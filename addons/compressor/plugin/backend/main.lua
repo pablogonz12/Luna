@@ -340,6 +340,22 @@ local function job_state()
   }
 end
 
+-- The wire shape for settings: `excluded` must be a real JSON array, or an
+-- empty list arrives as {} and a full one as {"1":..,"2":..}.
+local function encode_settings(data)
+  return {
+    version = data.version,
+    compress = data.compress,
+    dedupe = data.dedupe,
+    eco = data.eco,
+    assets = data.assets,
+    assetProfile = data.assetProfile,
+    keepLanguages = data.keepLanguages,
+    maxSizeGb = data.maxSizeGb,
+    excluded = json.array(data.excluded),
+  }
+end
+
 local function response(o) return json.encode(o) end
 
 function M.register(registry)
@@ -387,7 +403,7 @@ function M.register(registry)
       },
       status = status,
       statusAt = statusAt,
-      settings = settings,
+      settings = encode_settings(settings),
       plan = build_plan(status, settings),
       job = job,
       autoStarted = autoStarted,
@@ -424,7 +440,7 @@ function M.register(registry)
       return response({success = false, error = 'Could not save settings'})
     end
     settings = next_settings
-    return response({success = true, settings = settings})
+    return response({success = true, settings = encode_settings(settings)})
   end
 
   registry.SlsCompressorRun = function(raw)
