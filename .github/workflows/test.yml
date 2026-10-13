@@ -5,10 +5,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - run: sudo apt-get update && sudo apt-get install -y lua5.4
+      - run: node --test tests/*.test.cjs
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
       - run: bash scripts/test-backend.sh
       - run: python3 scripts/luna.py verify
       - run: python3 -m py_compile scripts/luna.py tests/*.py
       - run: luac -p tests/bridge-smoke.lua bridge/bridge.lua addons/*/plugin/backend/main.lua
+      - run: node --check addons/luna/plugin/public/panel.js
       - run: bash -n scripts/*.sh
