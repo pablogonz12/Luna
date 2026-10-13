@@ -618,6 +618,7 @@ function M.register(registry)
     if type(raw)~='string' then return reply({success=false,error='Invalid value'}) end
     local ok,obj=pcall(json.decode,raw)
     if not ok or type(obj)~='table' or not valid_id(obj.id) then return reply({success=false,error='Invalid AppID'}) end
+    if not editable(tonumber(obj.id)) then return reply({success=false,error='Not a manifest game or non-Steam shortcut'}) end
     local hours=tonumber(obj.hours)
     if not hours or hours<0 or hours>10000000 or hours~=hours then return reply({success=false,error='Invalid hours'}) end
     local saved,err=transaction(function()
