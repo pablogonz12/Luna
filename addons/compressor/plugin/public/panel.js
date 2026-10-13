@@ -60,8 +60,8 @@
       try { await rpc('SlsCompressorRun', { raw: JSON.stringify({ action }) }); await refresh(); }
       catch (e) { status.textContent = String(e); }
     };
-    check.onclick = start('status');
-    preview.onclick = start('dryrun');
+    check.onclick = start('scan');
+    preview.onclick = start('preview');
     btn.onclick = () => { pane.hidden = !pane.hidden; if (!pane.hidden) refresh(); };
     w.setInterval(refresh, 6000);
   }

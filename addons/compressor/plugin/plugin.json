@@ -2,7 +2,7 @@
   "name": "sls-compressor",
   "common_name": "SLS Compressor",
   "description": "Btrfs game compression status and controls for the btrfs-game-compressor tool",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "backendType": "lua",
   "include": ["public"]
 }
