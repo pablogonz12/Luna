@@ -2,7 +2,7 @@
   "name": "sls-playtime",
   "common_name": "SLS Playtime",
   "description": "Native-library playtime and right-click editing for manifests and non-Steam games",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "backendType": "lua",
   "include": ["public"]
 }
