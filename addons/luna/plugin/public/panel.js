@@ -76,6 +76,10 @@
     UNCOMPRESSED: 'uncompressed', UPDATED: 'changed since last pass', COMPRESSED: 'dedupe pending',
     COMPACTED: 'compacted', 'LOW YIELD': 'low yield', RUNNING: 'playing now',
   };
+  // Lists can arrive as a real array or as an object keyed by index (an empty
+  // Lua table and a dense one differ only in marking), so normalise both.
+  const listOf = value => Array.isArray(value) ? value
+    : value && typeof value === 'object' ? Object.keys(value).map(key => value[key]) : [];
 
   function styled(document) {
     if (document.getElementById(STYLE_ID)) return;
@@ -668,7 +672,7 @@
       const job = compressor.job;
       const running = Boolean(job && job.running);
       const ceilingGb = Number(settings.maxSizeGb) || 0;
-      const excludedCount = (settings.excluded || []).length;
+      const excludedCount = listOf(settings.excluded).length;
 
       const enabled = document.createElement('p');
       enabled.className = 'sls-luna-note';
@@ -780,7 +784,7 @@
       sizeRow.append(sizeText, sizeInput, sizeSwitch);
       body.appendChild(sizeRow);
 
-      const excluded = (settings.excluded || []).length;
+      const excluded = listOf(settings.excluded).length;
       const excludedRow = document.createElement('div');
       excludedRow.className = 'sls-luna-row';
       const excludedText = document.createElement('div');
@@ -848,7 +852,7 @@
       const status = compressor && compressor.status;
       const games = (status && Array.isArray(status.games) ? status.games : []);
       const settings = (compressor && compressor.settings) || {};
-      const excluded = new Set(settings.excluded || []);
+      const excluded = new Set(listOf(settings.excluded));
       const ceilingGb = Number(settings.maxSizeGb) || 0;
 
       const summary = document.createElement('p');
@@ -892,7 +896,7 @@
         box.className = 'sls-luna-switch' + (excludedNow ? ' on' : '');
         box.appendChild(document.createElement('span'));
         box.onclick = () => {
-          const next = (settings.excluded || []).filter(entry => entry !== game.name);
+          const next = listOf(settings.excluded).filter(entry => entry !== game.name);
           if (!excludedNow) next.push(game.name);
           saveSettings({ excluded: next }, body);
         };
