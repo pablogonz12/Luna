@@ -1109,7 +1109,13 @@
         const item = document.createElement('button');
         item.className = 'sls-luna-subtab' + (entry.id === compressorTab ? ' active' : '');
         item.textContent = entry.label;
-        item.onclick = () => { compressorTab = entry.id; paint(); };
+        item.onclick = () => {
+          compressorTab = entry.id;
+          paint();
+          // The full game list arrives with the next refresh, so entering the
+          // Games tab fills it immediately instead of showing an empty page.
+          if (entry.id === 'games') refresh();
+        };
         strip.appendChild(item);
       });
       body.appendChild(strip);
@@ -1219,7 +1225,10 @@
         presence = presence || {};
       }
       try {
-        compressor = await rpc(w, 'SlsCompressorGet');
+        // The per-game list is only needed by the Games tab; the one-second
+        // poll asks for the light shape everywhere else.
+        const needGames = tab === 'compressor' && compressorTab === 'games';
+        compressor = await rpc(w, 'SlsCompressorGet', { raw: JSON.stringify({ light: !needGames }) });
         // The optimistic "Starting..." line gives way once the backend reports
         // this exact job (running, or already finished) from our request.
         const job = compressor && compressor.job;
