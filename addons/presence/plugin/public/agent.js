@@ -51,6 +51,15 @@
     const v = String(name || '').replace(/[\x00-\x1f\x7f]/g, '').trim();
     return v.length > 0 && v.length <= 160 ? v : null;
   }
+  // Session-time label for the placeholder-name enrichment. Sessions shorter
+  // than five minutes stay plain so a quick launch is not noisy.
+  function sessionLabel(elapsedMs) {
+    const minutes = Math.floor((Number(elapsedMs) || 0) / 60000);
+    if (minutes < 5) return '';
+    if (minutes < 60) return minutes + 'm';
+    const hours = Math.floor(minutes / 60), rest = minutes % 60;
+    return rest ? hours + 'h ' + rest + 'm' : hours + 'h';
+  }
   // Non-reversible account fingerprint (FNV-1a). The SteamID64 itself must never
   // reach our state file or any log; only this 8-hex digest is stored.
   function fnv1a(value) {
@@ -239,12 +248,14 @@
     return {activate, orphaned};
   }
   class PresenceController {
-    constructor({apps, storage, overview, hideShortcut, delay = sleep, accountKey = null, accountSource = null}) {
+    constructor({apps, storage, overview, hideShortcut, delay = sleep, accountKey = null, accountSource = null,
+                 now = () => Date.now()}) {
       this.apps = apps;
       this.storage = storage;
       this.overview = overview;
       this.hideShortcut = hideShortcut || (() => false);
       this.delay = delay;
+      this.now = now;
       this.accountKey = accountKey;
       this.accountSource = accountSource;
       this.state = readState(storage);
@@ -257,6 +268,13 @@
       this.stopFailures = new Map();
       this.accountMismatch = false;
       this.error = null;
+      // Shortcut enrichment: while a game runs, its hidden placeholder's name
+      // gains a session-time suffix like "(42m)". The backend owns the toggle;
+      // sync() applies it. startedAt/nameApplied limit Steam calls to actual
+      // text changes and allow restoring the plain title on stop.
+      this.sessionTime = true;
+      this.startedAt = new Map();
+      this.nameApplied = new Map();
       this.onchange = () => {};
     }
     persist() {
@@ -447,6 +465,8 @@
         try {
           if (this.storage.flush) await this.storage.flush();
           await this.apps.RunGame(shortcutGameId(id), '', -1, 100);
+          this.startedAt.set(appid, this.now());
+          this.nameApplied.delete(appid);
         } catch (e) {
           this.started.delete(appid);
           delete this.state.running[appid];
@@ -480,6 +500,8 @@
         delete this.state.running[appid];
         this.stopFailures.delete(appid);
         this.persist();
+        this.startedAt.delete(appid);
+        await this.restoreName(appid, id);
       } catch (err) {
         // A helper can outlive the UI that launched it (Steam restart, webhelper
         // recreation). Retry a bounded number of times, then stop claiming it is
@@ -497,6 +519,16 @@
         }
       }
       this.onchange();
+    }
+    // Cosmetic: put the plain game title back after an enriched run. Failures
+    // are ignored on purpose; a display name is not worth marking the agent
+    // unwell, and the next launch repairs it anyway.
+    async restoreName(appid, id) {
+      if (!this.sessionTime || !this.nameApplied.has(appid)) return;
+      this.nameApplied.delete(appid);
+      const base = cleanName(this.titleOf(appid));
+      if (!base) return;
+      try { await this.apps.SetShortcutName(id, base); } catch (_) { /* cosmetic */ }
     }
     async stopAll() {
       for (const original of new Set([...this.started, ...Object.keys(this.state.running).map(Number)])) {
@@ -526,6 +558,29 @@
           this.persist();
         } catch (err) {
           this.error = 'Cannot remove owned shortcut ' + id + ': ' + String(err?.message || err);
+        }
+      }
+    }
+    // Enrichment: stamp running placeholders with the session time. Only text
+    // that actually changed is sent to Steam; failures are cosmetic.
+    async refreshNames() {
+      if (!this.sessionTime || !this.state.enabled) return;
+      for (const original of new Set([...this.started, ...Object.keys(this.state.running).map(Number)])) {
+        const id = this.placeholderFor(original);
+        if (!id || !this.state.running[original]) continue;
+        const started = this.startedAt.get(original);
+        if (!started) continue;
+        const label = sessionLabel(this.now() - started);
+        if (!label) continue;
+        const base = cleanName(this.titleOf(original));
+        if (!base) continue;
+        const next = cleanName(base + ' (' + label + ')');
+        if (!next || this.nameApplied.get(original) === next) continue;
+        try {
+          await this.apps.SetShortcutName(id, next);
+          this.nameApplied.set(original, next);
+        } catch (e) {
+          console.warn('[SLS Presence] could not enrich name for ' + original + ':', e);
         }
       }
     }
@@ -617,6 +672,7 @@
             accountSource: account ? account.source : null,
           });
           controller.updateInjected(status.apps);
+          controller.sessionTime = status.state?.sessionTime !== false;
           // Recover what the destroyed context could not carry over: a game that
           // is still running (its presence is re-established through the existing
           // hidden placeholder) and a helper whose game is already gone. Without
@@ -655,6 +711,7 @@
             controller.setEnabled(status.state.enabled);
             if (!status.state.enabled) await controller.stopAll();
           }
+          controller.sessionTime = status.state.sessionTime !== false;
           if (controller.state.enabled) {
             for (const id of controller.active) {
               if (!controller.started.has(id)) await controller.begin(id);
@@ -702,10 +759,15 @@
     if (!sub) console.warn('[SLS Presence] App lifetime subscription unavailable');
     sync();
     w.setInterval(sync, 5000);
+    // Session-time enrichment runs on its own slower cadence so a rename never
+    // waits on (or blocks) the status sync.
+    w.setInterval(() => {
+      if (controller) controller.refreshNames().catch(e => console.warn('[SLS Presence] name refresh failed', e));
+    }, 60000);
   }
   return {
     PresenceController, validId, shortcutGameId, cleanName, parseRpc,
     probeCapabilities, probeContracts, makeHidingStrategy, readAccountKey,
-    readAccountIdentity, planReconciliation, fnv1a, HELPER, HIDE_STRATEGIES, bootAgent,
+    readAccountIdentity, planReconciliation, fnv1a, sessionLabel, HELPER, HIDE_STRATEGIES, bootAgent,
   };
 });
