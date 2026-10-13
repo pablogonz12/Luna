@@ -128,8 +128,8 @@ function fakeWindow(document,{get,presence,compressor,edit,setEnabled}={}){
     document,
     setInterval:(fn,ms)=>{return 1;},
     clearInterval:()=>{},
-    prompt:()=>null,
-    confirm:()=>true,
+    prompt:()=>{throw Error('window.prompt must not be used: it freezes the Steam shell');},
+    confirm:()=>{throw Error('window.confirm must not be used: it freezes the Steam shell');},
     Millennium:{callServerMethod:async(plugin,fn,args)=>{
       const payload=args&&args.raw?JSON.parse(args.raw):(args||{});
       calls.push({fn,payload});
@@ -380,8 +380,42 @@ test('Run now is gated by the enabled operations and sends the composed run',asy
   assert.equal(run.disabled,false,'Run now must unlock once an operation is enabled');
   run.onclick();
   await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls.filter(c=>c.fn==='SlsCompressorRun').length,0,'Run now must ask inside the page, never natively');
+  overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/Start the pass now\?/,'the confirmation drawer must appear');
+  const back=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Back');
+  assert.ok(back,'the drawer needs a Back button');
+  back.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  overlay=document.getElementById('sls-luna-overlay');
+  assert.doesNotMatch(textOf(overlay),/Start the pass now\?/,'Back must close the drawer');
+  assert.equal(calls.filter(c=>c.fn==='SlsCompressorRun').length,0,'Back must not start anything');
+  findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Run now').onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  overlay=document.getElementById('sls-luna-overlay');
+  const start=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Start the pass');
+  assert.ok(start,'the start button was not rendered');
+  start.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
   const called=calls.filter(c=>c.fn==='SlsCompressorRun').pop();
-  assert.equal(called.payload.action,'run','Run now must ask for the composed run');
+  assert.equal(called.payload.action,'run','the drawer must start the composed run');
+});
+
+test('the status tab shows live progress while a run is in flight',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const fixture=compressorFixture();
+  fixture.job={action:'run',pid:42,running:true,startedAt:Date.now()/1000-30,finishedAt:0,elapsed:30,
+    log:'[12/146] Compressing: MonsterHunterWilds...\n  [####------] 8% (12/146)'};
+  const {w}=fakeWindow(document,{compressor:fixture});
+  mount(w);
+  const overlay=await openCompressor(document);
+  const text=textOf(overlay);
+  assert.match(text,/Running now: compression pass/,'the running line is missing');
+  assert.match(text,/Progress: 12 of 146 games/,'the progress position is missing');
+  assert.match(text,/8%/,'the progress percentage is missing');
+  assert.match(text,/MonsterHunterWilds/,'the current game is missing');
+  assert.ok(findNode(overlay,node=>node.className==='sls-luna-progress'),'the progress bar is missing');
 });
 
 test('the settings tab saves switches and reveals the alpha resolution profiles',async()=>{
