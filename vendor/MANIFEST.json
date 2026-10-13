@@ -1,5 +1,24 @@
 {
   "addons": {
+    "compressor": {
+      "files": {
+        "backend/main.lua": {
+          "sha256": "5b113246ef14734c54475d625f5f049cfea53eea9a67f22ade2cb300e736af37",
+          "source_path": "plugin/backend/main.lua"
+        },
+        "plugin.json": {
+          "sha256": "d1fda79e9e21792bcd4d2d87025dcf6d0601191180d5dadf971619f66fdb42b3",
+          "source_path": "plugin/plugin.json"
+        },
+        "public/panel.js": {
+          "sha256": "7f02642be3dd65490f2467d7b398b94a6423741923d6776ff92883b21e7e96b2",
+          "source_path": "plugin/public/panel.js"
+        }
+      },
+      "plugin_version": "0.1.0",
+      "source_commit": "75859ba8abd46640123a1741ed41d4a04757944f",
+      "source_repo": "https://github.com/pgm1207/slsteam-luna"
+    },
     "luna": {
       "files": {
         "backend/main.lua": {
@@ -11,12 +30,12 @@
           "source_path": "plugin/plugin.json"
         },
         "public/panel.js": {
-          "sha256": "c16fdc61874cd8c6857999a508fc18d45073e37147ff359e23b7b29fa366d772",
+          "sha256": "2b958708b298d1f8513520dac9b47794f7a85563d575c3616c6b239e47023d33",
           "source_path": "plugin/public/panel.js"
         }
       },
       "plugin_version": "0.1.0",
-      "source_commit": "f42b0464463ac16b0bd5fa75d38c39984380852c",
+      "source_commit": "75859ba8abd46640123a1741ed41d4a04757944f",
       "source_repo": "https://github.com/pgm1207/slsteam-luna"
     },
     "playtime": {
@@ -39,7 +58,7 @@
         }
       },
       "plugin_version": "0.5.4",
-      "source_commit": "4e87de33db1141590e7778c44da9f0446b143062",
+      "source_commit": "f861a09122103f50f2afe74b860da8f9050e0434",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     },
     "presence": {
@@ -62,21 +81,21 @@
         }
       },
       "plugin_version": "0.3.0",
-      "source_commit": "b1d068262f130a801dc07378d5598a22f937e072",
+      "source_commit": "282ec864a7f6c381b47489eb0fbc3548bfbb91be",
       "source_repo": "https://github.com/pgm1207/slsteam-presence"
     }
   },
-  "generated": "2026-10-13T16:33:25+0200",
+  "generated": "2026-10-13T18:22:06+0200",
   "shared": {
     "bridge/bridge.lua": {
-      "sha256": "2dc3ba8658f97016d6795c5951665aaed7df5f3c1a07c229a552b5a0661c61e7",
-      "source_commit": "4e87de33db1141590e7778c44da9f0446b143062",
+      "sha256": "fa3e18871c8a4ca4f0da432f5de0242c741e3299e3d35ba8af143b25b088b101",
+      "source_commit": "f861a09122103f50f2afe74b860da8f9050e0434",
       "source_path": "bridge/bridge.lua",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     },
     "scripts/patch-lumen.py": {
       "sha256": "b9a7d060b818f1ed0ed9c81afd5b51c85ba2144cac89f96888771663794a5335",
-      "source_commit": "4e87de33db1141590e7778c44da9f0446b143062",
+      "source_commit": "f861a09122103f50f2afe74b860da8f9050e0434",
       "source_path": "scripts/patch-lumen.py",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     }
