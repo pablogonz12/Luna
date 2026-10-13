@@ -153,11 +153,78 @@
       const owner=instance?.BrowserWindow||w.SteamUIStore?.WindowStore?.MainWindowInstance?.BrowserWindow||w;
       return showModal(h(Dialog),owner,{strTitle:'Set Playtime',bForcePopOut:true,popupWidth:420,popupHeight:350});
     }
-    // Steam uses multiple internal menu classes (list/grid and selection
-    // variants). Keep discovering them; stopping after the first class makes
-    // the entry appear only on whichever surface happened to render first.
+    // Both grid and sidebar use the native game menu. Patch its final contents
+    // as well as updates: inserting only into the outer result can briefly
+    // appear and then disappear when Steam refreshes/reuses the menu.
     const originals={},wrappers={};
     const patches=new Map();
+    function target(props){
+      const ids=new Set();
+      function walk(value,depth=0){
+        if(!value||depth>12)return;
+        if(Array.isArray(value)){value.forEach(v=>walk(v,depth+1));return;}
+        const p=value.props;
+        if(!p)return;
+        if(p.app?.appid)ids.add(Number(p.app.appid));
+        if(Array.isArray(p.rgApps))p.rgApps.forEach(a=>ids.add(Number(a.appid)));
+        walk(p.children,depth+1);
+      }
+      walk(props?.children);
+      if(ids.size===1){const id=[...ids][0];return (w.appStore||w.SteamUIStore?.AppStore)?.GetAppOverviewByAppID?.(id)||{appid:id};}
+      return ids.size===0?props?.__slsPlaytimeTarget?.app:null;
+    }
+    function insert(result,props){
+      const app=target(props);
+      if(!canSetPlaytime(app,snapshot)||!React.isValidElement(result))return result;
+      const action=h(MenuItem,{key:'sls-set-playtime',onSelected:()=>{
+        open(app,props.__slsPlaytimeTarget?.instance).catch(e=>console.error('[SLS Playtime] editor',e));
+      }},'Set Playtime');
+      const children=result.props.children;
+      function remove(value){
+        if(Array.isArray(value))return value.filter(v=>v?.key!=='sls-set-playtime').map(remove);
+        return value;
+      }
+      const clean=remove(children);
+      let placed=false;
+      function afterPrimary(value){
+        if(Array.isArray(value)){
+          const out=[];
+          for(const child of value){
+            if(!placed&&Array.isArray(child))out.push(afterPrimary(child));
+            else {
+              out.push(child);
+              if(!placed&&React.isValidElement(child)){out.push(action);placed=true;}
+            }
+          }
+          return out;
+        }
+        if(React.isValidElement(value)){placed=true;return [value,action];}
+        return value;
+      }
+      const ordered=afterPrimary(clean);
+      return React.cloneElement(result,{children:placed?ordered:[action,clean]});
+    }
+    function hook(proto,kind){
+      if(patches.has(proto))return;
+      const originalRender=proto.render;
+      const wrappedRender=function(...a){
+        const result=originalRender.apply(this,a);
+        if(kind==='outer'){
+          if(!React.isValidElement(result))return result;
+          const apps=this.GetTargetApps();
+          return React.cloneElement(result,{__slsPlaytimeTarget:apps.length===1?{app:apps[0],instance:this.props.instance}:null});
+        }
+        return insert(result,this.props);
+      };
+      const originalUpdate=proto.shouldComponentUpdate;
+      const wrappedUpdate=function(nextProps,...a){
+        const decision=originalUpdate?originalUpdate.call(this,nextProps,...a):true;
+        return canSetPlaytime(target(nextProps),snapshot)||decision;
+      };
+      proto.render=wrappedRender;
+      if(kind==='inner')proto.shouldComponentUpdate=wrappedUpdate;
+      patches.set(proto,{originalRender,wrappedRender,originalUpdate,wrappedUpdate,kind});
+    }
     function restoreDiscovery(){for(const key of ['jsx','jsxs'])if(jsx[key]===wrappers[key])jsx[key]=originals[key];}
     for(const key of ['jsx','jsxs']){
       originals[key]=jsx[key];
@@ -168,26 +235,16 @@
           if(overview)w.__SlsPlaytimeLibrary?.patchDetails?.(overview,props.details);
         }
         const proto=type?.prototype;
-        if(!patches.has(proto)&&proto?.GetTargetApps&&proto?.BuildManageSubmenu&&proto?.render){
-          try{
-          const originalRender=proto.render;
-          const wrappedRender=function(...renderArgs){
-            const result=originalRender.apply(this,renderArgs);
-            const apps=this.GetTargetApps();
-            if(apps.length!==1||!canSetPlaytime(apps[0],snapshot)||!React.isValidElement(result))return result;
-            const children=React.Children.toArray(result.props.children);
-            children.splice(1,0,h(MenuItem,{key:'sls-set-playtime',onSelected:()=>{open(apps[0],this.props.instance).catch(e=>console.error('[SLS Playtime] editor',e));}},'Set Playtime'));
-            return React.cloneElement(result,{},children);
-          };
-          proto.render=wrappedRender;
-          patches.set(proto,{originalRender,wrappedRender});
-          }catch(e){console.warn('[SLS Playtime] native menu hook unavailable',e);}
+        if(proto?.GetTargetApps&&proto?.BuildManageSubmenu&&proto?.render){
+          hook(proto,'outer');
+        }else if(proto?.HideIfSubmenu&&proto?.HideMenu&&proto?.render){
+          hook(proto,'inner');
         }
         return originals[key].call(this,type,...args);
       };
       jsx[key]=wrappers[key];
     }
-    const api={update(value){snapshot=value;},open,get attached(){return patches.size>0;},dispose(){restoreDiscovery();for(const [proto,{originalRender,wrappedRender}] of patches)if(proto.render===wrappedRender)proto.render=originalRender;delete w.__SlsPlaytimeMenu;}};
+    const api={update(value){snapshot=value;},open,get attached(){return [...patches.values()].some(p=>p.kind==='inner');},dispose(){restoreDiscovery();for(const [proto,p]of patches){if(proto.render===p.wrappedRender)proto.render=p.originalRender;if(proto.shouldComponentUpdate===p.wrappedUpdate){if(p.originalUpdate)proto.shouldComponentUpdate=p.originalUpdate;else delete proto.shouldComponentUpdate;}}delete w.__SlsPlaytimeMenu;}};
     w.__SlsPlaytimeMenu=api;
     return api;
   }
