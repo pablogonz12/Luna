@@ -3,20 +3,20 @@
     "compressor": {
       "files": {
         "backend/main.lua": {
-          "sha256": "5b113246ef14734c54475d625f5f049cfea53eea9a67f22ade2cb300e736af37",
+          "sha256": "4f5babf814c9a79773d7a8a39e649816488b3f5e15a8075b50d8666a4b3bee86",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
-          "sha256": "d1fda79e9e21792bcd4d2d87025dcf6d0601191180d5dadf971619f66fdb42b3",
+          "sha256": "6307f64e1aa3f856684db2560f72929dae470106b07e14a5a01742f50dcbd975",
           "source_path": "plugin/plugin.json"
         },
         "public/panel.js": {
-          "sha256": "7f02642be3dd65490f2467d7b398b94a6423741923d6776ff92883b21e7e96b2",
+          "sha256": "85a98a8ac433ce5de749cb928cb85ac525c6c73382c0551049d28f9c45eaf628",
           "source_path": "plugin/public/panel.js"
         }
       },
-      "plugin_version": "0.1.0",
-      "source_commit": "75859ba8abd46640123a1741ed41d4a04757944f",
+      "plugin_version": "0.2.0",
+      "source_commit": "cf6414e86833303768acb3e19e77bcdd121d71f0",
       "source_repo": "https://github.com/pgm1207/slsteam-luna"
     },
     "luna": {
@@ -30,12 +30,12 @@
           "source_path": "plugin/plugin.json"
         },
         "public/panel.js": {
-          "sha256": "2b958708b298d1f8513520dac9b47794f7a85563d575c3616c6b239e47023d33",
+          "sha256": "13bca9e7d036f2f05a8ef290619f6265852f15773b103660dcaa3e9982f8a45c",
           "source_path": "plugin/public/panel.js"
         }
       },
       "plugin_version": "0.1.0",
-      "source_commit": "75859ba8abd46640123a1741ed41d4a04757944f",
+      "source_commit": "cf6414e86833303768acb3e19e77bcdd121d71f0",
       "source_repo": "https://github.com/pgm1207/slsteam-luna"
     },
     "playtime": {
@@ -85,7 +85,7 @@
       "source_repo": "https://github.com/pgm1207/slsteam-presence"
     }
   },
-  "generated": "2026-10-13T18:22:06+0200",
+  "generated": "2026-10-13T19:15:11+0200",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "fa3e18871c8a4ca4f0da432f5de0242c741e3299e3d35ba8af143b25b088b101",
