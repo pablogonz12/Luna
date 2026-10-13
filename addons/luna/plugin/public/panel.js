@@ -148,6 +148,11 @@
       '.sls-luna-subtab.active{background:#3cb0ff;border-color:#3cb0ff;color:#fff;}',
       '.sls-luna-log{margin:0;max-height:44vh;overflow:auto;background:#10161c;color:#aeb8c2;font-size:11px;',
       'line-height:1.45;padding:10px;border-radius:3px;white-space:pre-wrap;}',
+      '.sls-luna-confirm{background:#233140;border:1px solid #3b4b5c;border-radius:4px;padding:12px 14px;margin:0 0 10px;}',
+      '.sls-luna-confirm .name{color:#fff;font-size:14px;margin-bottom:6px;}',
+      '.sls-luna-confirm .sub{color:#9aa4ae;font-size:12px;line-height:1.5;}',
+      '.sls-luna-progress{height:6px;border-radius:3px;background:rgba(255,255,255,.08);margin:6px 0 12px;overflow:hidden;}',
+      '.sls-luna-progress div{height:100%;background:#3cb0ff;transition:width .4s;}',
       '.sls-luna-error{color:#ff8080;font-size:13px;margin:8px 0 0;}',
     ].join('');
     (document.head || document.body).appendChild(style);
@@ -273,6 +278,11 @@
     let compressorQuery = '';
     let pendingAction = null;
     let compressorNotice = null;
+    // In-page confirmation state: native confirm()/prompt() freeze the Steam
+    // shell, so every destructive action is armed with a second click instead.
+    let confirmAction = null;
+    let cancelArmed = false;
+    let cleanupArmed = false;
     let query = '';
     let visible = 50;
     let jobTimer = null;
@@ -325,7 +335,13 @@
       const label = document.createElement('span');
       label.textContent = entry.label;
       item.append(icon, label);
-      item.onclick = () => { tab = entry.id; paint(); };
+      item.onclick = () => {
+        tab = entry.id;
+        confirmAction = null;
+        cancelArmed = false;
+        cleanupArmed = false;
+        paint();
+      };
       return item;
     });
 
@@ -402,13 +418,35 @@
       const importButton = document.createElement('button');
       importButton.className = 'sls-luna-btn secondary';
       importButton.textContent = 'Import JSON';
-      importButton.onclick = async () => {
-        const raw = w.prompt('Paste a trusted SLS Playtime backup (replaces local records).');
-        if (!raw || !w.confirm('Replace ALL locally recorded playtime?')) return;
-        try {
-          await rpc(w, 'SlsPlaytimeImport', { raw });
-          await refresh();
-        } catch (error) { showError(body, error); }
+      importButton.onclick = () => {
+        // In-page flow: native prompt/confirm freeze the Steam shell, so the
+        // paste area and the replace button live in the panel itself.
+        const area = document.createElement('textarea');
+        area.rows = 6;
+        area.style.width = '100%';
+        area.placeholder = 'Paste a trusted SLS Playtime backup (JSON) here';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:8px;margin:6px 0;';
+        const replace = document.createElement('button');
+        replace.className = 'sls-luna-btn';
+        replace.textContent = 'Replace ALL local records';
+        const cancel = document.createElement('button');
+        cancel.className = 'sls-luna-btn secondary';
+        cancel.textContent = 'Cancel';
+        cancel.onclick = () => { area.remove(); row.remove(); };
+        replace.onclick = async () => {
+          const raw = area.value.trim();
+          if (!raw) { showError(body, Error('Paste a backup first.')); return; }
+          try {
+            await rpc(w, 'SlsPlaytimeImport', { raw });
+            area.remove(); row.remove();
+            await refresh();
+          } catch (error) { showError(body, error); }
+        };
+        row.append(replace, cancel);
+        body.insertBefore(area, body.children[1] || null);
+        body.insertBefore(row, body.children[2] || null);
+        area.focus();
       };
       actions.append(exportButton, importButton);
       body.appendChild(actions);
@@ -537,11 +575,19 @@
       actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
       const cleanup = document.createElement('button');
       cleanup.className = 'sls-luna-btn';
-      cleanup.textContent = 'Disable and remove placeholders';
+      cleanup.textContent = cleanupArmed ? 'Confirm removal' : 'Disable and remove placeholders';
       cleanup.onclick = async () => {
-        if (!w.confirm('Disable Presence and ask it to remove every placeholder it owns?')) return;
+        // Two-step in the page: a native confirm() would freeze the shell.
+        if (!cleanupArmed) { cleanupArmed = true; paint(); return; }
+        cleanupArmed = false;
         try { await rpc(w, 'SlsPresenceRequestCleanup'); await refresh(); } catch (error) { showError(body, error); }
       };
+      if (cleanupArmed) {
+        const warning = document.createElement('p');
+        warning.className = 'sls-luna-note';
+        warning.textContent = 'Click Confirm removal to disable Presence and remove every placeholder it owns.';
+        body.appendChild(warning);
+      }
       const ack = document.createElement('button');
       ack.className = 'sls-luna-btn secondary';
       ack.textContent = 'Acknowledge cleanup';
@@ -590,8 +636,9 @@
       } catch (error) { showError(body, error); }
     }
 
-    async function startJob(body, action, confirmText) {
-      if (confirmText && !w.confirm(confirmText)) return;
+    async function startJob(body, action) {
+      confirmAction = null;
+      cancelArmed = false;
       pendingAction = { action: action, at: Date.now() / 1000 };
       paint();
       try {
@@ -607,25 +654,30 @@
       }
     }
 
-    function jobButton(body, label, action, secondary, confirmText, disabled) {
+    function jobButton(body, label, action, secondary, disabled) {
       const button = document.createElement('button');
       button.className = 'sls-luna-btn' + (secondary ? ' secondary' : '');
       button.textContent = label;
       button.disabled = Boolean(disabled);
-      button.onclick = () => startJob(body, action, confirmText);
+      button.onclick = () => startJob(body, action);
       return button;
     }
 
     function cancelButton(body) {
       const button = document.createElement('button');
-      button.className = 'sls-luna-btn secondary';
-      button.textContent = 'Cancel job';
+      button.className = 'sls-luna-btn' + (cancelArmed ? '' : ' secondary');
+      button.textContent = cancelArmed ? 'Confirm cancel' : 'Cancel job';
       button.onclick = async () => {
         const job = compressor && compressor.job;
         if (!job || !job.running) return;
-        if (!w.confirm('Cancel ' + (ACTION_LABELS[job.action] || job.action)
-          + '? A pass keeps its progress and can be run again later.')) return;
-        try { await rpc(w, 'SlsCompressorCancel'); await refresh(); } catch (error) { showError(body, error); }
+        // Two-step in the page; a native confirm() would freeze the shell.
+        if (!cancelArmed) { cancelArmed = true; paint(); return; }
+        cancelArmed = false;
+        try { await rpc(w, 'SlsCompressorCancel'); await refresh(); }
+        catch (error) {
+          compressorNotice = String(error && error.message ? error.message : error);
+          paint();
+        }
       };
       return button;
     }
@@ -659,9 +711,71 @@
       const count = settings.compress && settings.dedupe
         ? (Number(plan.compress || 0) + Number(plan.dedupe || 0))
         : settings.compress ? Number(plan.compress || 0) : 0;
-      const scale = count > 0 ? ' on about ' + count + ' game(s)' : '';
-      return 'Run ' + target + scale + '? Games that are running are skipped, exclusions and the size '
-        + 'ceiling are respected, and the pass can be cancelled from here while it runs.';
+      const ceilingGb = Number(settings.maxSizeGb) || 0;
+      const excluded = listOf(settings.excluded).length;
+      return 'This runs <strong>' + target + '</strong>'
+        + (count > 0 ? ' on about <strong>' + count + '</strong> game(s)' : '')
+        + '. Filters: <strong>' + excluded + '</strong> excluded'
+        + (ceilingGb > 0 ? ', only games under <strong>' + ceilingGb + ' GB</strong>' : ', no size ceiling')
+        + '. Games that are playing are skipped; you can cancel from here while it runs.';
+    }
+
+    // The confirmation is a drawer inside the page: a native confirm() freezes
+    // the whole Steam shell, which is what made Run now look stuck.
+    function runConfirm(body, plan) {
+      const box = document.createElement('div');
+      box.className = 'sls-luna-confirm';
+      const title = document.createElement('div');
+      title.className = 'name';
+      title.textContent = 'Start the pass now?';
+      const detail = document.createElement('div');
+      detail.className = 'sub';
+      detail.innerHTML = runConfirmText(plan);
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
+      const start = document.createElement('button');
+      start.className = 'sls-luna-btn';
+      start.textContent = 'Start the pass';
+      start.onclick = () => startJob(body, 'run');
+      const back = document.createElement('button');
+      back.className = 'sls-luna-btn secondary';
+      back.textContent = 'Back';
+      back.onclick = () => { confirmAction = null; paint(); };
+      row.append(start, back);
+      box.append(title, detail, row);
+      return box;
+    }
+
+    // What the tool last printed, turned into position and, when the line
+    // carries it, a percentage for the bar. The percentage line and the game
+    // name usually come from different lines, so both are collected.
+    function jobProgress(job) {
+      if (!job || !job.log) return null;
+      const lines = job.log.split('\n').reverse();
+      const out = {};
+      for (const line of lines) {
+        let match = line.match(/(\d+)% \((\d+)\/(\d+)\)/);
+        if (match) {
+          if (out.pct == null) out.pct = Number(match[1]);
+          if (out.current == null) out.current = Number(match[2]);
+          if (out.total == null) out.total = Number(match[3]);
+          continue;
+        }
+        match = line.match(/\[(\d+)\/(\d+)\]\s*Compressing:\s*(.+)\.\.\./);
+        if (match) {
+          if (out.current == null) out.current = Number(match[1]);
+          if (out.total == null) out.total = Number(match[2]);
+          if (out.label == null) out.label = match[3];
+          continue;
+        }
+        match = line.match(/Deduplicating\s+(.+)\.\.\./);
+        if (match && out.label == null) out.label = 'deduplicating ' + match[1];
+      }
+      if (out.pct == null && out.current == null && out.label == null) {
+        const last = lines.find(entry => entry.trim());
+        return last ? { label: last.trim().slice(0, 120) } : null;
+      }
+      return out;
     }
 
     function compressorStatus(body) {
@@ -714,19 +828,51 @@
       body.appendChild(scanLine);
 
       body.appendChild(compressorBusyLine());
+      if (running) {
+        const progress = jobProgress(job);
+        const line = document.createElement('p');
+        line.className = 'sls-luna-note';
+        const position = progress && progress.total
+          ? progress.current + ' of ' + progress.total + ' games'
+          : (progress && progress.label) || 'working';
+        line.innerHTML = 'Progress: <strong>' + position + '</strong>'
+          + (progress && progress.pct ? ' \u00b7 ' + progress.pct + '%' : '')
+          + (progress && progress.total && progress.label ? ' \u00b7 ' + progress.label : '');
+        body.appendChild(line);
+        const bar = document.createElement('div');
+        bar.className = 'sls-luna-progress';
+        const fill = document.createElement('div');
+        fill.style.width = Math.max(2, Number(progress && progress.pct) || 2) + '%';
+        bar.appendChild(fill);
+        body.appendChild(bar);
+      }
 
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 8px;';
-      actions.appendChild(jobButton(body, 'Scan library', 'scan', true, null, running));
-      actions.appendChild(jobButton(body, 'Preview (dry-run)', 'preview', true, null, running));
-      actions.appendChild(jobButton(body, 'Run now', 'run', false, runConfirmText(plan), running || !runs));
+      actions.appendChild(jobButton(body, 'Scan library', 'scan', true, running));
+      actions.appendChild(jobButton(body, 'Preview (dry-run)', 'preview', true, running));
+      if (confirmAction !== 'run') {
+        const runButton = document.createElement('button');
+        runButton.className = 'sls-luna-btn';
+        runButton.textContent = 'Run now';
+        runButton.disabled = running || !runs;
+        runButton.onclick = () => { confirmAction = 'run'; paint(); };
+        actions.appendChild(runButton);
+      }
       if (running) actions.appendChild(cancelButton(body));
       body.appendChild(actions);
+      if (confirmAction === 'run') body.appendChild(runConfirm(body, plan));
+      if (cancelArmed && running) {
+        const stopHint = document.createElement('p');
+        stopHint.className = 'sls-luna-note';
+        stopHint.textContent = 'Click Confirm cancel again to stop the pass; it keeps its progress.';
+        body.appendChild(stopHint);
+      }
       if (!runs) {
-        const hint = document.createElement('p');
-        hint.className = 'sls-luna-note';
-        hint.textContent = 'Run now unlocks once compression or deduplication is enabled.';
-        body.appendChild(hint);
+        const unlockHint = document.createElement('p');
+        unlockHint.className = 'sls-luna-note';
+        unlockHint.textContent = 'Run now unlocks once compression or deduplication is enabled.';
+        body.appendChild(unlockHint);
       }
 
       if (running) startJobPolling();
@@ -841,7 +987,7 @@
         body.appendChild(warning);
         const previewRow = document.createElement('div');
         previewRow.style.cssText = 'display:flex;gap:8px;margin:0 0 8px;';
-        previewRow.appendChild(jobButton(body, 'Preview asset inventory (read-only)', 'assets', true, null,
+        previewRow.appendChild(jobButton(body, 'Preview asset inventory (read-only)', 'assets', true,
           Boolean(compressor.job && compressor.job.running)));
         body.appendChild(previewRow);
       }
@@ -1081,6 +1227,8 @@
           && (job.running || (Number(job.startedAt) >= pendingAction.at - 1))) {
           pendingAction = null;
         }
+        if (!(job && job.running)) cancelArmed = false;
+        if (job && job.running) confirmAction = null;
       } catch (error) {
         compressor = compressor || {};
       }
@@ -1095,6 +1243,9 @@
 
     function closeMenu() {
       stopJobPolling();
+      confirmAction = null;
+      cancelArmed = false;
+      cleanupArmed = false;
       const node = document.getElementById(OVERLAY_ID);
       if (node) node.remove();
     }
