@@ -47,7 +47,14 @@ local function addon_names()
       pipe:close()
     end
   end
-  table.sort(names)
+  -- The shell entry point must load before the feature add-ons so it can claim
+  -- the menubar and set the flag they check before drawing their own floating
+  -- panels; plain alphabetical order would put "compressor" before "luna".
+  table.sort(names, function(a, b)
+    if a == 'luna' then return b ~= 'luna' end
+    if b == 'luna' then return false end
+    return a < b
+  end)
   return names
 end
 

@@ -15,5 +15,5 @@ jobs:
       - run: python3 scripts/luna.py verify
       - run: python3 -m py_compile scripts/luna.py tests/*.py
       - run: luac -p tests/bridge-smoke.lua bridge/bridge.lua addons/*/plugin/backend/main.lua
-      - run: node --check addons/luna/plugin/public/panel.js
+      - run: for f in addons/*/plugin/public/*.js; do node --check "$f"; done
       - run: bash -n scripts/*.sh

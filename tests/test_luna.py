@@ -98,6 +98,10 @@ class LunaTestCase(unittest.TestCase):
         for name in ('presence', 'playtime'):
             for rel in ('backend/main.lua', 'public/agent.js', 'public/panel.js', 'plugin.json'):
                 self.assertTrue(self.installed(name, rel), '%s/%s missing' % (name, rel))
+        # The first-party shell and compressor ship no agent.js.
+        for name in ('luna', 'compressor'):
+            for rel in ('backend/main.lua', 'public/panel.js', 'plugin.json'):
+                self.assertTrue(self.installed(name, rel), '%s/%s missing' % (name, rel))
         self.assertTrue((self.addons / 'bridge.lua').is_file())
         content = self.boot.read_text()
         self.assertEqual(content.count('SLS-ADDONS-INTEGRATION'), 1)

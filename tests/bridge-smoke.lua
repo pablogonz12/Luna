@@ -20,10 +20,11 @@ local function copy(source, target)
   output:write(data); output:close()
 end
 
--- The shell add-on ships no agent.js: it has nothing to count.
+-- The shell add-on and the compressor ship no agent.js: they have nothing to
+-- count.
 local function install(addon)
   local files = { 'plugin/backend/main.lua', 'plugin/public/panel.js' }
-  if addon ~= 'luna' then files[#files + 1] = 'plugin/public/agent.js' end
+  if addon ~= 'luna' and addon ~= 'compressor' then files[#files + 1] = 'plugin/public/agent.js' end
   for _, rel in ipairs(files) do
     local target = addons .. addon .. '/' .. rel:gsub('^plugin/', '')
     copy(repo .. '/addons/' .. addon .. '/' .. rel, target)
@@ -31,6 +32,7 @@ local function install(addon)
 end
 
 install('luna')
+install('compressor')
 install('presence')
 install('playtime')
 
@@ -83,18 +85,21 @@ assert(type(registry.SlsPlaytimeGet) == 'function', 'the playtime backend did no
 assert(type(registry.SlsPlaytimeHeartbeat) == 'function', 'the playtime heartbeat RPC is missing')
 assert(type(registry.SlsPresenceGet) == 'function', 'the presence backend did not register')
 assert(type(registry.SlsPresenceSetEnabled) == 'function', 'the presence enable RPC is missing')
+assert(type(registry.SlsCompressorGet) == 'function', 'the compressor backend did not register')
+assert(type(registry.SlsCompressorRun) == 'function', 'the compressor run RPC is missing')
+assert(type(registry.SlsCompressorCancel) == 'function', 'the compressor cancel RPC is missing')
 assert(type(registry.SlsLunaInfo) == 'function', 'the Luna shell backend did not register')
-assert(#bridge.ui_js == 3, 'expected one UI script per add-on, got ' .. #bridge.ui_js)
--- The shell entry point carries no agent, because it has nothing to count.
+assert(#bridge.ui_js == 4, 'expected one UI script per add-on, got ' .. #bridge.ui_js)
+-- Only the counting add-ons carry an agent.
 assert(#bridge.control_js == 2, 'expected one control script per counting add-on, got ' .. #bridge.control_js)
 
--- Discovery is sorted, and the shell entry point must come first so it can set
--- the flag the other two check before drawing their own floating panels.
+-- Discovery is sorted with the shell entry point first (a plain alphabetical
+-- order would put "compressor" before "luna"), so "luna" can set the flag the
+-- other three check before drawing their own floating panels.
 assert(bridge.ui_js[1]:find('__SlsLunaUi', 1, true), 'the Luna shell script is not injected first')
-assert(bridge.ui_js[2]:find('__SlsPlaytimePanel', 1, true) or bridge.ui_js[3]:find('__SlsPlaytimePanel', 1, true),
-  'the playtime panel script is missing')
-assert(bridge.ui_js[2]:find('__SlsPresencePanel', 1, true) or bridge.ui_js[3]:find('__SlsPresencePanel', 1, true),
-  'the presence panel script is missing')
+assert(bridge.ui_js[2]:find('__SlsCompressorPanel', 1, true), 'the compressor panel script is missing')
+assert(bridge.ui_js[3]:find('__SlsPlaytimePanel', 1, true), 'the playtime panel script is missing')
+assert(bridge.ui_js[4]:find('__SlsPresencePanel', 1, true), 'the presence panel script is missing')
 
 -- A new add-on directory is picked up with no bridge change at all.
 local extra = addons .. 'example/backend'
@@ -123,4 +128,4 @@ install('playtime')
 bridge.register(third)
 assert(type(third.SlsPlaytimeGet) == 'function', 're-registering a healthy add-on failed')
 
-print('Luna bridge composition OK: three add-ons register in sorted order, a new one is discovered, a broken one is isolated')
+print('Luna bridge composition OK: four add-ons register in sorted order, a new one is discovered, a broken one is isolated')

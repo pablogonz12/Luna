@@ -96,7 +96,7 @@ function menubarFixture(document,lumenButton){
   return bar;
 }
 
-function fakeWindow(document,{get,presence,edit,setEnabled}={}){
+function fakeWindow(document,{get,presence,compressor,edit,setEnabled}={}){
   const calls=[];
   const w={
     document,
@@ -112,6 +112,15 @@ function fakeWindow(document,{get,presence,edit,setEnabled}={}){
       if(fn==='SlsPresenceGet')return JSON.stringify(presence||{success:true,state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}});
       if(fn==='SlsPlaytimeEdit')return JSON.stringify({success:true});
       if(fn==='SlsPresenceSetEnabled')return JSON.stringify({success:true,enabled:payload.enabled});
+      if(fn==='SlsCompressorGet')return JSON.stringify(compressor||{success:true,
+        tool:{found:true,path:'/home/tester/.local/bin/btrfs-game-compressor'},
+        status:{version:'0.3.1',libraries:['/lib'],games:[
+          {name:'Cronos: The New Dawn',status:'UNCOMPRESSED',size_bytes:239,size_display:'22.3G'},
+          {name:'Hades',status:'COMPACTED',size_bytes:11,size_display:'11.2G'}],
+          summary:{game_count:2,pending:1,compacted:1,low_yield:0,running:0,skipped_empty:0}},
+        statusAt:Date.now()/1000-120,job:null});
+      if(fn==='SlsCompressorRun')return JSON.stringify({success:true,job:{action:payload.action,running:true}});
+      if(fn==='SlsCompressorCancel')return JSON.stringify({success:true,cancelled:true});
       return JSON.stringify({success:true});
     }},
   };
@@ -159,12 +168,14 @@ test('mount falls back to the end of the menubar without Lumen',()=>{
 test('mount removes the floating add-on panels it replaces',()=>{
   const document=fakeDom();
   menubarFixture(document,true);
-  ['sls-playtime-panel-button','sls-playtime-panel','sls-presence-panel-button','sls-presence-panel']
+  ['sls-playtime-panel-button','sls-playtime-panel','sls-presence-panel-button','sls-presence-panel',
+    'sls-compressor-panel-button','sls-compressor-panel']
     .forEach(id=>{const node=document.createElement('div');node.id=id;document.body.appendChild(node);});
   const {w}=fakeWindow(document);
   mount(w);
   assert.equal(document.getElementById('sls-playtime-panel'),null,'the old floating panel must be gone');
   assert.equal(document.getElementById('sls-presence-panel'),null);
+  assert.equal(document.getElementById('sls-compressor-panel'),null);
 });
 
 test('the menu opens with the sidebar, both settings sections and the account row',async()=>{
@@ -270,6 +281,34 @@ test('the session-time switch defaults on and toggles through the real RPC',asyn
   const call=calls.filter(c=>c.fn==='SlsPresenceSetSessionTime').pop();
   assert.ok(call,'toggling must call SlsPresenceSetSessionTime');
   assert.equal(call.payload.sessionTime,false,'the switch must send the inverted value');
+});
+
+test('the compressor tab shows the summary and drives the real RPCs',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document);
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const compressorTab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.className==='sls-luna-tab' && node.textContent==='Compressor');
+  assert.ok(compressorTab,'the Compressor tab was not found');
+  compressorTab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const overlay=document.getElementById('sls-luna-overlay');
+  const text=textOf(overlay);
+  assert.match(text,/Pending/,'the pending statistic is missing');
+  assert.match(text,/Compacted/,'the compacted statistic is missing');
+  assert.match(text,/Cronos/,'a waiting game must be listed');
+  assert.doesNotMatch(text,/Hades/,'an already compacted game is not in the waiting list');
+  assert.ok(calls.some(c=>c.fn==='SlsCompressorGet'),'opening the menu must load the compressor state');
+  const check=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Check now');
+  assert.ok(check,'the Check now button was not rendered');
+  check.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const call=calls.filter(c=>c.fn==='SlsCompressorRun').pop();
+  assert.ok(call,'Check now must call SlsCompressorRun');
+  assert.equal(call.payload.action,'status','it must request the read-only scan');
 });
 
 test('buildRows ranks recorded games first and marks non-Steam entries',()=>{
