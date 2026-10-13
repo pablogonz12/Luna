@@ -115,7 +115,8 @@
     let snapshot={apps:[]};
     const tools=providedTools||discoverMenuTools(w);
     if(!tools)return null;
-    const {React,jsx,item:MenuItem,showModal}=tools;
+    const {React,item:MenuItem,showModal}=tools;
+    let jsx=tools.jsx;
     const h=React.createElement;
     async function open(app,instance){
       const latest=parseRpc(await rpc('SlsPlaytimeGet'));
@@ -238,7 +239,22 @@
       };
       jsx[key]=wrappers[key];
     }
-    const api={update(value){snapshot=value;},open,get attached(){return jsx.jsx===wrappers.jsx||jsx.jsxs===wrappers.jsxs;},dispose(){restoreDiscovery();delete w.__SlsPlaytimeMenu;}};
+    const api={update(value){snapshot=value;},open,get attached(){return jsx.jsx===wrappers.jsx||jsx.jsxs===wrappers.jsxs;},
+      ensure(){
+        // The library UI can rebuild its bundle (for example after changing a
+        // Store setting), replacing the jsx functions we hooked. Rebind if the
+        // module changed and re-arm on top of the current chain, so the menu
+        // entry cannot silently disappear until the next Steam restart.
+        if(api.attached)return false;
+        try{
+          const fresh=discoverMenuTools(w);
+          if(fresh&&fresh.jsx!==jsx)jsx=fresh.jsx;
+        }catch(_){ /* keep the previous module */ }
+        restoreDiscovery();
+        for(const key of ['jsx','jsxs']){originals[key]=jsx[key];jsx[key]=wrappers[key];}
+        return true;
+      },
+      dispose(){restoreDiscovery();delete w.__SlsPlaytimeMenu;}};
     w.__SlsPlaytimeMenu=api;
     return api;
   }
@@ -359,9 +375,17 @@
     const agent=new SessionAgent({rpc,name:id=>overview(id)?.display_name||overview(id)?.name||''});
     const library=libraryAdapter(w);
     w.__SlsPlaytimeLibrary=library;
+    // The menu module can still be loading when this context boots (a Steam
+    // restart race), so a failed discovery is retried by refresh() instead of
+    // leaving Set Playtime missing until the next restart.
     let menu=null;
-    try{menu=installPlaytimeMenu(w,rpc,value=>library.update(value));}
-    catch(e){console.warn('[SLS Playtime] context menu unavailable',e);}
+    function installMenu(){
+      if(menu)return menu;
+      try{menu=installPlaytimeMenu(w,rpc,value=>library.update(value));}
+      catch(e){console.warn('[SLS Playtime] context menu unavailable',e);}
+      return menu;
+    }
+    installMenu();
     function resolveTitles(ids){
       const titles={};
       if(!canResolveNames)return titles;
@@ -394,6 +418,11 @@
         // Manifest games stay editable but are not auto-counted.
         agent.setAllowed(value.trackedApps??value.apps);
         library.update(value);
+        // The menu hook can be missing because the module was still loading at
+        // boot, or detached by a library UI reload. Retry discovery and re-arm
+        // so Set Playtime never silently disappears until the next restart.
+        if(!menu)installMenu();
+        try{menu?.ensure?.();}catch(e){console.warn('[SLS Playtime] menu re-arm failed',e);}
         menu?.update(value);
         refreshTitles(value.apps,Object.keys(value.titles||{}).length);
         await rpc('SlsPlaytimeReport',{raw:JSON.stringify({healthy:consecutiveErrors===0,
