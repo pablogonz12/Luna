@@ -80,6 +80,16 @@
   // Lua table and a dense one differ only in marking), so normalise both.
   const listOf = value => Array.isArray(value) ? value
     : value && typeof value === 'object' ? Object.keys(value).map(key => value[key]) : [];
+  const formatBytes = bytes => {
+    const value = Number(bytes) || 0;
+    if (value < 1024) return value + ' B';
+    const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+    let size = value;
+    let unit = -1;
+    while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+    return (size >= 100 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
+  };
+  const pctText = value => String(Math.max(0, Math.min(100, Math.round(Number(value) || 0))));
 
   function styled(document) {
     if (document.getElementById(STYLE_ID)) return;
@@ -153,6 +163,20 @@
       '.sls-luna-confirm .sub{color:#9aa4ae;font-size:12px;line-height:1.5;}',
       '.sls-luna-progress{height:6px;border-radius:3px;background:rgba(255,255,255,.08);margin:6px 0 12px;overflow:hidden;}',
       '.sls-luna-progress div{height:100%;background:#3cb0ff;transition:width .4s;}',
+      '.sls-luna-progress.active{background:rgba(60,176,255,.15);}',
+      '.sls-luna-progress.active div{background-image:linear-gradient(90deg,rgba(60,176,255,.25),#3cb0ff,rgba(60,176,255,.25));',
+      'animation:sls-slide 1.2s linear infinite;}',
+      '@keyframes sls-slide{0%{transform:translateX(-30%);}100%{transform:translateX(30%);}}',
+      '.sls-luna-chip{font-size:11px;padding:2px 8px;border-radius:9px;background:rgba(255,255,255,.08);',
+      'color:#b8bcbf;white-space:nowrap;}',
+      '.sls-luna-chip.done{background:rgba(87,203,92,.18);color:#7be07f;}',
+      '.sls-luna-chip.running{background:rgba(60,176,255,.2);color:#7cc7ff;}',
+      '.sls-luna-chip.failed{background:rgba(255,128,128,.16);color:#ff9a9a;}',
+      '.sls-luna-chip.pending,.sls-luna-chip.skipped{opacity:.7;}',
+      '.sls-luna-mini{width:64px;height:6px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden;flex:0 0 64px;}',
+      '.sls-luna-mini i{display:block;height:100%;background:#3cb0ff;}',
+      '.sls-luna-mini i.done{background:#57cb5c;}',
+      '.sls-luna-mini i.failed{background:#ff8080;}',
       '.sls-luna-error{color:#ff8080;font-size:13px;margin:8px 0 0;}',
     ].join('');
     (document.head || document.body).appendChild(style);
@@ -713,8 +737,11 @@
         : settings.compress ? Number(plan.compress || 0) : 0;
       const ceilingGb = Number(settings.maxSizeGb) || 0;
       const excluded = listOf(settings.excluded).length;
+      const order = settings.runOrder === 'largest' ? 'largest first'
+        : settings.runOrder === 'library' ? 'in library order' : 'smallest first';
       return 'This runs <strong>' + target + '</strong>'
         + (count > 0 ? ' on about <strong>' + count + '</strong> game(s)' : '')
+        + ', ' + order
         + '. Filters: <strong>' + excluded + '</strong> excluded'
         + (ceilingGb > 0 ? ', only games under <strong>' + ceilingGb + ' GB</strong>' : ', no size ceiling')
         + '. Games that are playing are skipped; you can cancel from here while it runs.';
@@ -778,6 +805,91 @@
       return out;
     }
 
+    function progressBar(pct, indeterminate) {
+      const bar = document.createElement('div');
+      bar.className = 'sls-luna-progress' + (indeterminate ? ' active' : '');
+      const fill = document.createElement('div');
+      fill.style.width = indeterminate ? '100%' : Math.max(2, Number(pctText(pct))) + '%';
+      bar.appendChild(fill);
+      return bar;
+    }
+
+    // Byte-level overall progress, when the full queue is loaded; the light poll
+    // only carries counts, so callers fall back to the game count.
+    function queueOverall() {
+      const queue = (compressor && compressor.queue) || {};
+      let doneBytes = 0;
+      let totalBytes = 0;
+      listOf(queue.games).forEach(game => {
+        const size = Number(game.size) || 0;
+        totalBytes += size;
+        if (game.status === 'done' || game.status === 'skipped') doneBytes += size;
+        else if (game.status === 'running' && queue.current) {
+          doneBytes += Math.min(size, Number(queue.current.doneBytes) || 0);
+        }
+      });
+      if (totalBytes <= 0) return null;
+      return { doneBytes, totalBytes };
+    }
+
+    function compressorQueueBody(body) {
+      const queue = (compressor && compressor.queue) || {};
+      const current = queue.current;
+      const active = queue.active === true;
+      const total = Number(queue.total) || 0;
+      const done = Number(queue.done) || 0;
+      const failed = Number(queue.failed) || 0;
+      const skipped = Number(queue.skipped) || 0;
+      const saved = Number(queue.saved) || 0;
+      const overall = queueOverall();
+      const head = document.createElement('p');
+      head.className = 'sls-luna-note';
+      head.innerHTML = '<strong>' + (active ? 'Run in progress'
+        : queue.finished ? 'Last run finished' : 'Last run stopped') + '</strong> \u00b7 '
+        + (overall
+          ? formatBytes(overall.doneBytes) + ' of ' + formatBytes(overall.totalBytes)
+          : done + ' of ' + total + ' games')
+        + ' \u00b7 done ' + done
+        + (failed ? ' \u00b7 failed ' + failed : '')
+        + (skipped ? ' \u00b7 skipped ' + skipped : '')
+        + (saved > 0 ? ' \u00b7 saved ' + formatBytes(saved) : '');
+      body.appendChild(head);
+      body.appendChild(progressBar(overall
+        ? (overall.totalBytes > 0 ? overall.doneBytes / overall.totalBytes * 100 : 0)
+        : (total > 0 ? done / total * 100 : 0), active && !overall));
+
+      if (current) {
+        const pct = Number(current.totalBytes) > 0
+          ? Number(current.doneBytes) / Number(current.totalBytes) * 100 : null;
+        const line = document.createElement('p');
+        line.className = 'sls-luna-note';
+        line.innerHTML = 'Game ' + (Number(queue.index) || 0) + ' of ' + total + ': <strong>'
+          + current.name + '</strong> '
+          + (current.phase === 'dedupe'
+            ? '\u00b7 deduplicating' + (Number(current.scannedBytes) > 0
+              ? ' (' + formatBytes(current.scannedBytes) + ' scanned)' : '')
+            : '\u00b7 compressing' + (pct != null ? ' ' + pctText(pct) + '%' : ''));
+        body.appendChild(line);
+        body.appendChild(progressBar(pct == null ? 0 : pct,
+          current.phase !== 'compress' || pct == null));
+      }
+
+      if (!active && !queue.finished && total > 0) {
+        const stopped = document.createElement('p');
+        stopped.className = 'sls-luna-note';
+        stopped.textContent = 'The queue stopped before it finished; the game in progress is picked up again by the next run.';
+        body.appendChild(stopped);
+      }
+      const next = listOf(queue.next);
+      if (active && next.length) {
+        const upcoming = document.createElement('p');
+        upcoming.className = 'sls-luna-note';
+        upcoming.textContent = 'Next: ' + next.map(entry => entry.name + ' (' + formatBytes(entry.size) + ')').join(', ') + '.';
+        body.appendChild(upcoming);
+      }
+      return true;
+    }
+
     function compressorStatus(body) {
       const settings = (compressor && compressor.settings) || {};
       const plan = (compressor && compressor.plan) || {};
@@ -828,7 +940,9 @@
       body.appendChild(scanLine);
 
       body.appendChild(compressorBusyLine());
-      if (running) {
+      if (compressor && compressor.queue && (Number(compressor.queue.total) > 0 || compressor.queue.active)) {
+        compressorQueueBody(body);
+      } else if (running) {
         const progress = jobProgress(job);
         const line = document.createElement('p');
         line.className = 'sls-luna-note';
@@ -839,12 +953,7 @@
           + (progress && progress.pct ? ' \u00b7 ' + progress.pct + '%' : '')
           + (progress && progress.total && progress.label ? ' \u00b7 ' + progress.label : '');
         body.appendChild(line);
-        const bar = document.createElement('div');
-        bar.className = 'sls-luna-progress';
-        const fill = document.createElement('div');
-        fill.style.width = Math.max(2, Number(progress && progress.pct) || 2) + '%';
-        bar.appendChild(fill);
-        body.appendChild(bar);
+        body.appendChild(progressBar(progress && progress.pct, !progress || !progress.pct));
       }
 
       const actions = document.createElement('div');
@@ -930,6 +1039,30 @@
       sizeRow.append(sizeText, sizeInput, sizeSwitch);
       body.appendChild(sizeRow);
 
+      const orderRow = document.createElement('div');
+      orderRow.className = 'sls-luna-row';
+      const orderText = document.createElement('div');
+      orderText.className = 'txt';
+      const orderName = document.createElement('div');
+      orderName.className = 'name';
+      orderName.textContent = 'Run order';
+      const orderSub = document.createElement('div');
+      orderSub.className = 'sub';
+      orderSub.textContent = 'Which game the queue takes first. Smallest first shows finished games quickly.';
+      orderText.append(orderName, orderSub);
+      const orderChips = document.createElement('div');
+      orderChips.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;max-width:320px;';
+      [['smallest', 'Smallest first'], ['largest', 'Largest first'], ['library', 'Library order']]
+        .forEach(pair => {
+          const chip = document.createElement('button');
+          chip.className = 'sls-luna-subtab' + ((settings.runOrder || 'smallest') === pair[0] ? ' active' : '');
+          chip.textContent = pair[1];
+          chip.onclick = () => saveSettings({ runOrder: pair[0] }, body);
+          orderChips.appendChild(chip);
+        });
+      orderRow.append(orderText, orderChips);
+      body.appendChild(orderRow);
+
       const excluded = listOf(settings.excluded).length;
       const excludedRow = document.createElement('div');
       excludedRow.className = 'sls-luna-row';
@@ -1000,6 +1133,13 @@
       const settings = (compressor && compressor.settings) || {};
       const excluded = new Set(listOf(settings.excluded));
       const ceilingGb = Number(settings.maxSizeGb) || 0;
+      const queue = (compressor && compressor.queue) || null;
+      const queueByPath = {};
+      const queueByName = {};
+      listOf(queue && queue.games).forEach(entry => {
+        if (entry.path) queueByPath[entry.path] = entry;
+        if (entry.name) queueByName[entry.name] = entry;
+      });
 
       const summary = document.createElement('p');
       summary.className = 'sls-luna-note';
@@ -1037,6 +1177,30 @@
           game.community_hint_pct ? 'hint ~' + game.community_hint_pct + '%' : '',
         ].filter(Boolean).join(' \u00b7 ');
         text.append(name, sub);
+        // When a queue exists, each row carries its own state and mini bar:
+        // green when done, blue while running (with the live percentage), red
+        // when it failed, dim when still pending.
+        const queueEntry = queue ? (queueByPath[game.path] || queueByName[game.name]) : null;
+        let mini = null;
+        let chip = null;
+        if (queueEntry) {
+          const state = queueEntry.status || 'pending';
+          const isCurrent = queue.current && queueEntry.path === queue.current.path;
+          let pct = state === 'done' || state === 'failed' ? 100 : 0;
+          if (isCurrent && Number(queue.current.totalBytes) > 0) {
+            pct = Number(queue.current.doneBytes) / Number(queue.current.totalBytes) * 100;
+          }
+          mini = document.createElement('span');
+          mini.className = 'sls-luna-mini';
+          const fill = document.createElement('i');
+          fill.className = state === 'done' ? 'done' : state === 'failed' ? 'failed' : '';
+          fill.style.width = Math.max(2, Number(pctText(pct))) + '%';
+          mini.appendChild(fill);
+          chip = document.createElement('span');
+          chip.className = 'sls-luna-chip ' + state;
+          chip.textContent = state === 'done' && Number(queueEntry.saved) > 0
+            ? 'done \u00b7 saved ' + formatBytes(queueEntry.saved) : state;
+        }
         const excludedNow = excluded.has(game.name);
         const box = document.createElement('div');
         box.className = 'sls-luna-switch' + (excludedNow ? ' on' : '');
@@ -1046,7 +1210,10 @@
           if (!excludedNow) next.push(game.name);
           saveSettings({ excluded: next }, body);
         };
-        row.append(text, box);
+        const parts = [text];
+        if (mini) parts.push(mini, chip);
+        parts.push(box);
+        row.append(...parts);
         body.appendChild(row);
       });
       if (rows.length > 80) {

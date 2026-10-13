@@ -145,8 +145,9 @@ do
 #!/usr/bin/env bash
 echo "ARGS: $*" >&2
 case "$1" in
-  --status) sleep 0.3; printf '%s\n' '{"version":"9.9.9","libraries":["/lib"],"games":[{"name":"A","status":"UNCOMPRESSED","size_bytes":10,"size_display":"10B","dedupe_pending":true},{"name":"B","status":"COMPACTED","size_bytes":5,"size_display":"5B","dedupe_pending":false}],"summary":{"game_count":2,"pending":1,"compacted":1,"compressed":0,"compressed_only":0,"low_yield":0,"running":0,"skipped_empty":0}}' ;;
+  --status) sleep 0.3; printf '%s\n' '{"version":"9.9.9","libraries":["/lib"],"games":[{"name":"A","path":"/games/A","status":"UNCOMPRESSED","size_bytes":10,"size_display":"10B","dedupe_pending":true},{"name":"B","path":"/games/B","status":"COMPACTED","size_bytes":5,"size_display":"5B","dedupe_pending":false}],"summary":{"game_count":2,"pending":1,"compacted":1,"compressed":0,"compressed_only":0,"low_yield":0,"running":0,"skipped_empty":0}}' ;;
   --dry-run) echo 'dry run: nothing changed'; sleep 0.4 ;;
+  --compact) printf 'COMPACT|begin|A|%s|10\n' "$2"; echo 'PROGRESS|compress|64|128'; sleep 1.2; echo 'PROGRESS|compress|128|128'; echo 'COMPACT|phase|dedupe'; echo 'PROGRESS|dedupe|64|0'; sleep 1.2; printf 'COMPACT|done|A|COMPACTED|12345678|1\n' ;;
   --run) echo 'batch running'; sleep 2.5 ;;
   --dedupe) echo 'dedupe pass'; sleep 0.5 ;;
   --assets-all) echo 'asset inventory'; sleep 2.5 ;;
@@ -272,22 +273,43 @@ local planned = call(reg, 'SlsCompressorGet')
 assert(planned.plan.excluded == 1 and planned.plan.compress == 0 and planned.plan.blocked == 1,
   'the plan must hold back the excluded game')
 
--- Action composition from the settings. The fake tool records its argv, so the
--- composition is asserted without touching a library.
+-- The run is game by game: the backend writes a queue and a driver, and the
+-- driver invokes the tool once per game with machine-readable lines.
 idle(reg)
-assert(call(reg, 'SlsCompressorRun', json.encode({action = 'run'})).success, 'run refused')
-local ran = wait_for(reg, function(state) return state.job and not state.job.running end)
-assert(ran.job.log:find('ARGS: --run', 1, true), 'default run must use --run')
-assert(ran.job.action == 'run', 'the finished job was not the run')
-
 assert(call(reg, 'SlsCompressorPutSettings', json.encode({
-  compress = true, dedupe = false, assets = false, maxSizeGb = 0, excluded = {},
-})).success, 'compress-only settings refused')
-assert(call(reg, 'SlsCompressorRun', json.encode({action = 'run'})).success, 'compress-only run refused')
-local compress_only = wait_for(reg, function(state) return state.job and not state.job.running end)
-assert(compress_only.job.log:find('ARGS: --run --no-dedupe', 1, true),
-  'compress-only must pass --no-dedupe')
+  compress = true, dedupe = true, assets = false, maxSizeGb = 0, excluded = {},
+  runOrder = 'smallest',
+})).success, 'queue settings refused')
+local started = call(reg, 'SlsCompressorRun', json.encode({action = 'run'}))
+assert(started.success and started.job.queue == 1, 'the queue run did not start')
+local queued = wait_for(reg, function(state) return state.queue and state.queue.finished end, 20)
+assert(queued.queue.total == 1 and queued.queue.done == 1, 'the driver did not finish the queue')
+assert(queued.queue.saved == 12345678, 'the per-game savings were not carried')
+assert(queued.queue.phase == 'dedupe', 'the last phase was not observed')
+local full_queue = call(reg, 'SlsCompressorGet')
+assert(full_queue.queue and full_queue.queue.games and full_queue.queue.games[1].status == 'done',
+  'the per-game state is missing')
+assert(full_queue.queue.games[1].name == 'A' and full_queue.queue.games[1].saved == 12345678,
+  'the per-game entry is wrong')
+local light_queue = call(reg, 'SlsCompressorGet', json.encode({light = true}))
+assert(light_queue.queue and light_queue.queue.games == nil, 'the light queue must drop the game list')
 
+-- An empty queue (everything excluded) is refused with a clear reason.
+assert(call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = true, dedupe = true, assets = false, maxSizeGb = 0, excluded = { 'A' },
+})).success, 'exclusion settings refused')
+local empty = call(reg, 'SlsCompressorRun', json.encode({action = 'run'}))
+assert(empty.success == false and tostring(empty.error):find('Nothing to do', 1, true) ~= nil,
+  'an empty queue must be refused')
+
+-- The queue is ordered by size when asked.
+assert(call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = true, dedupe = true, assets = false, maxSizeGb = 0, excluded = {},
+  runOrder = 'largest',
+})).success, 'run order settings refused')
+assert(call(reg, 'SlsCompressorGet').settings.runOrder == 'largest', 'the run order was not kept')
+
+-- Dedupe-only mode keeps the tool's library pass, not the queue.
 assert(call(reg, 'SlsCompressorPutSettings', json.encode({
   compress = false, dedupe = true, assets = false, maxSizeGb = 0, excluded = {},
 })).success, 'dedupe-only settings refused')
@@ -325,6 +347,18 @@ local stopped = wait_for(reg, function(state) return state.job and not state.job
 assert(stopped.job.action == 'assets' and stopped.job.finishedAt > 0, 'the cancelled job was not observed as stopped')
 os.execute('sleep 0.3')
 assert(call(reg, 'SlsCompressorCancel').success == false, 'cancel with no job must fail closed')
+
+-- A queue run can be cancelled too; the interrupted game stays visible and the
+-- queue must not read as finished.
+assert(call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = true, dedupe = true, assets = false, maxSizeGb = 0, excluded = {},
+})).success, 'queue settings refused for cancel')
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'run'})).success, 'the queue run was refused')
+local qlive = wait_for(reg, function(state) return state.queue and state.queue.active end, 10)
+assert(qlive.queue.active, 'the queue was not observed as active')
+assert(call(reg, 'SlsCompressorCancel').success, 'cancel refused the queue')
+local qstopped = wait_for(reg, function(state) return state.queue and not state.queue.active end, 15)
+assert(qstopped.queue.finished == false, 'a cancelled queue must not read as finished')
 
 -- The preview is read-only and reports its own argv.
 assert(call(reg, 'SlsCompressorRun', json.encode({action = 'preview'})).success, 'the preview was refused')

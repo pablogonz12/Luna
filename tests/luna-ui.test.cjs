@@ -383,6 +383,7 @@ test('Run now is gated by the enabled operations and sends the composed run',asy
   assert.equal(calls.filter(c=>c.fn==='SlsCompressorRun').length,0,'Run now must ask inside the page, never natively');
   overlay=document.getElementById('sls-luna-overlay');
   assert.match(textOf(overlay),/Start the pass now\?/,'the confirmation drawer must appear');
+  assert.match(textOf(overlay),/smallest first/,'the drawer must state the run order');
   const back=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Back');
   assert.ok(back,'the drawer needs a Back button');
   back.onclick();
@@ -416,6 +417,37 @@ test('the status tab shows live progress while a run is in flight',async()=>{
   assert.match(text,/8%/,'the progress percentage is missing');
   assert.match(text,/MonsterHunterWilds/,'the current game is missing');
   assert.ok(findNode(overlay,node=>node.className==='sls-luna-progress'),'the progress bar is missing');
+});
+
+test('the status tab shows the game-by-game queue with bars',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const fixture=compressorFixture();
+  fixture.job={action:'run',pid:42,running:true,startedAt:Date.now()/1000-90,finishedAt:0,elapsed:90,log:''};
+  fixture.queue={active:true,total:3,index:2,done:1,failed:0,skipped:0,saved:123456789,finished:false,
+    current:{name:'Cronos: The New Dawn',path:'/games/Cronos',size:100,totalBytes:100,doneBytes:42,
+      phase:'compress',scannedBytes:0},
+    next:[{name:'Hades',size:50}],
+    games:[{name:'Cronos: The New Dawn',path:'/games/Cronos',size:100,status:'running',saved:0},
+      {name:'Hades',path:'/games/Hades',size:50,status:'pending',saved:0},
+      {name:'Pony Island',path:'/games/Pony',size:20,status:'done',saved:123456789}]};
+  const {w}=fakeWindow(document,{compressor:fixture});
+  mount(w);
+  let overlay=await openCompressor(document);
+  const text=textOf(overlay);
+  assert.match(text,/Run in progress/,'the queue state line is missing');
+  assert.match(text,/62 B of 170 B/,'the byte progress is missing');
+  assert.match(text,/Game 2 of 3: Cronos: The New Dawn/,'the current game is missing');
+  assert.match(text,/compressing 42%/,'the current percentage is missing');
+  assert.match(text,/Next: Hades/,'the next-up line is missing');
+  assert.match(text,/saved 118 MiB/,'the savings line is missing');
+  assert.ok(findNode(document.getElementById('sls-luna-overlay'),node=>(node.className||'').indexOf('sls-luna-progress')===0),
+    'the queue needs a progress bar');
+  overlay=await openCompressor(document,'Games');
+  const chips=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-chip'));
+  assert.ok(chips,'a per-game state chip was not rendered');
+  assert.match(textOf(overlay),/done . saved 118 MiB/,'a finished game must show its saving');
+  assert.ok(findNode(overlay,node=>node.className==='sls-luna-mini'),'a per-game mini bar was not rendered');
 });
 
 test('the settings tab saves switches and reveals the alpha resolution profiles',async()=>{
@@ -462,6 +494,14 @@ test('the settings tab saves switches and reveals the alpha resolution profiles'
   await new Promise(resolve=>setTimeout(resolve,20));
   saved=calls.filter(c=>c.fn==='SlsCompressorPutSettings').pop();
   assert.equal(saved.payload.maxSizeGb,20,'the ceiling switch must default to 20 GB');
+
+  overlay=await openCompressor(document,'Settings');
+  const orderChip=findNode(overlay,node=>node.className==='sls-luna-subtab' && node.textContent==='Largest first');
+  assert.ok(orderChip,'the run-order chips were not rendered');
+  orderChip.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  saved=calls.filter(c=>c.fn==='SlsCompressorPutSettings').pop();
+  assert.equal(saved.payload.runOrder,'largest','the order chip must save its value');
 });
 
 test('the games tab toggles per-game exclusions through PutSettings',async()=>{
