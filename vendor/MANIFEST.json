@@ -16,7 +16,7 @@
         }
       },
       "plugin_version": "0.1.0",
-      "source_commit": "029b126e137c6db1c365c9d1e0a2db8858f088c4",
+      "source_commit": "d00467d737a0e4ef16267175422a62149e0eaa12",
       "source_repo": "https://github.com/pgm1207/slsteam-luna"
     },
     "playtime": {
@@ -26,11 +26,11 @@
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
-          "sha256": "bcc62a77eeb79899d6c965813002e721e28758637dbcdd5c83fa6d24f013fd92",
+          "sha256": "fcb8a9c96f3b4d08fafa507a847d8fd01b784487b963061700fc89be817585f8",
           "source_path": "plugin/plugin.json"
         },
         "public/agent.js": {
-          "sha256": "db636861e7e34d04f8cd0e34c2d1ff3b560a01f0a6803ad24d1f8d57081097ad",
+          "sha256": "9e338cd2abc5311950f4fd4daaaf0186a8b0739831a85c071ec29c50b8e3e759",
           "source_path": "plugin/public/agent.js"
         },
         "public/panel.js": {
@@ -38,8 +38,8 @@
           "source_path": "plugin/public/panel.js"
         }
       },
-      "plugin_version": "0.5.2",
-      "source_commit": "d74ec1d8e3278bab013d02d5e436f27f54c4ba9d",
+      "plugin_version": "0.5.3",
+      "source_commit": "600002f8cc937f1ee01511e834ddcbe9931150c3",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     },
     "presence": {
@@ -66,17 +66,17 @@
       "source_repo": "https://github.com/pgm1207/slsteam-presence"
     }
   },
-  "generated": "2026-10-13T15:45:56+0200",
+  "generated": "2026-10-13T15:52:15+0200",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "2dc3ba8658f97016d6795c5951665aaed7df5f3c1a07c229a552b5a0661c61e7",
-      "source_commit": "d74ec1d8e3278bab013d02d5e436f27f54c4ba9d",
+      "source_commit": "600002f8cc937f1ee01511e834ddcbe9931150c3",
       "source_path": "bridge/bridge.lua",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     },
     "scripts/patch-lumen.py": {
       "sha256": "b9a7d060b818f1ed0ed9c81afd5b51c85ba2144cac89f96888771663794a5335",
-      "source_commit": "d74ec1d8e3278bab013d02d5e436f27f54c4ba9d",
+      "source_commit": "600002f8cc937f1ee01511e834ddcbe9931150c3",
       "source_path": "scripts/patch-lumen.py",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     }
