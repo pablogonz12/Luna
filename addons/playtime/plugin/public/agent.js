@@ -153,45 +153,55 @@
       const owner=instance?.BrowserWindow||w.SteamUIStore?.WindowStore?.MainWindowInstance?.BrowserWindow||w;
       return showModal(h(Dialog),owner,{strTitle:'Set Playtime',bForcePopOut:true,popupWidth:420,popupHeight:350});
     }
-    // Both grid and sidebar use the native game menu. Patch its final contents
-    // as well as updates: inserting only into the outer result can briefly
-    // appear and then disappear when Steam refreshes/reuses the menu.
+    // Steam binds each menu instance's real render as a non-writable own
+    // property on its first render, so prototype render patches silently stop
+    // running after the first render of every instance. That made the item
+    // appear only for whichever menu rendered first and then vanish on later
+    // opens/updates.
+    //
+    // Insert into the ELEMENTS instead: the jsx layer hands us the menu
+    // contents class and its children while the menu is being built, and the
+    // local item becomes a normal child that every render keeps. This works
+    // for the grid, the sidebar and any later Steam refresh.
     const originals={},wrappers={};
-    const patches=new Map();
-    function target(props){
+    const ITEM_KEY='sls-set-playtime';
+    let slot=null;
+    const overviewOf=id=>(w.appStore||w.SteamUIStore?.AppStore)?.GetAppOverviewByAppID?.(Number(id))||{appid:Number(id)};
+    const isOuter=proto=>!!(proto?.GetTargetApps&&proto?.BuildManageSubmenu&&proto?.render);
+    const isInner=proto=>!!(proto?.HideIfSubmenu&&proto?.HideMenu&&proto?.render);
+    function scanIds(children,depth=0){
       const ids=new Set();
-      function walk(value,depth=0){
-        if(!value||depth>12)return;
-        if(Array.isArray(value)){value.forEach(v=>walk(v,depth+1));return;}
-        const p=value.props;
-        if(!p)return;
-        if(p.app?.appid)ids.add(Number(p.app.appid));
-        if(Array.isArray(p.rgApps))p.rgApps.forEach(a=>ids.add(Number(a.appid)));
-        walk(p.children,depth+1);
-      }
-      walk(props?.children);
-      if(ids.size===1){const id=[...ids][0];return (w.appStore||w.SteamUIStore?.AppStore)?.GetAppOverviewByAppID?.(id)||{appid:id};}
-      return ids.size===0?props?.__slsPlaytimeTarget?.app:null;
+      if(depth>12||children==null)return ids;
+      if(Array.isArray(children)){for(const child of children)for(const id of scanIds(child,depth+1))ids.add(id);return ids;}
+      if(!React.isValidElement(children)||!children.props)return ids;
+      const props=children.props;
+      if(props.app?.appid)ids.add(Number(props.app.appid));
+      if(Array.isArray(props.rgApps))for(const app of props.rgApps)if(app?.appid)ids.add(Number(app.appid));
+      for(const id of scanIds(props.children,depth+1))ids.add(id);
+      return ids;
     }
-    function insert(result,props){
-      const app=target(props);
-      if(!canSetPlaytime(app,snapshot)||!React.isValidElement(result))return result;
-      const action=h(MenuItem,{key:'sls-set-playtime',onSelected:()=>{
-        open(app,props.__slsPlaytimeTarget?.instance).catch(e=>console.error('[SLS Playtime] editor',e));
+    function targetFor(props){
+      const ids=[...scanIds(props?.children)];
+      // A focused game names itself in the menu label. That is authoritative
+      // even when extra child actions mention DLC or other apps. Bulk menus
+      // carry no label. Submenus are built later and have their own labels.
+      const labeled=slot&&Date.now()-slot.ts<10000&&props?.label&&slot.app?.display_name===props.label;
+      if(labeled)return slot;
+      if(ids.length===1)return {app:overviewOf(ids[0]),instance:slot?.instance};
+      return null;
+    }
+    function insertItem(children,app,instance){
+      const action=h(MenuItem,{key:ITEM_KEY,onSelected:()=>{
+        open(app,instance).catch(e=>console.error('[SLS Playtime] editor',e));
       }},'Set Playtime');
-      const children=result.props.children;
-      function remove(value){
-        if(Array.isArray(value))return value.filter(v=>v?.key!=='sls-set-playtime').map(remove);
-        return value;
-      }
-      const clean=remove(children);
+      const clean=(Array.isArray(children)?children:[children]).filter(c=>!(c&&(c.key===ITEM_KEY||(c.props&&c.props.key===ITEM_KEY))));
       let placed=false;
       function afterPrimary(value){
         if(Array.isArray(value)){
           const out=[];
           for(const child of value){
             if(!placed&&Array.isArray(child))out.push(afterPrimary(child));
-            else {
+            else{
               out.push(child);
               if(!placed&&React.isValidElement(child)){out.push(action);placed=true;}
             }
@@ -202,28 +212,7 @@
         return value;
       }
       const ordered=afterPrimary(clean);
-      return React.cloneElement(result,{children:placed?ordered:[action,clean]});
-    }
-    function hook(proto,kind){
-      if(patches.has(proto))return;
-      const originalRender=proto.render;
-      const wrappedRender=function(...a){
-        const result=originalRender.apply(this,a);
-        if(kind==='outer'){
-          if(!React.isValidElement(result))return result;
-          const apps=this.GetTargetApps();
-          return React.cloneElement(result,{__slsPlaytimeTarget:apps.length===1?{app:apps[0],instance:this.props.instance}:null});
-        }
-        return insert(result,this.props);
-      };
-      const originalUpdate=proto.shouldComponentUpdate;
-      const wrappedUpdate=function(nextProps,...a){
-        const decision=originalUpdate?originalUpdate.call(this,nextProps,...a):true;
-        return canSetPlaytime(target(nextProps),snapshot)||decision;
-      };
-      proto.render=wrappedRender;
-      if(kind==='inner')proto.shouldComponentUpdate=wrappedUpdate;
-      patches.set(proto,{originalRender,wrappedRender,originalUpdate,wrappedUpdate,kind});
+      return placed?ordered:[action,...(Array.isArray(clean)?clean:[clean])];
     }
     function restoreDiscovery(){for(const key of ['jsx','jsxs'])if(jsx[key]===wrappers[key])jsx[key]=originals[key];}
     for(const key of ['jsx','jsxs']){
@@ -235,16 +224,21 @@
           if(overview)w.__SlsPlaytimeLibrary?.patchDetails?.(overview,props.details);
         }
         const proto=type?.prototype;
-        if(proto?.GetTargetApps&&proto?.BuildManageSubmenu&&proto?.render){
-          hook(proto,'outer');
-        }else if(proto?.HideIfSubmenu&&proto?.HideMenu&&proto?.render){
-          hook(proto,'inner');
+        if(isOuter(proto)&&props?.overview){
+          // Fresh build of the game menu: remember the exact target before its
+          // contents elements are created inside the same render pass.
+          slot={app:props.overview,instance:props.instance,ts:Date.now()};
+        }else if(isInner(proto)&&props&&props.children!=null){
+          const target=targetFor(props);
+          if(target&&canSetPlaytime(target.app,snapshot)){
+            args[0]={...props,children:insertItem(props.children,target.app,target.instance)};
+          }
         }
         return originals[key].call(this,type,...args);
       };
       jsx[key]=wrappers[key];
     }
-    const api={update(value){snapshot=value;},open,get attached(){return [...patches.values()].some(p=>p.kind==='inner');},dispose(){restoreDiscovery();for(const [proto,p]of patches){if(proto.render===p.wrappedRender)proto.render=p.originalRender;if(proto.shouldComponentUpdate===p.wrappedUpdate){if(p.originalUpdate)proto.shouldComponentUpdate=p.originalUpdate;else delete proto.shouldComponentUpdate;}}delete w.__SlsPlaytimeMenu;}};
+    const api={update(value){snapshot=value;},open,get attached(){return jsx.jsx===wrappers.jsx||jsx.jsxs===wrappers.jsxs;},dispose(){restoreDiscovery();delete w.__SlsPlaytimeMenu;}};
     w.__SlsPlaytimeMenu=api;
     return api;
   }
