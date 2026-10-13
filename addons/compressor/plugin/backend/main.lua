@@ -19,6 +19,12 @@ local JOB_FILE = DIR .. '/job.json'
 local JOB_DONE = DIR .. '/job.done'
 local JOB_LOG = DIR .. '/last.log'
 local SETTINGS = DIR .. '/settings.json'
+-- One-game-at-a-time queue: the backend writes a list and a driver script, the
+-- driver runs `--compact` per game and appends state, and the UI reads both.
+local QUEUE_LIST = DIR .. '/queue.list'
+local QUEUE_STATE = DIR .. '/queue.state'
+local QUEUE_LOG = DIR .. '/run.log'
+local DRIVER = DIR .. '/run-queue.sh'
 -- The tool's own configuration, one file per knob (see its --help FILES).
 local TOOL_DIR = HOME .. '/.config/btrfs-game-compressor'
 
@@ -51,6 +57,10 @@ local PROFILES = {
   ['ultra-performance'] = 1, performance = 1, balanced = 1,
   quality = 1, ['ultra-quality'] = 1, lossless = 1,
 }
+
+-- How the per-game queue is ordered. Smallest first is the default: a first
+-- run then shows completed games almost immediately.
+local RUN_ORDERS = { smallest = 1, largest = 1, library = 1 }
 
 local function shq(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
@@ -121,14 +131,16 @@ local function find_tool()
   return nil
 end
 
--- A pid is ours while /proc still shows the wrapper. Anything else (a recycled
--- pid, a vanished process) counts as finished.
+-- A pid is ours while /proc still shows the wrapper or the queue driver.
+-- Anything else (a recycled pid, a vanished process) counts as finished.
 local function alive(pid)
   if type(pid) ~= 'number' or pid < 2 then return false end
   local f = io.open('/proc/' .. math.floor(pid) .. '/cmdline', 'rb')
   if not f then return false end
   local data = f:read('*a'); f:close()
-  return type(data) == 'string' and data:find('btrfs-game-compressor', 1, true) ~= nil
+  if type(data) ~= 'string' then return false end
+  return data:find('btrfs-game-compressor', 1, true) ~= nil
+    or data:find('run-queue.sh', 1, true) ~= nil
 end
 
 -- The process group of a live pid, so a cancel can reach the stage children
@@ -176,6 +188,7 @@ local function default_settings()
     assetProfile = 'balanced',
     keepLanguages = '',
     maxSizeGb = 0,
+    runOrder = 'smallest',
     excluded = {},
   }
 end
@@ -191,6 +204,7 @@ local function read_settings()
   if type(value.eco) == 'boolean' then data.eco = value.eco end
   if type(value.assets) == 'boolean' then data.assets = value.assets end
   if PROFILES[value.assetProfile] then data.assetProfile = value.assetProfile end
+  if RUN_ORDERS[value.runOrder] then data.runOrder = value.runOrder end
   data.keepLanguages = normalize_languages(value.keepLanguages)
   local size = tonumber(value.maxSizeGb)
   if size and size >= 0 and size <= 100000 then
@@ -254,12 +268,197 @@ local function build_plan(status, settings)
   return plan
 end
 
--- The exact command for the current settings.
-local function run_args(settings)
-  if settings.compress and settings.dedupe then return '--run' end
-  if settings.compress then return '--run --no-dedupe' end
-  if settings.dedupe then return '--dedupe' end
-  return nil
+-- ---------------------------------------------------------------------------
+-- The one-game-at-a-time queue. The list is written game by game so the UI can
+-- show a state and a bar per game, and the driver is a small detached shell
+-- script so the pass continues even when Steam or Lumen goes away.
+
+-- The queue mirrors the plan: compression targets first, then games whose
+-- dedupe pass is outstanding. Running and compacted games are never queued, and
+-- the user's filters (exclusions, size ceiling) already applied.
+local function build_queue(status, settings)
+  local blocked = {}
+  for _, name in ipairs(settings.excluded) do blocked[name] = true end
+  local ceiling = tonumber(settings.maxSizeGb) or 0
+  local ceiling_bytes = ceiling > 0 and math.floor(ceiling * 1024 * 1024 * 1024) or 0
+  local queue = {}
+  for _, game in ipairs((status and status.games) or {}) do
+    local state = tostring(game.status or '')
+    local size = tonumber(game.size_bytes) or 0
+    local path = tostring(game.path or '')
+    local name = tostring(game.name or '')
+    local excluded = blocked[name] == true
+    local over = ceiling_bytes > 0 and size >= ceiling_bytes
+    if not excluded and not over and path ~= '' and name ~= '' then
+      local compress = settings.compress and (state == 'UNCOMPRESSED' or state == 'UPDATED')
+      local dedupe = settings.dedupe and (state == 'COMPRESSED'
+        or (state == 'LOW YIELD' and game.dedupe_pending == true))
+      if compress or dedupe then
+        queue[#queue + 1] = { name = name, path = path, size = size }
+      end
+    end
+  end
+  if settings.runOrder == 'largest' then
+    table.sort(queue, function(a, b) return a.size > b.size end)
+  elseif settings.runOrder == 'smallest' then
+    table.sort(queue, function(a, b) return a.size < b.size end)
+  end
+  return queue
+end
+
+-- The driver runs one `--compact` per game and appends QUEUE\t<event> lines to
+-- the state file; the log holds the tool's own output, including its
+-- COMPACT| and PROGRESS| lines.
+local function write_driver(tool)
+  local template = [[#!/bin/bash
+# SLS Luna compressor queue driver: one game at a time, so the panel can show a
+# state and a bar per game. Written by the backend; do not edit by hand.
+set -u
+DIR=@DIR@
+TOOL=@TOOL@
+LIST=@LIST@
+LOG=@LOG@
+STATE=@STATE@
+: > "$LOG"
+: > "$STATE"
+total=0
+while IFS=$'\t' read -r name path size; do
+    [ -n "$path" ] || continue
+    total=$((total+1))
+done < "$LIST"
+i=0
+while IFS=$'\t' read -r name path size; do
+    [ -n "$path" ] || continue
+    i=$((i+1))
+    printf 'start\t%s\t%s\t%s\t%s\t%s\n' "$i" "$total" "$size" "$name" "$path" >> "$STATE"
+    BGC_PROGRESS=1 BGC_PROGRESS_TOTAL="$size" "$TOOL" --compact "$path" --verbose >> "$LOG" 2>&1
+    rc=$?
+    saved=0
+    if [ "$rc" -eq 0 ]; then
+        saved=$(grep -a '^COMPACT|done' "$LOG" | tail -n 1 | awk -F'|' '{print $(NF-1)}')
+        [ -n "$saved" ] || saved=0
+    fi
+    printf 'done\t%s\t%s\t%s\t%s\n' "$i" "$total" "$rc" "$saved" >> "$STATE"
+    if [ "$rc" -eq 130 ] || [ "$rc" -eq 143 ]; then
+        break
+    fi
+done < "$LIST"
+printf 'finish\t%s\t%s\n' "$i" "$total" >> "$STATE"
+]]
+  local script = template:gsub('@(%u+)@', {
+    DIR = shq(DIR), TOOL = shq(tool), LIST = shq(QUEUE_LIST),
+    LOG = shq(QUEUE_LOG), STATE = shq(QUEUE_STATE),
+  })
+  if not write_text(DRIVER, script) then return false end
+  os.execute('chmod +x ' .. shq(DRIVER))
+  return true
+end
+
+local function read_tail_bytes(path, bytes)
+  local f = io.open(path, 'rb')
+  if not f then return '' end
+  local size = f:seek('end') or 0
+  local start = size - (bytes or 262144)
+  if start < 0 then start = 0 end
+  f:seek('set', start)
+  local data = f:read('*a') or ''
+  f:close()
+  return data
+end
+
+local function split_tabs(line)
+  local out = {}
+  for field in (line .. '\t'):gmatch('([^\t]*)\t') do out[#out + 1] = field end
+  return out
+end
+
+-- Everything the panel needs about the queue: per-game states from the driver,
+-- and the current phase and byte counts from the tool's own progress lines.
+local function read_queue(limit)
+  local raw = read_text(QUEUE_LIST)
+  if not raw then return nil end
+  local games, byIndex = {}, {}
+  local index = 0
+  for line in raw:gmatch('[^\n]+') do
+    local fields = split_tabs(line)
+    if fields[2] and fields[2] ~= '' then
+      index = index + 1
+      local entry = {
+        index = index, name = fields[1] or '', path = fields[2],
+        size = tonumber(fields[3]) or 0, status = 'pending', saved = 0,
+      }
+      games[#games + 1] = entry
+      byIndex[index] = entry
+    end
+  end
+  local queue = { total = index, index = 0, current = nil, done = 0, failed = 0,
+    skipped = 0, saved = 0, finished = false, phase = '', doneBytes = 0,
+    totalBytes = 0, scannedBytes = 0, games = games }
+  local state = read_text(QUEUE_STATE)
+  if state then
+    for line in state:gmatch('[^\n]+') do
+      local fields = split_tabs(line)
+      local kind = fields[1] or ''
+      if kind == 'start' then
+        queue.index = tonumber(fields[2]) or 0
+        queue.total = tonumber(fields[3]) or queue.total
+        queue.current = {
+          name = fields[5] or '', path = fields[6] or '',
+          size = tonumber(fields[4]) or 0,
+        }
+        local entry = byIndex[queue.index]
+        if entry then entry.status = 'running' end
+      elseif kind == 'done' then
+        local idx = tonumber(fields[2]) or 0
+        local rc = tonumber(fields[4]) or 0
+        local saved = tonumber(fields[5]) or 0
+        local entry = byIndex[idx]
+        if entry then
+          entry.status = rc == 0 and 'done' or (rc == 3 and 'skipped' or 'failed')
+          entry.saved = saved
+        end
+        if rc == 0 then queue.done = queue.done + 1
+        elseif rc == 3 then queue.skipped = queue.skipped + 1
+        else queue.failed = queue.failed + 1 end
+        queue.saved = queue.saved + saved
+      elseif kind == 'finish' then
+        queue.finished = true
+        queue.current = nil
+      end
+    end
+  end
+  local log = read_tail_bytes(QUEUE_LOG, limit or 262144)
+  for line in log:gmatch('[^\n]+') do
+    local done_bytes, total_bytes = line:match('^PROGRESS|compress|(%d+)|(%d+)$')
+    if done_bytes then
+      queue.phase = 'compress'
+      queue.doneBytes = tonumber(done_bytes) or 0
+      queue.totalBytes = tonumber(total_bytes) or 0
+    else
+      local hashed = line:match('^PROGRESS|dedupe|(%d+)|%d+$')
+      if hashed then
+        queue.phase = 'dedupe'
+        queue.scannedBytes = tonumber(hashed) or 0
+      elseif line:sub(1, 14) == 'COMPACT|phase|' then
+        queue.phase = line:sub(15)
+        if queue.phase == 'compress' then queue.doneBytes = 0 end
+      end
+    end
+  end
+  if queue.current then
+    queue.current.phase = queue.phase
+    queue.current.doneBytes = queue.doneBytes
+    queue.current.totalBytes = queue.totalBytes
+    queue.current.scannedBytes = queue.scannedBytes
+  end
+  -- A short "next up" list so even the light poll can show what follows.
+  queue.next = {}
+  for _, entry in ipairs(games) do
+    if entry.status == 'pending' and #queue.next < 5 then
+      queue.next[#queue.next + 1] = { name = entry.name, size = entry.size }
+    end
+  end
+  return queue
 end
 
 -- ---------------------------------------------------------------------------
@@ -277,22 +476,21 @@ local function read_job()
 end
 
 -- Launches detached so a pass survives Steam and Lumen both going away. The
--- tool's own shell records $$ in a pid file before exec, which stays correct
+-- command's own shell records $$ in a pid file before exec, which stays correct
 -- even in the rare case where setsid has to fork, and it leads its own process
 -- group so a cancel can take the whole pass down.
-local function spawn(tool, action, args)
-  local spec = ACTIONS[action]
+local function spawn_detached(command, action, scan)
   fs.create_directories(DIR)
   os.remove(JOB_DONE)
   write_text(JOB_LOG, '')
-  if spec.scan then os.remove(STATUS_TMP) end
+  if scan then os.remove(STATUS_TMP) end
   local pidfile = DIR .. '/job.pid'
   os.remove(pidfile)
-  local redirect = spec.scan
+  local redirect = scan
     and ('> ' .. shq(STATUS_TMP) .. ' 2>> ' .. shq(JOB_LOG))
     or ('> ' .. shq(JOB_LOG) .. ' 2>&1')
-  local inner = string.format('echo $$ > %s; exec nohup %s %s %s < /dev/null',
-    shq(pidfile), shq(tool), args or spec.args, redirect)
+  local inner = string.format('echo $$ > %s; exec nohup %s %s < /dev/null',
+    shq(pidfile), command, redirect)
   local outer = string.format('setsid sh -c %s < /dev/null > /dev/null 2>&1 &', shq(inner))
   os.execute(outer)
   local pid
@@ -305,8 +503,13 @@ local function spawn(tool, action, args)
   os.remove(pidfile)
   if not pid then return nil end
   write_text(JOB_FILE, json.encode({ action = action, pid = pid, startedAt = os.time() }))
-  if spec.scan then write_text(ATTEMPT_AT, tostring(os.time())) end
+  if scan then write_text(ATTEMPT_AT, tostring(os.time())) end
   return pid
+end
+
+local function spawn(tool, action, args)
+  local spec = ACTIONS[action]
+  return spawn_detached(shq(tool) .. ' ' .. (args or spec.args), action, spec.scan == true)
 end
 
 -- A finished scan only counts once its whole JSON landed; a scan that was
@@ -352,6 +555,7 @@ local function encode_settings(data)
     assetProfile = data.assetProfile,
     keepLanguages = data.keepLanguages,
     maxSizeGb = data.maxSizeGb,
+    runOrder = data.runOrder,
     excluded = json.array(data.excluded),
   }
 end
@@ -402,6 +606,16 @@ function M.register(registry)
       end
     end
     local plan = build_plan(status, settings)
+    local queue = read_queue(light and 262144 or 524288)
+    if queue then
+      queue.active = job ~= nil and job.running and job.action == 'run' and not queue.finished
+      queue.next = json.array(queue.next or {})
+      if light then
+        queue.games = nil
+      else
+        queue.games = json.array(queue.games)
+      end
+    end
     local wire_status = status
     if light and status then
       wire_status = { version = status.version, summary = status.summary }
@@ -417,6 +631,7 @@ function M.register(registry)
       statusAt = statusAt,
       settings = encode_settings(settings),
       plan = plan,
+      queue = queue,
       job = job,
       autoStarted = autoStarted,
     })
@@ -435,6 +650,7 @@ function M.register(registry)
       if type(obj[key]) == 'boolean' then next_settings[key] = obj[key] end
     end
     if PROFILES[obj.assetProfile] then next_settings.assetProfile = obj.assetProfile end
+    if RUN_ORDERS[obj.runOrder] then next_settings.runOrder = obj.runOrder end
     next_settings.keepLanguages = normalize_languages(obj.keepLanguages)
     local size = tonumber(obj.maxSizeGb)
     if size and size >= 0 and size <= 100000 then
@@ -464,13 +680,6 @@ function M.register(registry)
     if not ACTIONS[action] then
       return response({success = false, error = 'Unknown action'})
     end
-    local args = ACTIONS[action].args
-    if action == 'run' then
-      args = run_args(settings)
-      if not args then
-        return response({success = false, error = 'Nothing is enabled: turn on compression or deduplication first'})
-      end
-    end
     local job = job_state()
     if job and job.running then
       return response({success = false, error = 'A job is already running'})
@@ -479,13 +688,61 @@ function M.register(registry)
     if not tool then
       return response({success = false, error = 'btrfs-game-compressor was not found'})
     end
-    local pid = spawn(tool, action, args)
+    if action ~= 'run' then
+      local pid = spawn(tool, action, ACTIONS[action].args)
+      if not pid then
+        return response({success = false, error = 'Could not start the tool'})
+      end
+      return response({
+        success = true,
+        job = {action = action, pid = pid, running = true, startedAt = os.time(),
+          args = ACTIONS[action].args},
+      })
+    end
+    -- A run is game by game: the backend writes the queue and a detached driver
+    -- runs one `--compact` per game, so the panel gets a state and a bar per
+    -- game and the pass survives the UI closing.
+    if not settings.compress then
+      if not settings.dedupe then
+        return response({success = false, error = 'Nothing is enabled: turn on compression or deduplication first'})
+      end
+      -- Dedupe-only has no per-game command; the tool's library pass is the
+      -- maintenance path and the queue does not apply.
+      local pid = spawn(tool, 'run', '--dedupe')
+      if not pid then
+        return response({success = false, error = 'Could not start the tool'})
+      end
+      return response({
+        success = true,
+        job = {action = 'run', pid = pid, running = true, startedAt = os.time(), args = '--dedupe'},
+      })
+    end
+    local status = scan_state()
+    if not status then
+      return response({success = false, error = 'Scan the library first so the queue can be built'})
+    end
+    local queue = build_queue(status, settings)
+    if #queue == 0 then
+      return response({success = false, error = 'Nothing to do with the current settings'})
+    end
+    local lines = {}
+    for _, game in ipairs(queue) do
+      lines[#lines + 1] = game.name .. '\t' .. game.path .. '\t' .. tostring(game.size)
+    end
+    if not write_text(QUEUE_LIST, table.concat(lines, '\n') .. '\n') then
+      return response({success = false, error = 'Could not write the queue'})
+    end
+    if not write_driver(tool) then
+      return response({success = false, error = 'Could not write the queue driver'})
+    end
+    local pid = spawn_detached(shq(DRIVER), 'run', false)
     if not pid then
-      return response({success = false, error = 'Could not start the tool'})
+      return response({success = false, error = 'Could not start the queue'})
     end
     return response({
       success = true,
-      job = {action = action, pid = pid, running = true, startedAt = os.time(), args = args},
+      job = {action = 'run', pid = pid, running = true, startedAt = os.time(),
+        args = 'queue', queue = #queue},
     })
   end
 
