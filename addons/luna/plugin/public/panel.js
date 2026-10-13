@@ -221,6 +221,18 @@
     let presence = null;
     let query = '';
     let visible = 50;
+    // Keep the actual input node across paints (including asynchronous refreshes).
+    // Recreating it after every keystroke drops focus and the caret.
+    const search = document.createElement('input');
+    search.className = 'sls-luna-search';
+    search.placeholder = 'Filter game or AppID';
+    search.oninput = () => {
+      query = search.value; visible = 50;
+      const start = search.selectionStart, end = search.selectionEnd;
+      paint();
+      search.focus();
+      if (typeof search.setSelectionRange === 'function') search.setSelectionRange(start, end);
+    };
 
     const sidebar = () => NAV.map(entry => {
       const item = document.createElement('div');
@@ -287,11 +299,7 @@
       body.appendChild(info);
       if (snapshot) body.appendChild(statsRow());
 
-      const search = document.createElement('input');
-      search.className = 'sls-luna-search';
-      search.placeholder = 'Filter game or AppID';
       search.value = query;
-      search.oninput = () => { query = search.value; visible = 50; paint(); };
       body.appendChild(search);
 
       const actions = document.createElement('div');
@@ -470,6 +478,8 @@
     const TITLES = { playtime: 'Playtime', presence: 'Presence', about: 'About SLS Luna' };
 
     function paint() {
+      const restoreSearch = document.activeElement === search && tab === 'playtime';
+      const selection = [search.selectionStart, search.selectionEnd];
       const existing = document.getElementById(OVERLAY_ID);
       if (existing) existing.remove();
       overlay = document.createElement('div');
@@ -511,6 +521,10 @@
       overlay.appendChild(win);
       overlay.addEventListener('click', event => { if (event.target === overlay) closeMenu(); });
       document.body.appendChild(overlay);
+      if (restoreSearch) {
+        search.focus();
+        if (typeof search.setSelectionRange === 'function') search.setSelectionRange(...selection);
+      }
     }
 
     async function refresh() {

@@ -192,6 +192,21 @@ test('the menu opens with the sidebar, both settings sections and the account ro
   assert.match(text,/Minecraft \(#3212112756\) \[non-Steam\]/,'non-Steam games must be marked');
   assert.match(text,/Save/,'each listed game needs a save control');
 });
+test('typing repeatedly retains the same search node, focus and caret',async()=>{
+  const document=fakeDom();menubarFixture(document,true);
+  const {w}=fakeWindow(document);
+  mount(w);document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const search=document.created.find(e=>e.className==='sls-luna-search');
+  search.focus=()=>{document.activeElement=search;};
+  search.setSelectionRange=(a,b)=>{search.selectionStart=a;search.selectionEnd=b;};
+  search.focus();
+  for(const value of ['m','mi','min','mine']){
+    search.value=value;search.setSelectionRange(value.length,value.length);search.oninput();
+    assert.equal(document.activeElement,search);assert.equal(search.selectionStart,value.length);
+    assert.equal(document.created.filter(e=>e.className==='sls-luna-search').length,1);
+  }
+});
 
 test('Escape closes the menu',async()=>{
   const document=fakeDom();
