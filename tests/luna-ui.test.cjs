@@ -246,11 +246,11 @@ test('the presence switch calls the real RPC with the inverted value',async()=>{
   assert.equal(call.payload.enabled,false,'the switch must send the inverted value');
 });
 
-test('the presence mode defaults to shortcut and can be switched to native',async()=>{
+test('the session-time switch defaults on and toggles through the real RPC',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
   const {w,calls}=fakeWindow(document,{
-    presence:{success:true,state:{enabled:true,mode:'shortcut',owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}}});
+    presence:{success:true,state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}}});
   mount(w);
   document.getElementById('sls-luna-btn').click();
   await new Promise(resolve=>setTimeout(resolve,30));
@@ -260,16 +260,16 @@ test('the presence mode defaults to shortcut and can be switched to native',asyn
   presenceTab.onclick();
   await new Promise(resolve=>setTimeout(resolve,20));
   const overlay=document.getElementById('sls-luna-overlay');
-  assert.match(textOf(overlay),/Presence mode/,'the mode selector is missing');
-  const safe=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-btn') && node.textContent==='Shortcut (safe)');
-  const native=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-btn') && node.textContent==='Native (test)');
-  assert.ok(safe&&native,'both mode buttons must exist');
-  assert.ok(!/secondary/.test(safe.className),'shortcut must render as the active default');
-  native.onclick();
+  assert.match(textOf(overlay),/Show session time in the name/,'the enrichment row is missing');
+  const sessionSwitch=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-switch')
+    && node.parentNode && /session time/i.test(node.parentNode.textContent));
+  assert.ok(sessionSwitch,'the session-time switch was not rendered');
+  assert.match(sessionSwitch.className,/sls-luna-switch on/,'it must be on by default');
+  sessionSwitch.onclick();
   await new Promise(resolve=>setTimeout(resolve,20));
-  const call=calls.filter(c=>c.fn==='SlsPresenceSetMode').pop();
-  assert.ok(call,'choosing native must call SlsPresenceSetMode');
-  assert.equal(call.payload.mode,'native','the native mode must be sent');
+  const call=calls.filter(c=>c.fn==='SlsPresenceSetSessionTime').pop();
+  assert.ok(call,'toggling must call SlsPresenceSetSessionTime');
+  assert.equal(call.payload.sessionTime,false,'the switch must send the inverted value');
 });
 
 test('buildRows ranks recorded games first and marks non-Steam entries',()=>{
