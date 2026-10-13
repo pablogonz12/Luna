@@ -1,0 +1,8 @@
+{
+  "name": "sls-playtime",
+  "common_name": "SLS Playtime",
+  "description": "Local editable playtime tracker for slsteam-moon manifest games",
+  "version": "0.4.0",
+  "backendType": "lua",
+  "include": ["public"]
+}
