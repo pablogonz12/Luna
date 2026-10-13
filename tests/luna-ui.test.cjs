@@ -246,6 +246,32 @@ test('the presence switch calls the real RPC with the inverted value',async()=>{
   assert.equal(call.payload.enabled,false,'the switch must send the inverted value');
 });
 
+test('the presence mode defaults to shortcut and can be switched to native',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{
+    presence:{success:true,state:{enabled:true,mode:'shortcut',owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}}});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const presenceTab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.className==='sls-luna-tab' && node.textContent==='Presence');
+  assert.ok(presenceTab,'the Presence tab was not found');
+  presenceTab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/Presence mode/,'the mode selector is missing');
+  const safe=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-btn') && node.textContent==='Shortcut (safe)');
+  const native=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-btn') && node.textContent==='Native (test)');
+  assert.ok(safe&&native,'both mode buttons must exist');
+  assert.ok(!/secondary/.test(safe.className),'shortcut must render as the active default');
+  native.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const call=calls.filter(c=>c.fn==='SlsPresenceSetMode').pop();
+  assert.ok(call,'choosing native must call SlsPresenceSetMode');
+  assert.equal(call.payload.mode,'native','the native mode must be sent');
+});
+
 test('buildRows ranks recorded games first and marks non-Steam entries',()=>{
   const rows=buildRows({apps:[1,2,3],games:{'2':{trackedSeconds:3600,adjustmentSeconds:0,lastPlayed:9}},
     titles:{'1':'Named but unplayed'},shortcutNames:{'3':'Shortcut'}},'');
