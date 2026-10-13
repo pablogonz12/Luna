@@ -220,6 +220,12 @@ assert(done.status.games[1].name == 'A' and done.tool.version == '9.9.9', 'the r
 assert(done.statusAt > 0, 'the scan time was not stamped')
 local again = call(reg, 'SlsCompressorGet')
 assert(again.autoStarted == false and again.status ~= nil, 'a later Get must not rescan')
+-- The light shape (what the panel polls) drops the per-game list for speed,
+-- but the plan and the summary must stay.
+local light = call(reg, 'SlsCompressorGet', json.encode({light = true}))
+assert(light.status and light.status.summary and light.status.games == nil,
+  'the light response must drop the games list')
+assert(light.plan and light.plan.compress == 1, 'the light response must keep the plan')
 
 -- Defaults: safe operations on, nothing destructive, no filters.
 assert(again.settings.compress == true and again.settings.dedupe == true, 'safe passes must default on')

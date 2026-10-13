@@ -371,11 +371,18 @@ function M.register(registry)
     return status
   end
 
-  registry.SlsCompressorGet = function()
+  registry.SlsCompressorGet = function(raw)
     local tool = find_tool()
     -- Settings can change on disk (a hand edit, another surface), so the file
     -- is the source of truth on every read.
     settings = read_settings()
+    -- Polling clients can ask for the light shape: the plan and the job, with
+    -- the per-game list left out so a one-second poll stays tiny.
+    local light = false
+    if type(raw) == 'string' and #raw <= 200 then
+      local ok, obj = pcall(json.decode, raw)
+      if ok and type(obj) == 'table' and obj.light == true then light = true end
+    end
     -- job_state() first: observing a finished scan adopts its report, which is
     -- what this same response must already include.
     local job = job_state()
@@ -394,6 +401,11 @@ function M.register(registry)
         end
       end
     end
+    local plan = build_plan(status, settings)
+    local wire_status = status
+    if light and status then
+      wire_status = { version = status.version, summary = status.summary }
+    end
     return response({
       success = true,
       tool = {
@@ -401,10 +413,10 @@ function M.register(registry)
         path = tool or '',
         version = status and tostring(status.version or '') or '',
       },
-      status = status,
+      status = wire_status,
       statusAt = statusAt,
       settings = encode_settings(settings),
-      plan = build_plan(status, settings),
+      plan = plan,
       job = job,
       autoStarted = autoStarted,
     })
