@@ -1,6 +1,9 @@
 /* SLS Presence lightweight panel for Lumen desktop shell + store webview. */
 (function (w) {
   if (!w.document || w.__SlsPresencePanel) return;
+  // SLS Luna hosts this add-on's settings in its own menubar menu; the floating
+  // panel is only for a standalone install.
+  if (w.__SlsLunaUi) return;
   w.__SlsPresencePanel = true;
   const rpc = async (method, args = {}) => {
     const raw = await w.Millennium.callServerMethod('lumen', method, args);

@@ -35,6 +35,9 @@
   function mount(w){
   const document=w.document;
   if(!document||w.__SlsPlaytimePanel)return;
+  // SLS Luna hosts this add-on's settings in its own menubar menu; the floating
+  // panel is only for a standalone install.
+  if(w.__SlsLunaUi)return;
   w.__SlsPlaytimePanel=true;
   const parse=raw=>typeof raw==='string'?JSON.parse(raw):raw;
   const rpc=async(method,args={})=>{

@@ -1,0 +1,8 @@
+{
+  "name": "sls-luna",
+  "common_name": "SLS Luna",
+  "description": "Shell entry point for the SLSsteam-Moon add-ons: one Luna button and one settings menu",
+  "version": "0.1.0",
+  "backendType": "lua",
+  "include": ["public"]
+}
