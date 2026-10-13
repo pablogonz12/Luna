@@ -12,7 +12,7 @@ local function valid_id(v)
   local n = tonumber(v)
   return n and n >= 1 and n <= MAX and n == math.floor(n)
 end
-local function blank() return {enabled=false, owned={}, running={}, cleanup=0, account=nil, accountSource=nil} end
+local function blank() return {enabled=false, sessionTime=true, owned={}, running={}, cleanup=0, account=nil, accountSource=nil} end
 -- Only the 8-hex FNV digest of an account identity is ever persisted; the raw
 -- SteamID or account name must never reach this file or a log line.
 local function valid_account(v)
@@ -30,6 +30,9 @@ local function read_file()
   local data=blank()
   data.enabled=value.enabled==true
   data.cleanup=tonumber(value.cleanup) or 0
+  -- Enrichment: while a game runs, its hidden placeholder gains a session-time
+  -- suffix (e.g. "(42m)"). On by default; only false disables it.
+  data.sessionTime=value.sessionTime~=false
   if valid_account(value.account) then data.account=value.account end
   if valid_source(value.accountSource) then data.accountSource=value.accountSource end
   for original,shortcut in pairs(type(value.owned)=='table' and value.owned or {}) do
@@ -236,6 +239,7 @@ function M.register(registry)
     local next_state=blank()
     next_state.enabled=state.enabled -- UI owns enabled setting, not agent
     next_state.cleanup=state.cleanup
+    next_state.sessionTime=state.sessionTime -- UI owns the enrichment toggle too
     next_state.account=valid_account(obj.account) and obj.account or state.account
     next_state.accountSource=valid_source(obj.accountSource) and obj.accountSource or state.accountSource
     local count=0
@@ -268,6 +272,15 @@ function M.register(registry)
     local ok,err=save_file(updated)
     if ok then state=updated end
     return response({success=ok,error=err,enabled=state.enabled})
+  end
+  -- Enrichment toggle: when on, a running placeholder's name gains a session
+  -- time suffix like "(42m)" and is restored to the plain title on stop.
+  registry.SlsPresenceSetSessionTime=function(value)
+    if type(value)~='boolean' then return response({success=false,error='Expected boolean'}) end
+    local updated=read_file();updated.sessionTime=value
+    local saved,err=save_file(updated)
+    if saved then state=updated end
+    return response({success=saved,error=err,sessionTime=state.sessionTime})
   end
   registry.SlsPresenceRequestCleanup=function()
     local updated=read_file();updated.enabled=false;updated.cleanup=updated.cleanup+1
