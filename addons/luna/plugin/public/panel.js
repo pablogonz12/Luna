@@ -381,10 +381,13 @@
       const body = document.createElement('div');
       const state = (presence && presence.state) || {};
       const runtime = (presence && presence.runtime) || {};
+      const mode = state.mode === 'native' ? 'native' : 'shortcut';
       const note = document.createElement('p');
       note.className = 'sls-luna-note';
-      note.innerHTML = 'Publishes a hidden placeholder shortcut so friends see the game you are playing. '
-        + 'Requires SLSsteam-Moon and at least one numeric manifest.';
+      note.innerHTML = (mode === 'native'
+        ? 'Native mode: nothing is faked. Steam reports the running game itself, so friends see the real app (experimental; verify with a second account).'
+        : 'Shortcut mode: a hidden placeholder shortcut named after the game is published, so friends see the game you are playing.')
+        + ' Requires SLSsteam-Moon and at least one numeric manifest.';
       body.appendChild(note);
 
       const toggle = document.createElement('div');
@@ -409,6 +412,37 @@
       };
       toggle.append(text, switchBox);
       body.appendChild(toggle);
+
+      const modeRow = document.createElement('div');
+      modeRow.className = 'sls-luna-row';
+      const modeText = document.createElement('div');
+      modeText.className = 'txt';
+      const modeName = document.createElement('div');
+      modeName.className = 'name';
+      modeName.textContent = 'Presence mode';
+      const modeSub = document.createElement('div');
+      modeSub.className = 'sub';
+      modeSub.textContent = mode === 'native'
+        ? 'Native: Steam reports the game itself; the current friends view is unverified.'
+        : 'Shortcut: the validated behaviour. A hidden placeholder carries the game name.';
+      modeText.append(modeName, modeSub);
+      const modeBox = document.createElement('div');
+      modeBox.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
+      [['shortcut', 'Shortcut (safe)'], ['native', 'Native (test)']].forEach(pair => {
+        const button = document.createElement('button');
+        button.className = 'sls-luna-btn' + (mode === pair[0] ? '' : ' secondary');
+        button.textContent = pair[1];
+        button.onclick = async () => {
+          if (mode === pair[0]) return;
+          try {
+            await rpc(w, 'SlsPresenceSetMode', { mode: pair[0] });
+            await refresh();
+          } catch (error) { showError(body, error); }
+        };
+        modeBox.appendChild(button);
+      });
+      modeRow.append(modeText, modeBox);
+      body.appendChild(modeRow);
 
       const owned = Object.keys(state.owned || {}).length;
       const running = Object.keys(state.running || {}).length;
