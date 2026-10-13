@@ -53,6 +53,29 @@
     const date = new Date((Number(seconds) || 0) * 1000);
     return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
   };
+  // Compressor page vocabulary: in-page sub-tabs, the alpha resolution
+  // profiles, and plain-language names for actions and game states.
+  const COMPRESSOR_TABS = [
+    { id: 'status', label: 'Status' },
+    { id: 'settings', label: 'Settings' },
+    { id: 'games', label: 'Games' },
+    { id: 'log', label: 'Log' },
+  ];
+  const PROFILE_LABELS = [
+    ['ultra-performance', '480p'],
+    ['performance', '720p'],
+    ['balanced', '1080p'],
+    ['quality', '1440p'],
+    ['ultra-quality', '4K'],
+    ['lossless', 'Lossless'],
+  ];
+  const ACTION_LABELS = {
+    scan: 'library scan', preview: 'preview', run: 'compression pass', assets: 'asset inventory',
+  };
+  const STATUS_LABELS = {
+    UNCOMPRESSED: 'uncompressed', UPDATED: 'changed since last pass', COMPRESSED: 'dedupe pending',
+    COMPACTED: 'compacted', 'LOW YIELD': 'low yield', RUNNING: 'playing now',
+  };
 
   function styled(document) {
     if (document.getElementById(STYLE_ID)) return;
@@ -114,6 +137,13 @@
       '.sls-luna-stat i{color:#8d97a1;font-size:12px;font-style:normal;}',
       '.sls-luna-game{display:flex;align-items:center;gap:9px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.05);}',
       '.sls-luna-game .gname{flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:13px;color:#e6e9ec;}',
+      '.sls-luna-subtabs{display:flex;gap:6px;margin:0 0 14px;}',
+      '.sls-luna-subtab{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#cfd3d7;',
+      'border-radius:3px;padding:5px 11px;font-size:12px;cursor:pointer;font-family:inherit;}',
+      '.sls-luna-subtab:hover{background:rgba(255,255,255,.12);}',
+      '.sls-luna-subtab.active{background:#3cb0ff;border-color:#3cb0ff;color:#fff;}',
+      '.sls-luna-log{margin:0;max-height:44vh;overflow:auto;background:#10161c;color:#aeb8c2;font-size:11px;',
+      'line-height:1.45;padding:10px;border-radius:3px;white-space:pre-wrap;}',
       '.sls-luna-error{color:#ff8080;font-size:13px;margin:8px 0 0;}',
     ].join('');
     (document.head || document.body).appendChild(style);
@@ -235,6 +265,10 @@
     let snapshot = null;
     let presence = null;
     let compressor = null;
+    let compressorTab = 'status';
+    let compressorQuery = '';
+    let pendingAction = null;
+    let compressorNotice = null;
     let query = '';
     let visible = 50;
     let jobTimer = null;
@@ -251,6 +285,18 @@
       if (typeof search.setSelectionRange === 'function') search.setSelectionRange(start, end);
     };
 
+    // Same idea for the compressor Games tab: one node, caret kept across paints.
+    const compressSearch = document.createElement('input');
+    compressSearch.className = 'sls-luna-search';
+    compressSearch.placeholder = 'Filter games';
+    compressSearch.oninput = () => {
+      compressorQuery = compressSearch.value;
+      const start = compressSearch.selectionStart, end = compressSearch.selectionEnd;
+      paint();
+      compressSearch.focus();
+      if (typeof compressSearch.setSelectionRange === 'function') compressSearch.setSelectionRange(start, end);
+    };
+
     // A running compressor job is polled while the menu stays open; the timer
     // dies with the menu so a closed window never keeps talking to the backend.
     function stopJobPolling() {
@@ -263,7 +309,7 @@
         await refresh();
         const job = compressor && compressor.job;
         if (!job || !job.running) stopJobPolling();
-      }, 3000);
+      }, 1000);
     }
 
     const sidebar = () => NAV.map(entry => {
@@ -503,30 +549,141 @@
       return body;
     }
 
-    function compressorBody() {
-      const body = document.createElement('div');
-      const note = document.createElement('p');
-      note.className = 'sls-luna-note';
-      note.innerHTML = 'Compresses installed games on Btrfs with ZSTD and dedupes shared data, using the '
-        + '<strong>btrfs-game-compressor</strong> tool. Checks are read-only; a compaction is irreversible '
-        + 'and can take hours, and it never touches a game that is running.';
-      body.appendChild(note);
+    // ---- Compressor page: Status / Settings / Games / Log ------------------
 
-      const tool = (compressor && compressor.tool) || {};
-      if (!tool.found) {
-        const missing = document.createElement('p');
-        missing.className = 'sls-luna-note';
-        missing.innerHTML = '<strong>btrfs-game-compressor was not found.</strong> Run its install.sh, or '
-          + 'point SLS_COMPRESSOR_BIN at the binary and restart Steam.';
-        body.appendChild(missing);
-        return body;
+    function compressorRunsText() {
+      const settings = (compressor && compressor.settings) || {};
+      const parts = [];
+      if (settings.compress) parts.push('ZSTD compression');
+      if (settings.dedupe) parts.push('deduplication');
+      return parts.join(' + ');
+    }
+
+    function compressorBusyLine() {
+      const job = compressor && compressor.job;
+      const line = document.createElement('p');
+      line.className = 'sls-luna-note';
+      if (job && job.running) {
+        line.innerHTML = '<strong>Running now:</strong> ' + (ACTION_LABELS[job.action] || job.action)
+          + ' \u00b7 ' + age(job.startedAt) + '.';
+      } else if (pendingAction) {
+        line.innerHTML = '<strong>Starting</strong> ' + (ACTION_LABELS[pendingAction.action] || pendingAction.action) + '\u2026';
+      } else if (job) {
+        line.innerHTML = 'Last job: ' + (ACTION_LABELS[job.action] || job.action)
+          + ' (started at ' + clock(job.startedAt) + ').';
+      } else {
+        line.textContent = 'No job has run from here yet.';
       }
+      return line;
+    }
 
-      const summary = (compressor && compressor.status && compressor.status.summary) || null;
+    async function saveSettings(patch, body) {
+      const current = (compressor && compressor.settings) || {};
+      const next = Object.assign({}, current, patch);
+      try {
+        await rpc(w, 'SlsCompressorPutSettings', { raw: JSON.stringify(next) });
+        await refresh();
+      } catch (error) { showError(body, error); }
+    }
+
+    async function startJob(body, action, confirmText) {
+      if (confirmText && !w.confirm(confirmText)) return;
+      pendingAction = { action: action, at: Date.now() / 1000 };
+      paint();
+      try {
+        await rpc(w, 'SlsCompressorRun', { raw: JSON.stringify({ action: action }) });
+        startJobPolling();
+        await refresh();
+      } catch (error) {
+        // The body painted before the request is gone by now, so the failure
+        // travels through the notice the next paint renders.
+        pendingAction = null;
+        compressorNotice = String(error && error.message ? error.message : error);
+        paint();
+      }
+    }
+
+    function jobButton(body, label, action, secondary, confirmText, disabled) {
+      const button = document.createElement('button');
+      button.className = 'sls-luna-btn' + (secondary ? ' secondary' : '');
+      button.textContent = label;
+      button.disabled = Boolean(disabled);
+      button.onclick = () => startJob(body, action, confirmText);
+      return button;
+    }
+
+    function cancelButton(body) {
+      const button = document.createElement('button');
+      button.className = 'sls-luna-btn secondary';
+      button.textContent = 'Cancel job';
+      button.onclick = async () => {
+        const job = compressor && compressor.job;
+        if (!job || !job.running) return;
+        if (!w.confirm('Cancel ' + (ACTION_LABELS[job.action] || job.action)
+          + '? A pass keeps its progress and can be run again later.')) return;
+        try { await rpc(w, 'SlsCompressorCancel'); await refresh(); } catch (error) { showError(body, error); }
+      };
+      return button;
+    }
+
+    function switchRow(body, label, sub, on, onToggle) {
+      const row = document.createElement('div');
+      row.className = 'sls-luna-row';
+      const text = document.createElement('div');
+      text.className = 'txt';
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = label;
+      const info = document.createElement('div');
+      info.className = 'sub';
+      info.textContent = sub;
+      text.append(name, info);
+      const box = document.createElement('div');
+      box.className = 'sls-luna-switch' + (on ? ' on' : '');
+      box.appendChild(document.createElement('span'));
+      box.onclick = () => onToggle(!on);
+      row.append(text, box);
+      body.appendChild(row);
+      return row;
+    }
+
+    function runConfirmText(plan) {
+      const settings = (compressor && compressor.settings) || {};
+      const target = settings.compress && settings.dedupe ? 'ZSTD compression + deduplication'
+        : settings.compress ? 'ZSTD compression (deduplication stays for a later pass)'
+        : 'a whole-library deduplication pass (the exclude list does not apply to this mode)';
+      const count = settings.compress && settings.dedupe
+        ? (Number(plan.compress || 0) + Number(plan.dedupe || 0))
+        : settings.compress ? Number(plan.compress || 0) : 0;
+      const scale = count > 0 ? ' on about ' + count + ' game(s)' : '';
+      return 'Run ' + target + scale + '? Games that are running are skipped, exclusions and the size '
+        + 'ceiling are respected, and the pass can be cancelled from here while it runs.';
+    }
+
+    function compressorStatus(body) {
+      const settings = (compressor && compressor.settings) || {};
+      const plan = (compressor && compressor.plan) || {};
+      const tool = (compressor && compressor.tool) || {};
+      const runs = compressorRunsText();
+      const job = compressor.job;
+      const running = Boolean(job && job.running);
+      const ceilingGb = Number(settings.maxSizeGb) || 0;
+      const excludedCount = (settings.excluded || []).length;
+
+      const enabled = document.createElement('p');
+      enabled.className = 'sls-luna-note';
+      enabled.innerHTML = runs
+        ? 'A run does: <strong>' + runs + '</strong>. Asset changes are never applied by a run, and a '
+          + 'game that is playing is skipped.'
+        : '<strong>Nothing is enabled.</strong> Turn on compression or deduplication in Settings first.';
+      body.appendChild(enabled);
+
       const stats = document.createElement('div');
       stats.className = 'sls-luna-stat';
-      [['Pending', summary ? summary.pending : 0], ['Compacted', summary ? summary.compacted : 0],
-        ['Low yield', summary ? summary.low_yield : 0], ['Running', summary ? summary.running : 0]]
+      [['Pending', plan.pending, 'games not compacted yet'],
+        ['To compress', plan.compress, 'waiting for ZSTD'],
+        ['Dedupe only', plan.dedupe, 'compression is current'],
+        ['Held back', Number(plan.excluded || 0) + Number(plan.overSize || 0), 'excluded or over the ceiling']]
         .forEach(pair => {
           const cell = document.createElement('div');
           const value = document.createElement('b');
@@ -538,115 +695,280 @@
         });
       body.appendChild(stats);
 
-      const scan = document.createElement('p');
-      scan.className = 'sls-luna-note';
+      const filters = document.createElement('p');
+      filters.className = 'sls-luna-note';
+      filters.textContent = 'Filters: ' + excludedCount + ' game(s) excluded'
+        + (ceilingGb > 0 ? ', only games under ' + ceilingGb + ' GB' : ', no size ceiling')
+        + '. Pending counts come from the last scan.';
+      body.appendChild(filters);
+
+      const scanLine = document.createElement('p');
+      scanLine.className = 'sls-luna-note';
       const when = Number(compressor.statusAt || 0);
-      const version = compressor.status && compressor.status.version ? ' v' + compressor.status.version : '';
-      const libraries = compressor.status && Array.isArray(compressor.status.libraries)
-        ? ' Libraries: ' + compressor.status.libraries.length + '.' : '';
-      scan.textContent = 'Tool: ' + (tool.path || '?') + version + '. '
-        + (when ? 'Scanned ' + age(when) + ' ago.' : 'No scan yet.') + libraries;
-      body.appendChild(scan);
+      scanLine.textContent = 'Tool: ' + (tool.path || '?') + (tool.version ? ' v' + tool.version : '') + '. '
+        + (when ? 'Scanned ' + age(when) + ' ago.' : 'No scan yet \u2014 one starts by itself on first open.');
+      body.appendChild(scanLine);
 
-      const job = compressor.job;
-      if (job) {
-        const line = document.createElement('p');
-        line.className = 'sls-luna-note';
-        line.innerHTML = job.running
-          ? '<strong>Running ' + job.action + '</strong> for ' + age(job.startedAt) + '.'
-          : 'Last job: <strong>' + job.action + '</strong> (started at ' + clock(job.startedAt) + ').';
-        body.appendChild(line);
-      }
+      body.appendChild(compressorBusyLine());
 
-      const running = Boolean(job && job.running);
       const actions = document.createElement('div');
-      actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px;';
-      const add = (label, action, secondary, confirmText) => {
-        const button = document.createElement('button');
-        button.className = 'sls-luna-btn' + (secondary ? ' secondary' : '');
-        button.textContent = label;
-        button.disabled = running;
-        button.onclick = async () => {
-          if (confirmText && !w.confirm(confirmText)) return;
-          try {
-            await rpc(w, 'SlsCompressorRun', { raw: JSON.stringify({ action: action }) });
-            startJobPolling();
-            await refresh();
-          } catch (error) { showError(body, error); }
-        };
-        actions.appendChild(button);
-        return button;
-      };
-      add(summary ? 'Check now' : 'Run the first scan', 'status', true);
-      add('Preview (dry-run)', 'dryrun', true);
-      add('Recheck', 'recheck', true);
-      add('Dedupe', 'dedupe', true);
-      add('Compact pending\u2026', 'compact', false,
-        'Run the compaction pass? It is irreversible (no restore copy), can take hours, and keeps '
-        + 'running if Steam closes. Running games are skipped.');
-      if (running) {
-        const stop = document.createElement('button');
-        stop.className = 'sls-luna-btn secondary';
-        stop.textContent = 'Cancel job';
-        stop.onclick = async () => {
-          if (!w.confirm('Cancel ' + job.action + '? A compaction keeps its checkpoints and can be resumed later.')) return;
-          try { await rpc(w, 'SlsCompressorCancel'); await refresh(); } catch (error) { showError(body, error); }
-        };
-        actions.appendChild(stop);
-      }
+      actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 8px;';
+      actions.appendChild(jobButton(body, 'Scan library', 'scan', true, null, running));
+      actions.appendChild(jobButton(body, 'Preview (dry-run)', 'preview', true, null, running));
+      actions.appendChild(jobButton(body, 'Run now', 'run', false, runConfirmText(plan), running || !runs));
+      if (running) actions.appendChild(cancelButton(body));
       body.appendChild(actions);
-
-      if (job && job.log) {
-        const toggle = document.createElement('button');
-        toggle.className = 'sls-luna-btn secondary';
-        toggle.textContent = 'Show log';
-        const pre = document.createElement('pre');
-        pre.style.cssText = 'display:none;max-height:160px;overflow:auto;background:#10161c;color:#aeb8c2;'
-          + 'font-size:11px;padding:8px;border-radius:3px;white-space:pre-wrap;';
-        pre.textContent = job.log;
-        toggle.onclick = () => {
-          const shown = pre.style.display !== 'none';
-          pre.style.display = shown ? 'none' : 'block';
-          toggle.textContent = shown ? 'Show log' : 'Hide log';
-        };
-        body.append(toggle, pre);
-      }
-
-      const games = (compressor && compressor.status && Array.isArray(compressor.status.games)
-        ? compressor.status.games : []);
-      const waiting = games.filter(game => game && (game.status === 'UNCOMPRESSED' || game.status === 'UPDATED'
-        || game.status === 'COMPRESSED' || game.status === 'LOW YIELD'))
-        .sort((a, b) => (Number(b.size_bytes) || 0) - (Number(a.size_bytes) || 0));
-      if (waiting.length) {
-        const title = document.createElement('p');
-        title.className = 'sls-luna-note';
-        title.innerHTML = '<strong>Waiting for work</strong> (' + waiting.length + ' games, largest first).';
-        body.appendChild(title);
-        waiting.slice(0, 40).forEach(game => {
-          const row = document.createElement('div');
-          row.className = 'sls-luna-game';
-          const name = document.createElement('span');
-          name.className = 'gname';
-          name.textContent = game.name;
-          const hint = document.createElement('span');
-          hint.style.cssText = 'color:#8d97a1;font-size:12px;white-space:nowrap;';
-          hint.textContent = (game.community_hint_pct ? '~' + game.community_hint_pct + '% at zstd1' : '')
-            + (game.dedupe_pending ? (game.community_hint_pct ? ' \u00b7 ' : '') + 'dedupe pending' : '');
-          const size = document.createElement('span');
-          size.style.cssText = 'color:#b8bcbf;font-size:13px;white-space:nowrap;';
-          size.textContent = game.size_display || '';
-          row.append(name, hint, size);
-          body.appendChild(row);
-        });
-        if (waiting.length > 40) {
-          const more = document.createElement('p');
-          more.className = 'sls-luna-note';
-          more.textContent = '\u2026and ' + (waiting.length - 40) + ' more.';
-          body.appendChild(more);
-        }
+      if (!runs) {
+        const hint = document.createElement('p');
+        hint.className = 'sls-luna-note';
+        hint.textContent = 'Run now unlocks once compression or deduplication is enabled.';
+        body.appendChild(hint);
       }
 
       if (running) startJobPolling();
+      return body;
+    }
+
+    function compressorSettings(body) {
+      const settings = (compressor && compressor.settings) || {};
+      const group = title => {
+        const line = document.createElement('p');
+        line.className = 'sls-luna-note';
+        line.innerHTML = '<strong>' + title + '</strong>';
+        body.appendChild(line);
+      };
+
+      group('Safe operations');
+      switchRow(body, 'ZSTD compression',
+        'Rewrites each game through zstd when it is new or changed. The slow part, and safe to interrupt.',
+        settings.compress !== false, value => saveSettings({ compress: value }, body));
+      switchRow(body, 'Deduplication',
+        'Merges duplicate extents after compression. Touches no file contents.',
+        settings.dedupe !== false, value => saveSettings({ dedupe: value }, body));
+      switchRow(body, 'Eco mode',
+        'Runs the pass with nice/ionice so the machine stays responsive while it works.',
+        settings.eco === true, value => saveSettings({ eco: value }, body));
+
+      group('Limits');
+      const ceiling = Number(settings.maxSizeGb) || 0;
+      const sizeRow = document.createElement('div');
+      sizeRow.className = 'sls-luna-row';
+      const sizeText = document.createElement('div');
+      sizeText.className = 'txt';
+      const sizeName = document.createElement('div');
+      sizeName.className = 'name';
+      sizeName.textContent = 'Only process games smaller than';
+      const sizeSub = document.createElement('div');
+      sizeSub.className = 'sub';
+      sizeSub.textContent = 'Handy for a first test: set it low, watch one small game go through, then lift it. Off means every game.';
+      sizeText.append(sizeName, sizeSub);
+      const sizeInput = document.createElement('input');
+      sizeInput.className = 'sls-luna-input';
+      sizeInput.type = 'number';
+      sizeInput.min = '0';
+      sizeInput.step = '1';
+      sizeInput.placeholder = 'GB';
+      sizeInput.value = ceiling > 0 ? String(ceiling) : '';
+      sizeInput.disabled = ceiling <= 0;
+      sizeInput.onchange = () => saveSettings({ maxSizeGb: Math.max(0, Number(sizeInput.value) || 0) }, body);
+      const sizeSwitch = document.createElement('div');
+      sizeSwitch.className = 'sls-luna-switch' + (ceiling > 0 ? ' on' : '');
+      sizeSwitch.appendChild(document.createElement('span'));
+      sizeSwitch.onclick = () => saveSettings({
+        maxSizeGb: ceiling > 0 ? 0 : Math.max(1, Number(sizeInput.value) || 20),
+      }, body);
+      sizeRow.append(sizeText, sizeInput, sizeSwitch);
+      body.appendChild(sizeRow);
+
+      const excluded = (settings.excluded || []).length;
+      const excludedRow = document.createElement('div');
+      excludedRow.className = 'sls-luna-row';
+      const excludedText = document.createElement('div');
+      excludedText.className = 'txt';
+      const excludedName = document.createElement('div');
+      excludedName.className = 'name';
+      excludedName.textContent = 'Excluded games';
+      const excludedSub = document.createElement('div');
+      excludedSub.className = 'sub';
+      excludedSub.textContent = excluded
+        ? excluded + ' game(s) will never be touched by a pass. The status view still reports them.'
+        : 'Pick games a pass must never touch; the status view still reports them.';
+      excludedText.append(excludedName, excludedSub);
+      const manage = document.createElement('button');
+      manage.className = 'sls-luna-btn secondary';
+      manage.textContent = 'Manage';
+      manage.onclick = () => { compressorTab = 'games'; paint(); };
+      excludedRow.append(excludedText, manage);
+      body.appendChild(excludedRow);
+
+      group('Alpha');
+      switchRow(body, 'Asset optimization',
+        'ALPHA. Changes supported game assets (images, DDS textures, audio). While off, the resolution profile is pinned to Native so nothing can change assets.',
+        settings.assets === true, value => saveSettings({ assets: value }, body));
+      if (settings.assets === true) {
+        const profileRow = document.createElement('div');
+        profileRow.className = 'sls-luna-row';
+        const profileText = document.createElement('div');
+        profileText.className = 'txt';
+        const profileName = document.createElement('div');
+        profileName.className = 'name';
+        profileName.textContent = 'Resolution profile';
+        const profileSub = document.createElement('div');
+        profileSub.className = 'sub';
+        profileSub.textContent = 'Longest edge assets are downsized to. Lossless only recompresses Hades LZ4 packages; decoded assets stay identical.';
+        profileText.append(profileName, profileSub);
+        const chips = document.createElement('div');
+        chips.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;max-width:340px;';
+        PROFILE_LABELS.forEach(pair => {
+          const chip = document.createElement('button');
+          chip.className = 'sls-luna-subtab' + (settings.assetProfile === pair[0] ? ' active' : '');
+          chip.textContent = pair[1];
+          chip.onclick = () => saveSettings({ assetProfile: pair[0] }, body);
+          chips.appendChild(chip);
+        });
+        profileRow.append(profileText, chips);
+        body.appendChild(profileRow);
+
+        const warning = document.createElement('p');
+        warning.className = 'sls-luna-note';
+        warning.innerHTML = '<strong>Alpha:</strong> the run buttons never apply assets. This sets the '
+          + 'profile for the tool and the read-only inventory below; applying assets stays a per-game '
+          + 'action in the tool for now.';
+        body.appendChild(warning);
+        const previewRow = document.createElement('div');
+        previewRow.style.cssText = 'display:flex;gap:8px;margin:0 0 8px;';
+        previewRow.appendChild(jobButton(body, 'Preview asset inventory (read-only)', 'assets', true, null,
+          Boolean(compressor.job && compressor.job.running)));
+        body.appendChild(previewRow);
+      }
+      return body;
+    }
+
+    function compressorGames(body) {
+      const status = compressor && compressor.status;
+      const games = (status && Array.isArray(status.games) ? status.games : []);
+      const settings = (compressor && compressor.settings) || {};
+      const excluded = new Set(settings.excluded || []);
+      const ceilingGb = Number(settings.maxSizeGb) || 0;
+
+      const summary = document.createElement('p');
+      summary.className = 'sls-luna-note';
+      summary.innerHTML = '<strong>' + games.length + ' installed games</strong>. '
+        + excluded.size + ' excluded, ' + (ceilingGb > 0 ? 'only under ' + ceilingGb + ' GB' : 'no size ceiling')
+        + '. Toggling a game here never writes to it.';
+      body.appendChild(summary);
+
+      compressSearch.value = compressorQuery;
+      body.appendChild(compressSearch);
+
+      const needle = compressorQuery.trim().toLowerCase();
+      const rows = games.filter(game => (String(game.name) + ' ' + String(game.status)).toLowerCase().includes(needle));
+      if (!rows.length) {
+        const empty = document.createElement('p');
+        empty.className = 'sls-luna-note';
+        empty.textContent = games.length ? 'Nothing matches that filter.' : 'No scan yet: run Scan library first.';
+        body.appendChild(empty);
+        return body;
+      }
+      rows.slice(0, 80).forEach(game => {
+        const row = document.createElement('div');
+        row.className = 'sls-luna-row';
+        const text = document.createElement('div');
+        text.className = 'txt';
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = game.name;
+        const sub = document.createElement('div');
+        sub.className = 'sub';
+        sub.textContent = [
+          STATUS_LABELS[game.status] || String(game.status || '').toLowerCase(),
+          game.size_display || '',
+          game.dedupe_pending ? 'dedupe pending' : '',
+          game.community_hint_pct ? 'hint ~' + game.community_hint_pct + '%' : '',
+        ].filter(Boolean).join(' \u00b7 ');
+        text.append(name, sub);
+        const excludedNow = excluded.has(game.name);
+        const box = document.createElement('div');
+        box.className = 'sls-luna-switch' + (excludedNow ? ' on' : '');
+        box.appendChild(document.createElement('span'));
+        box.onclick = () => {
+          const next = (settings.excluded || []).filter(entry => entry !== game.name);
+          if (!excludedNow) next.push(game.name);
+          saveSettings({ excluded: next }, body);
+        };
+        row.append(text, box);
+        body.appendChild(row);
+      });
+      if (rows.length > 80) {
+        const more = document.createElement('p');
+        more.className = 'sls-luna-note';
+        more.textContent = '\u2026and ' + (rows.length - 80) + ' more; filter to narrow the list.';
+        body.appendChild(more);
+      }
+      return body;
+    }
+
+    function compressorLog(body) {
+      const job = compressor && compressor.job;
+      body.appendChild(compressorBusyLine());
+      if (!job) return body;
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;margin:10px 0;';
+      const reload = document.createElement('button');
+      reload.className = 'sls-luna-btn secondary';
+      reload.textContent = 'Reload log';
+      reload.onclick = () => refresh();
+      actions.appendChild(reload);
+      if (job.running) actions.appendChild(cancelButton(body));
+      body.appendChild(actions);
+      const pre = document.createElement('pre');
+      pre.className = 'sls-luna-log';
+      pre.textContent = job.log || 'No output yet.';
+      body.appendChild(pre);
+      const note = document.createElement('p');
+      note.className = 'sls-luna-note';
+      note.textContent = 'The last 40 lines; colour codes and progress redraws are removed.';
+      body.appendChild(note);
+      if (job.running) startJobPolling();
+      return body;
+    }
+
+    function compressorBody() {
+      const body = document.createElement('div');
+      // One-shot notice: a failed request paints here instead of into a body
+      // that the repaint has already replaced.
+      if (compressorNotice) {
+        const notice = document.createElement('p');
+        notice.className = 'sls-luna-error';
+        notice.textContent = compressorNotice;
+        body.appendChild(notice);
+        compressorNotice = null;
+      }
+      const tool = (compressor && compressor.tool) || {};
+      if (!tool.found) {
+        const missing = document.createElement('p');
+        missing.className = 'sls-luna-note';
+        missing.innerHTML = '<strong>btrfs-game-compressor was not found.</strong> Run its install.sh, or '
+          + 'point SLS_COMPRESSOR_BIN at the binary and restart Steam.';
+        body.appendChild(missing);
+        return body;
+      }
+      const strip = document.createElement('div');
+      strip.className = 'sls-luna-subtabs';
+      COMPRESSOR_TABS.forEach(entry => {
+        const item = document.createElement('button');
+        item.className = 'sls-luna-subtab' + (entry.id === compressorTab ? ' active' : '');
+        item.textContent = entry.label;
+        item.onclick = () => { compressorTab = entry.id; paint(); };
+        strip.appendChild(item);
+      });
+      body.appendChild(strip);
+      // The section builders append into the body they are handed; appending
+      // their return value again would make the body its own child.
+      if (compressorTab === 'settings') compressorSettings(body);
+      else if (compressorTab === 'games') compressorGames(body);
+      else if (compressorTab === 'log') compressorLog(body);
+      else compressorStatus(body);
       return body;
     }
 
@@ -748,6 +1070,13 @@
       }
       try {
         compressor = await rpc(w, 'SlsCompressorGet');
+        // The optimistic "Starting..." line gives way once the backend reports
+        // this exact job (running, or already finished) from our request.
+        const job = compressor && compressor.job;
+        if (pendingAction && job
+          && (job.running || (Number(job.startedAt) >= pendingAction.at - 1))) {
+          pendingAction = null;
+        }
       } catch (error) {
         compressor = compressor || {};
       }

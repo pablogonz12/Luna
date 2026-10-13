@@ -37,13 +37,24 @@ function fakeDom(){
       querySelectorAll(){return [];},
     };
     // textContent behaves like the DOM's: the element's own text plus its
-    // children's, which is what the code and the tests read.
+    // children's, which is what the code and the tests read. innerHTML markup
+    // contributes its visible text (tags stripped) so headings and notes are
+    // visible to assertions exactly as a browser would show them.
     let ownText='';
+    let markup='';
+    Object.defineProperty(element,'innerHTML',{
+      get:()=>markup,
+      set(value){
+        markup=String(value);
+        ownText=markup.replace(/<svg[\s\S]*?<\/svg>/g,'').replace(/<[^>]*>/g,'');
+        element.children.length=0;
+      },
+    });
     Object.defineProperty(element,'textContent',{
       get:()=>element.children.length
         ? element.children.map(child=>child.textContent).join('')
         : ownText,
-      set(value){ownText=String(value);element.children.length=0;},
+      set(value){ownText=String(value);markup='';element.children.length=0;},
     });
     Object.defineProperty(element,'innerText',{get:()=>element.textContent});
     created.push(element);
@@ -96,6 +107,21 @@ function menubarFixture(document,lumenButton){
   return bar;
 }
 
+function compressorFixture(overrides){
+  const base={success:true,
+    tool:{found:true,path:'/home/tester/.local/bin/btrfs-game-compressor',version:'0.3.1'},
+    status:{version:'0.3.1',libraries:['/lib'],games:[
+      {name:'Cronos: The New Dawn',status:'UNCOMPRESSED',size_bytes:239,size_display:'22.3G',dedupe_pending:true,community_hint_pct:71.2},
+      {name:'Hades',status:'COMPACTED',size_bytes:11,size_display:'11.2G',dedupe_pending:false},
+      {name:'Pony Island',status:'RUNNING',size_bytes:1,size_display:'96M',dedupe_pending:false}],
+      summary:{game_count:3,pending:2,compacted:1,low_yield:0,running:1,skipped_empty:0}},
+    plan:{total:3,pending:2,compacted:1,running:1,excluded:0,overSize:0,compress:1,dedupe:0,blocked:0},
+    settings:{version:1,compress:true,dedupe:true,eco:false,assets:false,assetProfile:'balanced',
+      keepLanguages:'',maxSizeGb:0,excluded:[]},
+    statusAt:Date.now()/1000-120,job:null};
+  return Object.assign(base,overrides||{});
+}
+
 function fakeWindow(document,{get,presence,compressor,edit,setEnabled}={}){
   const calls=[];
   const w={
@@ -112,13 +138,8 @@ function fakeWindow(document,{get,presence,compressor,edit,setEnabled}={}){
       if(fn==='SlsPresenceGet')return JSON.stringify(presence||{success:true,state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}});
       if(fn==='SlsPlaytimeEdit')return JSON.stringify({success:true});
       if(fn==='SlsPresenceSetEnabled')return JSON.stringify({success:true,enabled:payload.enabled});
-      if(fn==='SlsCompressorGet')return JSON.stringify(compressor||{success:true,
-        tool:{found:true,path:'/home/tester/.local/bin/btrfs-game-compressor'},
-        status:{version:'0.3.1',libraries:['/lib'],games:[
-          {name:'Cronos: The New Dawn',status:'UNCOMPRESSED',size_bytes:239,size_display:'22.3G'},
-          {name:'Hades',status:'COMPACTED',size_bytes:11,size_display:'11.2G'}],
-          summary:{game_count:2,pending:1,compacted:1,low_yield:0,running:0,skipped_empty:0}},
-        statusAt:Date.now()/1000-120,job:null});
+      if(fn==='SlsCompressorGet')return JSON.stringify(compressor||compressorFixture());
+      if(fn==='SlsCompressorPutSettings')return JSON.stringify({success:true,settings:payload});
       if(fn==='SlsCompressorRun')return JSON.stringify({success:true,job:{action:payload.action,running:true}});
       if(fn==='SlsCompressorCancel')return JSON.stringify({success:true,cancelled:true});
       return JSON.stringify({success:true});
@@ -215,7 +236,7 @@ test('typing repeatedly retains the same search node, focus and caret',async()=>
   for(const value of ['m','mi','min','mine']){
     search.value=value;search.setSelectionRange(value.length,value.length);search.oninput();
     assert.equal(document.activeElement,search);assert.equal(search.selectionStart,value.length);
-    assert.equal(document.created.filter(e=>e.className==='sls-luna-search').length,1);
+    assert.equal(document.created.filter(e=>e.className==='sls-luna-search' && e.parentNode).length,1);
   }
 });
 
@@ -283,32 +304,162 @@ test('the session-time switch defaults on and toggles through the real RPC',asyn
   assert.equal(call.payload.sessionTime,false,'the switch must send the inverted value');
 });
 
-test('the compressor tab shows the summary and drives the real RPCs',async()=>{
+async function openCompressor(document,subtab){
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const compressorTab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab') && node.textContent==='Compressor');
+  assert.ok(compressorTab,'the Compressor tab was not found');
+  compressorTab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  if(subtab){
+    const item=findNode(document.getElementById('sls-luna-overlay'),
+      node=>(node.className||'').startsWith('sls-luna-subtab') && node.textContent===subtab);
+    assert.ok(item,'the '+subtab+' sub-tab was not found');
+    item.onclick();
+    await new Promise(resolve=>setTimeout(resolve,20));
+  }
+  return document.getElementById('sls-luna-overlay');
+}
+
+async function clickRefresh(document){
+  const button=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.tagName==='BUTTON' && node.textContent==='Refresh');
+  assert.ok(button,'the Refresh button was not found');
+  button.onclick();
+  await new Promise(resolve=>setTimeout(resolve,30));
+}
+
+test('the compressor status tab shows the plan and drives the real RPCs',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
   const {w,calls}=fakeWindow(document);
   mount(w);
-  document.getElementById('sls-luna-btn').click();
-  await new Promise(resolve=>setTimeout(resolve,30));
-  const compressorTab=findNode(document.getElementById('sls-luna-overlay'),
-    node=>node.className==='sls-luna-tab' && node.textContent==='Compressor');
-  assert.ok(compressorTab,'the Compressor tab was not found');
-  compressorTab.onclick();
-  await new Promise(resolve=>setTimeout(resolve,20));
-  const overlay=document.getElementById('sls-luna-overlay');
+  const overlay=await openCompressor(document);
   const text=textOf(overlay);
-  assert.match(text,/Pending/,'the pending statistic is missing');
-  assert.match(text,/Compacted/,'the compacted statistic is missing');
-  assert.match(text,/Cronos/,'a waiting game must be listed');
-  assert.doesNotMatch(text,/Hades/,'an already compacted game is not in the waiting list');
+  assert.match(text,/ZSTD compression \+ deduplication/,'the enabled operations are not stated');
+  assert.match(text,/To compress/,'the compression statistic is missing');
+  assert.match(text,/Dedupe only/,'the dedupe statistic is missing');
+  assert.match(text,/Held back/,'the filter statistic is missing');
   assert.ok(calls.some(c=>c.fn==='SlsCompressorGet'),'opening the menu must load the compressor state');
-  const check=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Check now');
-  assert.ok(check,'the Check now button was not rendered');
-  check.onclick();
+  const scan=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Scan library');
+  assert.ok(scan,'the Scan library button was not rendered');
+  scan.onclick();
   await new Promise(resolve=>setTimeout(resolve,20));
   const call=calls.filter(c=>c.fn==='SlsCompressorRun').pop();
-  assert.ok(call,'Check now must call SlsCompressorRun');
-  assert.equal(call.payload.action,'status','it must request the read-only scan');
+  assert.ok(call,'Scan library must call SlsCompressorRun');
+  assert.equal(call.payload.action,'scan','it must request the read-only scan');
+});
+
+test('Run now is gated by the enabled operations and sends the composed run',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const fixture=compressorFixture();
+  fixture.settings.compress=false;
+  fixture.settings.dedupe=false;
+  const {w,calls}=fakeWindow(document,{compressor:fixture});
+  mount(w);
+  let overlay=await openCompressor(document);
+  let run=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Run now');
+  assert.ok(run,'the Run now button was not rendered');
+  assert.equal(run.disabled,true,'Run now must be disabled while nothing is enabled');
+  overlay=await openCompressor(document,'Settings');
+  const compressionSwitch=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-switch')
+    && node.parentNode && /ZSTD compression/.test(node.parentNode.textContent));
+  assert.ok(compressionSwitch,'the compression switch was not found');
+  compressionSwitch.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const saved=calls.filter(c=>c.fn==='SlsCompressorPutSettings').pop();
+  assert.ok(saved,'the switch must save through PutSettings');
+  assert.equal(saved.payload.compress,true,'the switch must send the new value');
+  Object.assign(fixture.settings,saved.payload);
+  fixture.plan.compress=1;
+  await clickRefresh(document);
+  overlay=await openCompressor(document,'Status');
+  run=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Run now');
+  assert.equal(run.disabled,false,'Run now must unlock once an operation is enabled');
+  run.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const called=calls.filter(c=>c.fn==='SlsCompressorRun').pop();
+  assert.equal(called.payload.action,'run','Run now must ask for the composed run');
+});
+
+test('the settings tab saves switches and reveals the alpha resolution profiles',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const fixture=compressorFixture();
+  const {w,calls}=fakeWindow(document,{compressor:fixture});
+  mount(w);
+  let overlay=await openCompressor(document,'Settings');
+  let text=textOf(overlay);
+  assert.match(text,/Safe operations/,'the safe group is missing');
+  assert.match(text,/Eco mode/,'the eco switch is missing');
+  assert.match(text,/Only process games smaller than/,'the size ceiling row is missing');
+  assert.match(text,/Asset optimization/,'the alpha switch is missing');
+  assert.doesNotMatch(text,/Resolution profile/,'the profile must stay hidden while alpha is off');
+
+  const alphaSwitch=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-switch')
+    && node.parentNode && /Asset optimization/.test(node.parentNode.textContent));
+  assert.ok(alphaSwitch,'the alpha switch was not found');
+  alphaSwitch.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  let saved=calls.filter(c=>c.fn==='SlsCompressorPutSettings').pop();
+  assert.equal(saved.payload.assets,true,'the alpha switch must save assets=true');
+  Object.assign(fixture.settings,saved.payload);
+  await clickRefresh(document);
+
+  overlay=await openCompressor(document,'Settings');
+  text=textOf(overlay);
+  assert.match(text,/Resolution profile/,'the profile row must appear once alpha is on');
+  const chip=findNode(overlay,node=>node.className==='sls-luna-subtab' && node.textContent==='1440p');
+  assert.ok(chip,'the resolution profile chips were not rendered');
+  chip.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  saved=calls.filter(c=>c.fn==='SlsCompressorPutSettings').pop();
+  assert.equal(saved.payload.assetProfile,'quality','the chip must save its profile');
+  Object.assign(fixture.settings,saved.payload);
+  await clickRefresh(document);
+
+  overlay=await openCompressor(document,'Settings');
+  const ceilingSwitch=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-switch')
+    && node.parentNode && /Only process games smaller than/.test(node.parentNode.textContent));
+  assert.ok(ceilingSwitch,'the size ceiling switch was not found');
+  ceilingSwitch.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  saved=calls.filter(c=>c.fn==='SlsCompressorPutSettings').pop();
+  assert.equal(saved.payload.maxSizeGb,20,'the ceiling switch must default to 20 GB');
+});
+
+test('the games tab toggles per-game exclusions through PutSettings',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const fixture=compressorFixture();
+  const {w,calls}=fakeWindow(document,{compressor:fixture});
+  mount(w);
+  const overlay=await openCompressor(document,'Games');
+  const text=textOf(overlay);
+  assert.match(text,/3 installed games/,'the games summary is missing');
+  assert.match(text,/Cronos: The New Dawn/,'the games list is missing');
+  assert.match(text,/playing now/,'a running game must be labelled');
+  const rowSwitch=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-switch')
+    && node.parentNode && /Cronos/.test(node.parentNode.textContent));
+  assert.ok(rowSwitch,'the per-game switch was not rendered');
+  rowSwitch.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const saved=calls.filter(c=>c.fn==='SlsCompressorPutSettings').pop();
+  assert.deepEqual(saved.payload.excluded,['Cronos: The New Dawn'],'the exclusion must be saved');
+});
+
+test('the log tab shows the sanitized job tail',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const fixture=compressorFixture();
+  fixture.job={action:'run',pid:42,running:false,startedAt:Date.now()/1000-120,
+    finishedAt:Date.now()/1000-60,elapsed:0,log:'ARGS: --run\nbatch running'};
+  const {w}=fakeWindow(document,{compressor:fixture});
+  mount(w);
+  const overlay=await openCompressor(document,'Log');
+  assert.match(textOf(overlay),/batch running/,'the log text is missing');
 });
 
 test('buildRows ranks recorded games first and marks non-Steam entries',()=>{

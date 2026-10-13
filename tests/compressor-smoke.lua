@@ -1,6 +1,6 @@
 -- Compressor backend integration test: tool discovery, the detached job runner,
--- status adoption, the guards and cancellation. Only run with HOME pointing to
--- a disposable tmpdir (enforced by the runner).
+-- status adoption, settings persistence and mirroring, action composition, the
+-- guards and cancellation. Only run with HOME pointing to a disposable tmpdir.
 assert(os.getenv('LUNA_TEST_HOME') == os.getenv('HOME'), 'Test must run in isolated HOME')
 
 -- A small real JSON codec: the backend round-trips its own payloads, and the
@@ -143,11 +143,13 @@ do
   local f = assert(io.open(tool, 'wb'))
   f:write([==[
 #!/usr/bin/env bash
+echo "ARGS: $*" >&2
 case "$1" in
-  --status) sleep 0.3; printf '%s\n' '{"version":"9.9.9","libraries":["/lib"],"games":[{"name":"A","status":"UNCOMPRESSED","size_bytes":10,"size_display":"10B"},{"name":"B","status":"COMPACTED","size_bytes":5,"size_display":"5B"}],"summary":{"game_count":2,"pending":1,"compacted":1,"compressed":1,"compressed_only":0,"low_yield":0,"running":0,"skipped_empty":0}}' ;;
+  --status) sleep 0.3; printf '%s\n' '{"version":"9.9.9","libraries":["/lib"],"games":[{"name":"A","status":"UNCOMPRESSED","size_bytes":10,"size_display":"10B","dedupe_pending":true},{"name":"B","status":"COMPACTED","size_bytes":5,"size_display":"5B","dedupe_pending":false}],"summary":{"game_count":2,"pending":1,"compacted":1,"compressed":0,"compressed_only":0,"low_yield":0,"running":0,"skipped_empty":0}}' ;;
   --dry-run) echo 'dry run: nothing changed'; sleep 0.4 ;;
-  --recheck) echo 'rechecked'; sleep 0.4 ;;
-  --compact-all-no-backup) echo 'compacting'; sleep 5 ;;
+  --run) echo 'batch running'; sleep 2.5 ;;
+  --dedupe) echo 'dedupe pass'; sleep 0.5 ;;
+  --assets-all) echo 'asset inventory'; sleep 2.5 ;;
   *) echo "unknown $1" >&2; exit 2 ;;
 esac
 ]==])
@@ -170,33 +172,133 @@ local function wait_for(registry, predicate, seconds)
   error('timed out waiting for the backend')
 end
 
+local function idle(registry)
+  local state = call(registry, 'SlsCompressorGet')
+  if state.job and state.job.running then
+    call(registry, 'SlsCompressorCancel')
+  end
+end
+
+local function read(path)
+  local f = io.open(path, 'rb')
+  if not f then return nil end
+  local data = f:read('*a'); f:close()
+  return data
+end
+
 local reg = {}
 local plugin = assert(loadfile(repo .. '/addons/compressor/plugin/backend/main.lua'))()
 assert(type(plugin) == 'table' and type(plugin.register) == 'function')
 plugin.register(reg)
 
--- The log tail is bounded: only the last lines of a long pass reach one RPC.
+-- The log tail is bounded and terminal-friendly: escape sequences and progress
+-- redraws must not reach the panel.
 do
   local path = home .. '/tail.log'
   local f = assert(io.open(path, 'wb'))
   for i = 1, 100 do f:write('line ' .. i .. '\n') end
+  f:write('\27[32mok\27[0m\n')
+  f:write('step 1\rstep 2\rstep 3\r\n')
   f:close()
-  assert(plugin.tail(path, 5) == 'line 96\nline 97\nline 98\nline 99\nline 100', 'the tail window is wrong')
+  local out = plugin.tail(path, 5)
+  assert(out:find('line 100', 1, true), 'the tail window is wrong')
+  assert(not out:find('\27', 1, true), 'ANSI escapes leaked into the tail')
+  assert(out:find('step 3', 1, true) and not out:find('step 1', 1, true),
+    'a carriage-return redraw was not collapsed to its last frame')
 end
 
 -- First open: the tool is found and the read-only scan starts on its own.
 local first = call(reg, 'SlsCompressorGet')
 assert(first.success, 'Get failed')
 assert(first.tool.found and first.tool.path == tool, 'the installed tool was not discovered')
-assert(first.autoStarted == true and first.job and first.job.running and first.job.action == 'status',
+assert(first.autoStarted == true and first.job and first.job.running and first.job.action == 'scan',
   'the first Get must start the read-only scan')
 
 local done = wait_for(reg, function(state) return state.job and not state.job.running end)
 assert(done.status and done.status.summary.pending == 1, 'the scan output was not adopted')
-assert(done.status.games[1].name == 'A' and done.status.version == '9.9.9', 'the report was not decoded')
+assert(done.status.games[1].name == 'A' and done.tool.version == '9.9.9', 'the report was not decoded')
 assert(done.statusAt > 0, 'the scan time was not stamped')
 local again = call(reg, 'SlsCompressorGet')
 assert(again.autoStarted == false and again.status ~= nil, 'a later Get must not rescan')
+
+-- Defaults: safe operations on, nothing destructive, no filters.
+assert(again.settings.compress == true and again.settings.dedupe == true, 'safe passes must default on')
+assert(again.settings.assets == false and again.settings.assetProfile == 'balanced', 'alpha must default off')
+assert(again.settings.maxSizeGb == 0 and #again.settings.excluded == 0, 'filters must default empty')
+assert(again.plan.compress == 1 and again.plan.compacted == 1, 'the plan must count the scan')
+
+-- Settings round-trip and mirroring into the tool's own config.
+local saved = call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = true, dedupe = false, eco = true, assets = true,
+  assetProfile = 'quality', maxSizeGb = 20, keepLanguages = 'English, de, en',
+  excluded = { 'B', 'A', 'A' },
+}))
+assert(saved.success and saved.settings.dedupe == false and saved.settings.eco == true, 'settings were not saved')
+assert(saved.settings.maxSizeGb == 20 and saved.settings.assetProfile == 'quality', 'values were not kept')
+assert(#saved.settings.excluded == 2 and saved.settings.excluded[1] == 'A', 'exclusions were not normalised')
+assert(saved.settings.keepLanguages == 'de,en,english', 'languages were not normalised')
+local tool_dir = home .. '/.config/btrfs-game-compressor'
+assert(read(tool_dir .. '/throttle.conf') == '1\n', 'eco mode was not mirrored')
+assert(read(tool_dir .. '/visual_target') == 'quality\n', 'the alpha profile was not mirrored')
+assert(read(tool_dir .. '/max_size_mib') == '20480\n', 'the size ceiling was not mirrored')
+assert(read(tool_dir .. '/exclude_games') == 'A\nB\n', 'the exclusion list was not mirrored')
+
+-- Invalid values fall back to safe defaults without touching the mirror files
+-- in a broken state, and a full replace is exactly what the panel sends.
+local odd = call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = true, dedupe = false, maxSizeGb = -4, assetProfile = 'nonsense',
+  excluded = { 'bad/name', 'ok' },
+}))
+assert(odd.success and odd.settings.assetProfile == 'balanced', 'an unknown profile was accepted')
+assert(odd.settings.maxSizeGb == 0, 'an invalid ceiling was kept')
+assert(#odd.settings.excluded == 1 and odd.settings.excluded[1] == 'ok', 'an invalid exclusion was saved')
+assert(read(tool_dir .. '/exclude_games') == 'ok\n', 'the mirror kept an invalid exclusion')
+
+-- Turning alpha off pins the tool to native, and the plan follows the filters.
+local off = call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = true, dedupe = true, assets = false, maxSizeGb = 0,
+  excluded = { 'A' },
+}))
+assert(off.settings.assets == false, 'alpha could not be turned off')
+assert(read(tool_dir .. '/visual_target') == 'native\n', 'alpha off must pin visual_target to native')
+assert(read(tool_dir .. '/max_size_mib') == '0\n', 'the ceiling was not cleared')
+local planned = call(reg, 'SlsCompressorGet')
+assert(planned.plan.excluded == 1 and planned.plan.compress == 0 and planned.plan.blocked == 1,
+  'the plan must hold back the excluded game')
+
+-- Action composition from the settings. The fake tool records its argv, so the
+-- composition is asserted without touching a library.
+idle(reg)
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'run'})).success, 'run refused')
+local ran = wait_for(reg, function(state) return state.job and not state.job.running end)
+assert(ran.job.log:find('ARGS: --run', 1, true), 'default run must use --run')
+assert(ran.job.action == 'run', 'the finished job was not the run')
+
+assert(call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = true, dedupe = false, assets = false, maxSizeGb = 0, excluded = {},
+})).success, 'compress-only settings refused')
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'run'})).success, 'compress-only run refused')
+local compress_only = wait_for(reg, function(state) return state.job and not state.job.running end)
+assert(compress_only.job.log:find('ARGS: --run --no-dedupe', 1, true),
+  'compress-only must pass --no-dedupe')
+
+assert(call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = false, dedupe = true, assets = false, maxSizeGb = 0, excluded = {},
+})).success, 'dedupe-only settings refused')
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'run'})).success, 'dedupe-only run refused')
+local dedupe_only = wait_for(reg, function(state) return state.job and not state.job.running end)
+assert(dedupe_only.job.log:find('ARGS: --dedupe', 1, true), 'dedupe-only must run --dedupe')
+
+assert(call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = false, dedupe = false, assets = false, maxSizeGb = 0, excluded = {},
+})).success, 'both-off settings refused')
+local nothing = call(reg, 'SlsCompressorRun', json.encode({action = 'run'}))
+assert(nothing.success == false, 'a run with nothing enabled must be refused')
+
+-- The alpha inventory is its own read-only action.
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'assets'})).success, 'the asset inventory was refused')
+local assets = wait_for(reg, function(state) return state.job and not state.job.running end)
+assert(assets.job.log:find('ARGS: --assets-all', 1, true), 'the asset inventory used the wrong command')
 
 -- Guards: only the known actions, one job at a time, payloads stay small.
 assert(call(reg, 'SlsCompressorRun', json.encode({action = 'nonsense'})).success == false,
@@ -204,21 +306,24 @@ assert(call(reg, 'SlsCompressorRun', json.encode({action = 'nonsense'})).success
 assert(call(reg, 'SlsCompressorRun', 'not json').success == false, 'a broken payload was accepted')
 assert(call(reg, 'SlsCompressorRun', nil).success == false, 'a missing payload was accepted')
 assert(call(reg, 'SlsCompressorRun', string.rep('x', 2000)).success == false, 'an oversized payload was accepted')
-assert(call(reg, 'SlsCompressorRun', json.encode({action = 'dryrun'})).success, 'the dry run was refused')
-assert(call(reg, 'SlsCompressorRun', json.encode({action = 'recheck'})).success == false,
+assert(call(reg, 'SlsCompressorPutSettings', 'nope').success == false, 'broken settings were accepted')
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'assets'})).success, 'the asset inventory was refused')
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'preview'})).success == false,
   'a second job was admitted while one was running')
 
-local dry = wait_for(reg, function(state) return state.job and not state.job.running end)
-assert(dry.job.action == 'dryrun', 'the finished job was not the dry run')
-assert(dry.job.log:find('dry run: nothing changed', 1, true), 'the log tail lost the tool output')
-
 -- Cancel fails closed when idle, and stops a live detached pass.
-assert(call(reg, 'SlsCompressorCancel').success == false, 'cancel with no job must fail closed')
-assert(call(reg, 'SlsCompressorRun', json.encode({action = 'compact'})).success, 'the compaction was refused')
-local live = wait_for(reg, function(state) return state.job and state.job.running and state.job.action == 'compact' end)
-assert(live.job.pid >= 2, 'the compaction has no pid')
+local live = wait_for(reg, function(state) return state.job and state.job.running and state.job.action == 'assets' end)
+assert(live.job.pid >= 2, 'the live job has no pid')
 assert(call(reg, 'SlsCompressorCancel').success, 'cancel refused a live job')
 local stopped = wait_for(reg, function(state) return state.job and not state.job.running end)
-assert(stopped.job.action == 'compact' and stopped.job.finishedAt > 0, 'the cancelled pass was not observed as stopped')
+assert(stopped.job.action == 'assets' and stopped.job.finishedAt > 0, 'the cancelled job was not observed as stopped')
+os.execute('sleep 0.3')
+assert(call(reg, 'SlsCompressorCancel').success == false, 'cancel with no job must fail closed')
 
-print('Luna compressor backend OK: discovery, detached jobs, status adoption, guards, cancel')
+-- The preview is read-only and reports its own argv.
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'preview'})).success, 'the preview was refused')
+local preview = wait_for(reg, function(state) return state.job and not state.job.running end)
+assert(preview.job.log:find('ARGS: --dry-run --pending', 1, true), 'the preview used the wrong command')
+assert(preview.job.log:find('dry run: nothing changed', 1, true), 'the log tail lost the tool output')
+
+print('Luna compressor backend OK: discovery, jobs, settings, mirroring, composition, guards, cancel')
