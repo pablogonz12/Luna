@@ -7,6 +7,190 @@
   'use strict';
   const valid = id => Number.isSafeInteger(Number(id)) && Number(id) > 0 && Number(id) <= 4294967295;
   const parseRpc = raw => typeof raw === 'string' ? JSON.parse(raw) : raw;
+  // Publish local totals into the same model Steam uses for its library cards.
+  // Steam replaces these records on overview updates, so reapply after updates.
+  function libraryAdapter(w) {
+    const store=w.appStore||w.SteamUIStore?.AppStore;
+    let games={},editable=new Set();
+    const detailsByApp=new Map();
+    const patchedDetails=new WeakSet();
+    const eligible=o=>o&&(o.app_type===1073741824||editable.has(Number(o.appid)));
+    const patch=o=>{
+      const record=games[String(o?.appid)];
+      if(!record||!eligible(o))return;
+      o.minutes_playtime_forever=Math.max(0,(Number(record.trackedSeconds)||0)+(Number(record.adjustmentSeconds)||0))/60;
+      // Only actual per-game history can populate the recent bucket.
+      if(Number(record.lastPlayed)>0){
+        o.rt_last_time_locally_played=Number(record.lastPlayed);
+        o.rt_last_time_played=Number(record.lastPlayed);
+        o.rt_last_time_played_or_installed=Number(record.lastPlayed);
+      }
+    };
+    const apply=()=>{
+      for(const id of Object.keys(games)){
+        const o=store?.GetAppOverviewByAppID?.(Number(id));
+        if(!eligible(o))continue;
+        patch(o);
+        store.m_mapApps?.set(o.appid,o);
+      }
+    };
+    // Steam binds UpdateAppOverview as a sealed, read-only MobX action. Do not
+    // assign to it: that aborts agent startup in strict mode. Hook the mutable
+    // map insertion and AppInfoStore notification instead (as Decky does).
+    const info=w.appInfoStore;
+    if(store?.m_mapApps?.set){
+      const map=store.m_mapApps,originalSet=map.set;
+      map.set=function(id,overview){patch(overview);return originalSet.call(this,id,overview);};
+    }
+    if(info?.OnAppOverviewChange){
+      const original=info.OnAppOverviewChange;
+      info.OnAppOverviewChange=function(...args){
+        const result=original.apply(this,args);
+        // Steam calls this BEFORE updating its overview instances. A microtask
+        // reapplies values after the complete synchronous update, including
+        // in-place updates that never call Map.set.
+        (w.queueMicrotask||queueMicrotask)(apply);
+        return result;
+      };
+    }else if(store?.UpdateAppOverview&&Object.getOwnPropertyDescriptor(store,'UpdateAppOverview')?.writable!==false){
+      const original=store.UpdateAppOverview;
+      store.UpdateAppOverview=function(...args){const result=original.apply(this,args);apply();return result;};
+    }
+    function patchDetails(overview,details){
+      if(!details||!eligible(overview))return;
+      const record=games[String(overview.appid)];
+      if(!record)return;
+      detailsByApp.set(Number(overview.appid),{overview,details});
+      // Manifest pages read this separate model, not the card overview.
+      // Steam may refill this plain object after JSX creation. Preserve those
+      // native writes, but resolve the local override each time it is read.
+      if(!patchedDetails.has(details)&&Object.getOwnPropertyDescriptor(details,'nPlaytimeForever')?.configurable!==false){
+        let native=details.nPlaytimeForever;
+        Object.defineProperty(details,'nPlaytimeForever',{configurable:true,enumerable:true,
+          get(){const local=games[String(overview.appid)];return local&&eligible(overview)?Math.max(0,(Number(local.trackedSeconds)||0)+(Number(local.adjustmentSeconds)||0))/60:native;},
+          set(value){native=value;}});
+        patchedDetails.add(details);
+      }
+      if(!patchedDetails.has(details))details.nPlaytimeForever=Math.max(0,(Number(record.trackedSeconds)||0)+(Number(record.adjustmentSeconds)||0))/60;
+    }
+    return {patchDetails,update(snapshot){games=snapshot.games||{};editable=new Set(Array.isArray(snapshot.apps)?snapshot.apps.map(Number):[]);apply();for(const {overview,details} of detailsByApp.values())patchDetails(overview,details);}};
+  }
+  function canSetPlaytime(app,snapshot) {
+    // The backend's inventory is numeric stplug-in manifests + shortcuts, NOT
+    // the Steam library/installed list (which also contains official games).
+    return valid(app?.appid)&&Array.isArray(snapshot?.apps)&&snapshot.apps.some(id=>Number(id)===Number(app.appid));
+  }
+  function parseHours(text) {
+    if(String(text).trim()==='')throw Error('Enter the total hours.');
+    const hours=Number(text);
+    if(!Number.isFinite(hours)||hours<0||hours>10000000)throw Error('Use a number between 0 and 10,000,000 hours.');
+    return hours;
+  }
+  function discoverMenuTools(w) {
+    const chunks=w.webpackChunksteamui;
+    if(!chunks?.push||!w.SP_REACT)return null;
+    let require;
+    chunks.push([['sls-playtime-menu-'+Date.now()],{},r=>{require=r;}]);
+    if(!require?.m)return null;
+    const factory=Object.values(require.m).find(f=>String(f).includes('BuildManageSubmenu'));
+    if(!factory)return null;
+    // Only inspect dependencies of the already-loaded native game menu. Avoid
+    // executing arbitrary webpack modules and avoid version-specific module ids.
+    const dependencies=[...String(factory).matchAll(/\br\((\d+(?:e\d+)?)\)/g)].map(m=>Number(m[1]));
+    let jsx,item,showModal;
+    for(const id of new Set(dependencies)){
+      const exports=require(id);
+      if(exports?.jsx&&exports?.jsxs)jsx=exports;
+      for(const value of Object.values(exports||{})){
+        if(typeof value!=='function')continue;
+        const source=String(value);
+        if(value.prototype?.OnClick&&source.includes('contextMenuItem')&&source.includes('onSelected'))item=value;
+        if(source.includes('RequestModalMeasure')&&source.includes('bForcePopOut'))showModal=value;
+      }
+    }
+    return jsx&&item&&showModal?{React:w.SP_REACT,jsx,item,showModal}:null;
+  }
+  function installPlaytimeMenu(w,rpc,refreshLibrary,providedTools) {
+    if(w.__SlsPlaytimeMenu)return w.__SlsPlaytimeMenu;
+    let snapshot={apps:[]};
+    const tools=providedTools||discoverMenuTools(w);
+    if(!tools)return null;
+    const {React,jsx,item:MenuItem,showModal}=tools;
+    const h=React.createElement;
+    async function open(app,instance){
+      const latest=parseRpc(await rpc('SlsPlaytimeGet'));
+      if(!latest?.success||!canSetPlaytime(app,latest))throw Error('This game is not eligible for local playtime editing.');
+      snapshot=latest;
+      const record=latest.games?.[String(app.appid)];
+      const total=record?Math.max(0,(Number(record.trackedSeconds)||0)+(Number(record.adjustmentSeconds)||0))/3600:(Number(app.minutes_playtime_forever)||0)/60;
+      function Dialog({closeModal}){
+        const [value,setValue]=React.useState(String(Number(total.toFixed(4))));
+        const [error,setError]=React.useState('');
+        const [busy,setBusy]=React.useState(false);
+        async function save(event){
+          event.preventDefault();if(busy)return;
+          try{
+            const hours=parseHours(value);setBusy(true);setError('');
+            const result=parseRpc(await rpc('SlsPlaytimeEdit',{raw:JSON.stringify({id:Number(app.appid),hours})}));
+            if(!result?.success)throw Error(result?.error||'Playtime could not be saved.');
+            const fresh=parseRpc(await rpc('SlsPlaytimeGet'));
+            if(!fresh?.success)throw Error('Saved, but the library could not be refreshed.');
+            snapshot=fresh;refreshLibrary(fresh);closeModal?.();
+          }catch(e){setError(String(e.message||e));setBusy(false);}
+        }
+        const buttonStyle={padding:'9px 20px',border:0,borderRadius:3,color:'#fff',background:'#35465a',cursor:'pointer'};
+        return h('form',{onSubmit:save,style:{padding:28,width:380,boxSizing:'border-box',color:'#dce7ef',background:'#1b2838',fontFamily:'Arial,sans-serif'}},
+          h('h2',{style:{margin:'0 0 12px',color:'#fff'}},'Set Playtime'),
+          h('div',{style:{marginBottom:20}},app.display_name||app.name||'App '+app.appid),
+          h('label',{htmlFor:'sls-playtime-hours'},'Total hours'),
+          h('input',{id:'sls-playtime-hours',type:'number',min:0,max:10000000,step:'any',autoFocus:true,disabled:busy,value,onChange:e=>setValue(e.target.value),style:{display:'block',boxSizing:'border-box',width:'100%',margin:'8px 0 14px',padding:10,color:'#fff',background:'#101822',border:'1px solid #65839c'}}),
+          h('div',{style:{fontSize:13,color:'#9fb2c4',marginBottom:16}},'Sets the local lifetime total. Recorded sessions and recent activity are preserved.'),
+          error&&h('div',{role:'alert',style:{color:'#ff9b9b',marginBottom:16}},error),
+          h('div',{style:{display:'flex',justifyContent:'flex-end',gap:10}},
+            h('button',{type:'button',disabled:busy,onClick:()=>closeModal?.(),style:buttonStyle},'Cancel'),
+            h('button',{type:'submit',disabled:busy,style:{...buttonStyle,background:'#1a75b8'}},busy?'Saving…':'Save')));
+      }
+      const owner=instance?.BrowserWindow||w.SteamUIStore?.WindowStore?.MainWindowInstance?.BrowserWindow||w;
+      return showModal(h(Dialog),owner,{strTitle:'Set Playtime',bForcePopOut:true,popupWidth:420,popupHeight:350});
+    }
+    // Steam uses multiple internal menu classes (list/grid and selection
+    // variants). Keep discovering them; stopping after the first class makes
+    // the entry appear only on whichever surface happened to render first.
+    const originals={},wrappers={};
+    const patches=new Map();
+    function restoreDiscovery(){for(const key of ['jsx','jsxs'])if(jsx[key]===wrappers[key])jsx[key]=originals[key];}
+    for(const key of ['jsx','jsxs']){
+      originals[key]=jsx[key];
+      wrappers[key]=function(type,...args){
+        const props=args[0];
+        if(props?.details){
+          const overview=props.overview||(w.appStore||w.SteamUIStore?.AppStore)?.GetAppOverviewByAppID?.(Number(props.details.unAppID));
+          if(overview)w.__SlsPlaytimeLibrary?.patchDetails?.(overview,props.details);
+        }
+        const proto=type?.prototype;
+        if(!patches.has(proto)&&proto?.GetTargetApps&&proto?.BuildManageSubmenu&&proto?.render){
+          try{
+          const originalRender=proto.render;
+          const wrappedRender=function(...renderArgs){
+            const result=originalRender.apply(this,renderArgs);
+            const apps=this.GetTargetApps();
+            if(apps.length!==1||!canSetPlaytime(apps[0],snapshot)||!React.isValidElement(result))return result;
+            const children=React.Children.toArray(result.props.children);
+            children.splice(1,0,h(MenuItem,{key:'sls-set-playtime',onSelected:()=>{open(apps[0],this.props.instance).catch(e=>console.error('[SLS Playtime] editor',e));}},'Set Playtime'));
+            return React.cloneElement(result,{},children);
+          };
+          proto.render=wrappedRender;
+          patches.set(proto,{originalRender,wrappedRender});
+          }catch(e){console.warn('[SLS Playtime] native menu hook unavailable',e);}
+        }
+        return originals[key].call(this,type,...args);
+      };
+      jsx[key]=wrappers[key];
+    }
+    const api={update(value){snapshot=value;},open,get attached(){return patches.size>0;},dispose(){restoreDiscovery();for(const [proto,{originalRender,wrappedRender}] of patches)if(proto.render===wrappedRender)proto.render=originalRender;delete w.__SlsPlaytimeMenu;}};
+    w.__SlsPlaytimeMenu=api;
+    return api;
+  }
   let sessionCounter = 0;
   /* Heartbeat protocol: every session carries an opaque id and its requests
      carry a sequence number that only advances once the backend acknowledged
@@ -122,6 +306,11 @@
     // the backend hands them to the panel.
     const canResolveNames=!!(w.appStore?.GetAppOverviewByAppID||w.SteamUIStore?.AppStore?.GetAppOverviewByAppID);
     const agent=new SessionAgent({rpc,name:id=>overview(id)?.display_name||overview(id)?.name||''});
+    const library=libraryAdapter(w);
+    w.__SlsPlaytimeLibrary=library;
+    let menu=null;
+    try{menu=installPlaytimeMenu(w,rpc,value=>library.update(value));}
+    catch(e){console.warn('[SLS Playtime] context menu unavailable',e);}
     function resolveTitles(ids){
       const titles={};
       if(!canResolveNames)return titles;
@@ -153,6 +342,8 @@
         // trackedApps is the set nothing else records: non-Steam shortcuts.
         // Manifest games stay editable but are not auto-counted.
         agent.setAllowed(value.trackedApps??value.apps);
+        library.update(value);
+        menu?.update(value);
         refreshTitles(value.apps,Object.keys(value.titles||{}).length);
         await rpc('SlsPlaytimeReport',{raw:JSON.stringify({healthy:consecutiveErrors===0,
           error:consecutiveErrors===0?'':reportedError})});
@@ -197,5 +388,5 @@
     w.setInterval(refresh,30000);
     w.setInterval(()=>{agent.pulse().then(()=>{if(agent.active.size)noteResult(true);},e=>{noteResult(false,e);console.warn('[SLS Playtime] pulse failed',e);});},10000);
   }
-  return {SessionAgent,parseRpc,bootAgent};
+  return {SessionAgent,parseRpc,bootAgent,libraryAdapter,canSetPlaytime,parseHours,discoverMenuTools,installPlaytimeMenu};
 });
