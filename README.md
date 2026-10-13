@@ -1,5 +1,7 @@
 # SLS Luna
 
+Repository: `pgm1207/slsteam-luna` (private). Product name: SLS Luna.
+
 One installer, verification and rollback for the SLSsteam-Moon / Lumen add-ons.
 
 Lumen injects code into the Steam client and exposes a single dispatch registry.
