@@ -39,10 +39,12 @@ PATCHER = ROOT / 'scripts' / 'patch-lumen.py'
 MARKER = 'SLS-ADDONS-INTEGRATION'
 
 # Installed as one set. The bridge discovers them from the directory and sorts
-# them, so this order is only for reporting; "luna" is first-party (it lives in
-# this repository) while the other two are vendored from their own projects.
-ADDONS = ('luna', 'playtime', 'presence')
+# them, so this order is only for reporting; "luna" and "compressor" are
+# first-party (they live in this repository) while the other two are vendored
+# from their own projects.
+ADDONS = ('luna', 'playtime', 'presence', 'compressor')
 SOURCED = ('playtime', 'presence')
+FIRST_PARTY = ('luna', 'compressor')
 
 # Files that make up one add-on, as (path in this repo, path under sls-addons/<name>).
 ADDON_FILES = {
@@ -60,6 +62,11 @@ ADDON_FILES = {
     'presence': (
         ('plugin/backend/main.lua', 'backend/main.lua'),
         ('plugin/public/agent.js', 'public/agent.js'),
+        ('plugin/public/panel.js', 'public/panel.js'),
+        ('plugin/plugin.json', 'plugin.json'),
+    ),
+    'compressor': (
+        ('plugin/backend/main.lua', 'backend/main.lua'),
         ('plugin/public/panel.js', 'public/panel.js'),
         ('plugin/plugin.json', 'plugin.json'),
     ),
@@ -524,23 +531,24 @@ def cmd_vendor(options):
                                    'source_commit': shared_commit, 'source_path': source_path,
                                    'sha256': sha256(ROOT / rel)}
         print('pinned %s from %s@%s' % (rel, shared_source.name, shared_commit[:12]))
-    # The first-party shell add-on comes from this repository, so it is pinned to
-    # this checkout rather than fetched from another project.
-    luna_commit = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
+    # First-party add-ons come from this repository, so they are pinned to this
+    # checkout rather than fetched from another project.
+    repo_commit = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
                                  capture_output=True, text=True).stdout.strip()
-    luna_files = {}
-    for source_rel, dest_rel in ADDON_FILES['luna']:
-        path = payload_path('luna', source_rel)
-        if not path.is_file():
-            raise SystemExit('FAIL: this repository has no addons/luna/%s' % source_rel)
-        luna_files[dest_rel] = {'source_path': source_rel, 'sha256': sha256(path)}
-    manifest['addons']['luna'] = {
-        'source_repo': 'https://github.com/pgm1207/slsteam-luna',
-        'source_commit': luna_commit,
-        'plugin_version': addon_version('luna'),
-        'files': luna_files,
-    }
-    print('pinned addons/luna from this repository@%s (%d files)' % (luna_commit[:12], len(luna_files)))
+    for name in FIRST_PARTY:
+        files = {}
+        for source_rel, dest_rel in ADDON_FILES[name]:
+            path = payload_path(name, source_rel)
+            if not path.is_file():
+                raise SystemExit('FAIL: this repository has no addons/%s/%s' % (name, source_rel))
+            files[dest_rel] = {'source_path': source_rel, 'sha256': sha256(path)}
+        manifest['addons'][name] = {
+            'source_repo': 'https://github.com/pgm1207/slsteam-luna',
+            'source_commit': repo_commit,
+            'plugin_version': addon_version(name),
+            'files': files,
+        }
+        print('pinned addons/%s from this repository@%s (%d files)' % (name, repo_commit[:12], len(files)))
     for name, source in sources.items():
         commit = head(source)
         paths = sorted({source_path for source_path, _ in ADDON_FILES[name]})

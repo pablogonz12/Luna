@@ -14,24 +14,30 @@ Each add-on project ships its own installer for people who want only that add-on
 | --- | --- | --- |
 | `playtime` | from the pinned payload | counts non-Steam games while they run; every manifest and shortcut stays editable |
 | `presence` | from the pinned payload | publishes a hidden placeholder shortcut so friends see the game being played |
+| `compressor` | from the pinned payload | status, previews, dedupe and compaction for the external btrfs-game-compressor tool |
+
+The compressor tab drives the separate
+[btrfs-game-compressor](https://github.com/pgm1207/btrfs-game-compressor) CLI.
+It is discovered at `~/.local/bin/btrfs-game-compressor` (or from
+`SLS_COMPRESSOR_BIN`); Luna never installs or updates the tool itself.
 
 ## Install
 
 ```bash
 bash scripts/preflight.sh          # read-only: environment, state, and refusals
-bash scripts/install-local.sh      # Steam must be closed; installs both add-ons
+bash scripts/install-local.sh      # Steam must be closed; installs every add-on
 bash scripts/status.sh             # what is installed and whether it matches
 ```
 
 `install-local.sh` accepts the add-on projects' flags plus its own:
 
 ```bash
-bash scripts/install-local.sh --only playtime     # one add-on instead of both
+bash scripts/install-local.sh --only playtime     # one add-on instead of all
 bash scripts/install-local.sh --dry-run           # print the plan, write nothing
 bash scripts/install-local.sh --force             # replace files that differ
 ```
 
-Uninstall removes one add-on and leaves the other working; removing the **last**
+Uninstall removes one add-on and leaves the others working; removing the **last**
 one restores `boot.lua` from its backup before deleting the payload it points at:
 
 ```bash
@@ -39,8 +45,9 @@ bash scripts/uninstall-local.sh --only presence
 bash scripts/uninstall-local.sh                   # everything
 ```
 
-Your playtime ledger and presence mapping are never touched: they live in
-`~/.local/share/slssteam-integrations`, not in the add-on directories.
+Your playtime ledger, presence mapping and compressor state are never touched:
+they live in `~/.local/share/slssteam-integrations`, not in the add-on
+directories.
 
 ## What it refuses to do
 
