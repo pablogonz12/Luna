@@ -13,3 +13,7 @@ LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/test
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/compressor-smoke.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/hltb-smoke.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/sgdb-smoke.lua"
+LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" \
+  SLS_GRAPHICS_SYSFS="$tmp/home/sys" SLS_GRAPHICS_OS_RELEASE="$tmp/home/os-release" \
+  SLS_GRAPHICS_SYSTEM_LAYER_DIRS="$tmp/home/no-system-layers" \
+  "$lua" "$root/tests/graphics-smoke.lua"

@@ -35,6 +35,8 @@
       + '<path d="M16.5 13.5v6M13.5 16.5h6" stroke="currentColor" stroke-width="2"/>',
     settings: '<circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="currentColor" stroke-width="2"/>',
+    graphics: '<rect x="3" y="4" width="18" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>'
+      + '<path d="M9 20h6M12 16v4M7 8h4M7 11h8" stroke="currentColor" stroke-width="2"/>',
     about: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M12 11v5m0-8v.5" stroke="currentColor" stroke-width="2"/>',
   };
@@ -45,6 +47,7 @@
     { id: 'compressor', label: 'Compressor' },
     { id: 'hltb', label: 'HowLongToBeat' },
     { id: 'steamgrid', label: 'SteamGridDB', beta: true },
+    { id: 'graphics', label: 'Graphics', beta: true },
     { id: 'settings', label: 'Settings' },
     { id: 'about', label: 'About' },
   ];
@@ -335,6 +338,7 @@
     let sgdbBusy = false;
     let sgdbNotice = null;
     let artworkRequest = '';
+    let graphics = null;
     let compressorTab = 'status';
     let compressorQuery = '';
     let pendingAction = null;
@@ -2224,6 +2228,98 @@
       return body;
     }
 
+    // ---- Graphics page (beta): read-only detection -------------------------
+
+    function graphicsBody() {
+      const body = document.createElement('div');
+      const report = graphics || {};
+      const system = report.system || {};
+      const lsfg = report.lsfg || {};
+      const layers = Array.isArray(lsfg.layers) ? lsfg.layers : [];
+      const gpus = Array.isArray(report.gpus) ? report.gpus : [];
+      const opti = Array.isArray(report.optiscaler) ? report.optiscaler : [];
+      const steamInfo = report.steam || {};
+
+      const note = document.createElement('p');
+      note.className = 'sls-luna-note';
+      note.innerHTML = 'Luna only <strong>detects</strong> what this machine has for frame generation and '
+        + 'upscaling. Nothing here installs, downloads or changes files - the installers come later, '
+        + 'each behind its own gates.';
+      body.appendChild(note);
+
+      const stat = document.createElement('div');
+      stat.className = 'sls-luna-stat';
+      [['GPU', gpus.length || '\u2014', gpus.map(gpu => gpu.vendor_name).join(' + ') || 'not detected'],
+        ['lsfg-vk', layers.length ? 'present' : 'not detected', layers.length ? 'Vulkan layer found' : 'no layer found'],
+        ['OptiScaler', opti.length ? 'present' : 'not detected', opti.length ? 'management files' : 'nothing found']]
+        .forEach(pair => {
+          const cell = document.createElement('div');
+          const value = document.createElement('b');
+          value.textContent = String(pair[1]);
+          const label = document.createElement('i');
+          label.textContent = pair[0] + ' \u00b7 ' + pair[2];
+          cell.append(value, label);
+          stat.appendChild(cell);
+        });
+      body.appendChild(stat);
+
+      const section = title => {
+        const line = document.createElement('p');
+        line.className = 'sls-luna-note';
+        line.innerHTML = '<strong>' + title + '</strong>';
+        body.appendChild(line);
+      };
+      const line = text => {
+        const node = document.createElement('p');
+        node.className = 'sls-luna-note';
+        node.textContent = text;
+        body.appendChild(node);
+      };
+
+      section('System');
+      line((system.distro || 'unknown distro') + (system.kernel ? ' \u00b7 kernel ' + system.kernel : ''));
+
+      section('GPU');
+      if (!gpus.length) line('No GPU was detected through sysfs.');
+      gpus.forEach(gpu => {
+        line(gpu.card + ': ' + (gpu.product || gpu.vendor_name) + ' \u00b7 driver ' + (gpu.driver || '?')
+          + ' (' + gpu.vendor + ':' + (gpu.device || '?') + ')');
+      });
+
+      section('Frame generation (lsfg-vk)');
+      if (!layers.length) {
+        line('No lsfg-vk Vulkan layer found. Luna does not install it yet.');
+      } else {
+        layers.forEach(layer => {
+          line('Layer: ' + layer.path + (layer.version ? ' (v' + layer.version + ')' : ''));
+        });
+        line(lsfg.config
+          ? 'User config: ' + lsfg.config.path
+          : 'No lsfg-vk user config found (it appears after the first configuration).');
+      }
+      if (Array.isArray(lsfg.decky_plugins) && lsfg.decky_plugins.length) {
+        line('Decky plugin detected: ' + lsfg.decky_plugins.map(path => path.split('/').pop()).join(', ')
+          + ' (separate project; Luna is not using or removing it).');
+      }
+
+      section('OptiScaler');
+      if (!opti.length) {
+        line('No OptiScaler or OptiScaler Client install detected in the usual user locations.');
+      } else {
+        opti.forEach(entry => {
+          line((entry.kind === 'client' ? 'Client: ' : 'Files: ') + entry.path);
+        });
+      }
+      line('Per-game OptiScaler detection and management are planned; today Luna only reports what exists.');
+
+      section('Steam');
+      line((steamInfo.root ? 'Steam root: ' + steamInfo.root : 'No bootstrapped Steam installation found.')
+        + (Array.isArray(steamInfo.runtimes) && steamInfo.runtimes.length
+          ? ' \u00b7 runtimes: ' + steamInfo.runtimes.join(', ') : '')
+        + (steamInfo.gamescope ? ' \u00b7 gamescope present' : ''));
+      return body;
+    }
+
     function settingsBody() {
       const body = document.createElement('div');
       const note = document.createElement('p');
@@ -2309,8 +2405,8 @@
     }
 
     const TITLES = { playtime: 'Playtime', presence: 'Presence', compressor: 'Compressor',
-      hltb: 'HowLongToBeat', steamgrid: 'SteamGridDB artwork', settings: 'Settings',
-      about: 'About SLS Luna' };
+      hltb: 'HowLongToBeat', steamgrid: 'SteamGridDB artwork', graphics: 'Graphics (read-only)',
+      settings: 'Settings', about: 'About SLS Luna' };
 
     function paint() {
       const nav = visibleNav();
@@ -2355,6 +2451,7 @@
         : tab === 'compressor' ? compressorBody()
         : tab === 'hltb' ? hltbBody()
         : tab === 'steamgrid' ? steamgridBody()
+        : tab === 'graphics' ? graphicsBody()
         : tab === 'settings' ? settingsBody()
         : tab === 'about' ? aboutBody() : playtimeBody());
 
@@ -2406,6 +2503,11 @@
         sgdb = await rpc(w, 'SlsSgdbGet');
       } catch (error) {
         sgdb = sgdb || {};
+      }
+      try {
+        graphics = await rpc(w, 'SlsGraphicsGet');
+      } catch (error) {
+        graphics = graphics || {};
       }
       maybeAutoFetch();
       repaintIfOpen();
