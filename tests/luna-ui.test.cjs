@@ -6,7 +6,7 @@
 // their real RPC names.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {mount,buildRows,findMenubar}=require('../addons/luna/plugin/public/panel.js');
+const {mount,buildRows,buildHltbRows,findMenubar}=require('../addons/luna/plugin/public/panel.js');
 
 function fakeDom(){
   const registry={};
@@ -122,12 +122,16 @@ function compressorFixture(overrides){
   return Object.assign(base,overrides||{});
 }
 
-function fakeWindow(document,{get,presence,compressor,edit,setEnabled}={}){
+function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,edit,setEnabled}={}){
   const calls=[];
+  const hltbState=Object.assign({success:true,count:0,games:{},library:[]},hltb||{});
+  hltbState.count=Object.keys(hltbState.games||{}).length;
   const w={
     document,
     setInterval:(fn,ms)=>{return 1;},
     clearInterval:()=>{},
+    // The fetch-missing queue spaces requests out; tests skip the waiting.
+    setTimeout:(fn,ms)=>{setTimeout(fn,0);return 0;},
     prompt:()=>{throw Error('window.prompt must not be used: it freezes the Steam shell');},
     confirm:()=>{throw Error('window.confirm must not be used: it freezes the Steam shell');},
     Millennium:{callServerMethod:async(plugin,fn,args)=>{
@@ -142,10 +146,59 @@ function fakeWindow(document,{get,presence,compressor,edit,setEnabled}={}){
       if(fn==='SlsCompressorPutSettings')return JSON.stringify({success:true,settings:payload});
       if(fn==='SlsCompressorRun')return JSON.stringify({success:true,job:{action:payload.action,running:true}});
       if(fn==='SlsCompressorCancel')return JSON.stringify({success:true,cancelled:true});
+      if(fn==='SlsHltbGet')return JSON.stringify(hltbState);
+      if(fn==='SlsHltbFetch'){
+        if(fetchFailure&&Number(payload.appid)===Number(fetchFailure)){
+          return JSON.stringify({success:false,error:'No confident HowLongToBeat match for "'+payload.name+'".'});
+        }
+        const record={name:payload.name,match:'exact',main:3600,extra:5400,completionist:7200,
+          source:'hltb-search',fetchedAt:Date.now()/1000};
+        hltbState.games[String(payload.appid)]=record;
+        hltbState.count=Object.keys(hltbState.games).length;
+        return JSON.stringify({success:true,record});
+      }
+      if(fn==='SlsHltbForget'){
+        delete hltbState.games[String(payload.appid)];
+        hltbState.count=Object.keys(hltbState.games).length;
+        return JSON.stringify({success:true,removed:true});
+      }
+      if(fn==='SlsHltbPut'){
+        hltbState.games[String(payload.appid)]={name:payload.name,match:'manual',main:(payload.main||0)*3600,
+          extra:(payload.extra||0)*3600,completionist:(payload.completionist||0)*3600,source:'manual',fetchedAt:Date.now()/1000};
+        hltbState.count=Object.keys(hltbState.games).length;
+        return JSON.stringify({success:true});
+      }
+      if(fn==='__lumenOpenExternalUrl')return JSON.stringify({ok:true});
       return JSON.stringify({success:true});
     }},
   };
   return {w,calls};
+}
+
+function hltbFixture(overrides){
+  return Object.assign({games:{'1145360':{name:'Hades',match:'exact',main:84940,extra:175028,
+    completionist:343055,source:'hltb-search',fetchedAt:Date.now()/1000-120}},
+    library:[{appid:1145360,name:'Hades',shortcut:false},
+      {appid:620,name:'Portal 2',shortcut:false},
+      {appid:3212112756,name:'Minecraft',shortcut:true}]},overrides||{});
+}
+
+async function openHltbPage(document,options){
+  const {w,calls}=fakeWindow(document,options);
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='HowLongToBeat');
+  assert.ok(tab,'the HowLongToBeat tab was not found');
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  return {w,calls,overlay:document.getElementById('sls-luna-overlay')};
+}
+
+function rowFor(overlay,label){
+  return findNode(overlay,node=>node.className==='sls-luna-game'
+    &&node.children.length&&node.children[0].textContent.startsWith(label));
 }
 
 test('the menubar is found by shape, not by localized labels',()=>{
@@ -549,4 +602,93 @@ test('buildRows ranks recorded games first and marks non-Steam entries',()=>{
   assert.equal(rows.find(row=>row.id==='2').name,'App 2','with no name the id is shown');
   const filtered=buildRows({apps:[1,2],titles:{'1':'Portal 2'},games:{}},'portal');
   assert.deepEqual(filtered.map(row=>row.id),['1']);
+});
+
+test('buildHltbRows merges the library with cached times and sorts missing first',()=>{
+  const rows=buildHltbRows(
+    {'1145360':{name:'Hades',main:84940,match:'exact'}},
+    [{appid:620,name:'Portal 2',shortcut:false},{appid:1145360,name:'Hades',shortcut:false},
+      {appid:3212112756,name:'Minecraft',shortcut:true}],'');
+  assert.deepEqual(rows.map(row=>row.name),['Minecraft','Portal 2','Hades'],
+    'missing games sort first, then names');
+  assert.equal(rows.find(row=>row.name==='Minecraft').shortcut,true);
+  assert.equal(rows.find(row=>row.name==='Hades').record.main,84940);
+  assert.equal(rows.find(row=>row.name==='Portal 2').record,null);
+  const filtered=buildHltbRows({},[{appid:620,name:'Portal 2'}],'portal');
+  assert.deepEqual(filtered.map(row=>row.id),['620']);
+  const byId=buildHltbRows({},[{appid:620,name:'Portal 2'}],'620');
+  assert.deepEqual(byId.map(row=>row.id),['620']);
+});
+
+test('the HowLongToBeat page lists cached times, missing games and fetches on demand',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {calls,overlay}=await openHltbPage(document,{hltb:hltbFixture()});
+  const text=textOf(overlay);
+  assert.match(text,/23\.6 h story/,'cached times must be shown');
+  assert.match(text,/Portal 2 \(#620\)/,'missing games must be listed');
+  assert.match(text,/Minecraft \(#3212112756\) \[non-Steam\]/,'shortcuts must be marked');
+  assert.match(text,/Fetch missing \(2\)/,'the missing count must be visible');
+  const row=rowFor(overlay,'Portal 2');
+  assert.ok(row,'the Portal 2 row was not found');
+  const fetchButton=findNode(row,node=>node.textContent==='Fetch');
+  assert.ok(fetchButton,'a missing game must offer Fetch');
+  fetchButton.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const call=calls.filter(entry=>entry.fn==='SlsHltbFetch').pop();
+  assert.ok(call,'fetching a row must call SlsHltbFetch');
+  assert.deepEqual(call.payload,{appid:620,name:'Portal 2'});
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/1\.0 h story/,
+    'the fetched row must show its times');
+});
+
+test('the HowLongToBeat page opens the site search through Lumen',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {calls,overlay}=await openHltbPage(document,{hltb:hltbFixture()});
+  const row=rowFor(overlay,'Portal 2');
+  const search=findNode(row,node=>node.textContent==='Search');
+  assert.ok(search,'a game must offer Search');
+  search.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const call=calls.filter(entry=>entry.fn==='__lumenOpenExternalUrl').pop();
+  assert.ok(call,'Search must route through the Lumen opener');
+  assert.equal(call.payload.url,'https://howlongtobeat.com/?q=Portal%202');
+});
+
+test('the fetch-missing queue runs sequentially and stops on the first refusal',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {calls,overlay}=await openHltbPage(document,{hltb:hltbFixture({games:{},
+    library:[{appid:620,name:'Portal 2',shortcut:false},{appid:70,name:'Half-Life',shortcut:false},
+      {appid:220,name:'Half-Life 2',shortcut:false}]}),fetchFailure:220});
+  const start=findNode(overlay,node=>node.textContent==='Fetch missing (3)'
+    &&typeof node.onclick==='function');
+  assert.ok(start,'the fetch-missing button was not found');
+  start.onclick();
+  await new Promise(resolve=>setTimeout(resolve,200));
+  const fetched=calls.filter(entry=>entry.fn==='SlsHltbFetch').map(entry=>entry.payload.appid);
+  assert.deepEqual(fetched,[70,220],
+    'the queue must fetch in page order (missing sorts by name) and stop at the refusal');
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/Stopped:/,'the queue must report that it stopped');
+  assert.match(text,/No confident/,'the backend reason must be shown');
+});
+
+test('Forget removes a cached record and the game becomes fetchable again',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {calls,overlay}=await openHltbPage(document,{hltb:hltbFixture()});
+  const row=rowFor(overlay,'Hades');
+  const forget=findNode(row,node=>node.textContent==='Forget');
+  assert.ok(forget,'a cached game must offer Forget');
+  forget.onclick();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const call=calls.filter(entry=>entry.fn==='SlsHltbForget').pop();
+  assert.ok(call,'Forget must call SlsHltbForget');
+  assert.equal(call.payload.appid,1145360);
+  const fresh=document.getElementById('sls-luna-overlay');
+  assert.equal(findNode(rowFor(fresh,'Hades'),node=>node.textContent==='Fetch')!==null,true,
+    'the forgotten game must be fetchable again');
+  assert.match(textOf(fresh),/Fetch missing \(3\)/);
 });

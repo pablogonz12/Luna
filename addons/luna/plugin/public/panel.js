@@ -26,6 +26,9 @@
       + '<path d="M5 12a7 7 0 0 1 7-7m7 7a7 7 0 0 1-7 7" fill="none" stroke="currentColor" stroke-width="2"/>',
     compressor: '<path d="M4 8h16v11H4z" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M4 8l2-4h12l2 4M10 12h4" fill="none" stroke="currentColor" stroke-width="2"/>',
+    hltb: '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/>'
+      + '<path d="M12 7v5l3.5 2" fill="none" stroke="currentColor" stroke-width="2"/>'
+      + '<path d="M4 5.5L6.5 3M20 5.5L17.5 3" stroke="currentColor" stroke-width="2"/>',
     about: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M12 11v5m0-8v.5" stroke="currentColor" stroke-width="2"/>',
   };
@@ -33,6 +36,7 @@
     { id: 'playtime', label: 'Playtime' },
     { id: 'presence', label: 'Presence' },
     { id: 'compressor', label: 'Compressor' },
+    { id: 'hltb', label: 'HowLongToBeat' },
     { id: 'about', label: 'About' },
   ];
   // Floating panels the add-ons draw when Luna is not present.
@@ -298,6 +302,11 @@
     let snapshot = null;
     let presence = null;
     let compressor = null;
+    let hltb = null;
+    let hltbQuery = '';
+    let hltbQueue = null;
+    let hltbEdit = null;
+    let hltbNotice = null;
     let compressorTab = 'status';
     let compressorQuery = '';
     let pendingAction = null;
@@ -333,6 +342,18 @@
       paint();
       compressSearch.focus();
       if (typeof compressSearch.setSelectionRange === 'function') compressSearch.setSelectionRange(start, end);
+    };
+
+    // And for the HowLongToBeat page: same node, caret kept across paints.
+    const hltbSearch = document.createElement('input');
+    hltbSearch.className = 'sls-luna-search';
+    hltbSearch.placeholder = 'Filter by name or AppID';
+    hltbSearch.oninput = () => {
+      hltbQuery = hltbSearch.value;
+      const start = hltbSearch.selectionStart, end = hltbSearch.selectionEnd;
+      paint();
+      hltbSearch.focus();
+      if (typeof hltbSearch.setSelectionRange === 'function') hltbSearch.setSelectionRange(start, end);
     };
 
     // A running compressor job is polled while the menu stays open; the timer
@@ -1306,6 +1327,301 @@
       return body;
     }
 
+    // ---- HowLongToBeat page: cached times, missing games, on-demand fetch --
+
+    const hltbHours = seconds => (Math.max(0, Number(seconds) || 0) / 3600).toFixed(1) + ' h';
+
+    function hltbTimes(record) {
+      const parts = [];
+      if (record.main) parts.push(hltbHours(record.main) + ' story');
+      if (record.extra) parts.push(hltbHours(record.extra) + ' +extra');
+      if (record.completionist) parts.push(hltbHours(record.completionist) + ' 100%');
+      return parts.join(' \u00b7 ') || 'no times';
+    }
+
+    const sleep = ms => new Promise(resolve => {
+      const schedule = w.setTimeout || setTimeout;
+      schedule(resolve, ms);
+    });
+
+    async function refreshHltb() {
+      try {
+        hltb = await rpc(w, 'SlsHltbGet');
+      } catch (error) {
+        hltb = hltb || {};
+      }
+      paint();
+    }
+
+    async function forgetHltb(row) {
+      hltbNotice = null;
+      try {
+        await rpc(w, 'SlsHltbForget', { appid: Number(row.id) });
+        hltbEdit = null;
+        await refreshHltb();
+      } catch (error) {
+        hltbNotice = String(error && error.message ? error.message : error);
+        paint();
+      }
+    }
+
+    async function fetchHltbOne(row) {
+      hltbNotice = null;
+      try {
+        const out = await rpc(w, 'SlsHltbFetch', { appid: Number(row.id), name: row.name });
+        if (!out || out.success !== true) throw Error((out && out.error) || 'The fetch failed.');
+        await refreshHltb();
+      } catch (error) {
+        hltbNotice = String(error && error.message ? error.message : error);
+        paint();
+      }
+    }
+
+    async function openHltbSearch(row) {
+      hltbNotice = null;
+      const url = 'https://howlongtobeat.com/?q=' + encodeURIComponent(String(row.name || '').trim());
+      try {
+        const out = await rpc(w, '__lumenOpenExternalUrl', { url });
+        if (!out || out.ok !== true) throw Error('Steam could not open the browser.');
+      } catch (error) {
+        hltbNotice = String(error && error.message ? error.message : error);
+        paint();
+      }
+    }
+
+    // Sequentially fetch every missing game, keeping the site's own spacing
+    // (the backend enforces a minimum interval and reports 429s). Stops on the
+    // first refusal instead of hammering, and says why.
+    async function runHltbQueue(rows) {
+      if (!rows.length || (hltbQueue && hltbQueue.running)) return;
+      hltbQueue = { running: true, done: 0, total: rows.length, label: rows[0].name, error: '' };
+      paint();
+      for (const row of rows) {
+        if (!hltbQueue || !hltbQueue.running) break;
+        if (!document.getElementById(OVERLAY_ID)) { hltbQueue.running = false; return; }
+        hltbQueue.label = row.name;
+        paint();
+        try {
+          const out = await rpc(w, 'SlsHltbFetch', { appid: Number(row.id), name: row.name });
+          if (!out || out.success !== true) throw Error((out && out.error) || 'The fetch failed.');
+          hltbQueue.done += 1;
+          const fresh = await rpc(w, 'SlsHltbGet').catch(() => null);
+          if (fresh && fresh.success !== false) hltb = fresh;
+          hltbNotice = null;
+          paint();
+        } catch (error) {
+          hltbQueue.running = false;
+          hltbQueue.error = String(error && error.message ? error.message : error);
+          paint();
+          return;
+        }
+        await sleep(2200);
+      }
+      if (hltbQueue) {
+        hltbQueue.running = false;
+        hltbQueue.label = '';
+        paint();
+      }
+    }
+
+    function hltbSmallButton(label, handler) {
+      const button = document.createElement('button');
+      button.className = 'sls-luna-btn secondary';
+      button.style.cssText = 'padding:4px 9px;font-size:12px;white-space:nowrap;';
+      button.textContent = label;
+      button.onclick = () => { Promise.resolve(handler()).catch(() => {}); };
+      return button;
+    }
+
+    function hltbRow(row) {
+      const wrap = document.createElement('div');
+      const line = document.createElement('div');
+      line.className = 'sls-luna-game';
+      const name = document.createElement('span');
+      name.className = 'gname';
+      name.textContent = row.name + ' (#' + row.id + ')' + (row.shortcut ? ' [non-Steam]' : '');
+      line.appendChild(name);
+      if (row.record) {
+        const times = document.createElement('span');
+        times.style.cssText = 'color:#9aa4ae;font-size:12px;white-space:nowrap;';
+        times.textContent = hltbTimes(row.record);
+        const chip = document.createElement('span');
+        const manual = row.record.match === 'manual';
+        chip.className = 'sls-luna-chip' + (row.record.match === 'exact' || manual ? ' done' : '');
+        chip.textContent = manual ? 'manual' : row.record.match === 'exact' ? 'match' : 'approx';
+        line.append(times, chip);
+        line.append(
+          hltbSmallButton('Refresh', () => fetchHltbOne(row)),
+          hltbSmallButton('Search', () => openHltbSearch(row)),
+          hltbSmallButton('Edit', () => {
+            hltbEdit = {
+              appid: row.id,
+              main: Number(((Number(row.record.main) || 0) / 3600).toFixed(2)),
+              extra: Number(((Number(row.record.extra) || 0) / 3600).toFixed(2)),
+              completionist: Number(((Number(row.record.completionist) || 0) / 3600).toFixed(2)),
+            };
+            paint();
+          }),
+          hltbSmallButton('Forget', () => forgetHltb(row)));
+      } else {
+        line.append(
+          hltbSmallButton('Fetch', () => fetchHltbOne(row)),
+          hltbSmallButton('Search', () => openHltbSearch(row)));
+      }
+      wrap.appendChild(line);
+      if (hltbEdit && hltbEdit.appid === row.id) {
+        const editor = document.createElement('div');
+        editor.style.cssText = 'display:flex;gap:8px;align-items:center;margin:2px 0 10px;flex-wrap:wrap;';
+        const fields = [['main', 'story'], ['extra', 'extra'], ['completionist', '100%']];
+        const inputs = {};
+        fields.forEach(pair => {
+          const label = document.createElement('span');
+          label.style.cssText = 'color:#9aa4ae;font-size:12px;';
+          label.textContent = pair[1] + ' (h)';
+          const input = document.createElement('input');
+          input.className = 'sls-luna-input';
+          input.type = 'number';
+          input.min = '0';
+          input.step = '0.5';
+          input.value = String(hltbEdit[pair[0]] || 0);
+          input.oninput = () => { hltbEdit[pair[0]] = Number(input.value) || 0; };
+          inputs[pair[0]] = input;
+          editor.append(label, input);
+        });
+        const save = document.createElement('button');
+        save.className = 'sls-luna-btn';
+        save.textContent = 'Save hours';
+        save.onclick = async () => {
+          hltbNotice = null;
+          try {
+            await rpc(w, 'SlsHltbPut', { raw: JSON.stringify({
+              appid: Number(row.id),
+              name: row.name,
+              main: Number(inputs.main.value) || 0,
+              extra: Number(inputs.extra.value) || 0,
+              completionist: Number(inputs.completionist.value) || 0,
+            }) });
+            hltbEdit = null;
+            await refreshHltb();
+          } catch (error) {
+            hltbNotice = String(error && error.message ? error.message : error);
+            paint();
+          }
+        };
+        const cancel = document.createElement('button');
+        cancel.className = 'sls-luna-btn secondary';
+        cancel.textContent = 'Cancel';
+        cancel.onclick = () => { hltbEdit = null; paint(); };
+        editor.append(save, cancel);
+        wrap.appendChild(editor);
+      }
+      return wrap;
+    }
+
+    function hltbBody() {
+      const body = document.createElement('div');
+      const records = (hltb && hltb.games) || {};
+      const library = (hltb && hltb.library) || [];
+      const all = buildHltbRows(records, library, '');
+      const missing = all.filter(row => !row.record);
+
+      const info = document.createElement('p');
+      info.className = 'sls-luna-note';
+      info.innerHTML = 'Times come from HowLongToBeat, fetched <strong>on demand</strong> (never automatically) and '
+        + 'stored locally. Fetching waits between games because the site rate-limits searches. '
+        + 'You can correct any match with Edit; nothing here changes Steam files.';
+      body.appendChild(info);
+
+      const stats = document.createElement('div');
+      stats.className = 'sls-luna-stat';
+      [['Cached', Object.keys(records).length, 'games with times'],
+        ['Missing', missing.length, 'not fetched yet'],
+        ['Library', library.length || '\u2014', 'games seen by Luna']].forEach(pair => {
+        const cell = document.createElement('div');
+        const value = document.createElement('b');
+        value.textContent = String(pair[1]);
+        const label = document.createElement('i');
+        label.textContent = pair[0] + ' \u00b7 ' + pair[2];
+        cell.append(value, label);
+        stats.appendChild(cell);
+      });
+      body.appendChild(stats);
+
+      if (!library.length) {
+        const note = document.createElement('p');
+        note.className = 'sls-luna-note';
+        note.textContent = 'Luna has not received the game list from Steam yet. It arrives at startup; '
+          + 'restart Steam or reopen this page if the list stays empty.';
+        body.appendChild(note);
+      }
+
+      hltbSearch.value = hltbQuery;
+      body.appendChild(hltbSearch);
+
+      const busy = Boolean(hltbQueue && hltbQueue.running);
+      const missingFiltered = buildHltbRows(records, library, hltbQuery).filter(row => !row.record);
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px;';
+      const fetchMissing = document.createElement('button');
+      fetchMissing.className = 'sls-luna-btn';
+      fetchMissing.textContent = busy ? 'Fetching\u2026' : 'Fetch missing (' + missingFiltered.length + ')';
+      fetchMissing.disabled = busy || missingFiltered.length === 0;
+      fetchMissing.onclick = () => runHltbQueue(missingFiltered);
+      actions.appendChild(fetchMissing);
+      if (busy) {
+        const stop = document.createElement('button');
+        stop.className = 'sls-luna-btn secondary';
+        stop.textContent = 'Stop after current';
+        stop.onclick = () => { hltbQueue.running = false; paint(); };
+        actions.appendChild(stop);
+      }
+      body.appendChild(actions);
+
+      if (hltbQueue) {
+        const line = document.createElement('p');
+        line.className = 'sls-luna-note';
+        if (hltbQueue.error) {
+          line.innerHTML = '<strong>Stopped:</strong> ' + hltbQueue.error;
+        } else if (hltbQueue.running) {
+          line.innerHTML = '<strong>Fetching ' + hltbQueue.done + ' of ' + hltbQueue.total + '</strong> \u00b7 ' + (hltbQueue.label || '') + '\u2026';
+        } else {
+          line.textContent = 'Fetched ' + hltbQueue.done + ' game(s).';
+        }
+        body.appendChild(line);
+        body.appendChild(progressBar(
+          hltbQueue.total ? (hltbQueue.done / hltbQueue.total) * 100 : 0, hltbQueue.running));
+      }
+
+      if (hltbNotice) {
+        const error = document.createElement('p');
+        error.className = 'sls-luna-error';
+        error.textContent = hltbNotice;
+        body.appendChild(error);
+      }
+
+      const rows = buildHltbRows(records, library, hltbQuery);
+      if (!rows.length) {
+        const empty = document.createElement('p');
+        empty.className = 'sls-luna-note';
+        empty.textContent = library.length || Object.keys(records).length
+          ? 'Nothing matches that filter.' : 'No games known yet.';
+        body.appendChild(empty);
+        return body;
+      }
+      const list = document.createElement('div');
+      rows.slice(0, visible).forEach(row => list.appendChild(hltbRow(row)));
+      body.appendChild(list);
+      if (rows.length > visible) {
+        const more = document.createElement('button');
+        more.className = 'sls-luna-btn secondary';
+        more.style.marginTop = '10px';
+        more.textContent = 'Show 50 more (' + (rows.length - visible) + ' left)';
+        more.onclick = () => { visible += 50; paint(); };
+        body.appendChild(more);
+      }
+      return body;
+    }
+
     function aboutBody() {
       const body = document.createElement('div');
       const note = document.createElement('p');
@@ -1337,7 +1653,8 @@
       body.insertBefore(line, body.firstChild ? body.firstChild.nextSibling : null);
     }
 
-    const TITLES = { playtime: 'Playtime', presence: 'Presence', compressor: 'Compressor', about: 'About SLS Luna' };
+    const TITLES = { playtime: 'Playtime', presence: 'Presence', compressor: 'Compressor',
+      hltb: 'HowLongToBeat', about: 'About SLS Luna' };
 
     function paint() {
       const restoreSearch = document.activeElement === search && tab === 'playtime';
@@ -1378,6 +1695,7 @@
       body.className = 'sls-luna-body';
       body.appendChild(tab === 'presence' ? presenceBody()
         : tab === 'compressor' ? compressorBody()
+        : tab === 'hltb' ? hltbBody()
         : tab === 'about' ? aboutBody() : playtimeBody());
 
       main.append(head, body);
@@ -1419,6 +1737,11 @@
       } catch (error) {
         compressor = compressor || {};
       }
+      try {
+        hltb = await rpc(w, 'SlsHltbGet');
+      } catch (error) {
+        hltb = hltb || {};
+      }
       paint();
     }
 
@@ -1433,6 +1756,9 @@
       confirmAction = null;
       cancelArmed = false;
       cleanupArmed = false;
+      // A running fetch queue stops before its next game; the summary stays
+      // for the next time the menu opens.
+      if (hltbQueue && hltbQueue.running) hltbQueue.running = false;
       const node = document.getElementById(OVERLAY_ID);
       if (node) node.remove();
     }
@@ -1445,6 +1771,28 @@
     // Safety net: an add-on that mounted its floating panel before the flag was
     // set is removed on the next pass.
     w.setInterval(() => { removeFloating(document); }, 4000);
+  }
+
+  /* Merged view of the agent-reported game list and the cached HowLongToBeat
+     times. Pure so it can be tested without a DOM: missing games sort first,
+     then names; rows without a record carry record=null. */
+  function buildHltbRows(games, library, needle) {
+    const filter = String(needle || '').trim().toLowerCase();
+    const records = games || {};
+    const byId = new Map();
+    (Array.isArray(library) ? library : []).forEach(entry => {
+      const id = String((entry && entry.appid) || '');
+      if (!id) return;
+      byId.set(id, { id, name: entry.name || ('App ' + id), shortcut: entry.shortcut === true });
+    });
+    Object.keys(records).forEach(id => {
+      if (!byId.has(String(id))) {
+        byId.set(String(id), { id: String(id), name: (records[id] && records[id].name) || ('App ' + id), shortcut: false });
+      }
+    });
+    return [...byId.values()].map(row => ({ ...row, record: records[row.id] || null }))
+      .filter(row => (row.name + ' ' + row.id).toLowerCase().includes(filter))
+      .sort((a, b) => (a.record ? 1 : 0) - (b.record ? 1 : 0) || a.name.localeCompare(b.name));
   }
 
   /* List building for the Playtime tab. Kept pure so it can be tested without a
@@ -1472,5 +1820,5 @@
         || (b.record.lastPlayed || 0) - (a.record.lastPlayed || 0) || a.name.localeCompare(b.name));
   }
 
-  return { mount, buildRows, findMenubar, hours };
+  return { mount, buildRows, buildHltbRows, findMenubar, hours };
 });

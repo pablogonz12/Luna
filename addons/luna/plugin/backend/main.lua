@@ -10,11 +10,12 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.3.1'
+local VERSION = '0.4.0'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local data_dir = home .. '/.local/share/slssteam-integrations'
 local store_path = data_dir .. '/hltb.json'
+local library_path = data_dir .. '/hltb-library.json'
 
 local INIT_URL = 'https://howlongtobeat.com/api/search/site/init?t='
 local SEARCH_URL = 'https://howlongtobeat.com/api/search/site'
@@ -71,6 +72,36 @@ local function persist_store(data)
     return false, werr or cerr or 'write failed'
   end
   local ok, rerr = os.rename(tmp, store_path)
+  if not ok then os.remove(tmp); return false, rerr or 'rename failed' end
+  return true
+end
+
+-- The game list the Steam agent reports (appid + display name). Kept apart from
+-- the times themselves: it is inventory, not measurements, and the panel uses
+-- it to show what is still missing. Written atomically like the store.
+local function load_library()
+  local raw = read_file(library_path)
+  if not raw then return { version = 1, updatedAt = 0, games = {} } end
+  local ok, parsed = pcall(json.decode, raw)
+  if not ok or type(parsed) ~= 'table' or type(parsed.games) ~= 'table' then
+    return { version = 1, updatedAt = 0, games = {} }
+  end
+  parsed.version = 1
+  return parsed
+end
+
+local function persist_library(data)
+  fs.create_directories(fs.parent_path(library_path))
+  local tmp = library_path .. '.tmp'
+  local f, why = io.open(tmp, 'wb')
+  if not f then return false, why or 'cannot write library' end
+  local written, werr = f:write(json.encode(data))
+  local closed, cerr = f:close()
+  if not written or not closed then
+    os.remove(tmp)
+    return false, werr or cerr or 'write failed'
+  end
+  local ok, rerr = os.rename(tmp, library_path)
   if not ok then os.remove(tmp); return false, rerr or 'rename failed' end
   return true
 end
@@ -311,13 +342,43 @@ function M.register(registry)
     return reply({ success = true, version = VERSION, addons = installed(), data = data_dir })
   end
 
-  -- Whole local cache: appid -> record. Small by design (a library at most).
+  -- Whole local cache: appid -> record, plus the game list the agent reported.
+  -- Small by design (a library at most).
   registry.SlsHltbGet = function()
     local store = load_store()
+    local library = load_library()
     local count = 0
     for _ in pairs(store.games) do count = count + 1 end
     return reply({ success = true, games = store.games, count = count,
+      library = library.games, libraryAt = library.updatedAt,
       minFetchInterval = M.min_fetch_interval })
+  end
+
+  -- The Steam agent's inventory of owned games and non-Steam shortcuts, so the
+  -- panel can show what has no times yet. Purely local; never sent anywhere.
+  registry.SlsHltbLibrary = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    if not ok or type(entry) ~= 'table' or type(entry.games) ~= 'table' then
+      return reply({ success = false, error = 'Send {games: [{appid, name, shortcut?}]}.' })
+    end
+    local games, seen = {}, {}
+    for _, game in ipairs(entry.games) do
+      if type(game) == 'table' and valid_appid(game.appid) then
+        local key = tostring(math.floor(tonumber(game.appid)))
+        local name = tostring(game.name or ''):sub(1, 200)
+        if name ~= '' and not seen[key] then
+          seen[key] = true
+          games[#games + 1] = { appid = tonumber(key), name = name, shortcut = game.shortcut == true }
+        end
+      end
+      if #games >= 5000 then break end
+    end
+    if #games == 0 and #entry.games > 0 then
+      return reply({ success = false, error = 'No valid games in the inventory.' })
+    end
+    local saved, serr = persist_library({ version = 1, updatedAt = os.time(), games = games })
+    if not saved then return reply({ success = false, error = tostring(serr) }) end
+    return reply({ success = true, count = #games })
   end
 
   -- User-triggered fetch for one game. Never runs by itself and never batches.
