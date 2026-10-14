@@ -1391,11 +1391,13 @@
     let overlayTimer = null;
     function refreshDomOverlays() {
       let stored = null;
+      let detailsAppId = null;
       try {
         stored = JSON.parse((w.localStorage && w.localStorage.getItem('AppGridDisplaySettings')) || '{}').eSortBy;
-      } catch (_) { stored = null; }
+        detailsAppId = w.localStorage && w.localStorage.getItem('slsLunaDetailsAppId');
+      } catch (_) { /* storage unavailable */ }
       enforceSortLabel(document, stored);
-      updateHltbStat(document, (hltb && hltb.games) || {});
+      updateHltbStat(document, (hltb && hltb.games) || {}, detailsAppId);
     }
     function scheduleOverlayRefresh(delay) {
       if (overlayTimer) return;
@@ -1981,7 +1983,7 @@
   // playtime cell, built with the playtime cell's own class names so Steam's
   // styles apply unchanged. Pure DOM: no React state is involved, and the cell
   // is removed the moment there is no cached time for the shown game.
-  function updateHltbStat(document, games) {
+  function updateHltbStat(document, games, appidHint) {
     const existing = document.getElementById ? document.getElementById('sls-luna-hltb-stat') : null;
     const label = leafWithText(document, /^play time$/i);
     const cell = label && label.parentNode && label.parentNode.parentNode;
@@ -1989,7 +1991,7 @@
       if (existing && existing.remove) existing.remove();
       return null;
     }
-    const appid = detailsAppIdFrom(document);
+    const appid = appidHint || detailsAppIdFrom(document);
     const record = appid && games ? games[String(appid)] : null;
     const text = formatHltbStat(record);
     if (!text) {
