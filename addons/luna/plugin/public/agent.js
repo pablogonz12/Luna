@@ -215,6 +215,11 @@
     return value > 0 ? value : null;
   }
 
+  function hltbMinutesFor(appid) {
+    const seconds = hltbSecondsFor(appid);
+    return seconds ? Math.round(seconds / 60) : 0;
+  }
+
   // Longest first under an ascending comparison: the key inverts the seconds
   // and pads to a fixed width so plain string order equals time order. Games
   // without times get the largest key, so they sort after every known game.
@@ -330,6 +335,21 @@
       : props.onChange;
     if (appended === props.rgOptions && onChange === props.onChange) return null;
     return { ...props, rgOptions: appended, onChange };
+  }
+
+  // Steam's capsule overlay (the little value box on each library game) shows
+  // the active sort's value, but returns null for unknown sort values. When
+  // HowLongToBeat is active, re-point that overlay at Steam's own hours-played
+  // rendering with the cached minutes, so each capsule reads like
+  // "23.6 hours". Games without times keep Steam's default (nothing shown).
+  function withHltbOverlay(props) {
+    if (!props || props.sortByType !== SORT_VALUE) return null;
+    if (!props.app || props.id === undefined || props.strCollectionId !== undefined) return null;
+    const minutes = hltbMinutesFor(props.app.appid);
+    if (!minutes) return null;
+    const clone = Object.assign(Object.create(Object.getPrototypeOf(props.app)), props.app);
+    clone.minutes_playtime_forever = minutes;
+    return { ...props, sortByType: 4, app: clone }; // 4 = Steam's hours-played sort
   }
 
   function refreshHltbData(w) {
@@ -491,6 +511,11 @@
             const withSort = withSortOption(props, w);
             if (withSort) args[0] = withSort;
           }
+          // While that option is active, each capsule shows its cached hours.
+          if (props && props.sortByType === SORT_VALUE) {
+            const overlay = withHltbOverlay(props);
+            if (overlay) args[0] = overlay;
+          }
           const proto = type && type.prototype;
           if (isOuter(proto) && props && props.overview) {
             // Fresh build of the game menu: remember the exact target before
@@ -585,7 +610,7 @@
   }
 
   return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, discoverMenuTools, openExternalUrl, searchUrlFor, nameOf,
-    defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbSortKey,
-    applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption, refreshHltbData,
-    installLunaMenu, bootLunaMenu };
+    defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor,
+    hltbSortKey, applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption,
+    withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
 });

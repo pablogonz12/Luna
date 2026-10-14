@@ -10,7 +10,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf,
   collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,setHltbRecords,hltbSortKey,applyHltbSortAs,
-  restoreHltbSortAs,syncSortAs,isSortDropdown,withSortOption}=require('../addons/luna/plugin/public/agent.js');
+  restoreHltbSortAs,syncSortAs,isSortDropdown,withSortOption,withHltbOverlay,hltbMinutesFor}=require('../addons/luna/plugin/public/agent.js');
 
 test('search URL trims and encodes the game name',()=>{
   assert.equal(searchUrlFor('  Hades  '),'https://howlongtobeat.com/?q=Hades');
@@ -461,6 +461,46 @@ test('only the real sort dropdown gains the HowLongToBeat option',()=>{
     'the numeric fingerprint is required');
   assert.equal(isSortDropdown({rgOptions:SORT_ENUM.slice()}),true);
   function ENUMStrings(){return [{data:'a',label:'x'},{data:'b',label:'y'}];}
+});
+
+test('the capsule overlay shows cached hours while the HLTB sort is active',()=>{
+  setHltbRecords({'2':{main:7200},'3':{match:'none'}});
+  class Overview{}
+  Overview.prototype.GetCanonicalReleaseDate=()=>123;
+  const app=Object.assign(new Overview(),{appid:2,minutes_playtime_forever:0});
+  const result=withHltbOverlay({app,sortByType:SORT_VALUE,context:{},id:'row-1'});
+  assert.ok(result,'the overlay must be re-pointed');
+  assert.equal(result.sortByType,4,"Steam's hours-played branch must render it");
+  assert.equal(result.app.minutes_playtime_forever,120,'the cached main story in minutes');
+  assert.equal(result.app.GetCanonicalReleaseDate(),123,'the clone must keep the prototype');
+  assert.equal(app.minutes_playtime_forever,0,'the original overview must stay untouched');
+  assert.equal(hltbMinutesFor(2),120);
+  assert.equal(withHltbOverlay({app:{appid:3,minutes_playtime_forever:0},sortByType:SORT_VALUE,id:'x'}),null,
+    'a refused match must show nothing');
+  assert.equal(withHltbOverlay({app:{appid:99},sortByType:SORT_VALUE,id:'x'}),null,
+    'a game without times must show nothing');
+  assert.equal(withHltbOverlay({app,sortByType:4,id:'x'}),null,'other sorts must be untouched');
+  assert.equal(withHltbOverlay({app,sortByType:SORT_VALUE,id:'x',strCollectionId:'c'}),null,
+    'the capsule itself must not be rewritten, only its overlay');
+  assert.equal(withHltbOverlay({app,sortByType:SORT_VALUE,id:'x'})!==null,true);
+  setHltbRecords({});
+});
+
+test('rendering the capsule overlay under the HLTB sort shows hours',()=>{
+  setHltbRecords({'2':{main:7200}});
+  const tools=fixture();
+  const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Beta'})}};
+  const menu=installLunaMenu(w,tools);
+  class Overlay{}
+  const el=tools.jsx.jsx(Overlay,{app:{appid:2,minutes_playtime_forever:0},sortByType:SORT_VALUE,
+    context:{},id:'row-1'});
+  assert.equal(el.props.sortByType,4,'the hook must re-point the overlay');
+  assert.equal(el.props.app.minutes_playtime_forever,120);
+  const untouched=tools.jsx.jsx(Overlay,{app:{appid:2,minutes_playtime_forever:0},sortByType:4,
+    context:{},id:'row-2'});
+  assert.equal(untouched.props.app.minutes_playtime_forever,0,'normal sorts are untouched');
+  menu.dispose();
+  setHltbRecords({});
 });
 
 test('the rendered library dropdown carries the HowLongToBeat option',()=>{
