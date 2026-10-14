@@ -476,11 +476,12 @@ test('live artwork requests are applied through Steam own API',async()=>{
       setItem:(key,value)=>store.set(key,String(value)),removeItem:key=>store.delete(key)},
     Millennium:{callServerMethod:(plugin,fn,args)=>{
       assert.equal(fn,'SlsSgdbLive');
-      if(args.kind==='icon'){
+      const payload=JSON.parse(args.raw);
+      if(payload.kind==='icon'){
         return Promise.resolve(JSON.stringify({success:false,code:'no_live',error:'no icon slot'}));
       }
       return Promise.resolve(JSON.stringify({success:true,base64:'AAA',extension:'png',
-        type:args.kind==='grid'?0:3}));
+        type:payload.kind==='grid'?0:3}));
     }},
   };
   store.set(ARTWORK_LIVE_KEY,JSON.stringify({appid:1145360,kinds:['grid','wide','icon'],at:1234}));

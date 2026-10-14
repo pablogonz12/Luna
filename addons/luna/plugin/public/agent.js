@@ -90,7 +90,7 @@
         if (!apps || typeof apps.SetCustomArtworkForApp !== 'function') {
           throw Error('Steam artwork API unavailable');
         }
-        const live = await rpc(w, 'SlsSgdbLive', { appid, kind });
+        const live = await rpc(w, 'SlsSgdbLive', { raw: JSON.stringify({ appid, kind }) });
         if (!live || live.success !== true) {
           throw Error((live && live.error) || 'No live payload for this slot.');
         }
