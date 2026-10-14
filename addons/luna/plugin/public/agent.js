@@ -183,6 +183,125 @@
     return jsx && item ? { React: w.SP_REACT, jsx, item } : null;
   }
 
+  /* ---- HowLongToBeat as a library sort option --------------------------
+   * Steam builds "SORT BY" from a fixed enum and sorts through one exported
+   * comparator factory (`gQ`, found by the stable field names its comparators
+   * use). Luna appends its own option (value 12) to the rendered dropdown and
+   * wraps `gQ` so that value sorts by the locally cached main-story seconds,
+   * unknown games last. Steam treats unknown values with its alphabetical
+   * fallback, so a missing patch can never break the library. */
+  const SORT_VALUE = 12;
+  const SORT_LABEL = 'HowLongToBeat';
+  const SORT_ENUM_FINGERPRINT = [1, 4, 9, 11]; // alphabetical, hours, metacritic, review
+  let hltbRecords = {};
+  let sortModule = null;
+  let sortOriginal = null;
+  let sortPatched = false;
+  let sortSeen = 0;
+
+  function setHltbRecords(records) {
+    hltbRecords = records || {};
+  }
+
+  function hltbSecondsFor(appid) {
+    const record = hltbRecords[String(appid)];
+    if (!record || record.match === 'none') return null;
+    const main = Number(record.main) || 0;
+    const fallback = Number(record.all) || Number(record.extra) || 0;
+    const value = main || fallback;
+    return value > 0 ? value : null;
+  }
+
+  // Descending by main story, like Steam's own "hours played" order; a game
+  // without times sorts after every game that has them.
+  function hltbComparator(a, b) {
+    const left = hltbSecondsFor(a && a.appid);
+    const right = hltbSecondsFor(b && b.appid);
+    if (left == null && right == null) return 0;
+    if (left == null) return 1;
+    if (right == null) return -1;
+    if (right !== left) return right - left;
+    return String((a && a.display_name) || '').localeCompare(String((b && b.display_name) || ''));
+  }
+
+  function discoverSortModule(w) {
+    const chunks = w.webpackChunksteamui;
+    if (!chunks || !chunks.push) return null;
+    let require;
+    chunks.push([['sls-luna-sort-' + Date.now()], {}, r => { require = r; }]);
+    if (!require || !require.m) return null;
+    for (const [id, factory] of Object.entries(require.m)) {
+      const source = String(factory);
+      // Only the sort module carries the enum, the comparators and their
+      // field names together; requiring it is safe (already-loaded module).
+      if (!source.includes('CompareSortAs') || !source.includes('metacritic_score')
+          || !source.includes('rt_purchased_time')) continue;
+      let exports;
+      try { exports = require(id); } catch (_) { continue; }
+      if (exports && typeof exports.gQ === 'function' && typeof exports.xn === 'number') return exports;
+    }
+    return null;
+  }
+
+  function ensureSortPatch(w) {
+    let found = null;
+    try {
+      found = discoverSortModule(w);
+    } catch (_) { /* keep waiting for the next beat */ }
+    if (!found) return false;
+    if (found !== sortModule) {
+      sortModule = found;
+      sortPatched = false;
+    }
+    if (!sortPatched) {
+      sortOriginal = sortModule.gQ;
+      const wrapped = function (sortValue) {
+        if (sortValue === SORT_VALUE) return hltbComparator;
+        return sortOriginal(sortValue);
+      };
+      try {
+        Object.defineProperty(sortModule, 'gQ', { value: wrapped, configurable: true, writable: true });
+      } catch (_) {
+        try {
+          sortModule.gQ = wrapped;
+        } catch (error) {
+          console.warn('[SLS Luna] sort patch failed', error);
+          sortModule = null;
+          return false;
+        }
+      }
+      sortPatched = true;
+    }
+    return true;
+  }
+
+  // The sort dropdown is recognized by its option values, not its labels, so
+  // this works in every language. Other dropdowns never match the fingerprint.
+  function isSortDropdown(props) {
+    if (!props || !Array.isArray(props.rgOptions) || props.rgOptions.length < 8) return false;
+    const seen = new Set();
+    for (const option of props.rgOptions) {
+      const data = option && option.data;
+      if (typeof data !== 'number') return false;
+      seen.add(data);
+    }
+    return SORT_ENUM_FINGERPRINT.every(value => seen.has(value));
+  }
+
+  function withSortOption(props) {
+    if (!isSortDropdown(props)) return null;
+    sortSeen += 1;
+    if (props.rgOptions.some(option => option && option.data === SORT_VALUE)) return null;
+    return { ...props, rgOptions: props.rgOptions.concat([{ data: SORT_VALUE, label: SORT_LABEL }]) };
+  }
+
+  function refreshHltbData(w) {
+    return rpc(w, 'SlsHltbGet').then(out => {
+      if (out && out.success !== false) setHltbRecords(out.games || {});
+      return true;
+    }).catch(() => false);
+  }
+
   /* Install the Luna game-menu hook. Returns the registry (or null while the
      library module is still loading). `providedTools` lets tests inject the
      jsx/item pair instead of a live webpack module. */
@@ -330,6 +449,11 @@
         const next = inRender && base[key] ? base[key] : originals[key];
         if (!inRender) {
           const props = args[0];
+          // The library's SORT BY dropdown gains the cached-times option.
+          if (props && Array.isArray(props.rgOptions)) {
+            const withSort = withSortOption(props);
+            if (withSort) args[0] = withSort;
+          }
           const proto = type && type.prototype;
           if (isOuter(proto) && props && props.overview) {
             // Fresh build of the game menu: remember the exact target before
@@ -359,6 +483,10 @@
       register,
       unregister,
       list: () => actions.map(entry => ({ id: entry.id, label: entry.label })),
+      get sort() {
+        return { patched: sortPatched, value: SORT_VALUE, seen: sortSeen,
+          games: Object.keys(hltbRecords).length, module: sortModule !== null };
+      },
       get attached() { return wrappedModule !== null && jsx === wrappedModule; },
       ensure() {
         // The library UI can rebuild its bundle, which produces a new jsx
@@ -408,12 +536,20 @@
       }
     };
     arm();
-    const beat = () => { arm(); pushLibrary(w); };
+    const beat = () => {
+      arm();
+      pushLibrary(w);
+      refreshHltbData(w);
+      ensureSortPatch(w);
+    };
     if (typeof w.setInterval === 'function') w.setInterval(beat, 30000);
     if (typeof w.setTimeout === 'function') w.setTimeout(() => pushLibrary(w), 60000);
     pushLibrary(w);
+    ensureSortPatch(w);
+    refreshHltbData(w);
   }
 
-  return { HLTB_SEARCH, discoverMenuTools, openExternalUrl, searchUrlFor, nameOf, defaultActions,
-    collectLibrary, pushLibrary, rpc, installLunaMenu, bootLunaMenu };
+  return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, discoverMenuTools, openExternalUrl, searchUrlFor, nameOf,
+    defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords, hltbComparator, discoverSortModule,
+    ensureSortPatch, isSortDropdown, withSortOption, refreshHltbData, installLunaMenu, bootLunaMenu };
 });

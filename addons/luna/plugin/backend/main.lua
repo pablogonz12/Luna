@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.4.0'
+local VERSION = '0.5.0'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local data_dir = home .. '/.local/share/slssteam-integrations'
@@ -230,24 +230,24 @@ end
 local function fetch_rows(name)
   if not ok_http or type(http) ~= 'table'
       or type(http.get) ~= 'function' or type(http.post) ~= 'function' then
-    return nil, 'The Lumen HTTP module is unavailable; cannot reach HowLongToBeat.'
+    return nil, 'The Lumen HTTP module is unavailable; cannot reach HowLongToBeat.', 'unavailable'
   end
   local function token()
     local response, err = http.get(INIT_URL .. tostring(os.time()) .. '000',
       { headers = request_headers(), timeout = 15 })
-    if type(response) ~= 'table' then return nil, tostring(err or 'no response') end
+    if type(response) ~= 'table' then return nil, tostring(err or 'no response'), 'unavailable' end
     if response.status ~= 200 then
-      return nil, 'HowLongToBeat search init failed (HTTP ' .. tostring(response.status) .. ').'
+      return nil, 'HowLongToBeat search init failed (HTTP ' .. tostring(response.status) .. ').', 'unavailable'
     end
     local parsed = decode_body(response.body)
     if not parsed or type(parsed.token) ~= 'string' or parsed.token == '' then
-      return nil, 'HowLongToBeat returned no search token.'
+      return nil, 'HowLongToBeat returned no search token.', 'unavailable'
     end
     return parsed.token
   end
 
-  local current, why = token()
-  if not current then return nil, why end
+  local current, why, code = token()
+  if not current then return nil, why, code end
   local payload = json.encode(search_payload(name))
   for attempt = 1, 2 do
     local response, err = http.post(SEARCH_URL, payload, {
@@ -255,23 +255,25 @@ local function fetch_rows(name)
       timeout = 20,
     })
     if type(response) ~= 'table' then
-      return nil, 'HowLongToBeat request failed: ' .. tostring(err or 'no response')
+      return nil, 'HowLongToBeat request failed: ' .. tostring(err or 'no response'), 'unavailable'
     end
     if response.status == 403 and attempt == 1 then
-      current, why = token()
-      if not current then return nil, why end
+      current, why, code = token()
+      if not current then return nil, why, code end
     elseif response.status == 429 then
-      return nil, 'HowLongToBeat is rate-limiting searches; wait a minute and try again.'
+      return nil, 'HowLongToBeat is rate-limiting searches; wait a minute and try again.', 'rate_limit'
     elseif response.status ~= 200 then
-      return nil, 'HowLongToBeat search failed (HTTP ' .. tostring(response.status) .. ').'
+      return nil, 'HowLongToBeat search failed (HTTP ' .. tostring(response.status) .. ').', 'unavailable'
     else
       local parsed = decode_body(response.body)
       local rows = parsed and (parsed.data or parsed.results)
-      if type(rows) ~= 'table' then return nil, 'HowLongToBeat returned an unexpected response.' end
+      if type(rows) ~= 'table' then
+        return nil, 'HowLongToBeat returned an unexpected response.', 'unavailable'
+      end
       return rows
     end
   end
-  return nil, 'HowLongToBeat rejected the search token twice.'
+  return nil, 'HowLongToBeat rejected the search token twice.', 'unavailable'
 end
 
 -- ------------------------------------------------------------------ records
@@ -291,6 +293,18 @@ function M.record_from_row(row, quality, now)
     extra = number(row.comp_plus),
     completionist = number(row.comp_100),
     all = number(row.comp_all),
+    source = 'hltb-search',
+    fetchedAt = now or os.time(),
+  }
+end
+
+-- A refused search is remembered too: without it the panel would show the
+-- same unfetchable game as missing forever and queues would retry it.
+local function record_no_match(name, now)
+  return {
+    id = 0,
+    name = tostring(name or ''),
+    match = 'none',
     source = 'hltb-search',
     fetchedAt = now or os.time(),
   }
@@ -382,27 +396,42 @@ function M.register(registry)
   end
 
   -- User-triggered fetch for one game. Never runs by itself and never batches.
+  -- Failures carry a `code` so a queue can tell "this game has no match"
+  -- (skip and remember) from "the site is rate-limiting us" (wait and retry).
   registry.SlsHltbFetch = function(appid, name)
-    if not valid_appid(appid) then return reply({ success = false, error = 'Invalid app id.' }) end
+    if not valid_appid(appid) then
+      return reply({ success = false, code = 'invalid', error = 'Invalid app id.' })
+    end
     name = tostring(name or ''):gsub('^%s+', ''):gsub('%s+$', '')
-    if name == '' then return reply({ success = false, error = 'This game has no name to search for.' }) end
+    if name == '' then
+      return reply({ success = false, code = 'invalid', error = 'This game has no name to search for.' })
+    end
     local now = os.time()
     if now - last_fetch_at < M.min_fetch_interval then
-      return reply({ success = false, error = 'Wait a moment before the next HowLongToBeat request.' })
+      return reply({ success = false, code = 'throttled',
+        error = 'Wait a moment before the next HowLongToBeat request.' })
     end
     last_fetch_at = now
-    local rows, why = fetch_rows(name)
-    if not rows then return reply({ success = false, error = why }) end
+    local rows, why, code = fetch_rows(name)
+    local store = load_store()
+    local key = tostring(math.floor(tonumber(appid)))
+    if not rows then
+      return reply({ success = false, code = code or 'unavailable', error = why })
+    end
     local row, quality = M.pick_match(rows, name)
     if not row then
-      return reply({ success = false,
-        error = 'No confident HowLongToBeat match for "' .. name .. '". You can set the times manually.' })
+      -- Remember the refusal so the game stops counting as "missing" and the
+      -- queue does not retry it on every run.
+      store.games[key] = record_no_match(name, now)
+      local saved, serr = persist_store(store)
+      if not saved then return reply({ success = false, code = 'unavailable', error = tostring(serr) }) end
+      return reply({ success = false, code = 'no_match',
+        error = 'No confident HowLongToBeat match for "' .. name .. '". Set the times manually or try Search.' })
     end
-    local store = load_store()
     local record = M.record_from_row(row, quality, now)
-    store.games[tostring(math.floor(tonumber(appid)))] = record
+    store.games[key] = record
     local saved, serr = persist_store(store)
-    if not saved then return reply({ success = false, error = tostring(serr) }) end
+    if not saved then return reply({ success = false, code = 'unavailable', error = tostring(serr) }) end
     return reply({ success = true, record = record })
   end
 
