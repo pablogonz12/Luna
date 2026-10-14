@@ -2,7 +2,7 @@
   "name": "sls-luna",
   "common_name": "SLS Luna",
   "description": "Shell entry point for the SLSsteam-Moon add-ons: one Luna button, one settings menu, Luna's game right-click actions, and the local HowLongToBeat page, background pass and library sort",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "backendType": "lua",
   "include": [
     "public"

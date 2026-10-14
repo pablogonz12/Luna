@@ -834,6 +834,43 @@ test('the game page gains a How Long To Beat cell in the playtime style and drop
   assert.ok(cell,'the fixture kept the playtime cell');
 });
 
+function sparseGamePageFixture(document){
+  const cell=document.createElement('div');
+  cell.className='_cell _space';
+  const right=document.createElement('div');
+  right.className='_right';
+  const label=document.createElement('div');
+  label.className='_label';
+  label.textContent='Space Required';
+  const value=document.createElement('div');
+  value.className='_value';
+  value.textContent='620.81 MB';
+  right.append(label,value);
+  cell.appendChild(right);
+  const tooltip=document.createElement('div');
+  tooltip.className='tool-tip-source Focusable';
+  tooltip.appendChild(cell);
+  const row=document.createElement('div');
+  row.className='_row';
+  row.appendChild(tooltip);
+  document.body.appendChild(row);
+  return {row,tooltip};
+}
+
+test('the cell still appears when the page only shows Space Required',()=>{
+  const document=fakeDom();
+  const {row,tooltip}=sparseGamePageFixture(document);
+  const stat=updateHltbStat(document,{'1148610':{main:3600,match:'exact'}},'1148610');
+  assert.ok(stat,'the sparse page must still gain the cell');
+  assert.equal(stat.parentNode,row,'the cell belongs to the stat row');
+  const rightBox=stat.children[stat.children.length-1];
+  assert.equal(rightBox.children[0].textContent,'How Long To Beat');
+  assert.equal(rightBox.children[1].textContent,'1.0 hours');
+  updateHltbStat(document,{});
+  assert.equal(document.getElementById('sls-luna-hltb-stat'),null);
+  assert.ok(tooltip,'the space-required cell stays');
+});
+
 test('the SORT BY label is restored only while the HLTB sort is stored',()=>{
   const document=fakeDom();
   const header=document.createElement('div');
