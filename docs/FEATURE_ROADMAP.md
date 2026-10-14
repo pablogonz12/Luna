@@ -137,11 +137,47 @@ main-story and completionist times) and display the result in Luna. Do not build
 against an assumed official public API: this research did not confirm a supported
 public HLTB API or permission for automated scraping.
 
-**Implemented so far:** add-on `luna` 0.2.0 publishes the shared game right-click
-registry and a **HowLongToBeat** action that opens the game's search page in the
-user's browser through Steam's own URL handlers. The search happens in the
-browser's session; Luna sends no library data and stores no results. In-panel
-estimates remain unimplemented.
+**Implemented so far:** add-on `luna` 0.3.0 publishes the shared game right-click
+registry with two actions: **HowLongToBeat** opens the game's search page in the
+user's browser through Steam's own URL handlers, and **Fetch HowLongToBeat
+times** asks Luna's backend for one user-triggered lookup, which matches the
+title (refusing weak matches), stores the result as seconds in
+`~/.local/share/slssteam-integrations/hltb.json`, and never runs on its own or
+in batches. Manual hours per game are supported as corrections. The Steam-UI
+surfacing below reads that store.
+
+### In-Steam surfacing (design, verified against the installed client bundle)
+
+The goal is that HLTB data appears where Steam shows its own stats, not only in a
+Luna panel. Two integration points were located in the client's `steamui/sp.js`
+(re-check identifiers after every Steam update; if discovery fails, Luna must do
+nothing rather than guess):
+
+1. **Game page stat cell.** The app details page renders a row of stat cells
+   (Last Played, Play Time, Achievements) using one cell component and a shared
+   class group (`GameStat` / `GameStatRight` / `PlayBarLabel` / `PlaytimeRight`).
+   A Luna WebView agent can hook the same jsx layer it already hooks for the
+   right-click menu, detect that row while it renders, and append a
+   **HowLongToBeat** cell built with the same classes so Steam's own CSS places
+   it. It shows the cached values and is skipped when no data exists or the row
+   signature is unknown.
+2. **Library sort option.** The "SORT BY" dropdown is built from an enum
+   (`eL=1 … og=9, wD=10, LU=11`) with labels from `#Library_SortBy*` tokens, and
+   the real comparator comes from one exported factory (`gQ(sortValue) -> sort
+   function`) in a library module; the choice is persisted as
+   `AppGridDisplaySettings` in `localStorage`. Luna can append a
+   `{data: 12, label: 'HowLongToBeat'}` option to the dropdown's `rgOptions` and
+   wrap the exported `gQ` so value `12` sorts by cached HLTB hours (unknown
+   games after known ones, stable order). Steam treats unknown values with its
+   alphabetical fallback, so a failed/partial injection degrades to a normal
+   library instead of breaking it. Boot-order and persistence behavior
+   (restoring a stored `12` before Luna's patch lands) must be tested against a
+   live client before release.
+
+Both points consume the same local dataset described below; neither can work
+without a permitted data source. Detection must be locale-independent (match the
+numeric enum fingerprint, not translated labels), and all injected UI must be
+clearly attributable to Luna.
 
 Before implementation, choose a compliant data source and verify its current
 terms, attribution requirements, rate limits, and redistribution rules. If the
@@ -225,8 +261,9 @@ resolved.
 2. **Low-risk first feature:** prototype artwork search/preview with a mock provider
    and tests; resolve provider terms and reversible Steam artwork updates before
    enabling writes.
-3. **HLTB research:** determine whether a permitted source exists. The no-network
-   link fallback is implemented; data integration waits on that research.
+3. **HLTB research:** determine whether a permitted source exists. The
+   user-triggered fetch, local store and no-network link fallback are
+   implemented; nothing is fetched automatically.
 4. **Graphics discovery:** implement read-only detection for `lsfg-vk`, OptiScaler,
    GPU/driver/runtime facts, and unknown/unsupported states.
 5. **Optional installers:** separately validate install, update, rollback, and
