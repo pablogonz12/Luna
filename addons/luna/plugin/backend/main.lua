@@ -397,10 +397,17 @@ function M.register(registry)
   end
 
   -- One write surface for the switches above. Keys are whitelisted so this can
-  -- never grow into a general file-write primitive.
+  -- never grow into a general file-write primitive. The payload arrives either
+  -- as a JSON string (the panel wraps it in `raw`) or already decoded.
   registry.SlsLunaPrefsSet = function(raw)
-    local ok, entry = pcall(json.decode, tostring(raw or ''))
-    if not ok or type(entry) ~= 'table' or type(entry.key) ~= 'string' or #entry.key > 64 then
+    local entry = nil
+    if type(raw) == 'table' then
+      entry = raw
+    else
+      local ok, decoded = pcall(json.decode, tostring(raw or ''))
+      if ok and type(decoded) == 'table' then entry = decoded end
+    end
+    if not entry or type(entry.key) ~= 'string' or #entry.key > 64 then
       return reply({ success = false, error = 'Send {key, value}.' })
     end
     local kind = PREF_KEYS[entry.key]

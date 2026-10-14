@@ -403,5 +403,9 @@ out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'nonsense', value = tr
 assert(out.success == false, 'an unknown preference was accepted')
 out = call('SlsLunaPrefsSet', { raw = json.encode({ value = true }) })
 assert(out.success == false, 'a keyless preference was accepted')
+-- The bridge may hand the payload over already decoded; both shapes work.
+out = call('SlsLunaPrefsSet', { payload = { key = 'store_hide_followed', value = true } })
+assert(out.success == true and out.prefs.store_hide_followed == true,
+  'a decoded table payload must be accepted too')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs')
