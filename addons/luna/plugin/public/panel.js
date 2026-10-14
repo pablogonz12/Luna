@@ -1333,6 +1333,20 @@
       return body;
     }
 
+    // The remembered direction of the library sort; the agent picks it up
+    // through a storage event and rewrites the keys right away.
+    const HLTB_ORDER_KEY = 'slsLunaHltbOrder';
+    function hltbOrder() {
+      try {
+        return w.localStorage && w.localStorage.getItem(HLTB_ORDER_KEY) === 'long' ? 'long' : 'short';
+      } catch (_) { return 'short'; }
+    }
+    function setHltbOrder(order) {
+      try {
+        if (w.localStorage) w.localStorage.setItem(HLTB_ORDER_KEY, order);
+      } catch (_) { /* private mode; the order just stays default */ }
+    }
+
     // ---- HowLongToBeat page: cached times, missing games, on-demand fetch --
 
     const hltbHours = seconds => (Math.max(0, Number(seconds) || 0) / 3600).toFixed(1) + ' h';
@@ -1630,6 +1644,29 @@
         stats.appendChild(cell);
       });
       body.appendChild(stats);
+
+      const orderRow = document.createElement('div');
+      orderRow.className = 'sls-luna-row';
+      const orderText = document.createElement('div');
+      orderText.className = 'txt';
+      const orderName = document.createElement('div');
+      orderName.className = 'name';
+      const orderShort = hltbOrder() === 'short';
+      orderName.textContent = orderShort ? 'Library order: shortest first' : 'Library order: longest first';
+      const orderSub = document.createElement('div');
+      orderSub.className = 'sub';
+      orderSub.textContent = 'Applies to the library\u2019s HowLongToBeat sort. Games without times always stay at the end. '
+        + 'The library refreshes the new order by itself within a moment.';
+      orderText.append(orderName, orderSub);
+      const orderSwitch = document.createElement('div');
+      orderSwitch.className = 'sls-luna-switch' + (orderShort ? ' on' : '');
+      orderSwitch.appendChild(document.createElement('span'));
+      orderSwitch.onclick = () => {
+        setHltbOrder(orderShort ? 'long' : 'short');
+        repaintIfOpen();
+      };
+      orderRow.append(orderText, orderSwitch);
+      body.appendChild(orderRow);
 
       if (!library.length) {
         const note = document.createElement('p');

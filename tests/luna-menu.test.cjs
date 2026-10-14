@@ -375,27 +375,33 @@ test('pushLibrary sends the inventory once and skips identical payloads',async()
   assert.equal(quiet,false,'a failed push must not throw');
 });
 
-test('the sort key orders longest first under a plain string comparison',()=>{
+test('the sort key orders shortest first by default, longest games last, and no-data games at the very end',()=>{
   setHltbRecords({'1':{main:3600},'2':{main:7200},'3':{main:1800}});
   const long=hltbSortKey(2,'B');
   const short=hltbSortKey(1,'A');
   const shortest=hltbSortKey(3,'C');
-  assert.ok(long<short && short<shortest,'more seconds must compare earlier');
-  assert.ok(hltbSortKey(99,'Z')>shortest,'games without times must compare last');
+  assert.ok(shortest<short && short<long,'shortest main story must compare first by default');
+  assert.ok(hltbSortKey(99,'Z')>long,'games without times must compare last');
   assert.equal(hltbSortKey(2,'B').length,12,'ten digits, a colon and the name');
   setHltbRecords({'4':{match:'none'}});
-  assert.ok(hltbSortKey(4,'D')>hltbSortKey(3,'C'),'a refused match counts as no data');
+  assert.ok(hltbSortKey(4,'D')>long,'a refused match counts as no data');
   setHltbRecords({});
 });
 
-function sortableWindow(stored){
+function sortableWindow(stored,order){
+  const store=new Map();
+  if(stored!==undefined) store.set('AppGridDisplaySettings',JSON.stringify({eSortBy:stored}));
+  if(order!==undefined) store.set('slsLunaHltbOrder',order);
   return {
     appStore:{allApps:[
       {appid:1,display_name:'Alpha',sort_as:'alpha'},
       {appid:2,display_name:'Beta'},
       {appid:3,display_name:'Gamma',sort_as:'gamma'},
     ]},
-    localStorage:stored?{getItem:()=>JSON.stringify({eSortBy:stored})}:{getItem:()=>null},
+    localStorage:{getItem:key=>store.has(key)?store.get(key):null,
+      setItem:(key,value)=>store.set(key,String(value)),
+      removeItem:key=>store.delete(key)},
+    storage:store,
   };
 }
 
@@ -404,14 +410,41 @@ test('sorting rewrites sort_as while active and restores every original after',(
   const w=sortableWindow();
   const [one,two,three]=w.appStore.allApps;
   assert.equal(applyHltbSortAs(w),true);
-  assert.ok(two.sort_as<one.sort_as,'the longer game must compare first');
-  assert.ok(one.sort_as<three.sort_as,'a game without times must compare last');
+  assert.ok(one.sort_as<two.sort_as,'the shorter game must compare first');
+  assert.ok(two.sort_as<three.sort_as,'a game without times must compare last');
   assert.equal(applyHltbSortAs(w),true,'re-applying is safe');
   assert.equal(restoreHltbSortAs(),true);
   assert.equal(one.sort_as,'alpha','custom sort names must come back');
   assert.equal(two.sort_as,undefined,'a game without one must lose the property');
   assert.equal(three.sort_as,'gamma');
   assert.equal(restoreHltbSortAs(),false,'nothing left to restore');
+  setHltbRecords({});
+});
+
+test('changing the order rewrites the keys and pokes the grid to re-sort once',()=>{
+  setHltbRecords({'1':{main:3600},'2':{main:7200}});
+  const scheduled=[];
+  const base=sortableWindow(SORT_VALUE);
+  const w={appStore:base.appStore,localStorage:base.localStorage,storage:base.storage,
+    setTimeout:fn=>{scheduled.push(fn);return 0;}};
+  const [one,two]=w.appStore.allApps;
+  assert.equal(applyHltbSortAs(w),true);
+  assert.ok(one.sort_as<two.sort_as,'shortest first by default');
+  w.localStorage.setItem('slsLunaHltbOrder','long');
+  assert.equal(syncSortAs(w),true);
+  assert.ok(two.sort_as<one.sort_as,'longest first after the flip');
+  const changes=[];
+  const props={rgOptions:SORT_ENUM.slice(),selectedOption:SORT_VALUE,onChange:value=>changes.push(value)};
+  withSortOption(props,w);
+  assert.equal(scheduled.length,1,'the key change must schedule exactly one nudge');
+  scheduled.shift()();
+  assert.deepEqual(changes,[1],'the first poke keeps the keys in charge');
+  assert.equal(scheduled.length,1,'the second half of the nudge must follow');
+  scheduled.shift()();
+  assert.deepEqual(changes,[1,SORT_VALUE],'the second poke restores the HLTB sort');
+  withSortOption(props,w);
+  assert.equal(scheduled.length,0,'a clean state must not poke again');
+  restoreHltbSortAs();
   setHltbRecords({});
 });
 
@@ -442,7 +475,7 @@ test('syncSortAs follows the stored sort choice',()=>{
   const w=sortableWindow(SORT_VALUE);
   assert.equal(syncSortAs(w),true,'a stored HLTB choice must apply the keys');
   assert.notEqual(w.appStore.allApps[0].sort_as,'alpha');
-  w.localStorage.getItem=()=>JSON.stringify({eSortBy:4});
+  w.storage.set('AppGridDisplaySettings',JSON.stringify({eSortBy:4}));
   assert.equal(syncSortAs(w),true,'another choice must restore');
   assert.equal(w.appStore.allApps[0].sort_as,'alpha');
   assert.equal(syncSortAs(w),false,'nothing left to do when no keys are active');
