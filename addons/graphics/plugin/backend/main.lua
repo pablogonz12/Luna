@@ -255,7 +255,7 @@ local function deployed_files(install)
     for _, item in ipairs(items) do
       local name = tostring(item.name or '')
       local lower = name:lower()
-      if lower:find('optiscaler', 1, true) ~= nil or lower:find('nvngx', 1, true) ~= nil then
+      if lower:find('optiscaler', 1, true) ~= nil or lower == 'nvngx.dll' then
         found[#found + 1] = dir .. '/' .. name
       elseif item.is_directory and level < 1 and name ~= '' and name:sub(1, 1) ~= '.' then
         scan(dir .. '/' .. name, level + 1)

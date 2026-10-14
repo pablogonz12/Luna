@@ -2693,7 +2693,8 @@
     // page runs on its own origin and can only read it over RPC.
     async function setStoreHide(value) {
       try {
-        const out = await rpc(w, 'SlsLunaPrefsSet', { key: 'store_hide_followed', value: Boolean(value) });
+        const out = await rpc(w, 'SlsLunaPrefsSet',
+          { raw: JSON.stringify({ key: 'store_hide_followed', value: Boolean(value) }) });
         lunaInfo = Object.assign({}, lunaInfo || {}, { prefs: out.prefs });
       } catch (error) {
         betaNotice = 'Could not save the store preference: '
