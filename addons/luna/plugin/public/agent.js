@@ -332,11 +332,13 @@
   function withSortOption(props, w) {
     if (!isSortDropdown(props)) return null;
     sortSeen += 1;
-    // The dropdown reports the live choice; keep the keys in step even when
-    // the stored setting is stale or the list was reloaded.
+    // Only the header dropdown reports the live selection. The same option
+    // list also renders as a context menu with no `selectedOption`, and that
+    // menu must never touch the keys - mistaking it for "another sort chosen"
+    // used to drop them and leave the library alphabetical.
     if (props.selectedOption === SORT_VALUE) {
       if (!sortAsPatched) applyHltbSortAs(w);
-    } else if (sortAsPatched) {
+    } else if (props.selectedOption !== undefined && sortAsPatched) {
       restoreHltbSortAs();
     }
     const appended = props.rgOptions.some(option => option && option.data === SORT_VALUE)
