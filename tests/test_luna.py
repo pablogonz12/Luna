@@ -221,6 +221,40 @@ class LunaTestCase(unittest.TestCase):
         self.assertIn('patched', result.stdout)
         self.assertIn('same', result.stdout)
 
+    def test_preflight_reports_required_and_optional_components_read_only(self):
+        result = self.luna('preflight')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r'Lumen runtime\s+present')
+        self.assertRegex(result.stdout, r'LuaTools backend\s+present')
+        self.assertRegex(result.stdout, r'CloudRedirect\s+not detected')
+        self.assertRegex(result.stdout, r'Decky Loader\s+not detected')
+        self.assertRegex(result.stdout, r'Compressor CLI\s+not detected')
+        self.assertFalse((self.home / 'homebrew').exists())
+        self.assertFalse((self.home / '.local/share/CloudRedirect').exists())
+
+    def test_preflight_detects_optional_component_artifacts_without_installing_them(self):
+        cloud = self.home / '.local/share/CloudRedirect'
+        cloud.mkdir(parents=True)
+        (cloud / 'cloud_redirect.so').write_bytes(b'hook')
+        (cloud / 'cloud_redirect_cli').write_bytes(b'cli')
+        decky = self.home / 'homebrew/services'
+        decky.mkdir(parents=True)
+        loader = decky / 'PluginLoader'
+        loader.write_bytes(b'loader')
+        loader.chmod(0o755)
+        (decky / '.loader.version').write_text('v3-test')
+        compressor = self.home / '.local/bin/btrfs-game-compressor'
+        compressor.parent.mkdir(parents=True)
+        compressor.write_bytes(b'tool')
+        compressor.chmod(0o755)
+
+        result = self.luna('preflight')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r'CloudRedirect\s+present')
+        self.assertRegex(result.stdout, r'Decky Loader\s+present')
+        self.assertIn('(version v3-test)', result.stdout)
+        self.assertRegex(result.stdout, r'Compressor CLI\s+present')
+
     def test_status_flags_a_modified_payload(self):
         self.luna('install')
         (self.addons / 'playtime/public/panel.js').write_text('// changed\n')

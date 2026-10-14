@@ -50,6 +50,13 @@ That is enough to host the current add-ons without changing Lumen's own logic:
 4. the control channel's `polyfill` flag is enabled only when the bridge loaded,
    which is what lets an add-on talk to its backend from SharedJSContext.
 
+The `luna` add-on uses that same control channel to publish
+`window.__SlsLunaMenu`, a shared registry of per-game right-click actions. The
+first action (HowLongToBeat) opens the game's search page through Steam's URL
+handlers; other add-ons register their own actions instead of each hooking the
+library's jsx layer separately. Playtime keeps its own menu hook because it
+predates the registry and must stay independent.
+
 ## Why the current installer uses one patch and not four
 
 The patcher edits four places in `boot.lua` and refuses to run unless each anchor

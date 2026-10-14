@@ -50,6 +50,7 @@ FIRST_PARTY = ('luna', 'compressor')
 ADDON_FILES = {
     'luna': (
         ('plugin/backend/main.lua', 'backend/main.lua'),
+        ('plugin/public/agent.js', 'public/agent.js'),
         ('plugin/public/panel.js', 'public/panel.js'),
         ('plugin/plugin.json', 'plugin.json'),
     ),
@@ -202,6 +203,72 @@ def installed_addons():
     return tuple(name for name in ADDONS if (addons_dir() / name).is_dir())
 
 
+def component_inventory():
+    """Read-only inventory of the base stack and optional external tools."""
+    home_dir = home()
+    root = lumen_root()
+    moon_wrapper = home_dir / '.local/share/SLSsteam/path/steam'
+    lumen_boot = root / 'lua' / 'boot.lua'
+    luatools_backend = root / 'luatools' / 'backend' / 'main.lua'
+
+    cloud_dir = home_dir / '.local/share/CloudRedirect'
+    cloud_files = (cloud_dir / 'cloud_redirect.so', cloud_dir / 'cloud_redirect_cli')
+    cloud_present = tuple(path for path in cloud_files if path.is_file())
+    if len(cloud_present) == len(cloud_files):
+        cloud_state = 'present'
+    elif cloud_present:
+        cloud_state = 'partial'
+    else:
+        cloud_state = 'not detected'
+    cloud_detail = ', '.join(str(path) for path in cloud_present) or str(cloud_dir)
+
+    decky_services = home_dir / 'homebrew' / 'services'
+    decky_loader = decky_services / 'PluginLoader'
+    decky_version = decky_services / '.loader.version'
+    if decky_loader.is_file() and os.access(decky_loader, os.X_OK):
+        decky_state = 'present'
+        try:
+            version = decky_version.read_text().strip() if decky_version.is_file() else ''
+        except OSError:
+            version = ''
+        decky_detail = '%s%s (service state not checked)' % (
+            decky_loader, (' (version ' + version + ')') if version else '')
+    elif decky_services.exists():
+        decky_state = 'partial'
+        decky_detail = str(decky_services)
+    else:
+        decky_state = 'not detected'
+        decky_detail = str(decky_services)
+
+    compressor_candidates = []
+    configured = os.environ.get('SLS_COMPRESSOR_BIN')
+    if configured:
+        compressor_candidates.append(Path(configured).expanduser())
+    compressor_candidates.extend((
+        home_dir / '.local/bin/btrfs-game-compressor',
+        Path('/usr/local/bin/btrfs-game-compressor'),
+        Path('/usr/bin/btrfs-game-compressor'),
+        home_dir / 'Documents/Scripts/btrfs-game-compressor/btrfs-game-compressor',
+    ))
+    compressor = next((path for path in compressor_candidates
+                       if path.is_file() and os.access(path, os.X_OK)), None)
+
+    return (
+        ('slsteam-moon wrapper', 'present' if moon_wrapper.is_file() else 'not detected', str(moon_wrapper)),
+        ('Lumen runtime', 'present' if lumen_boot.is_file() else 'not detected', str(lumen_boot)),
+        ('LuaTools backend', 'present' if luatools_backend.is_file() else 'not detected', str(luatools_backend)),
+        ('CloudRedirect', cloud_state, cloud_detail),
+        ('Decky Loader', decky_state, decky_detail),
+        ('Compressor CLI', 'present' if compressor else 'not detected', str(compressor or compressor_candidates[0])),
+    )
+
+
+def print_component_inventory():
+    print('components:')
+    for name, state, detail in component_inventory():
+        print('  %-20s %-12s %s' % (name, state, detail))
+
+
 # --------------------------------------------------------------------------- apply
 
 class Apply:
@@ -262,6 +329,7 @@ def cmd_preflight(options):
         manifests = sum(1 for entry in plugdir.glob('*.lua') if entry.stem.isdigit())
     print('manifests  : %d' % manifests)
     print('installed  : %s' % (', '.join(installed_addons()) or 'none'))
+    print_component_inventory()
     boot = boot_file()
     if boot.is_file():
         content = boot.read_text(errors='replace')
@@ -300,6 +368,7 @@ def cmd_status(options):
              'present' if boot.with_name('boot.lua.sls-addons.original').is_file() else 'absent'))
     print('processes  : steam=%s lumen=%s'
           % (process_running('steam') or process_running('steamwebhelper'), process_running('lumen')))
+    print_component_inventory()
     rows = plan(targets)
     print('%-9s %-22s %s' % ('add-on', 'file', 'state'))
     degraded = False

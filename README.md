@@ -1,67 +1,62 @@
-# SLS Luna
+# Luna
 
-Repository: `pgm1207/Luna`. Project name: SLS Luna.
+### One curated bundle for a better Linux Steam setup.
 
-SLS Luna (the **Luna** repository) is an independent Steam integration and add-on project. It combines existing upstream components with Luna-maintained features and is intended to provide one useful menu for them. It is not a fork or replacement for Moon or Lumen.
+Luna brings useful Steam integrations, tools, and Luna-made features together in
+one installation—with a focused menu to manage the Luna features. Instead of
+rebuilding every underlying component, Luna installs and coordinates proven
+projects, then adds features designed to work well together.
 
-> **Project status:** SLS Luna is not a fork of LuaTools-Moon, slsteam-moon, or Lumen. Its UI and add-ons are maintained here. Integration with Lumen's existing backend capabilities is planned; this repository does not include Lumen's menu or backend source.
+> **Private preview · Linux Steam · In active development**
+>
+> Luna is an integrator and feature bundle, **not a fork or replacement** for
+> slsteam-moon, Lumen, LuaTools-Moon, or Decky Loader. The one-menu goal is still
+> being built: upstream settings, updates, fixes, and cloud-save pages are not all
+> in Luna yet, and Luna does not currently hide or remove upstream menus.
 
-## Upstream projects and credits
+## What you get today
 
-- **slsteam-moon** ([source](https://github.com/swwayps/slsteam-moon)) is the native Steam integration this stack targets. It is itself a fork of **SLSsteam** ([source](https://github.com/AceSLS/SLSsteam)); SLS Luna does not claim authorship of either project's core code.
-- **Lumen** ([source](https://github.com/swwayps/lumen)) is the runtime and UI/backend host. Luna is an add-on to Lumen; this project does not claim authorship of Lumen. Its repository currently has no visible license, so we do not copy or redistribute its code or binaries without clarification.
-- **LuaTools-Moon** ([source](https://github.com/swwayps/luatools-moon)) currently provides the base installer and a backend prerequisite for Luna. The installer calls its upstream installer when the base stack is absent; Luna does not fork or copy its plugin source. Its README credits the Linux port lineage and other projects it builds on.
-- **CloudRedirect** ([source](https://github.com/Selectively11/CloudRedirect)) is a separate optional project for cloud-save functionality; its code is not owned by SLS Luna.
+| Feature | Status | What it does |
+| --- | --- | --- |
+| **Luna menu shell** | Available | One place for Luna's installed add-on pages |
+| **Playtime** | Available | Track and edit local playtime for Steam shortcuts and non-Steam games |
+| **Presence** | Available | Show selected non-Steam activity to friends through the supported integration |
+| **Compressor** | Available | Manage Btrfs game compression jobs and progress from Steam |
+| **One-step setup** | Available, private preview | Install the upstream base when needed, then add Luna's integrity-checked payloads |
+| **Cloud saves / CloudRedirect** | Optional upstream component; Luna page planned | CloudRedirect is separate software; a unified Luna page is not implemented yet |
+| **Decky Loader** | Planned / compatibility review | Optional install is being evaluated; Decky is a separate project and is not installed by Luna today |
+| **Moon settings, updates, fixes** | Planned | Bring useful controls into Luna's navigation without copying upstream UI code |
+| **Artwork picker / right-click actions** | Planned; the action menu is wired | A game right-click action can now open Luna features; artwork search/apply is still to come |
+| **`lsfg-vk` / frame generation** | Research/design | Optional setup and per-game controls only after upstream, hardware, and platform compatibility gates |
+| **OptiScaler / OptiClient** | Planned | Unified Luna management is a goal; OptiClient is a separate third-party project, and per-game support must be validated |
+| **HowLongToBeat (HLTB)** | Search link available; estimates planned | Right-click search opens HowLongToBeat in your browser; in-panel estimates await a permitted data source |
+| **Rust runtime alternative** | Feasibility study | Explore a Luna-owned runtime path; no Lumen replacement exists, and Steam UI injection still needs a web/CEF bridge |
 
-See [Third-party notices](THIRD_PARTY_NOTICES.md) for the current provenance and licensing notes, and [Contributing](CONTRIBUTING.md) for the planned upstream workflow.
+The Compressor page requires the separate
+[btrfs-game-compressor](https://github.com/pgm1207/btrfs-game-compressor) tool;
+the current installer does not install or update that executable.
 
-## How the stack fits together
+## How Luna fits into the stack
 
 ```text
-Steam
-└── slsteam-moon             native Steam integration (based on SLSsteam)
-    └── Lumen                 runtime/bridge into Steam's UI
-        ├── LuaTools-Moon     current base/plugin dependency
-        └── Luna             installer + Luna-owned add-ons and menu shell
+Steam client
+└── slsteam-moon       native Steam integration
+    └── Lumen           Steam UI injection, runtime, and RPC host
+        ├── LuaTools-Moon   current base/plugin dependency
+        └── Luna           installer + Luna-owned menu and add-ons
 ```
 
-The goal is one coherent Luna experience—not to copy upstream projects into one undifferentiated codebase. Moon and Lumen remain separate dependencies; Luna owns its installer/orchestration, add-ons, and UI code. Some of the planned pages are not implemented yet, and the existing upstream UI is not yet replaced.
-
-## What Luna is (and is not)
-
-Think of Luna as an **integrator/distribution with its own features**:
-
-- **Not a fork:** Luna has not copied/forked LuaTools-Moon, slsteam-moon, or Lumen.
-- **Installer/orchestrator:** it can set up the upstream base and install Luna's
-  verified add-ons on top. A complete existing base is reused, not reinstalled.
-- **Luna-owned features:** Playtime, Presence, Compressor, and the menu shell are
-  maintained in this project or its explicitly pinned companion repositories.
-- **Long-term UI goal:** move useful controls into the Luna shell and offer one
-  Luna entry point. Right now the shell exists, but Lumen/LuaTools pages have not
-  all been ported; do not expect the upstream menu/button to be gone yet.
-
-## Current implementation
-
-Lumen injects code into the Steam client and exposes a shared backend dispatch registry. The current Luna installer registers one shared bridge in Lumen's `lua/boot.lua` and installs add-ons under `~/.local/share/Lumen/sls-addons/<name>`. Each add-on project can be installed independently; **Luna owns the combination**:
-
-| Add-on | Version | What it does |
-| --- | --- | --- |
-| `luna` | from the pinned payload | shared shell, navigation and feature composition |
-| `playtime` | from the pinned payload | counts non-Steam games while they run; every manifest and shortcut stays editable |
-| `presence` | from the pinned payload | publishes a hidden placeholder shortcut so friends see the game being played |
-| `compressor` | from the pinned payload | scan, settings, queue, progress and compaction UI for the external btrfs-game-compressor tool |
-
-The compressor add-on drives the separate
-[btrfs-game-compressor](https://github.com/pgm1207/btrfs-game-compressor) CLI.
-It is discovered at `~/.local/bin/btrfs-game-compressor` (or from
-`SLS_COMPRESSOR_BIN`); Luna never installs or updates the tool itself.
+Luna's job is to make the overall setup easier to install and use—not to claim
+ownership of the upstream runtime or native Steam integration. Luna's installer
+keeps dependencies identifiable and installs Luna's own verified add-ons on top.
+Today, the LuaTools backend is still required by Luna's integration, so the base
+plugin is retained. Removing that dependency and consolidating the overlapping
+menus requires completing and validating the Luna page integrations first.
 
 ## Install
 
-For a fresh installation, the top-level installer sets up the upstream
-slsteam-moon/Lumen/LuaTools base first, then installs the pinned Luna add-ons.
-The repository is currently private, so the public one-liner will only work after
-we explicitly make the repository public. For now, use an authenticated clone:
+The repository is currently **private**, so installation requires GitHub access.
+Clone it, then run the installer:
 
 ```bash
 git clone https://github.com/pgm1207/Luna.git
@@ -69,97 +64,64 @@ cd Luna
 bash install.sh
 ```
 
-It calls a checksum-verified, commit-pinned LuaTools-Moon installer rather than
-copying or maintaining that installer. When a complete base is already present,
-it skips the upstream installer and only layers SLS Luna on top. It does not
-silently upgrade an existing Moon/Lumen installation. The base installer is run
-with `--nolaunch` so Luna is installed before Steam is started again.
+The installer reuses a complete existing LuaTools-Moon stack. If the base is
+missing, it invokes the upstream installer at a pinned commit and verifies its
+SHA256 before running it; Steam is not auto-launched until Luna's add-ons are
+installed. Luna add-on payloads are separately pinned and integrity-checked.
+Existing Moon/Lumen installations are not silently upgraded. A partial base is a
+stop condition, not an invitation for Luna to remove or replace it.
 
-For a checkout, or to manage an existing installation directly:
-
-```bash
-bash scripts/preflight.sh          # read-only: environment, state, and refusals
-bash scripts/install-local.sh      # Steam must be closed; installs every add-on
-bash scripts/status.sh             # what is installed and whether it matches
-```
-
-`install-local.sh` accepts the add-on projects' flags plus its own:
+For an existing installation, inspect before changing anything:
 
 ```bash
-bash scripts/install-local.sh --only playtime     # one add-on instead of all
-bash scripts/install-local.sh --dry-run           # print the plan, write nothing
-bash scripts/install-local.sh --force             # replace files that differ
+bash scripts/preflight.sh          # read-only environment and safety checks
+bash scripts/status.sh              # installed files and drift
+bash scripts/install-local.sh --dry-run
+bash scripts/install-local.sh       # Steam must be fully closed
 ```
 
-Uninstall removes one add-on and leaves the others working; removing the **last**
-one restores `boot.lua` from its backup before deleting the payload it points at:
+Use `--only NAME` to install one add-on, or `--force` only after reviewing the
+differences. See the [installation roadmap](docs/INSTALL_PLAN.md) for the planned
+optional-component flow, including Decky Loader and CloudRedirect.
+
+## What Luna protects
+
+- Installation refuses while Steam or the Lumen sidecar is running.
+- Payloads are pinned by source commit and SHA256; unexpected drift fails closed.
+- Lumen's boot integration is checked before it is changed and restored on rollback.
+- Playtime, presence, and compressor user data live outside add-on directories and
+  are preserved during installation and removal.
+- Current Luna installers/add-ons do not edit Steam game manifests or game files.
+  Future artwork and graphics features may need scoped game/library changes; they
+  must be previewed, backed up, and reversible before release.
+
+## Project identity and credits
+
+Luna is an independent integration/distribution project. It is **not** a fork of
+[LuaTools-Moon](https://github.com/swwayps/luatools-moon),
+[slsteam-moon](https://github.com/swwayps/slsteam-moon), or
+[Lumen](https://github.com/swwayps/lumen). Those projects provide components that
+Luna currently uses; Luna's own menu and features are maintained here and in its
+credited companion repositories. Decky Loader and CloudRedirect are also separate
+projects, not Luna-owned code.
+
+See [third-party notices](THIRD_PARTY_NOTICES.md) for provenance and license
+status, [project direction](docs/PROJECT_DIRECTION.md) for scope, the
+[feature roadmap](docs/FEATURE_ROADMAP.md) for planned artwork, graphics,
+right-click, and HLTB integrations, and [contributing](CONTRIBUTING.md) for the
+collaboration model. Lumen's repository
+had no visible license when last checked; Luna does not copy or redistribute its
+source.
+
+## Development checks
 
 ```bash
-bash scripts/uninstall-local.sh --only presence
-bash scripts/uninstall-local.sh                   # everything
+node --test tests/*.test.cjs
+python3 -m unittest discover -s tests -p 'test_*.py'
+bash scripts/test-backend.sh
+python3 scripts/luna.py verify --sources
 ```
 
-Your playtime ledger, presence mapping and compressor state are never touched:
-they live in `~/.local/share/slssteam-integrations`, not in the add-on
-directories.
-
-## What it refuses to do
-
-Fail-closed by design, because every one of these has bitten this stack:
-
-* **Steam is running** - modifying Lumen under a live client. Close it via
-  *Steam → Exit*.
-* **A Lumen sidecar is still alive** from an earlier session. It keeps the old
-  `boot.lua` in memory, so a successful install looks like it did nothing. Luna
-  never kills it for you:
-  `pkill -u $(id -u) -x lumen`
-* **`boot.lua` has drifted** from the layout the patcher knows. Nothing is
-  written.
-* **An installed file differs from the pinned payload** - for example a local
-  edit or a newer build from an add-on's own installer. Use `--dry-run` to see
-  the diff, then `--force` if you mean it.
-* **The backup is missing** on uninstall. Nothing is deleted while Lumen is
-  patched, so a failed restore cannot leave a live bridge pointing at removed
-  files.
-
-Every write is transactional: if anything fails partway, the previous files are
-restored and the `boot.lua` patch is reverted.
-
-## Pinned payloads
-
-The add-on code in this repository is not a fork. `addons/` and the shared
-`bridge/bridge.lua` + `scripts/patch-lumen.py` are extracted from the add-on
-projects at exact commits and recorded with their sha256 in
-`vendor/MANIFEST.json`:
-
-```bash
-python3 scripts/luna.py verify                # payloads match the manifest
-python3 scripts/luna.py verify --sources      # ...and the local source checkouts
-bash scripts/vendor-update.sh                 # re-pin from the source checkouts
-```
-
-That is why installing Luna needs no network and no second checkout, and why what
-gets installed is exactly what was reviewed.
-
-## Requirements
-
-Native Linux Steam plus the [LuaTools-Moon stack](https://github.com/swwayps/luatools-moon)
-(Lumen + slsteam-moon + LuaTools plugin). The LuaTools backend is currently
-required by Luna's integration contract; do not use upstream `--noplugin` yet.
-Steam's manifest directory, SLSsteam configuration and your games are never
-modified.
-
-## Tests
-
-```bash
-python3 -m unittest discover -s tests -p 'test_*.py'   # installer, refusals, rollback, data safety
-bash scripts/test-backend.sh                           # bridge and shipped add-on backends
-python3 scripts/luna.py verify                         # pinned payload integrity
-```
-
-## Upstream collaboration
-
-The current installer patches `boot.lua` because the installed Lumen version has
-no stable add-on hook. `docs/UPSTREAM.md` describes a possible upstream hook proposal.
-The custom Lumen integration is described in `docs/PROJECT_DIRECTION.md`; it is
-planned work and should not be presented as already supported by upstream Lumen.
+Luna is a private preview. Versions, supported distributions, optional installs,
+and feature availability will be documented here as they are implemented and
+tested.
