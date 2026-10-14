@@ -16,7 +16,7 @@
         }
       },
       "plugin_version": "0.2.0",
-      "source_commit": "0419ed71a24670783450c77976296d82f8681e34",
+      "source_commit": "4fe9e81d871b983d69cbc32705ef0e6bdd894d29",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "luna": {
@@ -30,7 +30,7 @@
           "source_path": "plugin/plugin.json"
         },
         "public/agent.js": {
-          "sha256": "324d492b6dfd89aee01eae14d1696368d68416c2456fcef4518b343e650ea559",
+          "sha256": "ba44bcf6632d56ccef0477ea68f5a44c6afdafa8cb8b687e63cb4c84955c0045",
           "source_path": "plugin/public/agent.js"
         },
         "public/panel.js": {
@@ -39,7 +39,7 @@
         }
       },
       "plugin_version": "0.5.0",
-      "source_commit": "0419ed71a24670783450c77976296d82f8681e34",
+      "source_commit": "4fe9e81d871b983d69cbc32705ef0e6bdd894d29",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -89,7 +89,7 @@
       "source_repo": "https://github.com/pgm1207/slsteam-presence"
     }
   },
-  "generated": "2026-10-14T15:48:22+0200",
+  "generated": "2026-10-14T15:52:41+0200",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "fa3e18871c8a4ca4f0da432f5de0242c741e3299e3d35ba8af143b25b088b101",
