@@ -32,6 +32,12 @@ local function file_info(path)
   return { path = path, size = size or 0 }
 end
 
+-- Lua tables with no entries encode as objects, so every list that crosses the
+-- RPC boundary is marked as a real array (the panel tolerates both).
+local function as_array(value)
+  return json.array(value or {})
+end
+
 -- ------------------------------------------------------------------ system
 
 function M.parse_os_release(text)
@@ -92,7 +98,7 @@ function M.gpu_report(root)
       }
     end
   end
-  return out
+  return as_array(out)
 end
 
 -- ------------------------------------------------------------------ lsfg-vk
@@ -159,6 +165,8 @@ function M.lsfg_report(home_dir, system_dirs)
   for _, path in ipairs(pluginCandidates) do
     if fs.exists(path) then report.decky_plugins[#report.decky_plugins + 1] = path end
   end
+  report.layers = as_array(report.layers)
+  report.decky_plugins = as_array(report.decky_plugins)
   return report
 end
 
@@ -198,7 +206,7 @@ function M.optiscaler_report(home_dir)
       end
     end
   end
-  return found
+  return as_array(found)
 end
 
 -- ---------------------------------------------------- OptiScaler Client (read)
@@ -283,7 +291,7 @@ function M.optiscaler_client(home_dir)
           path = install,
           exists = install ~= '' and fs.exists(install),
           installed = entry.IsOptiscalerInstalled == true,
-          files = deployed_files(install),
+          files = as_array(deployed_files(install)),
           fsr_version = tostring(entry.FsrVersion or ''),
           fsr_native = entry.FsrIsNative == true,
           fsr_swapped = entry.IsFsr4DllSwapped == true,
@@ -302,7 +310,7 @@ function M.optiscaler_client(home_dir)
     app_dir = fs.exists(app_dir) and app_dir or '',
     managed = #games,
     versions_cached = (ok_cache and type(cache_versions) == 'table') and #cache_versions or 0,
-    games = games,
+    games = as_array(games),
   }
 end
 
@@ -337,6 +345,7 @@ function M.steam_report(home_dir)
     end
   end
   report.gamescope = fs.exists('/usr/bin/gamescope') or fs.exists('/usr/local/bin/gamescope')
+  report.runtimes = as_array(report.runtimes)
   return report
 end
 
