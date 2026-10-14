@@ -1351,13 +1351,33 @@
       schedule(resolve, ms);
     });
 
+    // The background flag remembers that the user asked for a full pass, so it
+    // survives closing the menu and even a Steam restart. Stopping is explicit.
+    const HLTB_BACKGROUND_KEY = 'slsLunaHltbBackground';
+    function hltbBackground() {
+      try {
+        return Boolean(w.localStorage && w.localStorage.getItem(HLTB_BACKGROUND_KEY) === '1');
+      } catch (_) { return false; }
+    }
+    function setHltbBackground(on) {
+      try {
+        if (!w.localStorage) return;
+        if (on) w.localStorage.setItem(HLTB_BACKGROUND_KEY, '1');
+        else w.localStorage.removeItem(HLTB_BACKGROUND_KEY);
+      } catch (_) { /* private mode or quota; the run itself still works */ }
+    }
+
+    const repaintIfOpen = () => {
+      if (document.getElementById(OVERLAY_ID)) paint();
+    };
+
     async function refreshHltb() {
       try {
         hltb = await rpc(w, 'SlsHltbGet');
       } catch (error) {
         hltb = hltb || {};
       }
-      paint();
+      repaintIfOpen();
     }
 
     async function forgetHltb(row) {
@@ -1368,7 +1388,7 @@
         await refreshHltb();
       } catch (error) {
         hltbNotice = String(error && error.message ? error.message : error);
-        paint();
+        repaintIfOpen();
       }
     }
 
@@ -1380,7 +1400,7 @@
         await refreshHltb();
       } catch (error) {
         hltbNotice = String(error && error.message ? error.message : error);
-        paint();
+        repaintIfOpen();
       }
     }
 
@@ -1430,17 +1450,19 @@
 
     // Sequentially fetch every missing game, keeping the site's own spacing.
     // Unmatchable games are skipped and remembered; rate limiting pauses and
-    // retries once, then stops and says why.
+    // retries once, then stops and says why. The run keeps going with the menu
+    // closed - the overlay is never re-opened by it - and it resumes after a
+    // Steam restart while the background flag is set.
     async function runHltbQueue(rows) {
       if (!rows.length || (hltbQueue && hltbQueue.running)) return;
+      setHltbBackground(true);
       hltbQueue = { running: true, done: 0, skipped: 0, total: rows.length,
         label: rows[0].name, error: '', wait: 0 };
-      paint();
+      repaintIfOpen();
       for (const row of rows) {
         if (!hltbQueue || !hltbQueue.running) break;
-        if (!document.getElementById(OVERLAY_ID)) { hltbQueue.running = false; return; }
         hltbQueue.label = row.name;
-        paint();
+        repaintIfOpen();
         try {
           const result = await fetchHltbWithPolicy(row, hltbQueue);
           if (result.skipped) hltbQueue.skipped += 1;
@@ -1448,11 +1470,11 @@
           const fresh = await rpc(w, 'SlsHltbGet').catch(() => null);
           if (fresh && fresh.success !== false) hltb = fresh;
           hltbNotice = null;
-          paint();
+          repaintIfOpen();
         } catch (error) {
           hltbQueue.running = false;
           hltbQueue.error = String(error && error.message ? error.message : error);
-          paint();
+          repaintIfOpen();
           return;
         }
         await sleep(2200);
@@ -1460,8 +1482,25 @@
       if (hltbQueue) {
         hltbQueue.running = false;
         hltbQueue.label = '';
-        paint();
+        // Everything queued was processed (user stops clear the flag first).
+        setHltbBackground(false);
+        repaintIfOpen();
       }
+    }
+
+    // A background pass resumes whenever fresh data arrives (menu open, the
+    // boot refresh, or the Refresh button) and the user has not stopped it.
+    function maybeAutoFetch() {
+      if (hltbQueue && hltbQueue.running) return;
+      if (!hltbBackground()) return;
+      const records = (hltb && hltb.games) || {};
+      const library = (hltb && hltb.library) || [];
+      const missing = buildHltbRows(records, library, '').filter(row => !row.record);
+      if (!missing.length) {
+        setHltbBackground(false);
+        return;
+      }
+      runHltbQueue(missing);
     }
 
     function hltbSmallButton(label, handler) {
@@ -1571,7 +1610,9 @@
       info.className = 'sls-luna-note';
       info.innerHTML = 'Times come from HowLongToBeat, fetched <strong>on demand</strong> (never automatically) and '
         + 'stored locally. Fetching waits between games because the site rate-limits searches; games it cannot '
-        + 'match are skipped and remembered. You can correct any match with Edit; nothing here changes Steam files.';
+        + 'match are skipped and remembered. A started pass <strong>keeps running in the background</strong> - with '
+        + 'this window closed, and across Steam restarts - until it finishes or you stop it. '
+        + 'You can correct any match with Edit; nothing here changes Steam files.';
       body.appendChild(info);
 
       const stats = document.createElement('div');
@@ -1615,7 +1656,11 @@
         const stop = document.createElement('button');
         stop.className = 'sls-luna-btn secondary';
         stop.textContent = 'Stop after current';
-        stop.onclick = () => { hltbQueue.running = false; paint(); };
+        stop.onclick = () => {
+          if (hltbQueue) hltbQueue.running = false;
+          setHltbBackground(false);
+          repaintIfOpen();
+        };
         actions.appendChild(stop);
       }
       body.appendChild(actions);
@@ -1632,7 +1677,8 @@
         } else if (hltbQueue.running) {
           line.innerHTML = '<strong>Fetching ' + (hltbQueue.done + hltbQueue.skipped + 1)
             + ' of ' + hltbQueue.total + '</strong> \u00b7 ' + (hltbQueue.label || '') + '\u2026'
-            + (hltbQueue.skipped ? ' (skipped ' + hltbQueue.skipped + ')' : '');
+            + (hltbQueue.skipped ? ' (skipped ' + hltbQueue.skipped + ')' : '')
+            + ' <span style="color:#8d97a1">\u00b7 keeps running with this window closed</span>';
         } else {
           line.textContent = 'Fetched ' + hltbQueue.done + ' game(s)' + skipText + '.';
         }
@@ -1792,7 +1838,8 @@
       } catch (error) {
         hltb = hltb || {};
       }
-      paint();
+      maybeAutoFetch();
+      repaintIfOpen();
     }
 
     function openMenu() {
@@ -1806,9 +1853,8 @@
       confirmAction = null;
       cancelArmed = false;
       cleanupArmed = false;
-      // A running fetch queue stops before its next game; the summary stays
-      // for the next time the menu opens.
-      if (hltbQueue && hltbQueue.running) hltbQueue.running = false;
+      // A fetch pass deliberately keeps running in the background; the menu
+      // shows its progress again the next time it is opened.
       const node = document.getElementById(OVERLAY_ID);
       if (node) node.remove();
     }
@@ -1821,6 +1867,14 @@
     // Safety net: an add-on that mounted its floating panel before the flag was
     // set is removed on the next pass.
     w.setInterval(() => { removeFloating(document); }, 4000);
+    // Resume a background fetch pass after a Steam restart without making the
+    // user open the menu: load the local times and continue where it left off.
+    (w.setTimeout || setTimeout)(async () => {
+      try {
+        hltb = await rpc(w, 'SlsHltbGet');
+      } catch (_) { /* the backend may still be starting */ }
+      maybeAutoFetch();
+    }, 6000);
   }
 
   /* Merged view of the agent-reported game list and the cached HowLongToBeat
