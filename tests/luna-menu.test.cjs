@@ -463,6 +463,24 @@ test('the dropdown selection drives the keys, and other choices clear them',()=>
   setHltbRecords({});
 });
 
+test('the selectionless context-menu variant never touches the keys',()=>{
+  setHltbRecords({'1':{main:3600}});
+  const w=sortableWindow(SORT_VALUE);
+  assert.equal(applyHltbSortAs(w),true);
+  const before=w.appStore.allApps[0].sort_as;
+  // The same option list renders as a right-click/context menu without a
+  // selectedOption prop; that must not be read as "another sort chosen".
+  const menuProps={rgOptions:SORT_ENUM.slice()};
+  const result=withSortOption(menuProps,w);
+  assert.ok(result,'the menu still gains the option');
+  assert.equal(w.appStore.allApps[0].sort_as,before,'the keys must survive the menu rendering');
+  // A real choice elsewhere still restores.
+  withSortOption({rgOptions:SORT_ENUM.slice(),selectedOption:4},w);
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha','an actual choice restores');
+  restoreHltbSortAs();
+  setHltbRecords({});
+});
+
 test('syncSortAs follows the stored sort choice',()=>{
   setHltbRecords({'1':{main:3600}});
   const w=sortableWindow(SORT_VALUE);
