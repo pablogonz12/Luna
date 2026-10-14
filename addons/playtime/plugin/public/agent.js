@@ -94,9 +94,17 @@
     if(!require?.m)return null;
     const factory=Object.values(require.m).find(f=>String(f).includes('BuildManageSubmenu'));
     if(!factory)return null;
-    // Only inspect dependencies of the already-loaded native game menu. Avoid
-    // executing arbitrary webpack modules and avoid version-specific module ids.
-    const dependencies=[...String(factory).matchAll(/\br\((\d+(?:e\d+)?)\)/g)].map(m=>Number(m[1]));
+    // Webpack minifies the require parameter; recent Steam builds use `t`,
+    // while older builds used `r`. Resolve the third factory parameter rather
+    // than assuming its name, then inspect only dependencies of the already-
+    // loaded native game-menu module (never execute arbitrary module factories).
+    const factorySource=String(factory);
+    const signature=factorySource.match(/^\s*(?:function(?:\s+[\w$]+)?\s*)?\(([^)]*)\)/);
+    const requireName=signature&&signature[1].split(',')[2]?.trim();
+    if(!requireName||!/^[A-Za-z_$][\w$]*$/.test(requireName))return null;
+    const escapedRequire=requireName.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    const dependencyPattern=new RegExp('\\b'+escapedRequire+'\\s*\\(\\s*(\\d+(?:e\\d+)?)\\s*\\)','g');
+    const dependencies=[...factorySource.matchAll(dependencyPattern)].map(m=>Number(m[1]));
     let jsx,item,showModal;
     for(const id of new Set(dependencies)){
       const exports=require(id);
@@ -105,8 +113,19 @@
         if(typeof value!=='function')continue;
         const source=String(value);
         if(value.prototype?.OnClick&&source.includes('contextMenuItem')&&source.includes('onSelected'))item=value;
-        if(source.includes('RequestModalMeasure')&&source.includes('bForcePopOut'))showModal=value;
       }
+    }
+    // Steam moved its modal API out of the game-menu module in a recent client
+    // update. Find the already-loaded webpack module by its modal contract
+    // instead of relying on a changing numeric module id or a minified export
+    // name. Only evaluate the one module whose factory advertises both markers.
+    for(const [id,moduleFactory] of Object.entries(require.m)){
+      const source=String(moduleFactory);
+      if(!source.includes('RequestModalMeasure')||!source.includes('bForcePopOut'))continue;
+      let exports;
+      try{exports=require(id);}catch(_){continue;}
+      showModal=Object.values(exports||{}).find(value=>typeof value==='function'&&String(value).includes('bForcePopOut'));
+      if(showModal)break;
     }
     return jsx&&item&&showModal?{React:w.SP_REACT,jsx,item,showModal}:null;
   }

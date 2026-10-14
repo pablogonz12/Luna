@@ -1325,7 +1325,7 @@
       body.appendChild(versions);
       const repo = document.createElement('p');
       repo.className = 'sls-luna-note';
-      repo.textContent = 'Repository: pgm1207/slsteam-luna (private).';
+      repo.textContent = 'Repository: pgm1207/Luna (private).';
       body.appendChild(repo);
       return body;
     }
