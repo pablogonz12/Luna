@@ -332,15 +332,12 @@
   function withSortOption(props, w) {
     if (!isSortDropdown(props)) return null;
     sortSeen += 1;
-    // Only the header dropdown reports the live selection. The same option
-    // list also renders as a context menu with no `selectedOption`, and that
-    // menu must never touch the keys - mistaking it for "another sort chosen"
-    // used to drop them and leave the library alphabetical.
-    if (props.selectedOption === SORT_VALUE) {
-      if (!sortAsPatched) applyHltbSortAs(w);
-    } else if (props.selectedOption !== undefined && sortAsPatched) {
-      restoreHltbSortAs();
-    }
+    // Only the explicit paths may change the keys: the stored choice (kept in
+    // step by syncSortAs on beats and storage events) and a pick through
+    // onChange below. Several views render this same option list with their
+    // own local sort state - and the context-menu variant has no selection at
+    // all - so a foreign selectedOption must never restore the keys.
+    if (props.selectedOption === SORT_VALUE && !sortAsPatched) applyHltbSortAs(w);
     const appended = props.rgOptions.some(option => option && option.data === SORT_VALUE)
       ? props.rgOptions
       : props.rgOptions.concat([{ data: SORT_VALUE, label: SORT_LABEL }]);
