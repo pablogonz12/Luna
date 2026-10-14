@@ -10,9 +10,11 @@ the upstream runtime or tool.
 
 | Goal | Intended Luna experience | Status |
 | --- | --- | --- |
-| Game asset picker | Find artwork for a Steam game and choose/apply a selected asset from a right-click action in the library | Planned; no picker or game-art editing is implemented |
-| Frame generation | Discover and manage supported `lsfg-vk` setup and per-game enablement from Luna | Research/design; installer and compatibility work required |
-| OptiScaler / OptiClient | Manage supported OptiScaler installation and per-game configuration through a Luna-owned page and game context actions | Planned; not an all-games or universal frame-generation promise |
+| Game asset picker | Find artwork for a Steam game and choose/apply a selected asset from a right-click action in the library | Available behind the beta switch (add-on `sgdb` 0.2.0) |
+| Frame generation | Discover and manage supported `lsfg-vk` setup and per-game enablement from Luna | Read-only detection shipped (Graphics page); installer and per-game work still gated on upstream and platform compatibility |
+| OptiScaler / OptiClient | Manage supported OptiScaler installation and per-game configuration through a Luna-owned page and game context actions | **Port started**: read-only detection and the client's managed-game list shipped; deployment and configuration planned (see `docs/optiscaler-client-port.md`) |
+| Store quality of life | Keep the store focused: hide games you already follow from its browsing surfaces, adjustable in Settings | Available (Settings switch); more store/library quality-of-life planned |
+| Compressor savings view | Show how much the Btrfs compressor has actually saved, per game, with charts | Available: Compressor → Stats reads the tool's own ledgers, plus a Measure now action |
 | HowLongToBeat (HLTB) | Show completion-time estimates for matched games in Luna and, where feasible, the Steam game context | Search-link action shipped in add-on `luna` 0.2.0; matched in-panel estimates still planned until a permitted data source is confirmed |
 | Rust-based runtime alternative | Explore whether Luna should eventually own a Rust runtime that can host Luna features without requiring Lumen | Feasibility study only; no replacement runtime exists |
 | One integrated menu | Bring these and existing Luna features into the Luna navigation, with game-specific actions available by right-click | Long-term goal; upstream Luna dependencies and menu contracts still constrain this |
@@ -145,10 +147,17 @@ OptiClient is part of OptiScaler.
 ### Proposed integration
 
 - **Implemented (read-only):** the Luna-owned **Graphics** beta page (add-on
-  `graphics` 0.1.0) reports GPU/driver/kernel/distro, `lsfg-vk` layers and
+  `graphics` 0.2.0) reports GPU/driver/kernel/distro, `lsfg-vk` layers and
   config, overlapping Decky plugins, OptiScaler/Client installs and the Steam
   runtime; it installs or changes nothing. Per-game configuration views come
   once identity mapping and upstream contracts allow it.
+- **Port, step 1 (read-only):** the same page reads the OptiScaler Client's own
+  database (`~/.config/OptiscalerClient/games.json`) and shows every game the
+  client manages with the upscaler state it recorded, re-checking the install
+  paths and looking for the deployed OptiScaler files, and resolving
+  `appid_<id>` names through the Steam appmanifest. Luna never writes to the
+  client's files. The deployment/configuration steps and their gates are scoped
+  in `docs/optiscaler-client-port.md`.
 - Evaluate whether OptiClient exposes a stable CLI, local API, or documented
   configuration format. If it does, Luna may launch/delegate through that public
   contract. If it does not, use a clearly separate launch/handoff rather than

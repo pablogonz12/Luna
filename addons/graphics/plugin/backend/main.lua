@@ -8,7 +8,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.1.0'
+local VERSION = '0.2.0'
 local home = os.getenv('HOME') or ''
 local sysfs_root = os.getenv('SLS_GRAPHICS_SYSFS') or '/sys'
 
@@ -169,11 +169,14 @@ end
 -- known user directories. Per-game detection is a later, larger job.
 function M.optiscaler_report(home_dir)
   home_dir = home_dir or home
+  local app_dir = os.getenv('SLS_GRAPHICS_OPTISCALER_APP') or '/opt/optiscaler-client'
   local candidates = {
     { kind = 'client', path = home_dir .. '/.local/share/OptiScalerClient' },
     { kind = 'client', path = home_dir .. '/Applications/OptiScalerClient' },
     { kind = 'client', path = home_dir .. '/.local/bin/OptiScalerClient' },
     { kind = 'client', path = home_dir .. '/opt/OptiScalerClient' },
+    { kind = 'client', path = home_dir .. '/.config/OptiscalerClient' },
+    { kind = 'client', path = app_dir },
     { kind = 'files', path = home_dir .. '/.local/share/OptiScaler' },
     { kind = 'files', path = home_dir .. '/.config/optiscaler' },
     { kind = 'files', path = home_dir .. '/.config/OptiScaler' },
@@ -184,7 +187,123 @@ function M.optiscaler_report(home_dir)
       found[#found + 1] = { kind = candidate.kind, path = candidate.path }
     end
   end
+  -- A Flatpak install keeps its data under ~/.var/app/<id>; only an id that
+  -- names the project is reported.
+  local ok_apps, apps = pcall(fs.list, home_dir .. '/.var/app')
+  if ok_apps and type(apps) == 'table' then
+    for _, item in ipairs(apps) do
+      local name = tostring(item.name or '')
+      if item.is_directory and name:lower():find('optiscaler', 1, true) then
+        found[#found + 1] = { kind = 'client', path = home_dir .. '/.var/app/' .. name }
+      end
+    end
+  end
   return found
+end
+
+-- ---------------------------------------------------- OptiScaler Client (read)
+--
+-- The first, read-only step of the Luna port: the client's own database says
+-- which games it manages and what it installed there; Luna re-checks the paths
+-- so a stale record cannot be presented as a live install. Nothing here writes
+-- or downloads anything.
+
+local CLIENT_DIRS = function(home_dir)
+  return {
+    home_dir .. '/.config/OptiscalerClient',
+    home_dir .. '/.config/OptiScalerClient',
+  }
+end
+
+local function client_game_name(entry, fallback_id)
+  local name = tostring(entry.Name or '')
+  local appid = tostring(entry.AppId or '')
+  if name == '' or name:match('^appid_%d+$') then
+    local install = tostring(entry.InstallPath or '')
+    local root = install:match('^(.*)/steamapps/common/[^/]+/?$')
+    if root and appid:match('^%d+$') then
+      local acf = read_file(root .. '/steamapps/appmanifest_' .. appid .. '.acf')
+      local resolved = acf and acf:match('"name"%s*"%s*([^"]+)"')
+      if resolved and resolved ~= '' then return resolved end
+    end
+  end
+  if name ~= '' then return name end
+  if appid ~= '' then return 'App ' .. appid end
+  return 'Game ' .. tostring(fallback_id or '?')
+end
+
+-- OptiScaler files are deployed next to the game: the top level and one level
+-- of subdirectories are enough to see them, and the walk is capped so a huge
+-- tree cannot turn one page load into a full disk scan.
+local function deployed_files(install)
+  local found = {}
+  if type(install) ~= 'string' or install == '' then return found end
+  local scanned = 0
+  local function scan(dir, level)
+    if scanned > 60 or #found >= 6 then return end
+    scanned = scanned + 1
+    local ok, items = pcall(fs.list, dir)
+    if not ok or type(items) ~= 'table' then return end
+    for _, item in ipairs(items) do
+      local name = tostring(item.name or '')
+      local lower = name:lower()
+      if lower:find('optiscaler', 1, true) ~= nil or lower:find('nvngx', 1, true) ~= nil then
+        found[#found + 1] = dir .. '/' .. name
+      elseif item.is_directory and level < 1 and name ~= '' and name:sub(1, 1) ~= '.' then
+        scan(dir .. '/' .. name, level + 1)
+      end
+    end
+  end
+  scan(install, 0)
+  return found
+end
+
+-- optiscaler_client(home_dir) -> nil when the client left no config behind,
+-- otherwise a compact read-only report of its managed games.
+function M.optiscaler_client(home_dir)
+  home_dir = home_dir or home
+  local config_dir = nil
+  for _, candidate in ipairs(CLIENT_DIRS(home_dir)) do
+    if fs.exists(candidate) then config_dir = candidate; break end
+  end
+  if not config_dir then return nil end
+  local raw = read_file(config_dir .. '/games.json')
+  local games = {}
+  local ok, decoded = pcall(json.decode, raw or '')
+  if ok and type(decoded) == 'table' then
+    local index = 0
+    for _, entry in ipairs(decoded) do
+      if type(entry) == 'table' then
+        index = index + 1
+        if index > 200 then break end
+        local install = tostring(entry.InstallPath or '')
+        games[#games + 1] = {
+          name = client_game_name(entry, index),
+          appid = tostring(entry.AppId or ''),
+          path = install,
+          exists = install ~= '' and fs.exists(install),
+          installed = entry.IsOptiscalerInstalled == true,
+          files = deployed_files(install),
+          fsr_version = tostring(entry.FsrVersion or ''),
+          fsr_native = entry.FsrIsNative == true,
+          fsr_swapped = entry.IsFsr4DllSwapped == true,
+          dlss_native = entry.DlssIsNative == true,
+          dlss_via = entry.DlssViaOptiscaler == true,
+          xess_native = entry.XessIsNative == true,
+          xess_via = entry.XessViaOptiscaler == true,
+        }
+      end
+    end
+  end
+  local ok_cache, cache_versions = pcall(fs.list, config_dir .. '/Cache/OptiScaler')
+  local app_dir = os.getenv('SLS_GRAPHICS_OPTISCALER_APP') or '/opt/optiscaler-client'
+  return {
+    config = config_dir,
+    app_dir = fs.exists(app_dir) and app_dir or '',
+    managed = #games,
+    versions_cached = (ok_cache and type(cache_versions) == 'table') and #cache_versions or 0,
+    games = games,
+  }
 end
 
 -- ------------------------------------------------------------------ steam
@@ -238,6 +357,7 @@ function M.register(registry)
       gpus = M.gpu_report(),
       lsfg = M.lsfg_report(home),
       optiscaler = M.optiscaler_report(home),
+      optiscaler_client = M.optiscaler_client(home),
       steam = M.steam_report(home),
     })
   end

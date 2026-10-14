@@ -150,6 +150,7 @@ case "$1" in
   --compact) printf 'COMPACT|begin|A|%s|10\n' "$2"; echo 'PROGRESS|compress|64|128'; sleep 1.2; echo 'PROGRESS|compress|128|128'; echo 'COMPACT|phase|dedupe'; echo 'PROGRESS|dedupe|64|0'; sleep 1.2; printf 'COMPACT|done|A|COMPACTED|12345678|1\n' ;;
   --run) echo 'batch running'; sleep 2.5 ;;
   --dedupe) echo 'dedupe pass'; sleep 0.5 ;;
+  --recheck) echo 'rechecking measurements'; sleep 0.5 ;;
   --assets-all) echo 'asset inventory'; sleep 2.5 ;;
   *) echo "unknown $1" >&2; exit 2 ;;
 esac
@@ -366,4 +367,70 @@ local preview = wait_for(reg, function(state) return state.job and not state.job
 assert(preview.job.log:find('ARGS: --dry-run --pending', 1, true), 'the preview used the wrong command')
 assert(preview.job.log:find('dry run: nothing changed', 1, true), 'the log tail lost the tool output')
 
-print('Luna compressor backend OK: discovery, jobs, settings, mirroring, composition, guards, cancel')
+-- ------------------------------------------------------------------- stats
+-- The Stats tab reads the compressor's own ledgers and Luna's queue; nothing in
+-- this pass runs the tool. The fixtures below use the documented row shapes.
+local function write_file(path, content)
+  local dir = path:match('^(.*)/[^/]*$')
+  if dir then os.execute('mkdir -p ' .. string.format('%q', dir)) end
+  local f = assert(io.open(path, 'wb'))
+  f:write(content)
+  f:close()
+end
+
+local tool_state_dir = home .. '/.local/state/btrfs-game-compressor'
+-- state v2 row: path|name|stamp|original|on-disk|saved-label|saved MiB|orig MiB|disk MiB
+write_file(tool_state_dir .. '/compressed_games.db',
+  '# btrfs-game-compressor state v2\n'
+  .. '/lib/Alpha|Alpha|1700000000|2.0G|1.0G|1.0G|1024|2048|1024\n'
+  .. '/lib/Beta|Beta|1700000100|512M|512M|n/a|0|0|0\n'
+  .. '/lib/Gamma|Gamma|1700000200|4.0G|3.5G|512M|512|4096|3584\n')
+-- dedupe history row: stamp|path|before|a|b|after|c|d|saved
+write_file(tool_state_dir .. '/dedupe_physical_history.db',
+  '1700000000|/lib/Alpha|2097152000|1|2097152000|1048576000|1|1048576000|1048576000\n'
+  .. '1700000300|/lib/Alpha|1048576000|1|1048576000|943718400|1|943718400|104857600\n'
+  .. '1700000400|/lib/Beta|1048576|1|1048576|524288|1|524288|524288\n')
+
+local parsed_state = plugin.parse_state_db(read(tool_state_dir .. '/compressed_games.db'))
+assert(parsed_state.records == 3, 'every state row must be counted as a record')
+assert(#parsed_state.measured == 2, 'only rows with measured MiB carry numbers')
+assert(parsed_state.measured[1].original_bytes == 2048 * 1048576
+  and parsed_state.measured[1].saved_bytes == 1024 * 1048576)
+
+local parsed_dedupe = plugin.parse_dedupe_history(read(tool_state_dir .. '/dedupe_physical_history.db'))
+assert(parsed_dedupe.passes == 3 and parsed_dedupe.directories == 2, 'dedupe passes were miscounted')
+assert(parsed_dedupe.saved_bytes == 104857600 + 524288, 'the latest measurement per directory must win')
+assert(parsed_dedupe.entries[1].path == '/lib/Alpha' and parsed_dedupe.entries[1].saved_bytes == 104857600,
+  'the dedupe entries must be sorted by savings')
+
+-- A finished queue pass leaves per-game savings behind, and the full Get joins
+-- every source; the light shape never pays for the stats.
+assert(call(reg, 'SlsCompressorPutSettings', json.encode({
+  compress = true, dedupe = true, assets = false, maxSizeGb = 0, excluded = {},
+})).success, 'stats settings refused')
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'run'})).success, 'the stats queue run was refused')
+wait_for(reg, function(state) return state.queue and state.queue.finished end, 20)
+local with_stats = call(reg, 'SlsCompressorGet')
+local stats = with_stats.stats
+assert(stats, 'the full response must carry the stats')
+assert(stats.compression.records == 3 and stats.compression.measured == 2, 'compression records are wrong')
+assert(stats.compression.saved_bytes == (1024 + 512) * 1048576, 'compression savings are wrong')
+assert(stats.compression.original_bytes == (2048 + 4096) * 1048576, 'compression originals are wrong')
+assert(stats.compression.games[1].name == 'Alpha' and stats.compression.games[1].saved_bytes == 1024 * 1048576,
+  'the compression chart must sort by savings')
+assert(stats.dedupe.passes == 3 and stats.dedupe.saved_bytes == 104857600 + 524288, 'dedupe totals are wrong')
+assert(stats.dedupe.newest == 1700000400, 'the newest dedupe stamp is wrong')
+assert(stats.luna.saved_bytes >= 12345678 and stats.luna.saved_bytes % 12345678 == 0,
+  'Luna per-game savings were not joined')
+assert(stats.luna.games[1].name == 'A' and stats.luna.games[1].saved_bytes == 12345678,
+  'the Luna chart must list the compacted game')
+assert(stats.library.games == 2 and stats.library.bytes == 15, 'library totals must come from the scan')
+assert(call(reg, 'SlsCompressorGet', json.encode({light = true})).stats == nil,
+  'the light shape must not carry the stats')
+
+-- The measurement refresh is its own read-only action and runs the tool.
+assert(call(reg, 'SlsCompressorRun', json.encode({action = 'recheck'})).success, 'the recheck was refused')
+local rechecked = wait_for(reg, function(state) return state.job and not state.job.running end)
+assert(rechecked.job.log:find('ARGS: --recheck', 1, true), 'the recheck used the wrong command')
+
+print('Luna compressor backend OK: discovery, jobs, settings, mirroring, composition, guards, cancel, stats')

@@ -28,6 +28,8 @@ function fakeDom(){
       remove(){const p=element.parentNode;if(p){const i=p.children.indexOf(element);if(i>=0)p.children.splice(i,1);}
         delete registry[element.id];element.parentNode=null;},
       setAttribute(name,value){element['attr_'+name]=value;},
+      getAttribute(name){return element['attr_'+name];},
+      removeAttribute(name){delete element['attr_'+name];},
       addEventListener(type,fn){(listeners[element.id+':'+type]=listeners[element.id+':'+type]||[]).push(fn);},
       focus(){},select(){},
       click(){(listeners[element.id+':click']||[]).forEach(fn=>
@@ -70,7 +72,14 @@ function fakeDom(){
     head:node('head'),body:node('body'),readyState:'complete',
     createElement:node,
     getElementById:id=>registry[id]||null,
-    querySelectorAll:()=>created,
+    // A simple [attr] selector filters by attribute; any other selector keeps
+    // the previous behaviour of returning everything (the panel's finders walk
+    // the tree themselves).
+    querySelectorAll:selector=>{
+      const match=String(selector||'').match(/^\[([\w-]+)\]$/);
+      if(!match)return created.slice();
+      return created.filter(element=>element['attr_'+match[1]]!==undefined);
+    },
     addEventListener(type,fn){(listeners['document:'+type]=listeners['document:'+type]||[]).push(fn);},
     fire(type,event){const key=type.startsWith('document')?type:type;
       (listeners[type]||[]).forEach(fn=>fn(event||{}));},
@@ -122,13 +131,14 @@ function compressorFixture(overrides){
   return Object.assign(base,overrides||{});
 }
 
-function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,sgdbKey,edit,setEnabled}={}){
+function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,sgdbKey,edit,setEnabled,prefs}={}){
   const calls=[];
   const hltbState=Object.assign({success:true,count:0,games:{},library:[]},hltb||{});
   hltbState.count=Object.keys(hltbState.games||{}).length;
   const rateLimited=new Set();
   const storage=new Map();
   const storageListeners=[];
+  const prefsState=Object.assign({version:1,store_hide_followed:false},prefs||{});
   const sgdbState={apiKey:sgdbKey||'',gridDir:'/home/tester/.local/share/Steam/userdata/1/config/grid',gridError:''};
   const w={
     document,
@@ -187,6 +197,10 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
         return JSON.stringify({success:true});
       }
       if(fn==='__lumenOpenExternalUrl')return JSON.stringify({ok:true});
+      if(fn==='SlsLunaInfo')return JSON.stringify({success:true,version:'0.13.0',
+        addons:{luna:true},prefs:Object.assign({},prefsState)});
+      if(fn==='SlsLunaPrefsSet'){prefsState[payload.key]=payload.value;
+        return JSON.stringify({success:true,prefs:Object.assign({},prefsState)});}
       if(fn==='SlsSgdbGet')return JSON.stringify({success:true,apiKey:sgdbState.apiKey,
         gridDir:sgdbState.gridDir,gridError:sgdbState.gridError});
       if(fn==='SlsSgdbSetKey'){sgdbState.apiKey=(payload.key||'').trim();
@@ -205,7 +219,7 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
         {kind:'grid',ok:true,live:true},{kind:'wide',ok:true,live:true},
         {kind:'hero',ok:true,live:true},{kind:'logo',ok:true,live:true},
         {kind:'icon',ok:true,live:false}]});
-      if(fn==='SlsGraphicsGet')return JSON.stringify({success:true,version:'0.1.0',
+      if(fn==='SlsGraphicsGet')return JSON.stringify({success:true,version:'0.2.0',
         system:{distro:'Arch Linux (test)',kernel:'6.12.4-arch1'},
         gpus:[{card:'card0',vendor:'0x1002',vendor_name:'AMD',device:'0x744c',driver:'amdgpu',
           product:'AMD Radeon RX 7900 XTX'}],
@@ -213,11 +227,15 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
           config:{path:'/home/tester/.config/lsfg-vk/conf.toml',size:22},
           decky_plugins:['/home/tester/homebrew/plugins/decky-lsfg-vk']},
         optiscaler:[{kind:'files',path:'/home/tester/.config/optiscaler'}],
+        optiscaler_client:{config:'/home/tester/.config/OptiscalerClient',app_dir:'/opt/optiscaler-client',
+          managed:1,versions_cached:2,games:[{name:'Space Engineers 2',appid:'1133870',path:'/games/SE2',
+            exists:true,installed:true,files:['/games/SE2/OptiScaler.ini'],fsr_version:'4.0.2.0',
+            fsr_native:true,fsr_swapped:false,dlss_native:false,dlss_via:false,xess_native:false,xess_via:false}]},
         steam:{root:'/home/tester/.local/share/Steam',runtimes:['SteamLinuxRuntime_sniper'],gamescope:true}});
       return JSON.stringify({success:true});
     }},
   };
-  return {w,calls,storage};
+  return {w,calls,storage,prefs:prefsState};
 }
 
 function hltbFixture(overrides){
@@ -968,6 +986,8 @@ test('the Graphics beta page reports the detection read-only',async()=>{
   assert.match(text,/VkLayer_LSFG_vk\.json/,'the lsfg-vk layer must be shown');
   assert.match(text,/Decky plugin detected: decky-lsfg-vk/,'the overlapping Decky plugin must be noted');
   assert.match(text,/OptiScaler/,'the OptiScaler section must exist');
+  assert.match(text,/Space Engineers 2/,'the OptiScaler Client games must be listed');
+  assert.match(text,/read side of the Luna port/,'the port must be described honestly');
   assert.match(text,/Steam root: \/home\/tester\/\.local\/share\/Steam/,'the Steam facts must be shown');
   assert.match(text,/Nothing here installs/,'the read-only promise must be stated');
 });
@@ -1006,4 +1026,135 @@ test('Forget removes a cached record and the game becomes fetchable again',async
   assert.equal(findNode(rowFor(fresh,'Hades'),node=>node.textContent==='Fetch')!==null,true,
     'the forgotten game must be fetchable again');
   assert.match(textOf(fresh),/Fetch missing \(3\)/);
+});
+
+test('store mode hides followed games when the backend switch is on',async()=>{
+  const document=fakeDom();
+  const tile=id=>{const node=document.createElement('a');node.setAttribute('data-ds-appid',id);
+    document.body.appendChild(node);return node;};
+  const followedOnly=tile('111');
+  const notFollowed=tile('333');
+  const allFollowed=tile('111,222');
+  const partlyFollowed=tile('111,444');
+  const {w,calls}=fakeWindow(document,{prefs:{store_hide_followed:true}});
+  w.location={hostname:'store.steampowered.com',pathname:'/'};
+  w.fetch=async()=>({ok:true,json:async()=>({rgFollowedApps:[111,222],rgOwnedApps:[1]})});
+  mount(w);
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(followedOnly.getAttribute('data-sls-luna-hidden'),'','a followed tile must be hidden');
+  assert.equal(allFollowed.getAttribute('data-sls-luna-hidden'),'',
+    'a tile whose appids are all followed must be hidden');
+  assert.equal(notFollowed.getAttribute('data-sls-luna-hidden'),undefined,
+    'a tile that is not followed must stay');
+  assert.equal(partlyFollowed.getAttribute('data-sls-luna-hidden'),undefined,
+    'a mixed tile must stay');
+  const chip=document.getElementById('sls-luna-store-chip');
+  assert.ok(chip,'the store chip must appear');
+  assert.match(chip.children[0].innerHTML,/Luna hides <b>2<\/b> followed games/);
+  assert.ok(calls.some(call=>call.fn==='SlsLunaInfo'),'the switch must come from the backend');
+  // The chip can show everything again without a reload.
+  chip.children[1].onclick();
+  assert.equal(followedOnly.getAttribute('data-sls-luna-hidden'),undefined,
+    'showing again must unmark every tile');
+  assert.match(chip.children[0].innerHTML,/showing every tile/);
+});
+
+test('store mode stays quiet when the switch is off or the page is search',async()=>{
+  const document=fakeDom();
+  const node=document.createElement('a');
+  node.setAttribute('data-ds-appid','111');
+  document.body.appendChild(node);
+  let fetched=0;
+  const first=fakeWindow(document,{prefs:{store_hide_followed:false}});
+  first.w.location={hostname:'store.steampowered.com',pathname:'/'};
+  first.w.fetch=async()=>{fetched+=1;return{ok:true,json:async()=>({rgFollowedApps:[111]})};};
+  mount(first.w);
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(node.getAttribute('data-sls-luna-hidden'),undefined);
+  assert.equal(fetched,0,'the followed list must not be fetched when the switch is off');
+
+  const searchDocument=fakeDom();
+  const row=searchDocument.createElement('a');
+  row.setAttribute('data-ds-appid','111');
+  searchDocument.body.appendChild(row);
+  const second=fakeWindow(searchDocument,{prefs:{store_hide_followed:true}});
+  second.w.location={hostname:'store.steampowered.com',pathname:'/search/'};
+  second.w.fetch=async()=>({ok:true,json:async()=>({rgFollowedApps:[111]})});
+  mount(second.w);
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(row.getAttribute('data-sls-luna-hidden'),undefined,'search pages must stay untouched');
+});
+
+test('the Settings page drives the store switch through the backend',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls,prefs}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='Settings');
+  assert.ok(tab,'the Settings tab must exist');
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const row=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'')==='sls-luna-row'
+      && textOf(node).includes('Hide followed games in the store'));
+  assert.ok(row,'the store switch row must exist');
+  const toggle=findNode(row,node=>(node.className||'').startsWith('sls-luna-switch'));
+  assert.ok(toggle&&!toggle.className.includes(' on'),'the switch must start off');
+  toggle.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const call=calls.filter(entry=>entry.fn==='SlsLunaPrefsSet').pop();
+  assert.ok(call,'the switch must write through the backend');
+  assert.equal(call.payload.key,'store_hide_followed');
+  assert.equal(call.payload.value,true);
+  assert.equal(prefs.store_hide_followed,true,'the backend must hold the value');
+  const rowAfter=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'')==='sls-luna-row'
+      && textOf(node).includes('Hide followed games in the store'));
+  const toggleAfter=findNode(rowAfter,node=>(node.className||'').startsWith('sls-luna-switch'));
+  assert.ok(toggleAfter.className.includes(' on'),'the switch must paint on after the write');
+});
+
+test('the compressor Stats tab charts the measured ledgers and can refresh them',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const stats={compression:{records:132,measured:2,original_bytes:6442450944,disk_bytes:3221225472,
+      saved_bytes:3221225472,games:[{name:'Gamma',path:'/lib/Gamma',saved_bytes:2147483648,
+        original_bytes:5368709120,disk_bytes:3221225472}]},
+    dedupe:{passes:3,directories:1,saved_bytes:6606028,newest:1700000400,
+      entries:[{path:'/mnt/storage/Games/SteamLibrary/steamapps/common/Slay the Spire 2',saved_bytes:6606028}]},
+    luna:{measured:1,saved_bytes:12345678,games:[{name:'Hades',saved_bytes:12345678}]},
+    library:{games:3,bytes:37665836}};
+  const {w,calls}=fakeWindow(document,{compressor:compressorFixture({stats})});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const menuTab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='Compressor');
+  assert.ok(menuTab,'the Compressor tab must exist');
+  menuTab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const subtab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-subtab')&&node.textContent==='Stats');
+  assert.ok(subtab,'the Stats sub-tab must exist');
+  subtab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/Measured saved/,'the measured total must be shown');
+  assert.match(text,/ZSTD savings per game/,'the ZSTD chart must exist');
+  assert.match(text,/Gamma/,'the measured game must be charted');
+  assert.match(text,/Deduplication per directory/,'the dedupe chart must exist');
+  assert.match(text,/Slay the Spire 2/,'the dedupe directory must be charted');
+  assert.match(text,/Savings recorded by Luna passes/,'Luna passes must be charted');
+  assert.match(text,/Biggest games in the library/,'the library chart must exist');
+  assert.match(text,/Library progress/,'the completion bar must exist');
+  const measure=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.tagName==='BUTTON'&&node.textContent==='Measure now');
+  assert.ok(measure,'the measurement action must be offered');
+  measure.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const call=calls.filter(entry=>entry.fn==='SlsCompressorRun').pop();
+  assert.ok(call&&call.payload.action==='recheck','the measurement must run the recheck action');
 });

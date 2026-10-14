@@ -27,6 +27,14 @@ local QUEUE_LOG = DIR .. '/run.log'
 local DRIVER = DIR .. '/run-queue.sh'
 -- The tool's own configuration, one file per knob (see its --help FILES).
 local TOOL_DIR = HOME .. '/.config/btrfs-game-compressor'
+-- The tool's own ledgers, read-only, powering the Stats tab: one line per game
+-- with its measured sizes, and one measurement per dedupe pass per directory.
+-- Both carry a '#' version header, and rows that do not match the expected
+-- shape are skipped, so a future format degrades to missing numbers instead of
+-- a broken page.
+local TOOL_STATE_DIR = HOME .. '/.local/state/btrfs-game-compressor'
+local TOOL_STATE_FILE = TOOL_STATE_DIR .. '/compressed_games.db'
+local TOOL_DEDUPE_HISTORY = TOOL_STATE_DIR .. '/dedupe_physical_history.db'
 
 -- Where the CLI may live, in preference order: the env override is the test
 -- seam, then an installed copy, then a source checkout (bgc-native has to sit
@@ -47,6 +55,9 @@ candidate(HOME .. '/Documents/Scripts/btrfs-game-compressor/btrfs-game-compresso
 local ACTIONS = {
   scan = { args = '--status --json', scan = true },
   preview = { args = '--dry-run --pending' },
+  -- Remeasures the installed games and refreshes the tool's own saved-size
+  -- ledger; it never recompresses anything. This is what fills the Stats tab.
+  recheck = { args = '--recheck' },
   run = { args = '--run' },
   assets = { args = '--assets-all' },
 }
@@ -304,6 +315,145 @@ local function build_queue(status, settings)
     table.sort(queue, function(a, b) return a.size < b.size end)
   end
   return queue
+end
+
+-- ---------------------------------------------------------------- statistics
+--
+-- The Stats tab reads the compressor's own ledgers instead of re-measuring:
+-- nothing here runs the tool, and a missing ledger is simply an empty report.
+
+local MIB = 1048576
+
+-- The tool escapes '%', '|' and control characters in its keys.
+local function decode_field(value)
+  return (tostring(value):gsub('%%(%x%x)', function(hex)
+    local code = tonumber(hex, 16)
+    if code == 0x25 then return '%' end
+    if code == 0x7C then return '|' end
+    if code == 0x09 then return '\t' end
+    if code == 0x0A then return '\n' end
+    if code == 0x0D then return '\r' end
+    return '%' .. hex
+  end))
+end
+
+local function pipe_fields(line)
+  local fields = {}
+  for field in (tostring(line) .. '|'):gmatch('([^|]*)|') do fields[#fields + 1] = field end
+  return fields
+end
+
+-- compressed_games.db, state v2: path|name|stamp|original|on-disk|saved-label|
+-- saved MiB|original MiB|on-disk MiB. Only rows the tool has measured (a
+-- non-zero original MiB) carry numbers; the rest are records without a size.
+function M.parse_state_db(text)
+  local records, measured = 0, {}
+  for line in tostring(text or ''):gmatch('[^\n]+') do
+    if line:sub(1, 1) ~= '#' then
+      local fields = pipe_fields(line)
+      if #fields >= 9 and fields[1] ~= '' then
+        records = records + 1
+        local original = tonumber(fields[8]) or 0
+        local disk = tonumber(fields[9]) or 0
+        if original > 0 then
+          measured[#measured + 1] = {
+            name = decode_field(fields[2]),
+            path = decode_field(fields[1]),
+            at = tonumber(fields[3]) or 0,
+            original_bytes = original * MIB,
+            disk_bytes = disk * MIB,
+            saved_bytes = math.max(0, (original - disk) * MIB),
+          }
+        end
+      end
+    end
+  end
+  return { records = records, measured = measured }
+end
+
+-- dedupe_physical_history.db: stamp|path|before|...|after|...|saved. The latest
+-- measurement per directory wins; earlier passes for the same directory would
+-- otherwise count the same reclaimed bytes twice.
+function M.parse_dedupe_history(text)
+  local by_path, passes, newest = {}, 0, 0
+  for line in tostring(text or ''):gmatch('[^\n]+') do
+    if line:sub(1, 1) ~= '#' then
+      local fields = pipe_fields(line)
+      if #fields >= 9 and fields[2] ~= '' then
+        passes = passes + 1
+        local at = tonumber(fields[1]) or 0
+        local current = by_path[fields[2]]
+        if not current or at >= current.at then
+          by_path[fields[2]] = {
+            path = decode_field(fields[2]),
+            at = at,
+            before_bytes = tonumber(fields[3]) or 0,
+            after_bytes = tonumber(fields[7]) or 0,
+            saved_bytes = tonumber(fields[9]) or 0,
+          }
+        end
+        if at > newest then newest = at end
+      end
+    end
+  end
+  local entries, saved_total = {}, 0
+  for _, entry in pairs(by_path) do
+    entries[#entries + 1] = entry
+    saved_total = saved_total + entry.saved_bytes
+  end
+  table.sort(entries, function(a, b) return a.saved_bytes > b.saved_bytes end)
+  return { passes = passes, directories = #entries, saved_bytes = saved_total,
+    newest = newest, entries = entries }
+end
+
+local function top_list(list, count)
+  local out = {}
+  for index = 1, math.min(#list, count) do out[#out + 1] = list[index] end
+  return out
+end
+
+-- Everything the Stats tab shows, in one read-only pass over small files.
+local function build_stats(status, queue)
+  local state = M.parse_state_db(read_text(TOOL_STATE_FILE))
+  local dedupe = M.parse_dedupe_history(read_text(TOOL_DEDUPE_HISTORY))
+  local measured = state.measured
+  table.sort(measured, function(a, b) return a.saved_bytes > b.saved_bytes end)
+  local original, disk, saved = 0, 0, 0
+  for _, entry in ipairs(measured) do
+    original = original + entry.original_bytes
+    disk = disk + entry.disk_bytes
+    saved = saved + entry.saved_bytes
+  end
+  -- Luna's own passes: the queue driver records the ZSTD bytes each game
+  -- reclaimed, which works even when the tool kept no MiB ledger.
+  local luna_saved, luna_games = 0, {}
+  for _, entry in ipairs((queue and queue.games) or {}) do
+    if (entry.saved or 0) > 0 then
+      luna_saved = luna_saved + entry.saved
+      luna_games[#luna_games + 1] = { name = entry.name, saved_bytes = entry.saved }
+    end
+  end
+  table.sort(luna_games, function(a, b) return a.saved_bytes > b.saved_bytes end)
+  -- Library totals come from the last scan: exact sizes per installed game.
+  local library_bytes, library_games = 0, 0
+  for _, game in ipairs((status and status.games) or {}) do
+    local size = tonumber(game.size_bytes) or 0
+    if size > 0 then
+      library_bytes = library_bytes + size
+      library_games = library_games + 1
+    end
+  end
+  return {
+    compression = { records = state.records, measured = #measured,
+      original_bytes = original, disk_bytes = disk, saved_bytes = saved,
+      games = json.array(top_list(measured, 10)) },
+    dedupe = { passes = dedupe.passes, directories = dedupe.directories,
+      saved_bytes = dedupe.saved_bytes, newest = dedupe.newest,
+      entries = json.array(top_list(dedupe.entries, 10)) },
+    luna = { measured = #luna_games, saved_bytes = luna_saved,
+      games = json.array(top_list(luna_games, 10)) },
+    library = { games = library_games, bytes = library_bytes },
+  }
 end
 
 -- The driver runs one `--compact` per game and appends QUEUE\t<event> lines to
@@ -620,6 +770,10 @@ function M.register(registry)
     if light and status then
       wire_status = { version = status.version, summary = status.summary }
     end
+    -- The Stats tab is part of the full shape only; polling clients never pay
+    -- for it.
+    local stats = nil
+    if not light then stats = build_stats(status, queue) end
     return response({
       success = true,
       tool = {
@@ -632,6 +786,7 @@ function M.register(registry)
       settings = encode_settings(settings),
       plan = plan,
       queue = queue,
+      stats = stats,
       job = job,
       autoStarted = autoStarted,
     })
