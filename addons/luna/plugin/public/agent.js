@@ -262,47 +262,76 @@
       for (const key of ['jsx', 'jsxs']) if (jsx[key] === wrappers[key]) jsx[key] = originals[key];
     }
 
+    // Two add-ons hooking the same jsx module must not fight: Playtime's agent
+    // considers itself detached whenever another wrapper sits on top of it and
+    // re-wraps on its next beat. Luna therefore re-arms only when Steam really
+    // replaced the module (the library rebuilt its bundle) - being wrapped by
+    // another add-on is not detachment, our wrapper still runs in the chain.
+    // `base` is the leaf function of the chain at install time; the re-entry
+    // guard uses it so a wrapper cycle can never recurse without bound.
+    let wrappedModule = null;
+    let inRender = false;
+    const base = {};
+
     for (const key of ['jsx', 'jsxs']) {
       originals[key] = jsx[key];
+      base[key] = jsx[key];
       wrappers[key] = function (type, ...args) {
-        const props = args[0];
-        const proto = type && type.prototype;
-        if (isOuter(proto) && props && props.overview) {
-          // Fresh build of the game menu: remember the exact target before its
-          // contents elements are created inside the same render pass.
-          slot = { app: props.overview, instance: props.instance, ts: Date.now() };
-        } else if (isInner(proto) && props && props.children != null) {
-          const target = targetFor(props);
-          if (target && target.app && valid(target.app.appid)) {
-            const items = actionItems(target.app);
-            if (items.length) args[0] = { ...props, children: insertActions(props.children, items) };
+        // Re-entry means another wrapper called us while we were already
+        // rendering (a cycle created by two add-ons re-arming). Fall back to
+        // the leaf so rendering still completes, without inserting twice.
+        const next = inRender && base[key] ? base[key] : originals[key];
+        if (!inRender) {
+          const props = args[0];
+          const proto = type && type.prototype;
+          if (isOuter(proto) && props && props.overview) {
+            // Fresh build of the game menu: remember the exact target before
+            // its contents elements are created inside the same render pass.
+            slot = { app: props.overview, instance: props.instance, ts: Date.now() };
+          } else if (isInner(proto) && props && props.children != null) {
+            const target = targetFor(props);
+            if (target && target.app && valid(target.app.appid)) {
+              const items = actionItems(target.app);
+              if (items.length) args[0] = { ...props, children: insertActions(props.children, items) };
+            }
           }
         }
-        return originals[key].call(this, type, ...args);
+        inRender = true;
+        try {
+          return next.call(this, type, ...args);
+        } finally {
+          inRender = false;
+        }
       };
       jsx[key] = wrappers[key];
     }
+    wrappedModule = jsx;
 
     const api = {
       version: 1,
       register,
       unregister,
       list: () => actions.map(entry => ({ id: entry.id, label: entry.label })),
-      get attached() { return jsx.jsx === wrappers.jsx || jsx.jsxs === wrappers.jsxs; },
+      get attached() { return wrappedModule !== null && jsx === wrappedModule; },
       ensure() {
-        // The library UI can rebuild its bundle and replace the jsx functions
-        // we hooked. Rebind if the module changed and re-arm on top of the
-        // current chain, so Luna's actions cannot silently disappear.
-        if (api.attached) return false;
+        // The library UI can rebuild its bundle, which produces a new jsx
+        // module object; re-arm on that object. An unchanged object means our
+        // wrapper is still somewhere in the chain - even when another add-on
+        // wrapped on top of it - so there is nothing to repair.
+        let fresh = null;
         try {
-          const fresh = discoverMenuTools(w);
-          if (fresh && fresh.jsx !== jsx) jsx = fresh.jsx;
-        } catch (_) { /* keep the previous module */ }
+          fresh = discoverMenuTools(w);
+        } catch (_) { /* keep waiting for the next beat */ }
+        if (!fresh || fresh.jsx === wrappedModule) return false;
+        jsx = fresh.jsx;
         restore();
         for (const key of ['jsx', 'jsxs']) {
+          if (jsx[key] === wrappers[key]) jsx[key] = originals[key];
           originals[key] = jsx[key];
+          base[key] = jsx[key];
           jsx[key] = wrappers[key];
         }
+        wrappedModule = jsx;
         return true;
       },
       dispose() {

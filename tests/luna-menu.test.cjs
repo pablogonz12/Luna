@@ -57,8 +57,9 @@ function fixture(){
 
 function webpackFixture(requireName){
   const React={createElement(){},isValidElement:e=>!!e?.props};
-  const jsxs=()=>{};
-  const jsx={jsx(){},jsxs};
+  const calls=[];
+  const jsxs=(t,p)=>{calls.push(p);return {type:t,props:p};};
+  const jsx={jsx:(t,p)=>{calls.push(p);return {type:t,props:p};},jsxs};
   const MenuItem=new Function('return function contextMenuItem(){return "onSelected"}')();
   MenuItem.prototype.OnClick=function(){};
   const moduleExports={...jsx,MenuItem};
@@ -68,7 +69,7 @@ function webpackFixture(requireName){
     main:new Function('return function(module,exports,'+requireName+'){' +
       'const nativeName="BuildManageSubmenu";'+requireName+'(1);}')(),
   };
-  return {SP_REACT:React,__expectedJsx:moduleExports,webpackChunksteamui:{push(chunk){chunk[2](require);}}};
+  return {SP_REACT:React,__expectedJsx:moduleExports,__calls:calls,webpackChunksteamui:{push(chunk){chunk[2](require);}}};
 }
 
 function labelsAfterPrimary(el){
@@ -215,24 +216,73 @@ test('an action whose eligibility throws is treated as disabled',()=>{
   }finally{console.warn=originalWarn;}
 });
 
-test('ensure re-arms the hook after a UI reload replaces the jsx functions',()=>{
+test('ensure re-arms only when Steam rebuilds the module, not when another add-on wraps on top',()=>{
   const tools=fixture();
   const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})}};
   const menu=installLunaMenu(w,tools);
-  const foreign={jsx:(t,p)=>({type:t,props:p}),jsxs:(t,p)=>({type:t,props:p})};
-  tools.jsx.jsx=foreign.jsx;tools.jsx.jsxs=foreign.jsxs;
-  assert.equal(menu.attached,false,'replaced wrappers must be detected');
-  assert.equal(menu.ensure(),true,'ensure must attempt a re-arm');
-  assert.equal(menu.attached,true,'ensure must re-install the wrappers');
-  tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
+  assert.equal(menu.attached,true,'installing must wrap the current module');
+  assert.equal(menu.ensure(),false,'a healthy hook must not re-arm');
+
+  // Another add-on (Playtime's agent) wraps on top of Luna's wrapper on the
+  // SAME module object. Luna is still in the chain and must stay quiet, or the
+  // two agents would re-wrap each other forever.
+  const previousJsx=tools.jsx.jsx;
+  const previousJsxs=tools.jsx.jsxs;
+  tools.jsx.jsx=function(type,...args){return previousJsx.call(this,type,...args);};
+  tools.jsx.jsxs=function(type,...args){return previousJsxs.call(this,type,...args);};
+  assert.equal(menu.attached,true,'another wrapper on top is not detachment');
+  assert.equal(menu.ensure(),false,'an unchanged module object must never re-wrap');
+  const el=tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
+  const el2=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
+    {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
+  assert.deepEqual(labelsAfterPrimary(el2),['HowLongToBeat','Fetch HowLongToBeat times'],
+    'the chain through the other wrapper must still insert Luna items');
+  assert.ok(el,'render must still flow through the chain');
+
+  // Steam rebuilds the library bundle: a new module object appears and the
+  // menu must re-arm on it.
+  Object.assign(w,webpackFixture('t'));
+  assert.equal(menu.ensure(),true,'a replaced module object must re-arm');
+  assert.equal(menu.attached,true);
+  w.__calls.length=0;
+  const fresh=w.__expectedJsx;
+  fresh.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
+  fresh.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
+    {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
+  const rendered=(w.__calls[w.__calls.length-1]||{}).children||[];
+  const labels=rendered.filter(child=>child&&child.props&&Array.isArray(child.props.children)
+    &&typeof child.props.children[0]==='string'&&child.props.children[0]!=='play')
+    .map(child=>child.props.children[0]);
+  assert.deepEqual(labels,['HowLongToBeat','Fetch HowLongToBeat times'],
+    'the re-armed hook on the rebuilt module must insert the item');
+  assert.equal(menu.ensure(),false,'a healthy re-armed hook must not keep wrapping');
+
+  menu.dispose();
+  assert.equal(w.__SlsLunaMenu,undefined);
+});
+
+test('a wrapper cycle between two add-ons cannot recurse without bound',()=>{
+  const tools=fixture();
+  const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})}};
+  const menu=installLunaMenu(w,tools);
+  // Simulate the worst case a hostile ordering could produce: the foreign
+  // wrapper that Luna captured as its originals calls back into Luna's own
+  // wrapper. The re-entry guard must fall back to the leaf function.
+  const previousJsx=tools.jsx.jsx;
+  tools.jsx.jsx=function(type,...args){return previousJsx.call(this,type,...args);};
+  menu.ensure();
+  let renders=0;
+  const original=tools.jsx.jsx;
+  tools.jsx.jsx=function(type,...args){
+    renders+=1;
+    if(renders>10)throw Error('infinite wrapper recursion');
+    return original.call(this,type,...args);
+  };
   const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times'],
-    'the re-armed hook must insert the item');
-  assert.equal(menu.ensure(),false,'a healthy hook must not re-arm again');
+  assert.ok(renders<10,'rendering must terminate');
+  assert.ok(el,'rendering must return an element');
   menu.dispose();
-  assert.equal(tools.jsx.jsx,foreign.jsx,'dispose restores the chain it found');
-  assert.equal(w.__SlsLunaMenu,undefined);
 });
 
 test('booting retries until the library module appears and only arms once',()=>{
