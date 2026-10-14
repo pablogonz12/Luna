@@ -842,25 +842,37 @@
       const skipped = Number(queue.skipped) || 0;
       const saved = Number(queue.saved) || 0;
       const overall = queueOverall();
+      // The overall bar is the queue's own unit: games finished. The current
+      // game's fraction is included so the bar moves within a game instead of
+      // sitting still between completions.
+      const currentFraction = () => {
+        if (!current) return 0;
+        if (current.phase === 'dedupe') {
+          const size = Number(current.size) || 0;
+          return size > 0 ? Math.min(1, (Number(current.scannedBytes) || 0) / size) : 0;
+        }
+        const totalBytes = Number(current.totalBytes) || 0;
+        return totalBytes > 0 ? Math.min(1, (Number(current.doneBytes) || 0) / totalBytes) : 0;
+      };
+      const barPct = total > 0 ? Math.min(100, ((done + currentFraction()) / total) * 100) : 0;
       const head = document.createElement('p');
       head.className = 'sls-luna-note';
       head.innerHTML = '<strong>' + (active ? 'Run in progress'
         : queue.finished ? 'Last run finished' : 'Last run stopped') + '</strong> \u00b7 '
-        + (overall
-          ? formatBytes(overall.doneBytes) + ' of ' + formatBytes(overall.totalBytes)
-          : done + ' of ' + total + ' games')
-        + ' \u00b7 done ' + done
+        + done + ' of ' + total + ' games done'
+        + (overall ? ' \u00b7 ' + formatBytes(overall.doneBytes) + ' of ' + formatBytes(overall.totalBytes) : '')
         + (failed ? ' \u00b7 failed ' + failed : '')
         + (skipped ? ' \u00b7 skipped ' + skipped : '')
         + (saved > 0 ? ' \u00b7 saved ' + formatBytes(saved) : '');
       body.appendChild(head);
-      body.appendChild(progressBar(overall
-        ? (overall.totalBytes > 0 ? overall.doneBytes / overall.totalBytes * 100 : 0)
-        : (total > 0 ? done / total * 100 : 0), active && !overall));
+      body.appendChild(progressBar(barPct, false));
 
       if (current) {
-        const pct = Number(current.totalBytes) > 0
-          ? Number(current.doneBytes) / Number(current.totalBytes) * 100 : null;
+        const pct = current.phase === 'dedupe'
+          ? (Number(current.size) > 0
+            ? Math.min(100, (Number(current.scannedBytes) || 0) / Number(current.size) * 100) : 0)
+          : (Number(current.totalBytes) > 0
+            ? Number(current.doneBytes) / Number(current.totalBytes) * 100 : 0);
         const line = document.createElement('p');
         line.className = 'sls-luna-note';
         line.innerHTML = 'Game ' + (Number(queue.index) || 0) + ' of ' + total + ': <strong>'
@@ -868,10 +880,9 @@
           + (current.phase === 'dedupe'
             ? '\u00b7 deduplicating' + (Number(current.scannedBytes) > 0
               ? ' (' + formatBytes(current.scannedBytes) + ' scanned)' : '')
-            : '\u00b7 compressing' + (pct != null ? ' ' + pctText(pct) + '%' : ''));
+            : '\u00b7 compressing' + (Number(current.totalBytes) > 0 ? ' ' + pctText(pct) + '%' : ''));
         body.appendChild(line);
-        body.appendChild(progressBar(pct == null ? 0 : pct,
-          current.phase !== 'compress' || pct == null));
+        body.appendChild(progressBar(pct, false));
       }
 
       if (!active && !queue.finished && total > 0) {

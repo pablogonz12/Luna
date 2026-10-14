@@ -436,13 +436,17 @@ test('the status tab shows the game-by-game queue with bars',async()=>{
   let overlay=await openCompressor(document);
   const text=textOf(overlay);
   assert.match(text,/Run in progress/,'the queue state line is missing');
+  assert.match(text,/1 of 3 games done/,'the games-done count is missing');
   assert.match(text,/62 B of 170 B/,'the byte progress is missing');
   assert.match(text,/Game 2 of 3: Cronos: The New Dawn/,'the current game is missing');
   assert.match(text,/compressing 42%/,'the current percentage is missing');
   assert.match(text,/Next: Hades/,'the next-up line is missing');
   assert.match(text,/saved 118 MiB/,'the savings line is missing');
-  assert.ok(findNode(document.getElementById('sls-luna-overlay'),node=>(node.className||'').indexOf('sls-luna-progress')===0),
-    'the queue needs a progress bar');
+  const overallBar=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').indexOf('sls-luna-progress')===0);
+  assert.ok(overallBar,'the queue needs a progress bar');
+  assert.doesNotMatch(overallBar.className,/active/,'the overall bar must not be an indeterminate loader');
+  assert.equal(overallBar.children[0].style.width,'47%','the bar must show games done plus the current fraction');
   overlay=await openCompressor(document,'Games');
   const chips=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-chip'));
   assert.ok(chips,'a per-game state chip was not rendered');
