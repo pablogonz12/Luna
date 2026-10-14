@@ -127,8 +127,12 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
   const hltbState=Object.assign({success:true,count:0,games:{},library:[]},hltb||{});
   hltbState.count=Object.keys(hltbState.games||{}).length;
   const rateLimited=new Set();
+  const storage=new Map();
   const w={
     document,
+    localStorage:{getItem:key=>storage.has(key)?storage.get(key):null,
+      setItem:(key,value)=>storage.set(key,String(value)),
+      removeItem:key=>storage.delete(key)},
     setInterval:(fn,ms)=>{return 1;},
     clearInterval:()=>{},
     // The fetch-missing queue spaces requests out; tests skip the waiting.
@@ -182,7 +186,7 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
       return JSON.stringify({success:true});
     }},
   };
-  return {w,calls};
+  return {w,calls,storage};
 }
 
 function hltbFixture(overrides){
@@ -194,7 +198,7 @@ function hltbFixture(overrides){
 }
 
 async function openHltbPage(document,options){
-  const {w,calls}=fakeWindow(document,options);
+  const {w,calls,storage}=fakeWindow(document,options);
   mount(w);
   document.getElementById('sls-luna-btn').click();
   await new Promise(resolve=>setTimeout(resolve,30));
@@ -203,7 +207,7 @@ async function openHltbPage(document,options){
   assert.ok(tab,'the HowLongToBeat tab was not found');
   tab.onclick();
   await new Promise(resolve=>setTimeout(resolve,20));
-  return {w,calls,overlay:document.getElementById('sls-luna-overlay')};
+  return {w,calls,storage,overlay:document.getElementById('sls-luna-overlay')};
 }
 
 function rowFor(overlay,label){
@@ -701,6 +705,63 @@ test('a rate-limited fetch pauses and retries the same game once',async()=>{
   const text=textOf(document.getElementById('sls-luna-overlay'));
   assert.match(text,/Fetched 2 game\(s\)/,'both games must end up cached');
   assert.doesNotMatch(text,/Stopped:/,'a single rate limit must not stop the queue');
+});
+
+test('the fetch pass keeps running with the menu closed and never reopens it',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {calls,storage,overlay}=await openHltbPage(document,{hltb:hltbFixture({games:{},
+    library:[{appid:70,name:'Half-Life',shortcut:false},{appid:220,name:'Half-Life 2',shortcut:false},
+      {appid:620,name:'Portal 2',shortcut:false}]})});
+  const start=findNode(overlay,node=>node.textContent==='Fetch missing (3)'
+    &&typeof node.onclick==='function');
+  start.onclick();
+  assert.equal(storage.get('slsLunaHltbBackground'),'1','starting a pass must set the background flag');
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const closed=document.getElementById('sls-luna-overlay');
+  if (closed) closed.remove(); // the user closes the menu while the pass runs
+  await new Promise(resolve=>setTimeout(resolve,400));
+  assert.equal(document.getElementById('sls-luna-overlay'),null,
+    'a background pass must never reopen the menu');
+  const fetched=calls.filter(entry=>entry.fn==='SlsHltbFetch').length;
+  assert.ok(fetched>=2,'fetching must continue with the menu closed (got '+fetched+')');
+  assert.equal(storage.get('slsLunaHltbBackground'),undefined,
+    'finishing every queued game must clear the background flag');
+});
+
+test('Stop clears the background flag and halts the pass',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {calls,storage,overlay}=await openHltbPage(document,{hltb:hltbFixture({games:{},
+    library:[{appid:70,name:'Half-Life',shortcut:false},{appid:220,name:'Half-Life 2',shortcut:false},
+      {appid:620,name:'Portal 2',shortcut:false}]})});
+  const start=findNode(overlay,node=>node.textContent==='Fetch missing (3)'
+    &&typeof node.onclick==='function');
+  start.onclick();
+  const stop=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Stop after current'&&typeof node.onclick==='function');
+  assert.ok(stop,'a running pass must offer Stop');
+  stop.onclick();
+  assert.equal(storage.get('slsLunaHltbBackground'),undefined,'Stop must clear the background flag');
+  await new Promise(resolve=>setTimeout(resolve,400));
+  const fetched=calls.filter(entry=>entry.fn==='SlsHltbFetch').length;
+  assert.ok(fetched<3,'stopping must end the pass early (got '+fetched+' of 3)');
+});
+
+test('a remembered pass resumes when the menu opens again',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {calls,storage}=await openHltbPage(document,{hltb:hltbFixture({games:{},
+    library:[{appid:70,name:'Half-Life',shortcut:false}]})});
+  storage.set('slsLunaHltbBackground','1');
+  // Closing and reopening the menu refreshes the data and resumes the pass.
+  const overlay=document.getElementById('sls-luna-overlay');
+  overlay.remove();
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,300));
+  const fetched=calls.filter(entry=>entry.fn==='SlsHltbFetch').map(entry=>entry.payload.appid);
+  assert.deepEqual(fetched,[70],'the remembered pass must resume on open');
+  assert.equal(storage.get('slsLunaHltbBackground'),undefined,'finishing must clear the flag');
 });
 
 test('Forget removes a cached record and the game becomes fetchable again',async()=>{

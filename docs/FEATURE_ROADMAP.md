@@ -140,11 +140,13 @@ public HLTB API or permission for automated scraping.
 **Implemented so far:** add-on `luna` owns HLTB inside the Luna menu and the
 library. The **HowLongToBeat** page lists the owned library and non-Steam
 shortcuts (reported by the SharedJSContext agent, locally only), shows cached
-times, and fetches on demand - per game or as a "fetch missing" queue that
+times, and fetches on demand - per game or as a **background pass** that
 spaces requests, **skips games the site cannot match** (remembering them so
-they stop counting as missing), and pauses a minute to retry once when the
-site rate-limits. The right-click menu keeps only the search link. The
-library's **SORT BY** dropdown gains a **HowLongToBeat** option: the agent
+they stop counting as missing), pauses a minute to retry once when the site
+rate-limits, **keeps running with the Luna window closed**, and resumes after a
+Steam restart until it finishes or the user stops it (the intent is remembered
+in localStorage; only Stop clears it). The right-click menu keeps only the
+search link. The library's **SORT BY** dropdown gains a **HowLongToBeat** option: the agent
 recognizes the dropdown by its option-value fingerprint (locale-independent)
 and appends value 12. Steam's comparator factory exports are non-configurable
 webpack getters, so instead of replacing it Luna relies on Steam's own fallback
