@@ -146,9 +146,13 @@ they stop counting as missing), and pauses a minute to retry once when the
 site rate-limits. The right-click menu keeps only the search link. The
 library's **SORT BY** dropdown gains a **HowLongToBeat** option: the agent
 recognizes the dropdown by its option-value fingerprint (locale-independent)
-and wraps Steam's exported comparator factory so Luna's value sorts by cached
-main-story hours, unknown games last; any failure degrades to Steam's
-alphabetical fallback. Everything is stored in
+and appends value 12. Steam's comparator factory exports are non-configurable
+webpack getters, so instead of replacing it Luna relies on Steam's own fallback
+for unknown values - alphabetical order - and rewrites each game's `sort_as`
+field (a plain writable property) to a zero-padded inverted-time key while the
+option is selected, restoring every original when another sort is chosen. With
+no HLTB data, or any failure along the way, the library behaves exactly as
+Steam's alphabetical sort. Everything is stored in
 `~/.local/share/slssteam-integrations/hltb.json`. Nothing is fetched
 automatically.
 

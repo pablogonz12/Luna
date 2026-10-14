@@ -184,19 +184,22 @@
   }
 
   /* ---- HowLongToBeat as a library sort option --------------------------
-   * Steam builds "SORT BY" from a fixed enum and sorts through one exported
-   * comparator factory (`gQ`, found by the stable field names its comparators
-   * use). Luna appends its own option (value 12) to the rendered dropdown and
-   * wraps `gQ` so that value sorts by the locally cached main-story seconds,
-   * unknown games last. Steam treats unknown values with its alphabetical
-   * fallback, so a missing patch can never break the library. */
+   * Steam builds "SORT BY" from a fixed enum and sorts through a comparator
+   * factory whose exports are non-configurable webpack getters, so it cannot
+   * be replaced. Unknown sort values fall back to Steam's alphabetical
+   * comparator, which compares each game's `sort_as` field - and that field is
+   * a plain writable property. Luna therefore appends its own option (value
+   * 12) to the rendered dropdown and, while that option is active, rewrites
+   * `sort_as` to a zero-padded inverted-time key; alphabetical comparison then
+   * yields longest-main-story first, games without times last. Originals are
+   * restored the moment another sort is chosen. If anything fails, Steam keeps
+   * working with its normal sorts. */
   const SORT_VALUE = 12;
   const SORT_LABEL = 'HowLongToBeat';
   const SORT_ENUM_FINGERPRINT = [1, 4, 9, 11]; // alphabetical, hours, metacritic, review
   let hltbRecords = {};
-  let sortModule = null;
-  let sortOriginal = null;
-  let sortPatched = false;
+  let sortAsPatched = null; // [overview, originalSortAs] pairs while active
+  let sortAsSeen = null;    // overviews already captured in this patch session
   let sortSeen = 0;
 
   function setHltbRecords(records) {
@@ -212,67 +215,87 @@
     return value > 0 ? value : null;
   }
 
-  // Descending by main story, like Steam's own "hours played" order; a game
-  // without times sorts after every game that has them.
-  function hltbComparator(a, b) {
-    const left = hltbSecondsFor(a && a.appid);
-    const right = hltbSecondsFor(b && b.appid);
-    if (left == null && right == null) return 0;
-    if (left == null) return 1;
-    if (right == null) return -1;
-    if (right !== left) return right - left;
-    return String((a && a.display_name) || '').localeCompare(String((b && b.display_name) || ''));
+  // Longest first under an ascending comparison: the key inverts the seconds
+  // and pads to a fixed width so plain string order equals time order. Games
+  // without times get the largest key, so they sort after every known game.
+  function hltbSortKey(appid, name) {
+    const seconds = hltbSecondsFor(appid) || 0;
+    const inverted = String(9999999999 - seconds).padStart(10, '0');
+    return inverted + ':' + String(name || '');
   }
 
-  function discoverSortModule(w) {
-    const chunks = w.webpackChunksteamui;
-    if (!chunks || !chunks.push) return null;
-    let require;
-    chunks.push([['sls-luna-sort-' + Date.now()], {}, r => { require = r; }]);
-    if (!require || !require.m) return null;
-    for (const [id, factory] of Object.entries(require.m)) {
-      const source = String(factory);
-      // Only the sort module carries the enum, the comparators and their
-      // field names together; requiring it is safe (already-loaded module).
-      if (!source.includes('CompareSortAs') || !source.includes('metacritic_score')
-          || !source.includes('rt_purchased_time')) continue;
-      let exports;
-      try { exports = require(id); } catch (_) { continue; }
-      if (exports && typeof exports.gQ === 'function' && typeof exports.xn === 'number') return exports;
+  function overviewsOf(w) {
+    const store = w && (w.appStore || (w.SteamUIStore && w.SteamUIStore.AppStore));
+    try {
+      if (store && Array.isArray(store.allApps)) return store.allApps;
+      if (store && store.m_mapApps && typeof store.m_mapApps.values === 'function') {
+        return [...store.m_mapApps.values()];
+      }
+    } catch (_) { /* no store yet */ }
+    return [];
+  }
+
+  function applyHltbSortAs(w) {
+    const overviews = overviewsOf(w);
+    if (!overviews.length) return false;
+    if (!sortAsPatched) {
+      sortAsPatched = [];
+      sortAsSeen = new WeakSet();
     }
+    for (const overview of overviews) {
+      if (!overview || overview.appid == null) continue;
+      const appid = Number(overview.appid);
+      if (!valid(appid)) continue;
+      const key = hltbSortKey(appid, overview.display_name || overview.name || '');
+      // A second pass must update the key without capturing the patched value
+      // as if it were the original.
+      if (sortAsSeen.has(overview)) {
+        try { overview.sort_as = key; } catch (_) { /* fine */ }
+        continue;
+      }
+      let original;
+      try {
+        original = overview.sort_as;
+        overview.sort_as = key;
+      } catch (_) { continue; }
+      sortAsSeen.add(overview);
+      sortAsPatched.push([overview, original]);
+    }
+    return sortAsPatched.length > 0;
+  }
+
+  function restoreHltbSortAs() {
+    if (!sortAsPatched) return false;
+    for (const [overview, original] of sortAsPatched) {
+      try {
+        if (original === undefined) delete overview.sort_as;
+        else overview.sort_as = original;
+      } catch (_) { /* the overview moved on; leave it */ }
+    }
+    sortAsPatched = null;
+    sortAsSeen = null;
+    return true;
+  }
+
+  function storageOf(w) {
+    try {
+      if (w && w.localStorage) return w.localStorage;
+      if (typeof localStorage !== 'undefined') return localStorage;
+    } catch (_) { /* blocked */ }
     return null;
   }
 
-  function ensureSortPatch(w) {
-    let found = null;
+  // Keep the keys in step with the persisted sort choice: applied while
+  // how-long-to-beat is selected, removed otherwise. Runs at boot, on every
+  // beat (to catch newly loaded games) and when the dropdown reports a change.
+  function syncSortAs(w) {
+    const storage = storageOf(w);
+    let current = null;
     try {
-      found = discoverSortModule(w);
-    } catch (_) { /* keep waiting for the next beat */ }
-    if (!found) return false;
-    if (found !== sortModule) {
-      sortModule = found;
-      sortPatched = false;
-    }
-    if (!sortPatched) {
-      sortOriginal = sortModule.gQ;
-      const wrapped = function (sortValue) {
-        if (sortValue === SORT_VALUE) return hltbComparator;
-        return sortOriginal(sortValue);
-      };
-      try {
-        Object.defineProperty(sortModule, 'gQ', { value: wrapped, configurable: true, writable: true });
-      } catch (_) {
-        try {
-          sortModule.gQ = wrapped;
-        } catch (error) {
-          console.warn('[SLS Luna] sort patch failed', error);
-          sortModule = null;
-          return false;
-        }
-      }
-      sortPatched = true;
-    }
-    return true;
+      current = storage ? JSON.parse(storage.getItem('AppGridDisplaySettings') || '{}').eSortBy : null;
+    } catch (_) { current = null; }
+    if (current === SORT_VALUE) return applyHltbSortAs(w);
+    return restoreHltbSortAs();
   }
 
   // The sort dropdown is recognized by its option values, not its labels, so
@@ -288,11 +311,25 @@
     return SORT_ENUM_FINGERPRINT.every(value => seen.has(value));
   }
 
-  function withSortOption(props) {
+  function withSortOption(props, w) {
     if (!isSortDropdown(props)) return null;
     sortSeen += 1;
-    if (props.rgOptions.some(option => option && option.data === SORT_VALUE)) return null;
-    return { ...props, rgOptions: props.rgOptions.concat([{ data: SORT_VALUE, label: SORT_LABEL }]) };
+    // The dropdown reports the live choice; keep the keys in step even when
+    // the stored setting is stale or the list was reloaded.
+    if (props.selectedOption === SORT_VALUE && !sortAsPatched) applyHltbSortAs(w);
+    if (props.selectedOption !== SORT_VALUE && sortAsPatched) restoreHltbSortAs();
+    const appended = props.rgOptions.some(option => option && option.data === SORT_VALUE)
+      ? props.rgOptions
+      : props.rgOptions.concat([{ data: SORT_VALUE, label: SORT_LABEL }]);
+    const onChange = typeof props.onChange === 'function'
+      ? value => {
+        if (value === SORT_VALUE) applyHltbSortAs(w);
+        else restoreHltbSortAs();
+        return props.onChange(value);
+      }
+      : props.onChange;
+    if (appended === props.rgOptions && onChange === props.onChange) return null;
+    return { ...props, rgOptions: appended, onChange };
   }
 
   function refreshHltbData(w) {
@@ -451,7 +488,7 @@
           const props = args[0];
           // The library's SORT BY dropdown gains the cached-times option.
           if (props && Array.isArray(props.rgOptions)) {
-            const withSort = withSortOption(props);
+            const withSort = withSortOption(props, w);
             if (withSort) args[0] = withSort;
           }
           const proto = type && type.prototype;
@@ -484,8 +521,8 @@
       unregister,
       list: () => actions.map(entry => ({ id: entry.id, label: entry.label })),
       get sort() {
-        return { patched: sortPatched, value: SORT_VALUE, seen: sortSeen,
-          games: Object.keys(hltbRecords).length, module: sortModule !== null };
+        return { value: SORT_VALUE, seen: sortSeen, games: Object.keys(hltbRecords).length,
+          applied: Boolean(sortAsPatched), patched: sortAsPatched ? sortAsPatched.length : 0 };
       },
       get attached() { return wrappedModule !== null && jsx === wrappedModule; },
       ensure() {
@@ -539,17 +576,16 @@
     const beat = () => {
       arm();
       pushLibrary(w);
-      refreshHltbData(w);
-      ensureSortPatch(w);
+      refreshHltbData(w).then(() => syncSortAs(w));
     };
     if (typeof w.setInterval === 'function') w.setInterval(beat, 30000);
     if (typeof w.setTimeout === 'function') w.setTimeout(() => pushLibrary(w), 60000);
     pushLibrary(w);
-    ensureSortPatch(w);
-    refreshHltbData(w);
+    refreshHltbData(w).then(() => syncSortAs(w));
   }
 
   return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, discoverMenuTools, openExternalUrl, searchUrlFor, nameOf,
-    defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords, hltbComparator, discoverSortModule,
-    ensureSortPatch, isSortDropdown, withSortOption, refreshHltbData, installLunaMenu, bootLunaMenu };
+    defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbSortKey,
+    applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption, refreshHltbData,
+    installLunaMenu, bootLunaMenu };
 });
