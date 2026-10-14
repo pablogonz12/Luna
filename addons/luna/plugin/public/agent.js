@@ -338,9 +338,18 @@
     return SORT_ENUM_FINGERPRINT.every(value => seen.has(value));
   }
 
+  // The nudge makes the grid re-sort after a key change. Steam's setter can
+  // belong to a dropdown instance that unmounts on the first change, so the
+  // second half is issued on the NEXT dropdown render, with a fresh setter.
+  let nudgePhase = 0; // 0 idle, 1 switched away, 2 switching back
+  let nudgeStamp = 0;
+
   function withSortOption(props, w) {
     if (!isSortDropdown(props)) return null;
     sortSeen += 1;
+    const schedule = (w && w.setTimeout) || setTimeout;
+    // A stale phase (user picked something manually, or a rebuild) is dropped.
+    if (nudgePhase && Date.now() - nudgeStamp > 15000) nudgePhase = 0;
     // The dropdown reports the live choice; keep the keys in step even when
     // the stored setting is stale or the list was reloaded.
     if (props.selectedOption === SORT_VALUE) {
@@ -349,17 +358,29 @@
       // run again. Picking alphabetical first keeps the keys in charge (its
       // comparator is the same fallback), then the HLTB choice re-sorts for
       // real. The original onChange is called directly, never our wrapper.
-      if (needsNudge && typeof props.onChange === 'function') {
+      if (needsNudge && nudgePhase === 0 && typeof props.onChange === 'function') {
         needsNudge = false;
+        nudgePhase = 1;
+        nudgeStamp = Date.now();
         const change = props.onChange;
-        const schedule = (w && w.setTimeout) || setTimeout;
         schedule(() => {
-          try { change(1); } catch (_) { /* state gone; the beat retries */ }
-          schedule(() => { try { change(SORT_VALUE); } catch (_) { /* fine */ } }, 80);
+          try { change(1); } catch (_) { nudgePhase = 0; }
         }, 80);
       }
-    } else if (sortAsPatched) {
-      restoreHltbSortAs();
+    } else {
+      // While a nudge is in flight the keys stay in charge, so the temporary
+      // sort renders in HLTB order too and nothing has to be re-applied.
+      if (sortAsPatched && nudgePhase === 0) restoreHltbSortAs();
+      // Second half: the dropdown just re-rendered on the temporary sort, so
+      // this setter is fresh. Calling it restores the HLTB choice for real.
+      if (nudgePhase === 1 && props.selectedOption === 1 && typeof props.onChange === 'function') {
+        nudgePhase = 2;
+        const change = props.onChange;
+        schedule(() => {
+          nudgePhase = 0;
+          try { change(SORT_VALUE); } catch (_) { /* the beat retries */ }
+        }, 120);
+      }
     }
     const appended = props.rgOptions.some(option => option && option.data === SORT_VALUE)
       ? props.rgOptions
@@ -523,21 +544,29 @@
       for (const key of ['jsx', 'jsxs']) if (jsx[key] === wrappers[key]) jsx[key] = originals[key];
     }
 
-    // Two add-ons hooking the same jsx module must not fight: Playtime's agent
-    // considers itself detached whenever another wrapper sits on top of it and
-    // re-wraps on its next beat. Luna therefore re-arms only when Steam really
-    // replaced the module (the library rebuilt its bundle) - being wrapped by
-    // another add-on is not detachment, our wrapper still runs in the chain.
-    // `base` is the leaf function of the chain at install time; the re-entry
-    // guard uses it so a wrapper cycle can never recurse without bound.
+    // Two add-ons hooking the same jsx module must not fight, and a Steam
+    // rebuild may replace the hooked functions in place or with a new module.
+    // The wrapper therefore stamps the module it wrapped (`__slsSeen.luna`)
+    // every time it runs; ensure() probes the live chain with an inert element
+    // and treats a fresh stamp as "we are still in the chain" (someone else may
+    // sit on top - fine) while a stale one means a real rebuild. `base` is the
+    // leaf function of the chain at install time; the re-entry guard uses it so
+    // a wrapper cycle can never recurse without bound.
     let wrappedModule = null;
     let inRender = false;
     const base = {};
+
+    function stampSeen() {
+      if (!jsx || typeof jsx !== 'object') return;
+      const seen = jsx.__slsSeen || (jsx.__slsSeen = {});
+      seen.luna = Date.now();
+    }
 
     for (const key of ['jsx', 'jsxs']) {
       originals[key] = jsx[key];
       base[key] = jsx[key];
       wrappers[key] = function (type, ...args) {
+        stampSeen();
         // Re-entry means another wrapper called us while we were already
         // rendering (a cycle created by two add-ons re-arming). Fall back to
         // the leaf so rendering still completes, without inserting twice.
@@ -590,16 +619,25 @@
       },
       get attached() { return wrappedModule !== null && jsx === wrappedModule; },
       ensure() {
-        // The library UI can rebuild its bundle, which produces a new jsx
-        // module object; re-arm on that object. An unchanged object means our
-        // wrapper is still somewhere in the chain - even when another add-on
-        // wrapped on top of it - so there is nothing to repair.
+        // The library UI can rebuild its bundle: sometimes with a new jsx
+        // module object, sometimes by replacing the hooked functions in place
+        // on the same object. Probe the live chain with an inert element: if
+        // Luna's wrapper runs it stamps the module, proving it is still in the
+        // chain (possibly under another add-on's wrapper - that is fine). A
+        // stale stamp means the functions were replaced and we must re-arm.
         let fresh = null;
         try {
           fresh = discoverMenuTools(w);
         } catch (_) { /* keep waiting for the next beat */ }
-        if (!fresh || fresh.jsx === wrappedModule) return false;
-        jsx = fresh.jsx;
+        if (!fresh) return false;
+        const module = fresh.jsx;
+        if (module.jsx === wrappers.jsx || module.jsxs === wrappers.jsxs) return false;
+        try {
+          module.jsx(function SlsLunaProbe() {}, {});
+        } catch (_) { /* a broken chain still means we are not in it */ }
+        const seen = module.__slsSeen && Number(module.__slsSeen.luna || 0);
+        if (seen && Date.now() - seen < 5000) return false;
+        jsx = module;
         restore();
         for (const key of ['jsx', 'jsxs']) {
           if (jsx[key] === wrappers[key]) jsx[key] = originals[key];
@@ -608,6 +646,7 @@
           jsx[key] = wrappers[key];
         }
         wrappedModule = jsx;
+        stampSeen();
         return true;
       },
       dispose() {

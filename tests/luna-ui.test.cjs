@@ -6,7 +6,8 @@
 // their real RPC names.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {mount,buildRows,buildHltbRows,findMenubar}=require('../addons/luna/plugin/public/panel.js');
+const {mount,buildRows,buildHltbRows,formatHltbStat,updateHltbStat,enforceSortLabel,
+  detailsAppIdFrom,findMenubar}=require('../addons/luna/plugin/public/panel.js');
 
 function fakeDom(){
   const registry={};
@@ -777,6 +778,76 @@ test('the HowLongToBeat page offers a sort-direction switch that is remembered',
   await new Promise(resolve=>setTimeout(resolve,20));
   assert.equal(storage.get('slsLunaHltbOrder'),'long','flipping must persist the preference');
   assert.match(textOf(document.getElementById('sls-luna-overlay')),/Library order: longest first/);
+});
+
+test('formatHltbStat renders native-looking values and hides refused matches',()=>{
+  assert.equal(formatHltbStat({main:84940,match:'exact'}),'23.6 hours');
+  assert.equal(formatHltbStat({main:180,match:'exact'}),'3 minutes');
+  assert.equal(formatHltbStat({main:60,match:'exact'}),'1 minute');
+  assert.equal(formatHltbStat({all:7200,match:'strong'}),'2.0 hours','the fallback bucket is used');
+  assert.equal(formatHltbStat({match:'none'}),null,'a refused match shows nothing');
+  assert.equal(formatHltbStat({main:0,match:'exact'}),null);
+  assert.equal(formatHltbStat(null),null);
+});
+
+function gamePageFixture(document){
+  const cell=document.createElement('div');
+  cell.className='_cell _playtime';
+  const icon=document.createElement('div');
+  icon.className='_icon';
+  const right=document.createElement('div');
+  right.className='_right';
+  const label=document.createElement('div');
+  label.className='_label';
+  label.textContent='Play Time';
+  const value=document.createElement('div');
+  value.className='_value';
+  value.textContent='30.1 hours';
+  right.append(label,value);
+  cell.append(icon,right);
+  const row=document.createElement('div');
+  row.appendChild(cell);
+  document.body.appendChild(row);
+  const link=document.createElement('a');
+  link.setAttribute('href','https://store.steampowered.com/app/3357650/007_First_Light/');
+  document.body.appendChild(link);
+  return {row,cell};
+}
+
+test('the game page gains a How Long To Beat cell in the playtime style and drops it without data',()=>{
+  const document=fakeDom();
+  const {row}=gamePageFixture(document);
+  assert.equal(detailsAppIdFrom(document),'3357650','the appid comes from the store link');
+  const stat=updateHltbStat(document,{'3357650':{main:57960,match:'exact'}});
+  assert.ok(stat,'the cell must be inserted');
+  assert.equal(stat.parentNode,row,'the cell must be a sibling in the stat row');
+  assert.equal(stat.className,'_cell _playtime','the playtime classes must be reused');
+  assert.equal(stat.children[0].className,'_icon');
+  assert.equal(stat.children[1].children[0].textContent,'How Long To Beat');
+  assert.equal(stat.children[1].children[1].textContent,'16.1 hours');
+  updateHltbStat(document,{'3357650':{main:7200,match:'exact'}});
+  assert.equal(document.getElementById('sls-luna-hltb-stat').children[1].children[1].textContent,
+    '2.0 hours','the value must update in place');
+  updateHltbStat(document,{});
+  assert.equal(document.getElementById('sls-luna-hltb-stat'),null,'no data means no cell');
+});
+
+test('the SORT BY label is restored only while the HLTB sort is stored',()=>{
+  const document=fakeDom();
+  const header=document.createElement('div');
+  const sortLabel=document.createElement('div');
+  sortLabel.textContent='Sort By';
+  const button=document.createElement('div');
+  const buttonText=document.createElement('div');
+  button.appendChild(buttonText);
+  header.append(sortLabel,button);
+  document.body.appendChild(header);
+  assert.equal(enforceSortLabel(document,4),false,'other sorts keep Steam labels');
+  assert.equal(enforceSortLabel(document,12),true,'the stored HLTB choice must label itself');
+  assert.equal(buttonText.textContent,'HowLongToBeat');
+  assert.equal(enforceSortLabel(document,12),false,'already correct labels are left alone');
+  buttonText.textContent='';
+  assert.equal(enforceSortLabel(document,1),false,'leaving the sort lets Steam own the label');
 });
 
 test('Forget removes a cached record and the game becomes fetchable again',async()=>{
