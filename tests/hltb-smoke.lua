@@ -385,6 +385,6 @@ out = call('SlsHltbLibrary', { raw = json.encode({ games = 'nope' }) })
 assert(out.success == false)
 
 out = call('SlsLunaInfo')
-assert(out.success == true and out.version == '0.6.0' and type(out.addons) == 'table')
+assert(out.success == true and out.version == '0.7.0' and type(out.addons) == 'table')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence')

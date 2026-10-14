@@ -197,9 +197,12 @@
   const SORT_VALUE = 12;
   const SORT_LABEL = 'HowLongToBeat';
   const SORT_ENUM_FINGERPRINT = [1, 4, 9, 11]; // alphabetical, hours, metacritic, review
+  const HLTB_ORDER_KEY = 'slsLunaHltbOrder';   // 'short' (default) or 'long'
   let hltbRecords = {};
   let sortAsPatched = null; // [overview, originalSortAs] pairs while active
   let sortAsSeen = null;    // overviews already captured in this patch session
+  let currentOrder = 'short';
+  let needsNudge = false;
   let sortSeen = 0;
 
   function setHltbRecords(records) {
@@ -220,13 +223,13 @@
     return seconds ? Math.round(seconds / 60) : 0;
   }
 
-  // Longest first under an ascending comparison: the key inverts the seconds
-  // and pads to a fixed width so plain string order equals time order. Games
-  // without times get the largest key, so they sort after every known game.
+  // Main-story seconds first, or longest first when the user prefers it;
+  // games without times always sit at the end of either order.
   function hltbSortKey(appid, name) {
-    const seconds = hltbSecondsFor(appid) || 0;
-    const inverted = String(9999999999 - seconds).padStart(10, '0');
-    return inverted + ':' + String(name || '');
+    const seconds = hltbSecondsFor(appid);
+    const value = seconds == null ? 9999999999
+      : (currentOrder === 'long' ? 9999999999 - seconds : seconds);
+    return String(value).padStart(10, '0') + ':' + String(name || '');
   }
 
   function overviewsOf(w) {
@@ -241,12 +244,14 @@
   }
 
   function applyHltbSortAs(w) {
+    currentOrder = readHltbOrder(w);
     const overviews = overviewsOf(w);
     if (!overviews.length) return false;
     if (!sortAsPatched) {
       sortAsPatched = [];
       sortAsSeen = new WeakSet();
     }
+    let changed = false;
     for (const overview of overviews) {
       if (!overview || overview.appid == null) continue;
       const appid = Number(overview.appid);
@@ -255,7 +260,9 @@
       // A second pass must update the key without capturing the patched value
       // as if it were the original.
       if (sortAsSeen.has(overview)) {
-        try { overview.sort_as = key; } catch (_) { /* fine */ }
+        if (overview.sort_as !== key) {
+          try { overview.sort_as = key; changed = true; } catch (_) { /* fine */ }
+        }
         continue;
       }
       let original;
@@ -265,7 +272,12 @@
       } catch (_) { continue; }
       sortAsSeen.add(overview);
       sortAsPatched.push([overview, original]);
+      changed = true;
     }
+    // Steam's grid caches its sorted order and `sort_as` is not observable, so
+    // a change here must be followed by Steam's own setSortBy being poked (the
+    // dropdown does that on its next render; see withSortOption).
+    if (changed) needsNudge = true;
     return sortAsPatched.length > 0;
   }
 
@@ -279,6 +291,7 @@
     }
     sortAsPatched = null;
     sortAsSeen = null;
+    needsNudge = false;
     return true;
   }
 
@@ -288,6 +301,15 @@
       if (typeof localStorage !== 'undefined') return localStorage;
     } catch (_) { /* blocked */ }
     return null;
+  }
+
+  function readHltbOrder(w) {
+    const storage = storageOf(w);
+    try {
+      return storage && storage.getItem(HLTB_ORDER_KEY) === 'long' ? 'long' : 'short';
+    } catch (_) {
+      return 'short';
+    }
   }
 
   // Keep the keys in step with the persisted sort choice: applied while
@@ -321,8 +343,24 @@
     sortSeen += 1;
     // The dropdown reports the live choice; keep the keys in step even when
     // the stored setting is stale or the list was reloaded.
-    if (props.selectedOption === SORT_VALUE && !sortAsPatched) applyHltbSortAs(w);
-    if (props.selectedOption !== SORT_VALUE && sortAsPatched) restoreHltbSortAs();
+    if (props.selectedOption === SORT_VALUE) {
+      if (!sortAsPatched) applyHltbSortAs(w);
+      // The grid caches its order, so a key change needs Steam's own setter to
+      // run again. Picking alphabetical first keeps the keys in charge (its
+      // comparator is the same fallback), then the HLTB choice re-sorts for
+      // real. The original onChange is called directly, never our wrapper.
+      if (needsNudge && typeof props.onChange === 'function') {
+        needsNudge = false;
+        const change = props.onChange;
+        const schedule = (w && w.setTimeout) || setTimeout;
+        schedule(() => {
+          try { change(1); } catch (_) { /* state gone; the beat retries */ }
+          schedule(() => { try { change(SORT_VALUE); } catch (_) { /* fine */ } }, 80);
+        }, 80);
+      }
+    } else if (sortAsPatched) {
+      restoreHltbSortAs();
+    }
     const appended = props.rgOptions.some(option => option && option.data === SORT_VALUE)
       ? props.rgOptions
       : props.rgOptions.concat([{ data: SORT_VALUE, label: SORT_LABEL }]);
@@ -547,7 +585,8 @@
       list: () => actions.map(entry => ({ id: entry.id, label: entry.label })),
       get sort() {
         return { value: SORT_VALUE, seen: sortSeen, games: Object.keys(hltbRecords).length,
-          applied: Boolean(sortAsPatched), patched: sortAsPatched ? sortAsPatched.length : 0 };
+          applied: Boolean(sortAsPatched), patched: sortAsPatched ? sortAsPatched.length : 0,
+          order: currentOrder, nudge: needsNudge };
       },
       get attached() { return wrappedModule !== null && jsx === wrappedModule; },
       ensure() {
@@ -605,12 +644,17 @@
     };
     if (typeof w.setInterval === 'function') w.setInterval(beat, 30000);
     if (typeof w.setTimeout === 'function') w.setTimeout(() => pushLibrary(w), 60000);
+    // The panel writes the sort order in localStorage; the storage event tells
+    // this context to rewrite the keys (and nudge the grid) right away.
+    if (typeof w.addEventListener === 'function') {
+      w.addEventListener('storage', () => { syncSortAs(w); });
+    }
     pushLibrary(w);
     refreshHltbData(w).then(() => syncSortAs(w));
   }
 
   return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, discoverMenuTools, openExternalUrl, searchUrlFor, nameOf,
     defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor,
-    hltbSortKey, applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption,
-    withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
+    hltbSortKey, readHltbOrder, applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown,
+    withSortOption, withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
 });

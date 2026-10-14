@@ -764,6 +764,21 @@ test('a remembered pass resumes when the menu opens again',async()=>{
   assert.equal(storage.get('slsLunaHltbBackground'),undefined,'finishing must clear the flag');
 });
 
+test('the HowLongToBeat page offers a sort-direction switch that is remembered',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {storage,overlay}=await openHltbPage(document,{hltb:hltbFixture()});
+  assert.match(textOf(overlay),/Library order: shortest first/,'the default must be shortest first');
+  const row=findNode(overlay,node=>node.className==='sls-luna-row'
+    &&(node.textContent||'').includes('Library order'));
+  const switchBox=findNode(row,node=>(node.className||'').startsWith('sls-luna-switch'));
+  assert.ok(switchBox&&switchBox.className.includes('on'),'the switch must start on');
+  switchBox.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(storage.get('slsLunaHltbOrder'),'long','flipping must persist the preference');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Library order: longest first/);
+});
+
 test('Forget removes a cached record and the game becomes fetchable again',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
