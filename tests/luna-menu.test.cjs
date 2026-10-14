@@ -8,7 +8,8 @@
 // selecting an action routes the URL through Steam's own handlers.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf}=require('../addons/luna/plugin/public/agent.js');
+const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf,
+  collectLibrary,pushLibrary}=require('../addons/luna/plugin/public/agent.js');
 
 test('search URL trims and encodes the game name',()=>{
   assert.equal(searchUrlFor('  Hades  '),'https://howlongtobeat.com/?q=Hades');
@@ -96,7 +97,7 @@ test('the focused game gains the HowLongToBeat action after its primary action',
   tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}},{type:'fav',props:{}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
   assert.equal(menu.list().some(entry=>entry.id==='hltb'),true);
   menu.dispose();
   assert.equal(w.__SlsLunaMenu,undefined);
@@ -123,7 +124,7 @@ test('a focused label authorizes the game even when child actions mention other 
   tools.jsx.jsx(tools.Outer,{overview:app,instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Grand Theft Auto V Enhanced',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[app]}},{type:'dlc',props:{app:{appid:999}}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
   menu.dispose();
 });
 
@@ -191,12 +192,12 @@ test('other add-ons can register and remove their own game actions through the r
   tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times','Change artwork']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Change artwork']);
   assert.equal(menu.unregister('hltb'),true);
   assert.equal(menu.unregister('missing'),false);
   const el2=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el2),['Fetch HowLongToBeat times','Change artwork']);
+  assert.deepEqual(labelsAfterPrimary(el2),['Change artwork']);
   menu.dispose();
 });
 
@@ -211,7 +212,7 @@ test('an action whose eligibility throws is treated as disabled',()=>{
     tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
     const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
       {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-    assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times']);
+    assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
     menu.dispose();
   }finally{console.warn=originalWarn;}
 });
@@ -235,7 +236,7 @@ test('ensure re-arms only when Steam rebuilds the module, not when another add-o
   const el=tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const el2=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el2),['HowLongToBeat','Fetch HowLongToBeat times'],
+  assert.deepEqual(labelsAfterPrimary(el2),['HowLongToBeat'],
     'the chain through the other wrapper must still insert Luna items');
   assert.ok(el,'render must still flow through the chain');
 
@@ -253,7 +254,7 @@ test('ensure re-arms only when Steam rebuilds the module, not when another add-o
   const labels=rendered.filter(child=>child&&child.props&&Array.isArray(child.props.children)
     &&typeof child.props.children[0]==='string'&&child.props.children[0]!=='play')
     .map(child=>child.props.children[0]);
-  assert.deepEqual(labels,['HowLongToBeat','Fetch HowLongToBeat times'],
+  assert.deepEqual(labels,['HowLongToBeat'],
     'the re-armed hook on the rebuilt module must insert the item');
   assert.equal(menu.ensure(),false,'a healthy re-armed hook must not keep wrapping');
 
@@ -305,49 +306,63 @@ test('booting retries until the library module appears and only arms once',()=>{
   }finally{console.warn=originalWarn;}
 });
 
-function menuItemFor(tools,el,label){
-  return (el.props.children||[]).find(child=>child&&child.props&&child.props.children
-    &&child.props.children[0]===label);
-}
-
-test('fetching HowLongToBeat times asks the Luna backend and returns the cached record',async()=>{
+test('fetching HowLongToBeat times is not a right-click action: the Luna page owns it',async()=>{
   const tools=fixture();
-  const calls=[];
   const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})},
-    Millennium:{callServerMethod:(plugin,fn,args)=>{
-      calls.push([plugin,fn,args]);
-      if(fn==='SlsHltbFetch')return JSON.stringify({success:true,record:{name:'Hades',main:84940,extra:175028}});
-      return JSON.stringify({success:false,error:'unexpected method'});
-    }}};
+    Millennium:{callServerMethod:()=>JSON.stringify({success:true,record:{name:'Hades'}})}};
   const menu=installLunaMenu(w,tools);
+  assert.deepEqual(menu.list().map(entry=>entry.id),['hltb'],
+    'only the search link stays on the context menu');
   tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  const item=menuItemFor(tools,el,'Fetch HowLongToBeat times');
-  assert.ok(item,'the fetch action must be offered');
-  const record=await item.props.onSelected();
-  assert.equal(record.main,84940);
-  assert.deepEqual(calls,[['lumen','SlsHltbFetch',{appid:1145360,name:'Hades'}]]);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
   menu.dispose();
 });
 
-test('a refused HowLongToBeat fetch is contained and logged with the backend reason',async()=>{
+test('collectLibrary reports owned games and shortcuts, never tools or duplicates',()=>{
+  const w={appStore:{allApps:[
+    {appid:1145360,app_type:1,display_name:'Hades'},
+    {appid:620,app_type:1,display_name:'Portal 2'},
+    {appid:3212112756,app_type:1073741824,display_name:'Minecraft'},
+    {appid:228980,app_type:4,display_name:'Steamworks Common Redistributables'},
+    {appid:1145360,app_type:1,display_name:'Hades again'},
+    {appid:999,app_type:1,display_name:''},
+  ]}};
+  const games=collectLibrary(w);
+  assert.deepEqual(games.map(game=>game.name),['Hades','Minecraft','Portal 2']);
+  assert.equal(games.find(game=>game.name==='Minecraft').shortcut,true);
+  assert.equal(games.find(game=>game.name==='Hades').shortcut,false);
+});
+
+test('collectLibrary also reads a Map-backed store and tolerates nonsense',()=>{
+  const map=new Map();
+  map.set(1,{appid:10,app_type:1,display_name:'Alpha'});
+  map.set(2,{appid:20,app_type:1,display_name:'Beta'});
+  const games=collectLibrary({appStore:{m_mapApps:map}});
+  assert.deepEqual(games.map(game=>game.name),['Alpha','Beta']);
+  assert.deepEqual(collectLibrary({}),[]);
+  assert.deepEqual(collectLibrary({appStore:{allApps:[null,{appid:0,app_type:1,display_name:'x'}]}}),[]);
+});
+
+test('pushLibrary sends the inventory once and skips identical payloads',async()=>{
   const tools=fixture();
-  const errors=[];
-  const originalError=console.error;
-  console.error=(...args)=>errors.push(args.map(String).join(' '));
-  try{
-    const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Orion Drift'})},
-      Millennium:{callServerMethod:()=>JSON.stringify({success:false,
-        error:'No confident HowLongToBeat match for "Orion Drift".'})}};
-    const menu=installLunaMenu(w,tools);
-    tools.jsx.jsx(tools.Outer,{overview:{appid:1,display_name:'Orion Drift'},instance:{}});
-    const el=tools.jsx.jsx(tools.Inner,{label:'Orion Drift',labelId:'l',children:[
-      {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1}]}}]});
-    const item=menuItemFor(tools,el,'Fetch HowLongToBeat times');
-    await item.props.onSelected();
-    assert.equal(errors.some(line=>line.includes('No confident HowLongToBeat match')),true,
-      'the backend reason must reach the console');
-    menu.dispose();
-  }finally{console.error=originalError;}
+  const calls=[];
+  const w={appStore:{allApps:[{appid:1145360,app_type:1,display_name:'Hades'}]},
+    Millennium:{callServerMethod:(plugin,fn,args)=>{calls.push([plugin,fn,args]);
+      return JSON.stringify({success:true,count:1});}}};
+  assert.equal(await pushLibrary(w),true);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][0],'lumen');
+  assert.equal(calls[0][1],'SlsHltbLibrary');
+  const payload=JSON.parse(calls[0][2].raw);
+  assert.deepEqual(payload.games,[{appid:1145360,name:'Hades',shortcut:false}]);
+  assert.equal(await pushLibrary(w),false,'an unchanged list must not be re-sent');
+  assert.equal(calls.length,1);
+  w.appStore.allApps.push({appid:620,app_type:1,display_name:'Portal 2'});
+  assert.equal(await pushLibrary(w),true,'a changed list must be sent');
+  assert.equal(calls.length,2);
+  const failing={appStore:w.appStore,Millennium:{callServerMethod:()=>Promise.reject(Error('down'))}};
+  const quiet=await pushLibrary(failing);
+  assert.equal(quiet,false,'a failed push must not throw');
 });

@@ -11,10 +11,11 @@
  * menu. Nothing here touches game files; every action decides its own behavior
  * through the backend contract.
  *
- * Actions: HowLongToBeat (opens the game's search page in the browser through
- * Steam's own URL handlers) and Fetch HowLongToBeat times (asks Luna's backend
- * for a user-triggered lookup and caches it locally; no library data leaves the
- * machine, and nothing is fetched automatically).
+ * Action: HowLongToBeat (opens the game's search page in the browser through
+ * Steam's own URL handlers). Fetching and the cached times live in the Luna
+ * menu's HowLongToBeat page; this agent only reports the local game inventory
+ * so that page can show what is still missing. Nothing is fetched
+ * automatically and no library data leaves the machine.
  */
 (function (root, factory) {
   const api = factory();
@@ -50,18 +51,64 @@
         if (!opened) throw Error('Steam could not open the browser for the HowLongToBeat search.');
         return true;
       }),
-    }, {
-      id: 'hltb-fetch',
-      label: 'Fetch HowLongToBeat times',
-      isEnabled: app => Boolean(nameOf(app)) && valid(app && app.appid),
-      run: (app, w) => rpc(w, 'SlsHltbFetch', { appid: Number(app.appid), name: nameOf(app) })
-        .then(out => {
-          if (!out || out.success !== true) {
-            throw Error((out && out.error) || 'The HowLongToBeat fetch failed.');
-          }
-          return out.record;
-        }),
     }];
+  }
+
+  /* The owned games and non-Steam shortcuts this context can see, for the
+     Luna panel's HowLongToBeat page. Only appid, display name and a shortcut
+     flag leave this function; the list stays local. */
+  function collectLibrary(w) {
+    const store = w && (w.appStore || (w.SteamUIStore && w.SteamUIStore.AppStore));
+    let overviews = [];
+    try {
+      if (store && Array.isArray(store.allApps)) overviews = store.allApps;
+      else if (store && store.m_mapApps && typeof store.m_mapApps.values === 'function') {
+        overviews = [...store.m_mapApps.values()];
+      }
+    } catch (_) { overviews = []; }
+    const out = [];
+    const seen = new Set();
+    for (const overview of overviews) {
+      if (!overview) continue;
+      const appid = Number(overview.appid);
+      if (!valid(appid) || seen.has(appid)) continue;
+      const type = Number(overview.app_type);
+      if (type !== 1 && type !== 1073741824) continue;
+      const name = nameOf(overview);
+      if (!name) continue;
+      seen.add(appid);
+      out.push({ appid, name: name.slice(0, 200), shortcut: type === 1073741824 });
+      if (out.length >= 5000) break;
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
+  }
+
+  let lastLibraryPayload = '';
+
+  function pushLibrary(w) {
+    let payload;
+    try {
+      const games = collectLibrary(w);
+      if (!games.length) return Promise.resolve(false);
+      payload = JSON.stringify({ games });
+    } catch (error) {
+      console.warn('[SLS Luna] library inventory failed', error);
+      return Promise.resolve(false);
+    }
+    if (payload === lastLibraryPayload) return Promise.resolve(false);
+    return rpc(w, 'SlsHltbLibrary', { raw: payload })
+      .then(out => {
+        if (out && out.success === true) {
+          lastLibraryPayload = payload;
+          return true;
+        }
+        return false;
+      })
+      .catch(error => {
+        console.warn('[SLS Luna] library inventory push failed', error);
+        return false;
+      });
   }
 
   function nameOf(app) {
@@ -346,7 +393,9 @@
 
   /* Boot in SharedJSContext: arm the menu now, retry while the library module
      is still loading, and re-arm on a slow beat so a Steam UI reload cannot
-     leave the menu without Luna's actions. */
+     leave the menu without Luna's actions. The game inventory is reported to
+     the backend at boot (again after a minute, so a late Steam start still
+     fills it) and refreshed on a slow beat. */
   function bootLunaMenu(w) {
     if (w.__SlsLunaAgent) return;
     w.__SlsLunaAgent = true;
@@ -359,8 +408,12 @@
       }
     };
     arm();
-    if (typeof w.setInterval === 'function') w.setInterval(arm, 30000);
+    const beat = () => { arm(); pushLibrary(w); };
+    if (typeof w.setInterval === 'function') w.setInterval(beat, 30000);
+    if (typeof w.setTimeout === 'function') w.setTimeout(() => pushLibrary(w), 60000);
+    pushLibrary(w);
   }
 
-  return { HLTB_SEARCH, discoverMenuTools, openExternalUrl, searchUrlFor, nameOf, defaultActions, installLunaMenu, bootLunaMenu };
+  return { HLTB_SEARCH, discoverMenuTools, openExternalUrl, searchUrlFor, nameOf, defaultActions,
+    collectLibrary, pushLibrary, rpc, installLunaMenu, bootLunaMenu };
 });

@@ -137,14 +137,15 @@ main-story and completionist times) and display the result in Luna. Do not build
 against an assumed official public API: this research did not confirm a supported
 public HLTB API or permission for automated scraping.
 
-**Implemented so far:** add-on `luna` 0.3.0 publishes the shared game right-click
-registry with two actions: **HowLongToBeat** opens the game's search page in the
-user's browser through Steam's own URL handlers, and **Fetch HowLongToBeat
-times** asks Luna's backend for one user-triggered lookup, which matches the
-title (refusing weak matches), stores the result as seconds in
-`~/.local/share/slssteam-integrations/hltb.json`, and never runs on its own or
-in batches. Manual hours per game are supported as corrections. The Steam-UI
-surfacing below reads that store.
+**Implemented so far:** add-on `luna` 0.4.0 owns HLTB inside the Luna menu:
+the **HowLongToBeat** page lists the owned library and non-Steam shortcuts
+(reported by the SharedJSContext agent, locally only), shows cached times, and
+fetches on demand - per game or as a rate-limited "fetch missing" queue that
+spaces requests and stops with the site's reason on a refusal. Weak matches are
+refused, manual corrections and Forget are built in, and everything is stored
+in `~/.local/share/slssteam-integrations/hltb.json`. The right-click menu keeps
+only the search link; fetching lives in the page. Nothing is fetched
+automatically.
 
 ### In-Steam surfacing (design, verified against the installed client bundle)
 

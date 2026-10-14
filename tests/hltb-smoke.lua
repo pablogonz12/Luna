@@ -343,7 +343,42 @@ assert(out.record.match == 'exact' and out.record.name == 'Hades')
 assert(out.record.main == 84940 and out.record.extra == 175028 and out.record.completionist == 343055)
 assert(out.record.all == 159766)
 
+-- ---------------------------------------------------------------- library
+
+local pushed = call('SlsHltbLibrary', { raw = json.encode({ games = {
+  { appid = 1145360, name = 'Hades' },
+  { appid = 620, name = 'Portal 2', shortcut = false },
+  { appid = 3212112756, name = 'Minecraft', shortcut = true },
+  { appid = 1145360, name = 'Hades again' },
+  { appid = 0, name = 'bad' },
+  { appid = 70, name = '' },
+} }) })
+assert(pushed.success == true and pushed.count == 3,
+  'the inventory must dedupe and validate, got ' .. tostring(pushed.count))
+local library_state = call('SlsHltbGet')
+assert(type(library_state.library) == 'table' and #library_state.library == 3)
+assert(library_state.libraryAt > 0)
+local seen_names = {}
+for _, entry in ipairs(library_state.library) do seen_names[entry.name] = entry end
+assert(seen_names['Hades'] and seen_names['Hades'].name == 'Hades', 'the first duplicate must win')
+assert(seen_names['Minecraft'] and seen_names['Minecraft'].shortcut == true)
+assert(seen_names['Minecraft'].appid == 3212112756)
+assert(seen_names['Portal 2'].shortcut == false)
+
+local fourth = dofile(repo .. '/addons/luna/plugin/backend/main.lua')
+local fourth_registry = {}
+fourth.register(fourth_registry)
+assert(#(json.decode(fourth_registry.SlsHltbGet()).library) == 3,
+  'the inventory must survive an add-on reload')
+
+out = call('SlsHltbLibrary', { raw = json.encode({ games = { { appid = 0, name = 'x' } } }) })
+assert(out.success == false and out.error:find('No valid games', 1, true) ~= nil)
+out = call('SlsHltbLibrary', { raw = 'not json' })
+assert(out.success == false)
+out = call('SlsHltbLibrary', { raw = json.encode({ games = 'nope' }) })
+assert(out.success == false)
+
 out = call('SlsLunaInfo')
-assert(out.success == true and out.version == '0.3.1' and type(out.addons) == 'table')
+assert(out.success == true and out.version == '0.4.0' and type(out.addons) == 'table')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence')
