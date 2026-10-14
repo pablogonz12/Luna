@@ -1385,12 +1385,31 @@
       if (document.getElementById(OVERLAY_ID)) paint();
     };
 
+    // The DOM-level pieces (game-page stat cell, SORT BY label) are refreshed
+    // on a debounce: data changes, navigation and Steam re-renders all funnel
+    // through here without touching React.
+    let overlayTimer = null;
+    function refreshDomOverlays() {
+      let stored = null;
+      try {
+        stored = JSON.parse((w.localStorage && w.localStorage.getItem('AppGridDisplaySettings')) || '{}').eSortBy;
+      } catch (_) { stored = null; }
+      enforceSortLabel(document, stored);
+      updateHltbStat(document, (hltb && hltb.games) || {});
+    }
+    function scheduleOverlayRefresh(delay) {
+      if (overlayTimer) return;
+      const schedule = w.setTimeout || setTimeout;
+      overlayTimer = schedule(() => { overlayTimer = null; refreshDomOverlays(); }, delay || 800);
+    }
+
     async function refreshHltb() {
       try {
         hltb = await rpc(w, 'SlsHltbGet');
       } catch (error) {
         hltb = hltb || {};
       }
+      scheduleOverlayRefresh(150);
       repaintIfOpen();
     }
 
@@ -1904,6 +1923,15 @@
     // Safety net: an add-on that mounted its floating panel before the flag was
     // set is removed on the next pass.
     w.setInterval(() => { removeFloating(document); }, 4000);
+    // Keep the game-page HLTB cell and the SORT BY label in step with Steam's
+    // own rendering; a MutationObserver where available, a slow beat otherwise.
+    if (typeof w.MutationObserver === 'function') {
+      const observer = new w.MutationObserver(() => scheduleOverlayRefresh());
+      observer.observe(document.body, { childList: true, subtree: true });
+    } else {
+      w.setInterval(refreshDomOverlays, 3000);
+    }
+    scheduleOverlayRefresh(1500);
     // Resume a background fetch pass after a Steam restart without making the
     // user open the menu: load the local times and continue where it left off.
     (w.setTimeout || setTimeout)(async () => {
@@ -1911,7 +1939,129 @@
         hltb = await rpc(w, 'SlsHltbGet');
       } catch (_) { /* the backend may still be starting */ }
       maybeAutoFetch();
+      scheduleOverlayRefresh(150);
     }, 6000);
+  }
+
+  /* The details-page stat cell and the library sort label. Both are DOM-level:
+     Steam's label lookup has no case for the Luna sort value, and the details
+     row is rendered by private components, so these run in the Steam window
+     (the panel's own document) and never touch React state. */
+
+  function formatHltbStat(record) {
+    if (!record || record.match === 'none') return null;
+    const seconds = Number(record.main) || Number(record.all) || Number(record.extra) || 0;
+    if (!(seconds > 0)) return null;
+    const minutes = Math.max(1, Math.round(seconds / 60));
+    if (minutes < 60) return minutes + (minutes === 1 ? ' minute' : ' minutes');
+    return (minutes / 60).toFixed(1) + ' hours';
+  }
+
+  function detailsAppIdFrom(document) {
+    const links = document.querySelectorAll ? document.querySelectorAll('a') : [];
+    for (const link of links || []) {
+      const href = (typeof link.getAttribute === 'function' ? link.getAttribute('href') : link.attr_href) || '';
+      const match = String(href).match(/store\.steampowered\.com\/app\/(\d+)/);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  function leafWithText(document, pattern) {
+    const nodes = document.querySelectorAll ? document.querySelectorAll('div,span') : [];
+    for (const node of nodes || []) {
+      if (node.children && node.children.length === 0 && pattern.test((node.textContent || '').trim())) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  // The game page (details view) gains a How Long To Beat cell right after the
+  // playtime cell, built with the playtime cell's own class names so Steam's
+  // styles apply unchanged. Pure DOM: no React state is involved, and the cell
+  // is removed the moment there is no cached time for the shown game.
+  function updateHltbStat(document, games) {
+    const existing = document.getElementById ? document.getElementById('sls-luna-hltb-stat') : null;
+    const label = leafWithText(document, /^play time$/i);
+    const cell = label && label.parentNode && label.parentNode.parentNode;
+    if (!cell || !cell.parentNode) {
+      if (existing && existing.remove) existing.remove();
+      return null;
+    }
+    const appid = detailsAppIdFrom(document);
+    const record = appid && games ? games[String(appid)] : null;
+    const text = formatHltbStat(record);
+    if (!text) {
+      if (existing && existing.remove) existing.remove();
+      return null;
+    }
+    if (existing && existing.parentNode === cell.parentNode) {
+      const value = document.getElementById('sls-luna-hltb-stat-value');
+      if (value) value.textContent = text;
+      return existing;
+    }
+    if (existing && existing.remove) existing.remove();
+    const iconSource = cell.children[0];
+    const rightSource = cell.children[1];
+    const labelSource = rightSource && rightSource.children[0];
+    const valueSource = rightSource && rightSource.children[1];
+    if (!iconSource || !rightSource || !labelSource || !valueSource) return null;
+    const stat = document.createElement('div');
+    stat.id = 'sls-luna-hltb-stat';
+    stat.className = cell.className;
+    const icon = document.createElement('div');
+    icon.className = iconSource.className;
+    icon.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">'
+      + '<circle cx="12" cy="12" r="8" fill="none" stroke="#7c8791" stroke-width="2"/>'
+      + '<path d="M12 7v5l3.5 2" fill="none" stroke="#7c8791" stroke-width="2"/>'
+      + '<path d="M4 5.5L6.5 3M20 5.5L17.5 3" stroke="#7c8791" stroke-width="2"/></svg>';
+    const right = document.createElement('div');
+    right.className = rightSource.className;
+    const labelNode = document.createElement('div');
+    labelNode.className = labelSource.className;
+    labelNode.textContent = 'How Long To Beat';
+    const value = document.createElement('div');
+    value.id = 'sls-luna-hltb-stat-value';
+    value.className = valueSource.className;
+    value.textContent = text;
+    right.append(labelNode, value);
+    stat.append(icon, right);
+    cell.parentNode.insertBefore(stat, cell.nextSibling);
+    return stat;
+  }
+
+  function firstTextLeaf(node) {
+    if (!node || !node.children) return null;
+    for (const child of node.children) {
+      if (!child.children || child.children.length === 0) {
+        const tag = String(child.tagName || '').toUpperCase();
+        if (tag === 'DIV' || tag === 'SPAN' || tag === '') return child;
+      } else {
+        const found = firstTextLeaf(child);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  // Steam's own sort-label lookup has no case for the Luna value, so a
+  // rehydrated choice (localStorage) renders an empty SORT BY label. While the
+  // Luna value is the stored choice, put the label back - and only then.
+  function enforceSortLabel(document, storedValue) {
+    if (storedValue !== 12) return false;
+    const nodes = document.querySelectorAll ? document.querySelectorAll('div,span') : [];
+    for (const node of nodes || []) {
+      const text = (node.textContent || '').trim();
+      if (!/^sort by$/i.test(text) || !node.children || node.children.length !== 2) continue;
+      const leaf = firstTextLeaf(node.children[1]);
+      if (leaf && (leaf.textContent || '').trim() !== 'HowLongToBeat') {
+        leaf.textContent = 'HowLongToBeat';
+        return true;
+      }
+      return false;
+    }
+    return false;
   }
 
   /* Merged view of the agent-reported game list and the cached HowLongToBeat
@@ -1961,5 +2111,6 @@
         || (b.record.lastPlayed || 0) - (a.record.lastPlayed || 0) || a.name.localeCompare(b.name));
   }
 
-  return { mount, buildRows, buildHltbRows, findMenubar, hours };
+  return { mount, buildRows, buildHltbRows, formatHltbStat, updateHltbStat, enforceSortLabel,
+    detailsAppIdFrom, findMenubar, hours };
 });

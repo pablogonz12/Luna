@@ -58,7 +58,11 @@ function fixture(){
 }
 
 function webpackFixture(requireName){
-  const React={createElement(){},isValidElement:e=>!!e?.props};
+  const React={createElement:(type,props,...children)=>{
+    const element={type,props:{...props,children}};
+    if(props&&'key' in props)element.key=props.key;
+    return element;},
+    isValidElement:e=>!!e?.props};
   const calls=[];
   const jsxs=(t,p)=>{calls.push(p);return {type:t,props:p};};
   const jsx={jsx:(t,p)=>{calls.push(p);return {type:t,props:p};},jsxs};
@@ -224,72 +228,65 @@ test('an action whose eligibility throws is treated as disabled',()=>{
   }finally{console.warn=originalWarn;}
 });
 
-test('ensure re-arms only when Steam rebuilds the module, not when another add-on wraps on top',()=>{
-  const tools=fixture();
-  const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})}};
-  const menu=installLunaMenu(w,tools);
-  assert.equal(menu.attached,true,'installing must wrap the current module');
-  assert.equal(menu.ensure(),false,'a healthy hook must not re-arm');
-
-  // Another add-on (Playtime's agent) wraps on top of Luna's wrapper on the
-  // SAME module object. Luna is still in the chain and must stay quiet, or the
-  // two agents would re-wrap each other forever.
-  const previousJsx=tools.jsx.jsx;
-  const previousJsxs=tools.jsx.jsxs;
-  tools.jsx.jsx=function(type,...args){return previousJsx.call(this,type,...args);};
-  tools.jsx.jsxs=function(type,...args){return previousJsxs.call(this,type,...args);};
-  assert.equal(menu.attached,true,'another wrapper on top is not detachment');
-  assert.equal(menu.ensure(),false,'an unchanged module object must never re-wrap');
-  const el=tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
-  const el2=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
-    {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el2),['HowLongToBeat'],
-    'the chain through the other wrapper must still insert Luna items');
-  assert.ok(el,'render must still flow through the chain');
-
-  // Steam rebuilds the library bundle: a new module object appears and the
-  // menu must re-arm on it.
-  Object.assign(w,webpackFixture('t'));
-  assert.equal(menu.ensure(),true,'a replaced module object must re-arm');
+test('ensure stays quiet while another add-on wraps on top, and re-arms after a rebuild',()=>{
+  const w=webpackFixture('t');
+  w.appStore={GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})};
+  const menu=installLunaMenu(w);
+  assert.ok(menu,'the menu must install from the live module');
+  const module=w.__expectedJsx;
+  const ourWrapper=module.jsx;
   assert.equal(menu.attached,true);
-  w.__calls.length=0;
-  const fresh=w.__expectedJsx;
-  fresh.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
-  fresh.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
-    {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  const rendered=(w.__calls[w.__calls.length-1]||{}).children||[];
-  const labels=rendered.filter(child=>child&&child.props&&Array.isArray(child.props.children)
-    &&typeof child.props.children[0]==='string'&&child.props.children[0]!=='play')
-    .map(child=>child.props.children[0]);
-  assert.deepEqual(labels,['HowLongToBeat'],
-    'the re-armed hook on the rebuilt module must insert the item');
-  assert.equal(menu.ensure(),false,'a healthy re-armed hook must not keep wrapping');
 
+  // Another add-on (Playtime's agent) wraps on top of Luna's wrapper, calling
+  // through. That is NOT detachment: the probe stamps Luna as present and
+  // nothing re-wraps - which is what stops the two agents fighting.
+  const foreign=function(type,...args){return ourWrapper.call(this,type,...args);};
+  const foreignXs=function(type,...args){return module.jsxs.call(this,type,...args);};
+  module.jsx=foreign;
+  module.jsxs=foreignXs;
+  assert.equal(menu.ensure(),false,'a call-through wrapper on top is not detachment');
+  assert.equal(module.jsx,foreign,'Luna must not re-wrap');
+  assert.ok(module.__slsSeen&&Date.now()-module.__slsSeen.luna<5000,
+    'the probe must have stamped Luna as present in the chain');
+  class InnerProbe{HideIfSubmenu(){} HideMenu(){} render(){}}
+  const el=module.jsx(InnerProbe,{label:'Hades',labelId:'l',children:[
+    {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat'],
+    'the chain through the other wrapper must still insert Luna items');
+
+  // Steam rebuilds the bundle in place: fresh functions, no wrapper, and no
+  // stamp since. The probe sees the stale stamp and re-arms on the same object.
+  module.jsx=(t,p)=>({type:t,props:p});
+  module.jsxs=(t,p)=>({type:t,props:p});
+  module.__slsSeen.luna=Date.now()-60000;
+  assert.equal(menu.ensure(),true,'a real rebuild must re-arm');
+  assert.equal(module.jsx,ourWrapper,'the wrapper must be back on the module');
+  const again=module.jsx(InnerProbe,{label:'Hades',labelId:'l',children:[
+    {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
+  assert.deepEqual(labelsAfterPrimary(again),['HowLongToBeat'],
+    'the re-armed hook must insert the item');
+  assert.equal(menu.ensure(),false,'a healthy hook must not re-arm again');
   menu.dispose();
   assert.equal(w.__SlsLunaMenu,undefined);
 });
 
-test('a wrapper cycle between two add-ons cannot recurse without bound',()=>{
-  const tools=fixture();
-  const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})}};
-  const menu=installLunaMenu(w,tools);
-  // Simulate the worst case a hostile ordering could produce: the foreign
-  // wrapper that Luna captured as its originals calls back into Luna's own
-  // wrapper. The re-entry guard must fall back to the leaf function.
-  const previousJsx=tools.jsx.jsx;
-  tools.jsx.jsx=function(type,...args){return previousJsx.call(this,type,...args);};
-  menu.ensure();
-  let renders=0;
-  const original=tools.jsx.jsx;
-  tools.jsx.jsx=function(type,...args){
-    renders+=1;
-    if(renders>10)throw Error('infinite wrapper recursion');
-    return original.call(this,type,...args);
+test('a foreign wrapper that calls through still terminates and inserts once',()=>{
+  const w=webpackFixture('t');
+  w.appStore={GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})};
+  const menu=installLunaMenu(w);
+  const module=w.__expectedJsx;
+  const ourWrapper=module.jsx;
+  let depth=0;
+  module.jsx=function(type,...args){
+    depth+=1;
+    if(depth>10)throw Error('infinite wrapper recursion');
+    try{return ourWrapper.call(this,type,...args);}finally{depth-=1;}
   };
-  const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
+  class InnerProbe{HideIfSubmenu(){} HideMenu(){} render(){}}
+  const el=module.jsx(InnerProbe,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.ok(renders<10,'rendering must terminate');
-  assert.ok(el,'rendering must return an element');
+  assert.ok(depth<=1,'the chain must not recurse');
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
   menu.dispose();
 });
 
@@ -436,10 +433,13 @@ test('changing the order rewrites the keys and pokes the grid to re-sort once',(
   const changes=[];
   const props={rgOptions:SORT_ENUM.slice(),selectedOption:SORT_VALUE,onChange:value=>changes.push(value)};
   withSortOption(props,w);
-  assert.equal(scheduled.length,1,'the key change must schedule exactly one nudge');
+  assert.equal(scheduled.length,1,'the key change must schedule the first poke');
   scheduled.shift()();
   assert.deepEqual(changes,[1],'the first poke keeps the keys in charge');
-  assert.equal(scheduled.length,1,'the second half of the nudge must follow');
+  // The dropdown re-renders on the temporary sort; that render issues the
+  // second half with a setter bound to the live instance.
+  withSortOption({...props,selectedOption:1},w);
+  assert.equal(scheduled.length,1,'the second half must follow on the next render');
   scheduled.shift()();
   assert.deepEqual(changes,[1,SORT_VALUE],'the second poke restores the HLTB sort');
   withSortOption(props,w);
