@@ -16,30 +16,30 @@
         }
       },
       "plugin_version": "0.2.0",
-      "source_commit": "10c5d411b5587fb5eb3a27fad97d51c0ffb3fd63",
+      "source_commit": "6814c1a0411eacfd9f86db75152b7b4d6d4f8cf1",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "luna": {
       "files": {
         "backend/main.lua": {
-          "sha256": "fae8c3487239bc75cab6b4069b4d2b26a73708254ae4cd85380c2f4dd3f8fc04",
+          "sha256": "458bdfc1f55041713b79ff631c1ef1eafac79f5ae716e6ae70ed156577f5d1a8",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
-          "sha256": "92a63f9aa9141c8376d4a1bf88bf068c74e47957decd4c37e6fda1e08cc4a7d2",
+          "sha256": "f2d4364096b5f66be544c6e94e15a2b4bb4991442fac34bd1343f9309d8f453e",
           "source_path": "plugin/plugin.json"
         },
         "public/agent.js": {
-          "sha256": "0a67a5cac919eb3b3b0b3b98bc26d9e753f2d29daf32f9b9654e9ff537dc6cc0",
+          "sha256": "a84576e5f2e6d576a054892ae6d3fdad736430633df8bde9ea9ee2d4d4d637c0",
           "source_path": "plugin/public/agent.js"
         },
         "public/panel.js": {
-          "sha256": "80c5894cdd56d826f03215ca094109d5611bbacde5a7a5e135f8a54cec5402bc",
+          "sha256": "2150108fc384c2a73bbbffaab7800cfdd06ce2efbf92824647b845c4315c7d8a",
           "source_path": "plugin/public/panel.js"
         }
       },
-      "plugin_version": "0.10.2",
-      "source_commit": "10c5d411b5587fb5eb3a27fad97d51c0ffb3fd63",
+      "plugin_version": "0.11.0",
+      "source_commit": "6814c1a0411eacfd9f86db75152b7b4d6d4f8cf1",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -100,11 +100,11 @@
         }
       },
       "plugin_version": "0.2.0",
-      "source_commit": "10c5d411b5587fb5eb3a27fad97d51c0ffb3fd63",
+      "source_commit": "6814c1a0411eacfd9f86db75152b7b4d6d4f8cf1",
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-10-14T19:25:42+0200",
+  "generated": "2026-10-14T19:36:51+0200",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "fa3e18871c8a4ca4f0da432f5de0242c741e3299e3d35ba8af143b25b088b101",
