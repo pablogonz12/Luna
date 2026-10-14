@@ -202,7 +202,6 @@
   let sortAsPatched = null; // [overview, originalSortAs] pairs while active
   let sortAsSeen = null;    // overviews already captured in this patch session
   let currentOrder = 'short';
-  let needsNudge = false;
   let sortSeen = 0;
 
   function setHltbRecords(records) {
@@ -251,9 +250,7 @@
       sortAsPatched = [];
       sortAsSeen = new WeakSet();
     }
-    let changed = false;
-    for (const overview of overviews) {
-      if (!overview || overview.appid == null) continue;
+    for (const overview of overviews) {      if (!overview || overview.appid == null) continue;
       const appid = Number(overview.appid);
       if (!valid(appid)) continue;
       const key = hltbSortKey(appid, overview.display_name || overview.name || '');
@@ -261,7 +258,7 @@
       // as if it were the original.
       if (sortAsSeen.has(overview)) {
         if (overview.sort_as !== key) {
-          try { overview.sort_as = key; changed = true; } catch (_) { /* fine */ }
+          try { overview.sort_as = key; } catch (_) { /* fine */ }
         }
         continue;
       }
@@ -272,12 +269,7 @@
       } catch (_) { continue; }
       sortAsSeen.add(overview);
       sortAsPatched.push([overview, original]);
-      changed = true;
     }
-    // Steam's grid caches its sorted order and `sort_as` is not observable, so
-    // a change here must be followed by Steam's own setSortBy being poked (the
-    // dropdown does that on its next render; see withSortOption).
-    if (changed) needsNudge = true;
     return sortAsPatched.length > 0;
   }
 
@@ -291,7 +283,6 @@
     }
     sortAsPatched = null;
     sortAsSeen = null;
-    needsNudge = false;
     return true;
   }
 
@@ -338,49 +329,15 @@
     return SORT_ENUM_FINGERPRINT.every(value => seen.has(value));
   }
 
-  // The nudge makes the grid re-sort after a key change. Steam's setter can
-  // belong to a dropdown instance that unmounts on the first change, so the
-  // second half is issued on the NEXT dropdown render, with a fresh setter.
-  let nudgePhase = 0; // 0 idle, 1 switched away, 2 switching back
-  let nudgeStamp = 0;
-
   function withSortOption(props, w) {
     if (!isSortDropdown(props)) return null;
     sortSeen += 1;
-    const schedule = (w && w.setTimeout) || setTimeout;
-    // A stale phase (user picked something manually, or a rebuild) is dropped.
-    if (nudgePhase && Date.now() - nudgeStamp > 15000) nudgePhase = 0;
     // The dropdown reports the live choice; keep the keys in step even when
     // the stored setting is stale or the list was reloaded.
     if (props.selectedOption === SORT_VALUE) {
       if (!sortAsPatched) applyHltbSortAs(w);
-      // The grid caches its order, so a key change needs Steam's own setter to
-      // run again. Picking alphabetical first keeps the keys in charge (its
-      // comparator is the same fallback), then the HLTB choice re-sorts for
-      // real. The original onChange is called directly, never our wrapper.
-      if (needsNudge && nudgePhase === 0 && typeof props.onChange === 'function') {
-        needsNudge = false;
-        nudgePhase = 1;
-        nudgeStamp = Date.now();
-        const change = props.onChange;
-        schedule(() => {
-          try { change(1); } catch (_) { nudgePhase = 0; }
-        }, 80);
-      }
-    } else {
-      // While a nudge is in flight the keys stay in charge, so the temporary
-      // sort renders in HLTB order too and nothing has to be re-applied.
-      if (sortAsPatched && nudgePhase === 0) restoreHltbSortAs();
-      // Second half: the dropdown just re-rendered on the temporary sort, so
-      // this setter is fresh. Calling it restores the HLTB choice for real.
-      if (nudgePhase === 1 && props.selectedOption === 1 && typeof props.onChange === 'function') {
-        nudgePhase = 2;
-        const change = props.onChange;
-        schedule(() => {
-          nudgePhase = 0;
-          try { change(SORT_VALUE); } catch (_) { /* the beat retries */ }
-        }, 120);
-      }
+    } else if (sortAsPatched) {
+      restoreHltbSortAs();
     }
     const appended = props.rgOptions.some(option => option && option.data === SORT_VALUE)
       ? props.rgOptions
@@ -394,6 +351,31 @@
       : props.onChange;
     if (appended === props.rgOptions && onChange === props.onChange) return null;
     return { ...props, rgOptions: appended, onChange };
+  }
+
+  // Steam's grid memoizes the sorted order and `sort_as` is not observable.
+  // Handing the grid a fresh array on every render makes its memo recompute, so
+  // the order follows the current keys - no poking of Steam's sort state.
+  function withFreshOverviews(props) {
+    if (!props || !Array.isArray(props.appOverviews) || props.eSortBy === undefined) return null;
+    return { ...props, appOverviews: props.appOverviews.slice() };
+  }
+
+  // The details page knows its app through React props only (there is no app
+  // link in the DOM). The wrapper publishes it in localStorage, which the
+  // panel's document shares, so the game-page stat can find its game.
+  const DETAILS_APPID_KEY = 'slsLunaDetailsAppId';
+  let lastDetailsAppId = 0;
+
+  function publishDetailsAppId(w, props) {
+    const appid = props && props.details && Number(props.details.unAppID);
+    if (!valid(appid) || appid === lastDetailsAppId) return false;
+    lastDetailsAppId = appid;
+    try {
+      const storage = storageOf(w);
+      if (storage) storage.setItem(DETAILS_APPID_KEY, String(appid));
+    } catch (_) { /* private mode; the panel falls back to the DOM */ }
+    return true;
   }
 
   // Steam's capsule overlay (the little value box on each library game) shows
@@ -573,14 +555,21 @@
         const next = inRender && base[key] ? base[key] : originals[key];
         if (!inRender) {
           const props = args[0];
-          // The library's SORT BY dropdown gains the cached-times option.
+          // The library's SORT BY dropdown gains the cached-times option, the
+          // grid gets a fresh overviews array (so it re-sorts with the keys),
+          // and the details page publishes its app id for the Luna panel.
           if (props && Array.isArray(props.rgOptions)) {
             const withSort = withSortOption(props, w);
             if (withSort) args[0] = withSort;
           }
+          if (props && Array.isArray(props.appOverviews)) {
+            const fresh = withFreshOverviews(props);
+            if (fresh) args[0] = fresh;
+          }
+          if (props && props.details) publishDetailsAppId(w, props);
           // While that option is active, each capsule shows its cached hours.
-          if (props && props.sortByType === SORT_VALUE) {
-            const overlay = withHltbOverlay(props);
+          if (args[0] && args[0].sortByType === SORT_VALUE) {
+            const overlay = withHltbOverlay(args[0]);
             if (overlay) args[0] = overlay;
           }
           const proto = type && type.prototype;
@@ -615,7 +604,7 @@
       get sort() {
         return { value: SORT_VALUE, seen: sortSeen, games: Object.keys(hltbRecords).length,
           applied: Boolean(sortAsPatched), patched: sortAsPatched ? sortAsPatched.length : 0,
-          order: currentOrder, nudge: needsNudge };
+          order: currentOrder };
       },
       get attached() { return wrappedModule !== null && jsx === wrappedModule; },
       ensure() {
@@ -692,8 +681,9 @@
     refreshHltbData(w).then(() => syncSortAs(w));
   }
 
-  return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, discoverMenuTools, openExternalUrl, searchUrlFor, nameOf,
-    defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor,
-    hltbSortKey, readHltbOrder, applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown,
-    withSortOption, withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
+  return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, DETAILS_APPID_KEY, discoverMenuTools, openExternalUrl,
+    searchUrlFor, nameOf, defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords,
+    hltbSecondsFor, hltbMinutesFor, hltbSortKey, readHltbOrder, applyHltbSortAs, restoreHltbSortAs,
+    syncSortAs, isSortDropdown, withSortOption, withFreshOverviews, publishDetailsAppId,
+    withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
 });

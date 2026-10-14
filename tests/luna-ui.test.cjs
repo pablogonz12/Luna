@@ -816,20 +816,22 @@ function gamePageFixture(document){
 
 test('the game page gains a How Long To Beat cell in the playtime style and drops it without data',()=>{
   const document=fakeDom();
-  const {row}=gamePageFixture(document);
+  const {row,cell}=gamePageFixture(document);
   assert.equal(detailsAppIdFrom(document),'3357650','the appid comes from the store link');
-  const stat=updateHltbStat(document,{'3357650':{main:57960,match:'exact'}});
-  assert.ok(stat,'the cell must be inserted');
-  assert.equal(stat.parentNode,row,'the cell must be a sibling in the stat row');
-  assert.equal(stat.className,'_cell _playtime','the playtime classes must be reused');
-  assert.equal(stat.children[0].className,'_icon');
-  assert.equal(stat.children[1].children[0].textContent,'How Long To Beat');
-  assert.equal(stat.children[1].children[1].textContent,'16.1 hours');
-  updateHltbStat(document,{'3357650':{main:7200,match:'exact'}});
-  assert.equal(document.getElementById('sls-luna-hltb-stat').children[1].children[1].textContent,
-    '2.0 hours','the value must update in place');
+  // The agent bridges the app id through localStorage; the hint path must work
+  // even when the page offers no app link at all.
+  const hinted=updateHltbStat(document,{'3357650':{main:57960,match:'exact'}},'3357650');
+  assert.ok(hinted,'the cell must be inserted with an app id hint');
+  assert.equal(hinted.parentNode,row,'the cell must be a sibling in the stat row');
+  assert.equal(hinted.className,'_cell _playtime','the playtime classes must be reused');
+  assert.equal(hinted.children[0].className,'_icon');
+  assert.equal(hinted.children[1].children[0].textContent,'How Long To Beat');
+  assert.equal(hinted.children[1].children[1].textContent,'16.1 hours');
+  let found=updateHltbStat(document,{'3357650':{main:7200,match:'exact'}});
+  assert.equal(found.children[1].children[1].textContent,'2.0 hours','the value must update in place');
   updateHltbStat(document,{});
   assert.equal(document.getElementById('sls-luna-hltb-stat'),null,'no data means no cell');
+  assert.ok(cell,'the fixture kept the playtime cell');
 });
 
 test('the SORT BY label is restored only while the HLTB sort is stored',()=>{

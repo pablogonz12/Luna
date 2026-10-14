@@ -9,8 +9,9 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf,
-  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,setHltbRecords,hltbSortKey,applyHltbSortAs,
-  restoreHltbSortAs,syncSortAs,isSortDropdown,withSortOption,withHltbOverlay,hltbMinutesFor}=require('../addons/luna/plugin/public/agent.js');
+  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,DETAILS_APPID_KEY,setHltbRecords,hltbSortKey,
+  applyHltbSortAs,restoreHltbSortAs,syncSortAs,isSortDropdown,withSortOption,withFreshOverviews,
+  publishDetailsAppId,withHltbOverlay,hltbMinutesFor}=require('../addons/luna/plugin/public/agent.js');
 
 test('search URL trims and encodes the game name',()=>{
   assert.equal(searchUrlFor('  Hades  '),'https://howlongtobeat.com/?q=Hades');
@@ -418,34 +419,26 @@ test('sorting rewrites sort_as while active and restores every original after',(
   setHltbRecords({});
 });
 
-test('changing the order rewrites the keys and pokes the grid to re-sort once',()=>{
-  setHltbRecords({'1':{main:3600},'2':{main:7200}});
-  const scheduled=[];
-  const base=sortableWindow(SORT_VALUE);
-  const w={appStore:base.appStore,localStorage:base.localStorage,storage:base.storage,
-    setTimeout:fn=>{scheduled.push(fn);return 0;}};
-  const [one,two]=w.appStore.allApps;
-  assert.equal(applyHltbSortAs(w),true);
-  assert.ok(one.sort_as<two.sort_as,'shortest first by default');
-  w.localStorage.setItem('slsLunaHltbOrder','long');
-  assert.equal(syncSortAs(w),true);
-  assert.ok(two.sort_as<one.sort_as,'longest first after the flip');
-  const changes=[];
-  const props={rgOptions:SORT_ENUM.slice(),selectedOption:SORT_VALUE,onChange:value=>changes.push(value)};
-  withSortOption(props,w);
-  assert.equal(scheduled.length,1,'the key change must schedule the first poke');
-  scheduled.shift()();
-  assert.deepEqual(changes,[1],'the first poke keeps the keys in charge');
-  // The dropdown re-renders on the temporary sort; that render issues the
-  // second half with a setter bound to the live instance.
-  withSortOption({...props,selectedOption:1},w);
-  assert.equal(scheduled.length,1,'the second half must follow on the next render');
-  scheduled.shift()();
-  assert.deepEqual(changes,[1,SORT_VALUE],'the second poke restores the HLTB sort');
-  withSortOption(props,w);
-  assert.equal(scheduled.length,0,'a clean state must not poke again');
-  restoreHltbSortAs();
-  setHltbRecords({});
+test('the grid gets a fresh overviews array so its memo re-sorts with the current keys',()=>{
+  const original=[{appid:1},{appid:2}];
+  const result=withFreshOverviews({appOverviews:original,eSortBy:SORT_VALUE,strCollectionId:'c'});
+  assert.ok(result,'the grid must be recognized');
+  assert.notEqual(result.appOverviews,original,'a fresh identity forces the memo to recompute');
+  assert.deepEqual(result.appOverviews,original,'the same games in the same order');
+  assert.equal(withFreshOverviews({appOverviews:'nope'}),null);
+  assert.equal(withFreshOverviews({appOverviews:original}),null,'other components are untouched');
+});
+
+test('the details page publishes its app id for the panel',()=>{
+  const store=new Map();
+  const w={localStorage:{getItem:key=>store.has(key)?store.get(key):null,
+    setItem:(key,value)=>store.set(key,String(value)),removeItem:key=>store.delete(key)}};
+  assert.equal(publishDetailsAppId(w,{details:{unAppID:3357650}}),true);
+  assert.equal(store.get(DETAILS_APPID_KEY),'3357650');
+  assert.equal(publishDetailsAppId(w,{details:{unAppID:3357650}}),false,'an unchanged id is not rewritten');
+  assert.equal(publishDetailsAppId(w,{details:{unAppID:0}}),false,'invalid ids are ignored');
+  assert.equal(publishDetailsAppId(w,{}),false);
+  assert.equal(publishDetailsAppId(w,{details:{unAppID:620}}),true);
 });
 
 test('the dropdown selection drives the keys, and other choices clear them',()=>{

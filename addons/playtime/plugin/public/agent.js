@@ -235,9 +235,16 @@
       return placed?ordered:[action,...(Array.isArray(clean)?clean:[clean])];
     }
     function restoreDiscovery(){for(const key of ['jsx','jsxs'])if(jsx[key]===wrappers[key])jsx[key]=originals[key];}
+    // Two add-ons hooking the same jsx module must not fight, and a Steam
+    // rebuild may replace the hooked functions in place or with a new module.
+    // The wrapper stamps the module it wrapped (__slsSeen.playtime) whenever it
+    // runs; ensure() probes the live chain with an inert element and treats a
+    // fresh stamp as "still in the chain" - even under another add-on's wrapper.
+    function stampSeen(){if(jsx&&typeof jsx==='object'){(jsx.__slsSeen||(jsx.__slsSeen={})).playtime=Date.now();}}
     for(const key of ['jsx','jsxs']){
       originals[key]=jsx[key];
       wrappers[key]=function(type,...args){
+        stampSeen();
         const props=args[0];
         if(props?.details){
           const overview=props.overview||(w.appStore||w.SteamUIStore?.AppStore)?.GetAppOverviewByAppID?.(Number(props.details.unAppID));
@@ -260,17 +267,26 @@
     }
     const api={update(value){snapshot=value;},open,get attached(){return jsx.jsx===wrappers.jsx||jsx.jsxs===wrappers.jsxs;},
       ensure(){
-        // The library UI can rebuild its bundle (for example after changing a
-        // Store setting), replacing the jsx functions we hooked. Rebind if the
-        // module changed and re-arm on top of the current chain, so the menu
-        // entry cannot silently disappear until the next Steam restart.
+        // The library UI can rebuild its bundle: sometimes with a new jsx
+        // module object, sometimes by replacing the hooked functions in place
+        // on the same object. If the wrapper is on top this is a no-op; else
+        // probe the chain with an inert element - the wrapper stamps the module
+        // when it runs, proving it is still in the chain. A stale stamp means
+        // the functions were replaced and the hook must be re-armed.
         if(api.attached)return false;
+        let fresh=null;
         try{
-          const fresh=discoverMenuTools(w);
-          if(fresh&&fresh.jsx!==jsx)jsx=fresh.jsx;
+          fresh=discoverMenuTools(w);
         }catch(_){ /* keep the previous module */ }
+        if(fresh&&fresh.jsx!==jsx)jsx=fresh.jsx;
+        if(jsx&&typeof jsx==='object'&&jsx.jsx!==wrappers.jsx&&jsx.jsxs!==wrappers.jsxs){
+          try{jsx.jsx(function SlsPlaytimeProbe(){},{});}catch(_){ /* not in the chain */ }
+          const seen=jsx.__slsSeen&&Number(jsx.__slsSeen.playtime||0);
+          if(seen&&Date.now()-seen<5000)return false;
+        }
         restoreDiscovery();
         for(const key of ['jsx','jsxs']){originals[key]=jsx[key];jsx[key]=wrappers[key];}
+        stampSeen();
         return true;
       },
       dispose(){restoreDiscovery();delete w.__SlsPlaytimeMenu;}};
