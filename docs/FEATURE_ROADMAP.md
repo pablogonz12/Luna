@@ -137,17 +137,25 @@ main-story and completionist times) and display the result in Luna. Do not build
 against an assumed official public API: this research did not confirm a supported
 public HLTB API or permission for automated scraping.
 
-**Implemented so far:** add-on `luna` 0.4.0 owns HLTB inside the Luna menu:
-the **HowLongToBeat** page lists the owned library and non-Steam shortcuts
-(reported by the SharedJSContext agent, locally only), shows cached times, and
-fetches on demand - per game or as a rate-limited "fetch missing" queue that
-spaces requests and stops with the site's reason on a refusal. Weak matches are
-refused, manual corrections and Forget are built in, and everything is stored
-in `~/.local/share/slssteam-integrations/hltb.json`. The right-click menu keeps
-only the search link; fetching lives in the page. Nothing is fetched
+**Implemented so far:** add-on `luna` owns HLTB inside the Luna menu and the
+library. The **HowLongToBeat** page lists the owned library and non-Steam
+shortcuts (reported by the SharedJSContext agent, locally only), shows cached
+times, and fetches on demand - per game or as a "fetch missing" queue that
+spaces requests, **skips games the site cannot match** (remembering them so
+they stop counting as missing), and pauses a minute to retry once when the
+site rate-limits. The right-click menu keeps only the search link. The
+library's **SORT BY** dropdown gains a **HowLongToBeat** option: the agent
+recognizes the dropdown by its option-value fingerprint (locale-independent)
+and wraps Steam's exported comparator factory so Luna's value sorts by cached
+main-story hours, unknown games last; any failure degrades to Steam's
+alphabetical fallback. Everything is stored in
+`~/.local/share/slssteam-integrations/hltb.json`. Nothing is fetched
 automatically.
 
 ### In-Steam surfacing (design, verified against the installed client bundle)
+
+The game-page stat cell below is still designed, not implemented; the sort
+option is implemented and covered by tests.
 
 The goal is that HLTB data appears where Steam shows its own stats, not only in a
 Luna panel. Two integration points were located in the client's `steamui/sp.js`

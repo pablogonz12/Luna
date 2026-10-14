@@ -282,7 +282,13 @@
     return Promise.resolve(w.Millennium.callServerMethod('lumen', method, args || {}))
       .then(parse)
       .then(out => {
-        if (out && out.success === false) throw Error(out.error || (method + ' failed'));
+        if (out && out.success === false) {
+          // Keep the backend's code so callers can tell retryable failures
+          // (rate limiting) from permanent ones (no confident match).
+          const error = Error(out.error || (method + ' failed'));
+          error.code = out.code || '';
+          throw error;
+        }
         return out;
       });
   }
@@ -1332,6 +1338,7 @@
     const hltbHours = seconds => (Math.max(0, Number(seconds) || 0) / 3600).toFixed(1) + ' h';
 
     function hltbTimes(record) {
+      if (record.match === 'none') return 'no match found';
       const parts = [];
       if (record.main) parts.push(hltbHours(record.main) + ' story');
       if (record.extra) parts.push(hltbHours(record.extra) + ' +extra');
@@ -1389,12 +1396,45 @@
       }
     }
 
-    // Sequentially fetch every missing game, keeping the site's own spacing
-    // (the backend enforces a minimum interval and reports 429s). Stops on the
-    // first refusal instead of hammering, and says why.
+    // Fetch one game with the queue's policy: a game the site cannot match is
+    // reported as skipped (the backend remembers it, so it stops counting as
+    // missing); rate limiting pauses a minute and retries once; anything else
+    // is fatal for the run.
+    async function fetchHltbWithPolicy(row, queue) {
+      let retried = false;
+      for (;;) {
+        try {
+          const out = await rpc(w, 'SlsHltbFetch', { appid: Number(row.id), name: row.name });
+          if (!out || out.success !== true) {
+            const error = Error((out && out.error) || 'The fetch failed.');
+            error.code = (out && out.code) || '';
+            throw error;
+          }
+          return { skipped: false };
+        } catch (error) {
+          const code = error && error.code;
+          if (code === 'no_match') return { skipped: true };
+          if ((code === 'rate_limit' || code === 'throttled') && !retried) {
+            retried = true;
+            queue.wait = 60;
+            queue.label = row.name;
+            paint();
+            await sleep(60000);
+            queue.wait = 0;
+            continue;
+          }
+          throw error;
+        }
+      }
+    }
+
+    // Sequentially fetch every missing game, keeping the site's own spacing.
+    // Unmatchable games are skipped and remembered; rate limiting pauses and
+    // retries once, then stops and says why.
     async function runHltbQueue(rows) {
       if (!rows.length || (hltbQueue && hltbQueue.running)) return;
-      hltbQueue = { running: true, done: 0, total: rows.length, label: rows[0].name, error: '' };
+      hltbQueue = { running: true, done: 0, skipped: 0, total: rows.length,
+        label: rows[0].name, error: '', wait: 0 };
       paint();
       for (const row of rows) {
         if (!hltbQueue || !hltbQueue.running) break;
@@ -1402,9 +1442,9 @@
         hltbQueue.label = row.name;
         paint();
         try {
-          const out = await rpc(w, 'SlsHltbFetch', { appid: Number(row.id), name: row.name });
-          if (!out || out.success !== true) throw Error((out && out.error) || 'The fetch failed.');
-          hltbQueue.done += 1;
+          const result = await fetchHltbWithPolicy(row, hltbQueue);
+          if (result.skipped) hltbQueue.skipped += 1;
+          else hltbQueue.done += 1;
           const fresh = await rpc(w, 'SlsHltbGet').catch(() => null);
           if (fresh && fresh.success !== false) hltb = fresh;
           hltbNotice = null;
@@ -1447,8 +1487,9 @@
         times.textContent = hltbTimes(row.record);
         const chip = document.createElement('span');
         const manual = row.record.match === 'manual';
+        const none = row.record.match === 'none';
         chip.className = 'sls-luna-chip' + (row.record.match === 'exact' || manual ? ' done' : '');
-        chip.textContent = manual ? 'manual' : row.record.match === 'exact' ? 'match' : 'approx';
+        chip.textContent = none ? 'no match' : manual ? 'manual' : row.record.match === 'exact' ? 'match' : 'approx';
         line.append(times, chip);
         line.append(
           hltbSmallButton('Refresh', () => fetchHltbOne(row)),
@@ -1524,17 +1565,19 @@
       const library = (hltb && hltb.library) || [];
       const all = buildHltbRows(records, library, '');
       const missing = all.filter(row => !row.record);
+      const noMatch = all.filter(row => row.record && row.record.match === 'none');
 
       const info = document.createElement('p');
       info.className = 'sls-luna-note';
       info.innerHTML = 'Times come from HowLongToBeat, fetched <strong>on demand</strong> (never automatically) and '
-        + 'stored locally. Fetching waits between games because the site rate-limits searches. '
-        + 'You can correct any match with Edit; nothing here changes Steam files.';
+        + 'stored locally. Fetching waits between games because the site rate-limits searches; games it cannot '
+        + 'match are skipped and remembered. You can correct any match with Edit; nothing here changes Steam files.';
       body.appendChild(info);
 
       const stats = document.createElement('div');
       stats.className = 'sls-luna-stat';
-      [['Cached', Object.keys(records).length, 'games with times'],
+      [['Cached', all.length - noMatch.length - missing.length, 'games with times'],
+        ['No match', noMatch.length, 'skipped, set them by hand'],
         ['Missing', missing.length, 'not fetched yet'],
         ['Library', library.length || '\u2014', 'games seen by Luna']].forEach(pair => {
         const cell = document.createElement('div');
@@ -1580,16 +1623,23 @@
       if (hltbQueue) {
         const line = document.createElement('p');
         line.className = 'sls-luna-note';
+        const skipText = hltbQueue.skipped ? ', ' + hltbQueue.skipped + ' skipped (no match)' : '';
         if (hltbQueue.error) {
           line.innerHTML = '<strong>Stopped:</strong> ' + hltbQueue.error;
+        } else if (hltbQueue.wait) {
+          line.innerHTML = '<strong>Rate-limited.</strong> Waiting ' + hltbQueue.wait
+            + 's before retrying \u201c' + (hltbQueue.label || '') + '\u201d\u2026';
         } else if (hltbQueue.running) {
-          line.innerHTML = '<strong>Fetching ' + hltbQueue.done + ' of ' + hltbQueue.total + '</strong> \u00b7 ' + (hltbQueue.label || '') + '\u2026';
+          line.innerHTML = '<strong>Fetching ' + (hltbQueue.done + hltbQueue.skipped + 1)
+            + ' of ' + hltbQueue.total + '</strong> \u00b7 ' + (hltbQueue.label || '') + '\u2026'
+            + (hltbQueue.skipped ? ' (skipped ' + hltbQueue.skipped + ')' : '');
         } else {
-          line.textContent = 'Fetched ' + hltbQueue.done + ' game(s).';
+          line.textContent = 'Fetched ' + hltbQueue.done + ' game(s)' + skipText + '.';
         }
         body.appendChild(line);
         body.appendChild(progressBar(
-          hltbQueue.total ? (hltbQueue.done / hltbQueue.total) * 100 : 0, hltbQueue.running));
+          hltbQueue.total ? ((hltbQueue.done + hltbQueue.skipped) / hltbQueue.total) * 100 : 0,
+          hltbQueue.running || Boolean(hltbQueue.wait)));
       }
 
       if (hltbNotice) {

@@ -122,10 +122,11 @@ function compressorFixture(overrides){
   return Object.assign(base,overrides||{});
 }
 
-function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,edit,setEnabled}={}){
+function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,edit,setEnabled}={}){
   const calls=[];
   const hltbState=Object.assign({success:true,count:0,games:{},library:[]},hltb||{});
   hltbState.count=Object.keys(hltbState.games||{}).length;
+  const rateLimited=new Set();
   const w={
     document,
     setInterval:(fn,ms)=>{return 1;},
@@ -149,7 +150,16 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,edit,set
       if(fn==='SlsHltbGet')return JSON.stringify(hltbState);
       if(fn==='SlsHltbFetch'){
         if(fetchFailure&&Number(payload.appid)===Number(fetchFailure)){
-          return JSON.stringify({success:false,error:'No confident HowLongToBeat match for "'+payload.name+'".'});
+          hltbState.games[String(payload.appid)]={name:payload.name,match:'none',
+            source:'hltb-search',fetchedAt:Date.now()/1000};
+          hltbState.count=Object.keys(hltbState.games).length;
+          return JSON.stringify({success:false,code:'no_match',
+            error:'No confident HowLongToBeat match for "'+payload.name+'".'});
+        }
+        if(rateLimitOnce&&Number(payload.appid)===Number(rateLimitOnce)&&!rateLimited.has(payload.appid)){
+          rateLimited.add(payload.appid);
+          return JSON.stringify({success:false,code:'rate_limit',
+            error:'HowLongToBeat is rate-limiting searches; wait a minute and try again.'});
         }
         const record={name:payload.name,match:'exact',main:3600,extra:5400,completionist:7200,
           source:'hltb-search',fetchedAt:Date.now()/1000};
@@ -656,7 +666,7 @@ test('the HowLongToBeat page opens the site search through Lumen',async()=>{
   assert.equal(call.payload.url,'https://howlongtobeat.com/?q=Portal%202');
 });
 
-test('the fetch-missing queue runs sequentially and stops on the first refusal',async()=>{
+test('the fetch-missing queue skips unmatchable games and keeps going',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
   const {calls,overlay}=await openHltbPage(document,{hltb:hltbFixture({games:{},
@@ -666,13 +676,31 @@ test('the fetch-missing queue runs sequentially and stops on the first refusal',
     &&typeof node.onclick==='function');
   assert.ok(start,'the fetch-missing button was not found');
   start.onclick();
-  await new Promise(resolve=>setTimeout(resolve,200));
+  await new Promise(resolve=>setTimeout(resolve,250));
   const fetched=calls.filter(entry=>entry.fn==='SlsHltbFetch').map(entry=>entry.payload.appid);
-  assert.deepEqual(fetched,[70,220],
-    'the queue must fetch in page order (missing sorts by name) and stop at the refusal');
+  assert.deepEqual(fetched,[70,220,620],'a no-match game must be skipped, not stop the run');
   const text=textOf(document.getElementById('sls-luna-overlay'));
-  assert.match(text,/Stopped:/,'the queue must report that it stopped');
-  assert.match(text,/No confident/,'the backend reason must be shown');
+  assert.match(text,/Fetched 2 game\(s\), 1 skipped \(no match\)/,'the summary must count the skip');
+  assert.match(text,/no match found/,'the skipped game must be remembered in the list');
+  assert.doesNotMatch(text,/Stopped:/,'a no-match must not stop the queue');
+});
+
+test('a rate-limited fetch pauses and retries the same game once',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {calls,overlay}=await openHltbPage(document,{hltb:hltbFixture({games:{},
+    library:[{appid:620,name:'Portal 2',shortcut:false},{appid:70,name:'Half-Life',shortcut:false}]}),
+    rateLimitOnce:620});
+  const start=findNode(overlay,node=>node.textContent==='Fetch missing (2)'
+    &&typeof node.onclick==='function');
+  start.onclick();
+  await new Promise(resolve=>setTimeout(resolve,250));
+  const fetched=calls.filter(entry=>entry.fn==='SlsHltbFetch').map(entry=>entry.payload.appid);
+  assert.deepEqual(fetched,[70,620,620],
+    'the rate-limited game must be retried after the pause, in page order');
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/Fetched 2 game\(s\)/,'both games must end up cached');
+  assert.doesNotMatch(text,/Stopped:/,'a single rate limit must not stop the queue');
 });
 
 test('Forget removes a cached record and the game becomes fetchable again',async()=>{

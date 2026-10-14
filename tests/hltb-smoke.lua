@@ -285,31 +285,37 @@ assert(wire.last_token == 'tok-3', 'the retry must use the refreshed token, got 
 wire.mode = 'ratelimit'
 local before = call('SlsHltbGet').count
 out = call('SlsHltbFetch', { appid = 367520, name = 'Hollow Knight' })
-assert(out.success == false and out.error:find('rate%-limit') ~= nil, '429 must surface as a clear message')
+assert(out.success == false and out.code == 'rate_limit' and out.error:find('rate%-limit') ~= nil,
+  '429 must surface as a retryable rate-limit code')
 assert(call('SlsHltbGet').count == before, 'a rate-limited fetch must not change the store')
 
 wire.mode = 'noname'
 out = call('SlsHltbFetch', { appid = 367520, name = 'Hollow Knight' })
-assert(out.success == false and out.error:find('No confident', 1, true) ~= nil,
-  'a weak match must be refused instead of stored')
-assert(call('SlsHltbGet').count == before)
+assert(out.success == false and out.code == 'no_match', 'a weak match must be refused')
+assert(out.error:find('No confident', 1, true) ~= nil)
+local refused = call('SlsHltbGet')
+assert(refused.count == before + 1, 'the refusal must be remembered once')
+assert(refused.games['367520'] and refused.games['367520'].match == 'none')
+assert(refused.games['367520'].main == nil, 'a no-match record carries no times')
 
 wire.mode = 'garbage'
-out = call('SlsHltbFetch', { appid = 367520, name = 'Hollow Knight' })
-assert(out.success == false and out.error:find('unexpected response', 1, true) ~= nil)
+out = call('SlsHltbFetch', { appid = 70, name = 'Half-Life' })
+assert(out.success == false and out.code == 'unavailable', 'a broken response is a hard failure')
+assert(out.error:find('unexpected response', 1, true) ~= nil)
+assert(call('SlsHltbGet').count == before + 1, 'a hard failure must not write a record')
 
 wire.mode = 'ok'
 out = call('SlsHltbFetch', { appid = 0, name = 'Hades' })
-assert(out.success == false and out.error:find('Invalid app id', 1, true) ~= nil)
+assert(out.success == false and out.code == 'invalid' and out.error:find('Invalid app id', 1, true) ~= nil)
 out = call('SlsHltbFetch', { appid = 1145360, name = '   ' })
-assert(out.success == false and out.error:find('no name', 1, true) ~= nil)
+assert(out.success == false and out.code == 'invalid' and out.error:find('no name', 1, true) ~= nil)
 
 -- ---------------------------------------------------------------- rate limiting
 
 local posts_before = wire.post_calls
 backend.min_fetch_interval = 600
 out = call('SlsHltbFetch', { appid = 1091500, name = 'Cyberpunk 2077' })
-assert(out.success == false and out.error:find('Wait a moment', 1, true) ~= nil,
+assert(out.success == false and out.code == 'throttled' and out.error:find('Wait a moment', 1, true) ~= nil,
   'back-to-back fetches must be refused politely')
 assert(wire.post_calls == posts_before, 'a refused fetch must not reach the network')
 backend.min_fetch_interval = 0
@@ -379,6 +385,6 @@ out = call('SlsHltbLibrary', { raw = json.encode({ games = 'nope' }) })
 assert(out.success == false)
 
 out = call('SlsLunaInfo')
-assert(out.success == true and out.version == '0.4.0' and type(out.addons) == 'table')
+assert(out.success == true and out.version == '0.5.0' and type(out.addons) == 'table')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence')
