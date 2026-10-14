@@ -360,23 +360,6 @@
     return { ...props, appOverviews: props.appOverviews.slice() };
   }
 
-  // The details page knows its app through React props only (there is no app
-  // link in the DOM). The wrapper publishes it in localStorage, which the
-  // panel's document shares, so the game-page stat can find its game.
-  const DETAILS_APPID_KEY = 'slsLunaDetailsAppId';
-  let lastDetailsAppId = 0;
-
-  function publishDetailsAppId(w, props) {
-    const appid = props && props.details && Number(props.details.unAppID);
-    if (!valid(appid) || appid === lastDetailsAppId) return false;
-    lastDetailsAppId = appid;
-    try {
-      const storage = storageOf(w);
-      if (storage) storage.setItem(DETAILS_APPID_KEY, String(appid));
-    } catch (_) { /* private mode; the panel falls back to the DOM */ }
-    return true;
-  }
-
   // Steam's capsule overlay (the little value box on each library game) shows
   // the active sort's value, but returns null for unknown sort values. When
   // HowLongToBeat is active, re-point that overlay at Steam's own hours-played
@@ -554,9 +537,9 @@
         const next = inRender && base[key] ? base[key] : originals[key];
         if (!inRender) {
           const props = args[0];
-          // The library's SORT BY dropdown gains the cached-times option, the
-          // grid gets a fresh overviews array (so it re-sorts with the keys),
-          // and the details page publishes its app id for the Luna panel.
+          // The library's SORT BY dropdown gains the cached-times option, and
+          // the grid gets a fresh overviews array (so it re-sorts with the
+          // current keys).
           if (props && Array.isArray(props.rgOptions)) {
             const withSort = withSortOption(props, w);
             if (withSort) args[0] = withSort;
@@ -565,7 +548,6 @@
             const fresh = withFreshOverviews(props);
             if (fresh) args[0] = fresh;
           }
-          if (props && props.details) publishDetailsAppId(w, props);
           // While that option is active, each capsule shows its cached hours.
           if (args[0] && args[0].sortByType === SORT_VALUE) {
             const overlay = withHltbOverlay(args[0]);
@@ -680,9 +662,9 @@
     refreshHltbData(w).then(() => syncSortAs(w));
   }
 
-  return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, DETAILS_APPID_KEY, discoverMenuTools, openExternalUrl,
+  return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, discoverMenuTools, openExternalUrl,
     searchUrlFor, nameOf, defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords,
     hltbSecondsFor, hltbMinutesFor, hltbSortKey, readHltbOrder, applyHltbSortAs, restoreHltbSortAs,
-    syncSortAs, isSortDropdown, withSortOption, withFreshOverviews, publishDetailsAppId,
-    withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
+    syncSortAs, isSortDropdown, withSortOption, withFreshOverviews, withHltbOverlay,
+    refreshHltbData, installLunaMenu, bootLunaMenu };
 });

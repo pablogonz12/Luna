@@ -29,7 +29,7 @@ projects, then adds features designed to work well together.
 | **Artwork picker / right-click actions** | Planned; the action menu is wired | A game right-click action can now open Luna features; artwork search/apply is still to come |
 | **`lsfg-vk` / frame generation** | Research/design | Optional setup and per-game controls only after upstream, hardware, and platform compatibility gates |
 | **OptiScaler / OptiClient** | Planned | Unified Luna management is a goal; OptiClient is a separate third-party project, and per-game support must be validated |
-| **HowLongToBeat (HLTB)** | Luna page + library sort available; game-page display designed | The HowLongToBeat tab manages locally cached times: an on-demand **background pass** that skips unmatched games, pauses on rate limits, keeps running with the menu closed and resumes after a Steam restart until stopped. The library's SORT BY gains a HowLongToBeat option that also labels each game with its hours |
+| **HowLongToBeat (HLTB)** | Luna page + library sort and capsule hours available | The HowLongToBeat tab manages locally cached times (background fetch pass, skips unmatched games, pauses on rate limits). The library's SORT BY gains a HowLongToBeat option that labels each capsule with its hours. The game-page cell was attempted and removed; tracked as an issue |
 | **Rust runtime alternative** | Feasibility study | Explore a Luna-owned runtime path; no Lumen replacement exists, and Steam UI injection still needs a web/CEF bridge |
 
 The Compressor page requires the separate

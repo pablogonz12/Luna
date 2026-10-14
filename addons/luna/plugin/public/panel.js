@@ -1391,13 +1391,10 @@
     let overlayTimer = null;
     function refreshDomOverlays() {
       let stored = null;
-      let detailsAppId = null;
       try {
         stored = JSON.parse((w.localStorage && w.localStorage.getItem('AppGridDisplaySettings')) || '{}').eSortBy;
-        detailsAppId = w.localStorage && w.localStorage.getItem('slsLunaDetailsAppId');
       } catch (_) { /* storage unavailable */ }
       enforceSortLabel(document, stored);
-      updateHltbStat(document, (hltb && hltb.games) || {}, detailsAppId);
     }
     function scheduleOverlayRefresh(delay) {
       if (overlayTimer) return;
@@ -1945,130 +1942,9 @@
     }, 6000);
   }
 
-  /* The details-page stat cell and the library sort label. Both are DOM-level:
-     Steam's label lookup has no case for the Luna sort value, and the details
-     row is rendered by private components, so these run in the Steam window
-     (the panel's own document) and never touch React state. */
-
-  function formatHltbStat(record) {
-    if (!record || record.match === 'none') return null;
-    const seconds = Number(record.main) || Number(record.all) || Number(record.extra) || 0;
-    if (!(seconds > 0)) return null;
-    const minutes = Math.max(1, Math.round(seconds / 60));
-    if (minutes < 60) return minutes + (minutes === 1 ? ' minute' : ' minutes');
-    return (minutes / 60).toFixed(1) + ' hours';
-  }
-
-  function detailsAppIdFrom(document) {
-    const links = document.querySelectorAll ? document.querySelectorAll('a') : [];
-    for (const link of links || []) {
-      const href = (typeof link.getAttribute === 'function' ? link.getAttribute('href') : link.attr_href) || '';
-      const match = String(href).match(/store\.steampowered\.com\/app\/(\d+)/);
-      if (match) return match[1];
-    }
-    return null;
-  }
-
-  function leafWithText(document, pattern) {
-    const nodes = document.querySelectorAll ? document.querySelectorAll('div,span') : [];
-    for (const node of nodes || []) {
-      if (node.children && node.children.length === 0 && pattern.test((node.textContent || '').trim())) {
-        return node;
-      }
-    }
-    return null;
-  }
-
-  // The stat row has several shapes: a game with playtime shows an icon plus a
-  // label/value box, while an unplayed game may show only "Space Required"
-  // with no icon and an extra tooltip wrapper. The anchor therefore starts
-  // from whichever stat label exists and walks up to the row itself.
-  const STAT_LABEL_PATTERNS = [/^play time$/i, /^last played$/i, /^last launched$/i,
-    /^space required$/i, /^achievements$/i];
-  let statIconClass = null; // learned from a play-time cell so sparse pages match
-
-  function statAnchor(document) {
-    for (const pattern of STAT_LABEL_PATTERNS) {
-      const label = leafWithText(document, pattern);
-      if (!label) continue;
-      const right = label.parentNode;
-      const cell = right && right.parentNode;
-      if (!cell || !right.children || right.children.length < 2) continue;
-      let row = cell.parentNode;
-      if (row && /tool-tip-source/i.test(String(row.className || ''))) row = row.parentNode;
-      if (!row || !row.children) continue;
-      return { row, cell, right, kind: pattern.source === '^play time$' ? 'playtime' : 'other' };
-    }
-    return null;
-  }
-
-  // The game page (details view) gains a How Long To Beat cell right after the
-  // playtime cell, built with the playtime cell's own class names so Steam's
-  // styles apply unchanged. Pure DOM: no React state is involved, and the cell
-  // is removed the moment there is no cached time for the shown game.
-  function updateHltbStat(document, games, appidHint) {
-    const existing = document.getElementById ? document.getElementById('sls-luna-hltb-stat') : null;
-    const anchor = statAnchor(document);
-    if (!anchor) {
-      if (existing && existing.remove) existing.remove();
-      return null;
-    }
-    const { row, cell, right, kind } = anchor;
-    const labelSource = right.children[0];
-    const valueSource = right.children[1];
-    if (!labelSource || !valueSource) {
-      if (existing && existing.remove) existing.remove();
-      return null;
-    }
-    // A real play-time cell teaches the icon class for cells that lack one.
-    if (kind === 'playtime' && cell.children[0] && !(cell.children[0].textContent || '').trim()) {
-      statIconClass = cell.children[0].className;
-    }
-    const appid = appidHint || detailsAppIdFrom(document);
-    const record = appid && games ? games[String(appid)] : null;
-    const text = formatHltbStat(record);
-    if (!text) {
-      if (existing && existing.remove) existing.remove();
-      return null;
-    }
-    if (existing && existing.parentNode === row) {
-      const value = document.getElementById('sls-luna-hltb-stat-value');
-      if (value) value.textContent = text;
-      return existing;
-    }
-    if (existing && existing.remove) existing.remove();
-    const stat = document.createElement('div');
-    stat.id = 'sls-luna-hltb-stat';
-    stat.className = cell.className;
-    if (statIconClass) {
-      const icon = document.createElement('div');
-      icon.className = statIconClass;
-      icon.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">'
-        + '<circle cx="12" cy="12" r="8" fill="none" stroke="#7c8791" stroke-width="2"/>'
-        + '<path d="M12 7v5l3.5 2" fill="none" stroke="#7c8791" stroke-width="2"/>'
-        + '<path d="M4 5.5L6.5 3M20 5.5L17.5 3" stroke="#7c8791" stroke-width="2"/></svg>';
-      stat.appendChild(icon);
-    }
-    const rightBox = document.createElement('div');
-    rightBox.className = right.className;
-    const labelNode = document.createElement('div');
-    labelNode.className = labelSource.className;
-    labelNode.textContent = 'How Long To Beat';
-    const value = document.createElement('div');
-    value.id = 'sls-luna-hltb-stat-value';
-    value.className = valueSource.className;
-    value.textContent = text;
-    rightBox.append(labelNode, value);
-    stat.appendChild(rightBox);
-    // Next to the play-time cell when the game has one, otherwise at the end
-    // of the row (the sparse page keeps Space Required only).
-    let before = null;
-    for (const child of row.children || []) {
-      if (/play time/i.test(child.textContent || '')) { before = child.nextSibling; break; }
-    }
-    row.insertBefore(stat, before);
-    return stat;
-  }
+  /* The library sort label. It is DOM-level because Steam's own label lookup
+     has no case for the Luna sort value, so a rehydrated choice
+     (localStorage) would otherwise render an empty SORT BY label. */
 
   function firstTextLeaf(node) {
     if (!node || !node.children) return null;
@@ -2150,6 +2026,5 @@
         || (b.record.lastPlayed || 0) - (a.record.lastPlayed || 0) || a.name.localeCompare(b.name));
   }
 
-  return { mount, buildRows, buildHltbRows, formatHltbStat, updateHltbStat, enforceSortLabel,
-    detailsAppIdFrom, findMenubar, hours };
+  return { mount, buildRows, buildHltbRows, enforceSortLabel, findMenubar, hours };
 });

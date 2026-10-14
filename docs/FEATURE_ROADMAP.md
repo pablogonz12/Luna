@@ -161,31 +161,31 @@ callback). The direction is a Luna page switch (shortest main story first by
 default, longest first when off), stored in localStorage; the Storage event
 makes the agent re-key immediately. Games without times always sort last, and
 with no HLTB data or any failure the library behaves exactly as Steam's
-alphabetical sort. The game-page stat cell takes its app id from the details
-React props (`details.unAppID`), which the agent publishes via localStorage
-because the page's DOM has no app link; the panel then builds the cell from the
-playtime cell's own classes. Everything is stored in
+alphabetical sort. Everything is stored in
 `~/.local/share/slssteam-integrations/hltb.json`. Nothing is fetched
 automatically.
 
 ### In-Steam surfacing (design, verified against the installed client bundle)
 
-The game-page stat cell below is still designed, not implemented; the sort
-option is implemented and covered by tests.
+The **sort option and the capsule hours are implemented**; the game-page stat
+cell was attempted and removed - a foreign DOM node inside a React-owned row
+does not survive re-renders, so it is tracked as
+[`issues/P2-hltb-game-page-stat.md`](issues/P2-hltb-game-page-stat.md) with
+what was learned (the app-id bridge is reusable; the cell needs a React-level
+hook).
 
 The goal is that HLTB data appears where Steam shows its own stats, not only in a
 Luna panel. Two integration points were located in the client's `steamui/sp.js`
 (re-check identifiers after every Steam update; if discovery fails, Luna must do
 nothing rather than guess):
 
-1. **Game page stat cell.** The app details page renders a row of stat cells
-   (Last Played, Play Time, Achievements) using one cell component and a shared
-   class group (`GameStat` / `GameStatRight` / `PlayBarLabel` / `PlaytimeRight`).
-   A Luna WebView agent can hook the same jsx layer it already hooks for the
-   right-click menu, detect that row while it renders, and append a
-   **HowLongToBeat** cell built with the same classes so Steam's own CSS places
-   it. It shows the cached values and is skipped when no data exists or the row
-   signature is unknown.
+1. **Game page stat cell - attempted, removed.** The app details page renders a
+   row of stat cells (Last Played, Play Time, Achievements) using one cell
+   component and a shared class group (`GameStat` / `GameStatRight` /
+   `PlayBarLabel` / `PlaytimeRight`). A DOM insertion built from those classes
+   looked right but does not survive React re-renders, so it was removed; see
+   [`issues/P2-hltb-game-page-stat.md`](issues/P2-hltb-game-page-stat.md) for
+   what was learned and the acceptance criteria for a React-level attempt.
 2. **Library sort option.** The "SORT BY" dropdown is built from an enum
    (`eL=1 … og=9, wD=10, LU=11`) with labels from `#Library_SortBy*` tokens, and
    the real comparator comes from one exported factory (`gQ(sortValue) -> sort

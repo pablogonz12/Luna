@@ -6,8 +6,7 @@
 // their real RPC names.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {mount,buildRows,buildHltbRows,formatHltbStat,updateHltbStat,enforceSortLabel,
-  detailsAppIdFrom,findMenubar}=require('../addons/luna/plugin/public/panel.js');
+const {mount,buildRows,buildHltbRows,enforceSortLabel,findMenubar}=require('../addons/luna/plugin/public/panel.js');
 
 function fakeDom(){
   const registry={};
@@ -778,97 +777,6 @@ test('the HowLongToBeat page offers a sort-direction switch that is remembered',
   await new Promise(resolve=>setTimeout(resolve,20));
   assert.equal(storage.get('slsLunaHltbOrder'),'long','flipping must persist the preference');
   assert.match(textOf(document.getElementById('sls-luna-overlay')),/Library order: longest first/);
-});
-
-test('formatHltbStat renders native-looking values and hides refused matches',()=>{
-  assert.equal(formatHltbStat({main:84940,match:'exact'}),'23.6 hours');
-  assert.equal(formatHltbStat({main:180,match:'exact'}),'3 minutes');
-  assert.equal(formatHltbStat({main:60,match:'exact'}),'1 minute');
-  assert.equal(formatHltbStat({all:7200,match:'strong'}),'2.0 hours','the fallback bucket is used');
-  assert.equal(formatHltbStat({match:'none'}),null,'a refused match shows nothing');
-  assert.equal(formatHltbStat({main:0,match:'exact'}),null);
-  assert.equal(formatHltbStat(null),null);
-});
-
-function gamePageFixture(document){
-  const cell=document.createElement('div');
-  cell.className='_cell _playtime';
-  const icon=document.createElement('div');
-  icon.className='_icon';
-  const right=document.createElement('div');
-  right.className='_right';
-  const label=document.createElement('div');
-  label.className='_label';
-  label.textContent='Play Time';
-  const value=document.createElement('div');
-  value.className='_value';
-  value.textContent='30.1 hours';
-  right.append(label,value);
-  cell.append(icon,right);
-  const row=document.createElement('div');
-  row.appendChild(cell);
-  document.body.appendChild(row);
-  const link=document.createElement('a');
-  link.setAttribute('href','https://store.steampowered.com/app/3357650/007_First_Light/');
-  document.body.appendChild(link);
-  return {row,cell};
-}
-
-test('the game page gains a How Long To Beat cell in the playtime style and drops it without data',()=>{
-  const document=fakeDom();
-  const {row,cell}=gamePageFixture(document);
-  assert.equal(detailsAppIdFrom(document),'3357650','the appid comes from the store link');
-  // The agent bridges the app id through localStorage; the hint path must work
-  // even when the page offers no app link at all.
-  const hinted=updateHltbStat(document,{'3357650':{main:57960,match:'exact'}},'3357650');
-  assert.ok(hinted,'the cell must be inserted with an app id hint');
-  assert.equal(hinted.parentNode,row,'the cell must be a sibling in the stat row');
-  assert.equal(hinted.className,'_cell _playtime','the playtime classes must be reused');
-  assert.equal(hinted.children[0].className,'_icon');
-  assert.equal(hinted.children[1].children[0].textContent,'How Long To Beat');
-  assert.equal(hinted.children[1].children[1].textContent,'16.1 hours');
-  let found=updateHltbStat(document,{'3357650':{main:7200,match:'exact'}});
-  assert.equal(found.children[1].children[1].textContent,'2.0 hours','the value must update in place');
-  updateHltbStat(document,{});
-  assert.equal(document.getElementById('sls-luna-hltb-stat'),null,'no data means no cell');
-  assert.ok(cell,'the fixture kept the playtime cell');
-});
-
-function sparseGamePageFixture(document){
-  const cell=document.createElement('div');
-  cell.className='_cell _space';
-  const right=document.createElement('div');
-  right.className='_right';
-  const label=document.createElement('div');
-  label.className='_label';
-  label.textContent='Space Required';
-  const value=document.createElement('div');
-  value.className='_value';
-  value.textContent='620.81 MB';
-  right.append(label,value);
-  cell.appendChild(right);
-  const tooltip=document.createElement('div');
-  tooltip.className='tool-tip-source Focusable';
-  tooltip.appendChild(cell);
-  const row=document.createElement('div');
-  row.className='_row';
-  row.appendChild(tooltip);
-  document.body.appendChild(row);
-  return {row,tooltip};
-}
-
-test('the cell still appears when the page only shows Space Required',()=>{
-  const document=fakeDom();
-  const {row,tooltip}=sparseGamePageFixture(document);
-  const stat=updateHltbStat(document,{'1148610':{main:3600,match:'exact'}},'1148610');
-  assert.ok(stat,'the sparse page must still gain the cell');
-  assert.equal(stat.parentNode,row,'the cell belongs to the stat row');
-  const rightBox=stat.children[stat.children.length-1];
-  assert.equal(rightBox.children[0].textContent,'How Long To Beat');
-  assert.equal(rightBox.children[1].textContent,'1.0 hours');
-  updateHltbStat(document,{});
-  assert.equal(document.getElementById('sls-luna-hltb-stat'),null);
-  assert.ok(tooltip,'the space-required cell stays');
 });
 
 test('the SORT BY label is restored only while the HLTB sort is stored',()=>{

@@ -9,9 +9,9 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf,
-  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,DETAILS_APPID_KEY,setHltbRecords,hltbSortKey,
+  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,setHltbRecords,hltbSortKey,
   applyHltbSortAs,restoreHltbSortAs,syncSortAs,isSortDropdown,withSortOption,withFreshOverviews,
-  publishDetailsAppId,withHltbOverlay,hltbMinutesFor}=require('../addons/luna/plugin/public/agent.js');
+  withHltbOverlay,hltbMinutesFor}=require('../addons/luna/plugin/public/agent.js');
 
 test('search URL trims and encodes the game name',()=>{
   assert.equal(searchUrlFor('  Hades  '),'https://howlongtobeat.com/?q=Hades');
@@ -427,18 +427,6 @@ test('the grid gets a fresh overviews array so its memo re-sorts with the curren
   assert.deepEqual(result.appOverviews,original,'the same games in the same order');
   assert.equal(withFreshOverviews({appOverviews:'nope'}),null);
   assert.equal(withFreshOverviews({appOverviews:original}),null,'other components are untouched');
-});
-
-test('the details page publishes its app id for the panel',()=>{
-  const store=new Map();
-  const w={localStorage:{getItem:key=>store.has(key)?store.get(key):null,
-    setItem:(key,value)=>store.set(key,String(value)),removeItem:key=>store.delete(key)}};
-  assert.equal(publishDetailsAppId(w,{details:{unAppID:3357650}}),true);
-  assert.equal(store.get(DETAILS_APPID_KEY),'3357650');
-  assert.equal(publishDetailsAppId(w,{details:{unAppID:3357650}}),false,'an unchanged id is not rewritten');
-  assert.equal(publishDetailsAppId(w,{details:{unAppID:0}}),false,'invalid ids are ignored');
-  assert.equal(publishDetailsAppId(w,{}),false);
-  assert.equal(publishDetailsAppId(w,{details:{unAppID:620}}),true);
 });
 
 test('the dropdown selection drives the keys, and other choices clear them',()=>{
