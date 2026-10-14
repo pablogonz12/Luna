@@ -1,25 +1,36 @@
 # Architecture
 
-## The layers
+## Current stack
 
-```
-SLSsteam-Moon + LuaTools-Moon     the installed stack: store hook + manifest manager
-        │
-        └── Lumen                 sidecar: CDP injector, Lua RPC registry, Steam path,
-        │                         shared JSON/fs shims. Ships lua/boot.lua as its entry point.
-        │
-        └── SLS Luna              THIS PROJECT: distribution and boot hook
-        │                         - one reversible boot.lua patch
-        │                         - one shared bridge at sls-addons/bridge.lua
-        │                         - pinned payloads under sls-addons/<name>/
-        │
-        └── add-ons               features, one directory each and nothing else:
-            playtime              local, editable playtime for non-Steam games
-            presence              hidden placeholder shortcut for friend visibility
+```text
+Steam client
+└── slsteam-moon                 native Steam integration; fork of SLSsteam
+    └── Lumen                    sidecar runtime, CDP injector and Lua RPC host
+        ├── LuaTools-Moon        plugin UI and Moon-oriented features
+        └── SLS Luna             current add-on distribution and feature set
+            ├── playtime         local playtime support for non-Steam games
+            ├── presence         friend-visibility integration
+            ├── compressor       UI/backend for the external Btrfs compressor
+            └── luna             Luna shell and shared integration
 ```
 
-Luna deliberately owns no features. It answers three questions and nothing else:
-*what* gets installed, *how* it is wired into Lumen, and *how* it is removed.
+The boundaries matter: slsteam-moon is the low-level Steam integration; Lumen
+hosts and injects plugin/add-on code; LuaTools-Moon supplies its own plugin UI and
+features; SLS Luna currently installs additional feature add-ons through a shared
+Lumen bridge. Cloud-save support may also use the separate CloudRedirect project.
+
+## Intended direction
+
+Keep the existing Luna menu as the single SLS Luna entry point and add original
+Luna UI pages for useful slsteam-moon capabilities: configuration, game updates,
+cloud saves, and fixes. Where possible, these pages should call Lumen's existing
+backend RPCs instead of reimplementing operations or copying Lumen's UI. This is
+planned, not current functionality. See [`PROJECT_DIRECTION.md`](PROJECT_DIRECTION.md).
+
+SLS Luna is an add-on, not a replacement for the native slsteam-moon core or the
+Lumen runtime. Pin compatible runtime versions and keep upstream code and release
+artifacts separate. If an extension point is needed, propose it to Lumen instead
+of silently maintaining a fragile permanent patch.
 
 ## The contract Lumen already offers
 
@@ -29,7 +40,7 @@ channel is the `control = true` channel - the only context that has
 `SteamClient`. Upstream LuaTools registers its RPC handlers in the same `registry`
 table the frontend dispatches against.
 
-That is enough to host add-ons without touching Lumen's own logic:
+That is enough to host the current add-ons without changing Lumen's own logic:
 
 1. a `dofile` of `sls-addons/bridge.lua` in file scope, so the locals it defines
    are visible to the builders below it;
@@ -39,7 +50,7 @@ That is enough to host add-ons without touching Lumen's own logic:
 4. the control channel's `polyfill` flag is enabled only when the bridge loaded,
    which is what lets an add-on talk to its backend from SharedJSContext.
 
-## Why one patch and not four
+## Why the current installer uses one patch and not four
 
 The patcher edits four places in `boot.lua` and refuses to run unless each anchor
 appears exactly once. Every add-on that installed itself would need the same four
@@ -53,18 +64,21 @@ Ordering also matters for correctness. `build_menu_assets()` and
 so the add-on scripts are appended before injection. The control channel's script
 list is likewise built inline in the channel table.
 
-## Files on disk
+## Files on disk (current installation)
 
 ```
 ~/.local/share/Lumen/
   lua/boot.lua                         patched once, backup beside it
   sls-addons/
     bridge.lua                         shared loader (pinned)
+    luna/{backend,public}/...          shared shell (pinned)
     presence/{backend,public}/...      payload (pinned)
     playtime/{backend,public}/...      payload (pinned)
+    compressor/{backend,public}/...    payload (pinned)
 ~/.local/share/slssteam-integrations/  USER DATA, never touched by install/uninstall
     presence.json
     playtime/<steamid64>.json(.bak)
+    compressor/                         settings and queue state
 ```
 
 An add-on directory contains exactly `backend/main.lua`, `public/panel.js`,
@@ -92,11 +106,11 @@ command to refresh. The trade-off is drift: the payload can grow stale relative
 to the add-on projects, which is why `verify --sources` compares against the local
 checkouts and the drift issue in `docs/issues/` asks for an automated check.
 
-## What Luna will not do
+## Current safety boundaries
 
-* It never edits SLSsteam configuration, manifests, games or Steam userdata.
-* It never touches user data on install, uninstall or upgrade.
+* It does not edit SLSsteam configuration, manifests, games or Steam userdata.
+* It does not touch user data on install, uninstall or upgrade.
 * It never kills Steam or a Lumen sidecar; it refuses and prints the command.
-* It does not merge add-ons into one process or one registry entry - each keeps
-  its own RPC namespace (`SlsPlaytime*`, `SlsPresence*`) so upstreaming one does
-  not require upstreaming the other.
+* Current add-ons use separate, namespaced RPC methods so they can be tested and
+  migrated independently. The planned unified UI does not require collapsing
+  those backend boundaries.

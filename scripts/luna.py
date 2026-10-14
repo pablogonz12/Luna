@@ -543,7 +543,7 @@ def cmd_vendor(options):
                 raise SystemExit('FAIL: this repository has no addons/%s/%s' % (name, source_rel))
             files[dest_rel] = {'source_path': source_rel, 'sha256': sha256(path)}
         manifest['addons'][name] = {
-            'source_repo': 'https://github.com/pgm1207/slsteam-luna',
+            'source_repo': 'https://github.com/pgm1207/Luna',
             'source_commit': repo_commit,
             'plugin_version': addon_version(name),
             'files': files,

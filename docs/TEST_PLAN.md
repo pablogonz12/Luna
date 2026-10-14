@@ -4,8 +4,9 @@
 
 | Suite | Command | Covers |
 | --- | --- | --- |
-| Installer | `python3 -m unittest discover -s tests -p 'test_*.py'` | install both, install one, idempotence, dry run, refusals (Steam, Lumen sidecar, drifted `boot.lua`, divergent payload), uninstall one / last, backup-missing refusal, user data untouched, status reporting, manifest verification |
-| Composition | `bash scripts/test-backend.sh` | the real bridge with both **real** backends: both register into one registry, both asset lists carry two scripts, and a deliberately broken add-on is skipped instead of stopping the healthy one |
+| Installer | `python3 -m unittest discover -s tests -p 'test_*.py'` | install all or one add-on, idempotence, dry run, refusals (Steam, Lumen sidecar, drifted `boot.lua`, divergent payload), uninstall one / last, backup-missing refusal, user data untouched, status reporting, manifest verification |
+| Bootstrap installer | `bash -n install.sh`; `./install.sh --help`; `./install.sh --dry-run` on a ready host | syntax/help; existing stack is reused; dry run performs no writes; upstream bootstrap is checksum-verified and uses `--nolaunch` |
+| Composition | `bash scripts/test-backend.sh` | the shipped bridge and add-on backends register in one registry, expected assets are injected in order, and a deliberately broken add-on is skipped instead of stopping healthy add-ons |
 | Payload pinning | `python3 scripts/luna.py verify` | every payload and shared file matches `vendor/MANIFEST.json`, and no file exists that the manifest does not list |
 | Drift | `python3 scripts/luna.py verify --sources` | the pinned bytes equal the local add-on checkouts (skipped where they are absent) |
 | Syntax | CI | `python3 -m py_compile`, `luac -p`, `bash -n` |
@@ -16,16 +17,16 @@ open or closed.
 
 ## On-device gates
 
-1. `preflight` reports the Steam root, manifest count, both payload versions,
+1. `preflight` reports the Steam root, manifest count, installed payload versions,
    `boot.lua` state and the data directory, and refuses while Steam or a Lumen
    sidecar is running.
-2. `install` with Steam closed and no sidecar: both add-ons load after a restart,
+2. `install` with Steam closed and no sidecar: all selected add-ons load after a restart,
    `boot.lua` shows exactly one marker, and `status` reports every file `same`.
-3. Live: the Playtime panel reports a healthy agent and plausible manifest and
-   shortcut counts; the Presence panel reports a healthy agent.
-4. `uninstall --only presence` leaves playtime working after a restart;
+3. Live: the Luna shell loads; Playtime and Presence report healthy agents; the
+   Compressor page loads its status and settings through backend RPCs.
+4. `uninstall --only presence` leaves the other add-ons working after a restart;
    `uninstall` restores `boot.lua` byte-for-byte.
-5. User data: the playtime ledger and `presence.json` are byte-identical across
+5. User data: playtime, presence and compressor state are preserved across
    install, upgrade and uninstall.
 6. A second add-on version (re-run `vendor-update.sh`, then install) replaces the
    payload and `status` returns to `same` everywhere.
