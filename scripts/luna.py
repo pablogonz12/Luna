@@ -42,9 +42,9 @@ MARKER = 'SLS-ADDONS-INTEGRATION'
 # them, so this order is only for reporting; "luna" and "compressor" are
 # first-party (they live in this repository) while the other two are vendored
 # from their own projects.
-ADDONS = ('luna', 'sgdb', 'playtime', 'presence', 'compressor')
+ADDONS = ('luna', 'sgdb', 'graphics', 'playtime', 'presence', 'compressor')
 SOURCED = ('playtime', 'presence')
-FIRST_PARTY = ('luna', 'sgdb', 'compressor')
+FIRST_PARTY = ('luna', 'sgdb', 'graphics', 'compressor')
 
 # Files that make up one add-on, as (path in this repo, path under sls-addons/<name>).
 ADDON_FILES = {
@@ -55,6 +55,10 @@ ADDON_FILES = {
         ('plugin/plugin.json', 'plugin.json'),
     ),
     'sgdb': (
+        ('plugin/backend/main.lua', 'backend/main.lua'),
+        ('plugin/plugin.json', 'plugin.json'),
+    ),
+    'graphics': (
         ('plugin/backend/main.lua', 'backend/main.lua'),
         ('plugin/plugin.json', 'plugin.json'),
     ),

@@ -99,6 +99,14 @@ thumbnails in the picker.
 
 ## 2. `lsfg-vk` frame-generation setup
 
+**Implemented (add-on `graphics` 0.1.0, behind the beta switch):** a read-only
+**Graphics** page reports the distro and kernel, every DRM card with its vendor,
+device, driver and product name, the `lsfg-vk` Vulkan layers found (with the
+manifest's implementation version) and its user config, the overlapping Decky
+plugins (`decky-lsfg-vk`, `Decky-Framegen`) without touching them, OptiScaler /
+OptiScaler Client installs in the usual user locations, and the Steam root with
+its Linux runtimes plus gamescope. It installs, downloads and changes nothing.
+
 The goal is to make supported setup and per-game selection manageable in Luna,
 including an installer flow when upstream permits it. It is **not** to bundle a
 mutable installer or claim a universal frame-generation toggle. The project has
@@ -136,9 +144,11 @@ OptiClient is part of OptiScaler.
 
 ### Proposed integration
 
-- Start with a Luna-owned **Graphics** page that detects installed versions and
-  shows upstream documentation/status. A Luna right-click action can open the
-  selected game's configuration view once identity mapping is reliable.
+- **Implemented (read-only):** the Luna-owned **Graphics** beta page (add-on
+  `graphics` 0.1.0) reports GPU/driver/kernel/distro, `lsfg-vk` layers and
+  config, overlapping Decky plugins, OptiScaler/Client installs and the Steam
+  runtime; it installs or changes nothing. Per-game configuration views come
+  once identity mapping and upstream contracts allow it.
 - Evaluate whether OptiClient exposes a stable CLI, local API, or documented
   configuration format. If it does, Luna may launch/delegate through that public
   contract. If it does not, use a clearly separate launch/handoff rather than

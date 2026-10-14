@@ -205,6 +205,15 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
         {kind:'grid',ok:true,live:true},{kind:'wide',ok:true,live:true},
         {kind:'hero',ok:true,live:true},{kind:'logo',ok:true,live:true},
         {kind:'icon',ok:true,live:false}]});
+      if(fn==='SlsGraphicsGet')return JSON.stringify({success:true,version:'0.1.0',
+        system:{distro:'Arch Linux (test)',kernel:'6.12.4-arch1'},
+        gpus:[{card:'card0',vendor:'0x1002',vendor_name:'AMD',device:'0x744c',driver:'amdgpu',
+          product:'AMD Radeon RX 7900 XTX'}],
+        lsfg:{layers:[{path:'/usr/share/vulkan/implicit_layer.d/VkLayer_LSFG_vk.json',version:2}],
+          config:{path:'/home/tester/.config/lsfg-vk/conf.toml',size:22},
+          decky_plugins:['/home/tester/homebrew/plugins/decky-lsfg-vk']},
+        optiscaler:[{kind:'files',path:'/home/tester/.config/optiscaler'}],
+        steam:{root:'/home/tester/.local/share/Steam',runtimes:['SteamLinuxRuntime_sniper'],gamescope:true}});
       return JSON.stringify({success:true});
     }},
   };
@@ -937,6 +946,30 @@ test('an artwork request with beta off points at the Settings switch',async()=>{
   assert.match(text,/Show beta features/,'the request must land on the Settings page');
   assert.match(text,/beta features are off/,'the reason must be explained');
   assert.doesNotMatch(text,/Artwork for Hades/,'no picker without beta on');
+});
+
+test('the Graphics beta page reports the detection read-only',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,storage}=fakeWindow(document,{});
+  storage.set('slsLunaBeta','1');
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='Graphics');
+  assert.ok(tab,'the Graphics tab must exist with beta on');
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/Arch Linux \(test\)/,'the distro must be shown');
+  assert.match(text,/AMD Radeon RX 7900 XTX/,'the GPU must be shown');
+  assert.match(text,/driver amdgpu/,'the driver must be shown');
+  assert.match(text,/VkLayer_LSFG_vk\.json/,'the lsfg-vk layer must be shown');
+  assert.match(text,/Decky plugin detected: decky-lsfg-vk/,'the overlapping Decky plugin must be noted');
+  assert.match(text,/OptiScaler/,'the OptiScaler section must exist');
+  assert.match(text,/Steam root: \/home\/tester\/\.local\/share\/Steam/,'the Steam facts must be shown');
+  assert.match(text,/Nothing here installs/,'the read-only promise must be stated');
 });
 
 test('the SORT BY label is restored only while the HLTB sort is stored',()=>{
