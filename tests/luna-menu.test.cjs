@@ -9,8 +9,8 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf,
-  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,setHltbRecords,discoverSortModule,ensureSortPatch,
-  isSortDropdown,withSortOption}=require('../addons/luna/plugin/public/agent.js');
+  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,setHltbRecords,hltbSortKey,applyHltbSortAs,
+  restoreHltbSortAs,syncSortAs,isSortDropdown,withSortOption}=require('../addons/luna/plugin/public/agent.js');
 
 test('search URL trims and encodes the game name',()=>{
   assert.equal(searchUrlFor('  Hades  '),'https://howlongtobeat.com/?q=Hades');
@@ -65,19 +65,14 @@ function webpackFixture(requireName){
   const MenuItem=new Function('return function contextMenuItem(){return "onSelected"}')();
   MenuItem.prototype.OnClick=function(){};
   const moduleExports={...jsx,MenuItem};
-  // The sort module Steam knows: numeric enum plus the comparator factory.
-  const sortGQ=value=>({kind:'steam-sort',value});
-  const sortExports={eL:1,wD:10,TB:2,iY:3,xn:4,CX:5,E0:6,VF:7,IZ:8,og:9,LU:11,gQ:sortGQ};
-  const exports={1:moduleExports,2:sortExports};
+  const exports={1:moduleExports};
   const require=id=>exports[id];
   require.m={
     1:new Function('return function(module,exports,'+requireName+'){' +
       'const nativeName="BuildManageSubmenu";'+requireName+'(1);}')(),
-    2:new Function('return function(module,exports,r){' +
-      'const a="CompareSortAs",b="metacritic_score",c="rt_purchased_time";r(2);}')(),
   };
-  return {SP_REACT:React,__expectedJsx:moduleExports,__calls:calls,__sortExports:sortExports,
-    __sortOriginal:sortGQ,webpackChunksteamui:{push(chunk){chunk[2](require);}}};
+  return {SP_REACT:React,__expectedJsx:moduleExports,__calls:calls,
+    webpackChunksteamui:{push(chunk){chunk[2](require);}}};
 }
 
 const SORT_ENUM=[{data:1,label:'Alphabetical'},{data:10,label:'Friends Playing'},
@@ -314,7 +309,7 @@ test('booting retries until the library module appears and only arms once',()=>{
     Object.assign(w,webpackFixture('t'));
     timers[0]();
     assert.ok(w.__SlsLunaMenu,'the retry beat must install the menu once the module exists');
-    assert.equal(w.__SlsLunaMenu.sort.patched,true,'the beat must patch the sort module');
+    assert.equal(w.__SlsLunaMenu.sort.value,SORT_VALUE);
     w.__SlsLunaMenu.dispose();
   }finally{console.warn=originalWarn;}
 });
@@ -380,21 +375,77 @@ test('pushLibrary sends the inventory once and skips identical payloads',async()
   assert.equal(quiet,false,'a failed push must not throw');
 });
 
-test('the sort module is found by its comparator field names and patched only for the Luna value',()=>{
-  const w=webpackFixture('t');
-  assert.equal(discoverSortModule(w),w.__sortExports,'the comparator module must be discovered');
-  assert.equal(ensureSortPatch(w),true,'the module must be patched');
-  assert.deepEqual(w.__sortExports.gQ(1),{kind:'steam-sort',value:1},
-    'every other sort value must keep Steam behavior');
-  const compare=w.__sortExports.gQ(SORT_VALUE);
-  assert.equal(typeof compare,'function','the Luna value must yield a comparator');
-  setHltbRecords({'20':{main:7200},'10':{main:3600},'30':{match:'none'}});
-  const order=[{appid:10,display_name:'A'},{appid:30,display_name:'B'},{appid:99,display_name:'C'},
-    {appid:20,display_name:'D'}].sort(compare).map(entry=>entry.appid);
-  assert.deepEqual(order.slice(0,2),[20,10],'the longest main story sorts first');
-  assert.deepEqual(order.slice(2).sort(),[30,99],'games without times sort last, refused ones included');
-  assert.equal(ensureSortPatch(w),true,'re-patching must be idempotent');
-  assert.deepEqual(w.__sortExports.gQ(9),{kind:'steam-sort',value:9});
+test('the sort key orders longest first under a plain string comparison',()=>{
+  setHltbRecords({'1':{main:3600},'2':{main:7200},'3':{main:1800}});
+  const long=hltbSortKey(2,'B');
+  const short=hltbSortKey(1,'A');
+  const shortest=hltbSortKey(3,'C');
+  assert.ok(long<short && short<shortest,'more seconds must compare earlier');
+  assert.ok(hltbSortKey(99,'Z')>shortest,'games without times must compare last');
+  assert.equal(hltbSortKey(2,'B').length,12,'ten digits, a colon and the name');
+  setHltbRecords({'4':{match:'none'}});
+  assert.ok(hltbSortKey(4,'D')>hltbSortKey(3,'C'),'a refused match counts as no data');
+  setHltbRecords({});
+});
+
+function sortableWindow(stored){
+  return {
+    appStore:{allApps:[
+      {appid:1,display_name:'Alpha',sort_as:'alpha'},
+      {appid:2,display_name:'Beta'},
+      {appid:3,display_name:'Gamma',sort_as:'gamma'},
+    ]},
+    localStorage:stored?{getItem:()=>JSON.stringify({eSortBy:stored})}:{getItem:()=>null},
+  };
+}
+
+test('sorting rewrites sort_as while active and restores every original after',()=>{
+  setHltbRecords({'1':{main:3600},'2':{main:7200}});
+  const w=sortableWindow();
+  const [one,two,three]=w.appStore.allApps;
+  assert.equal(applyHltbSortAs(w),true);
+  assert.ok(two.sort_as<one.sort_as,'the longer game must compare first');
+  assert.ok(one.sort_as<three.sort_as,'a game without times must compare last');
+  assert.equal(applyHltbSortAs(w),true,'re-applying is safe');
+  assert.equal(restoreHltbSortAs(),true);
+  assert.equal(one.sort_as,'alpha','custom sort names must come back');
+  assert.equal(two.sort_as,undefined,'a game without one must lose the property');
+  assert.equal(three.sort_as,'gamma');
+  assert.equal(restoreHltbSortAs(),false,'nothing left to restore');
+  setHltbRecords({});
+});
+
+test('the dropdown selection drives the keys, and other choices clear them',()=>{
+  setHltbRecords({'1':{main:3600}});
+  const w=sortableWindow();
+  const changes=[];
+  const props={rgOptions:SORT_ENUM.slice(),onChange:value=>changes.push(value),selectedOption:4};
+  const result=withSortOption(props,w);
+  assert.equal(result.rgOptions.length,11);
+  assert.equal(result.rgOptions[10].data,SORT_VALUE);
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha','no keys before the option is chosen');
+  result.onChange(SORT_VALUE);
+  assert.deepEqual(changes,[SORT_VALUE],'the original onChange must still run');
+  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha','the choice must apply the keys');
+  result.onChange(1);
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha','another choice must restore them');
+  // The persisted choice applies as soon as the dropdown reports it.
+  const selected={rgOptions:SORT_ENUM.slice(),selectedOption:SORT_VALUE};
+  withSortOption(selected,w);
+  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha');
+  restoreHltbSortAs();
+  setHltbRecords({});
+});
+
+test('syncSortAs follows the stored sort choice',()=>{
+  setHltbRecords({'1':{main:3600}});
+  const w=sortableWindow(SORT_VALUE);
+  assert.equal(syncSortAs(w),true,'a stored HLTB choice must apply the keys');
+  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha');
+  w.localStorage.getItem=()=>JSON.stringify({eSortBy:4});
+  assert.equal(syncSortAs(w),true,'another choice must restore');
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha');
+  assert.equal(syncSortAs(w),false,'nothing left to do when no keys are active');
   setHltbRecords({});
 });
 
@@ -403,7 +454,7 @@ test('only the real sort dropdown gains the HowLongToBeat option',()=>{
   assert.ok(patched,'the sort dropdown must be recognized by its option values');
   assert.equal(patched.rgOptions.length,11);
   assert.deepEqual(patched.rgOptions[10],{data:SORT_VALUE,label:SORT_LABEL});
-  assert.equal(withSortOption({rgOptions:patched.rgOptions}),null,'never appended twice');
+  assert.equal(withSortOption({rgOptions:patched.rgOptions}),null,'never appended twice and nothing to wrap');
   assert.equal(withSortOption({rgOptions:ENUMStrings()}),null,'string values are a different dropdown');
   assert.equal(withSortOption({rgOptions:SORT_ENUM.slice(0,3)}),null,'a short dropdown is not the sort one');
   assert.equal(withSortOption({rgOptions:SORT_ENUM.map(o=>({data:o.data+100,label:o.label}))}),null,
