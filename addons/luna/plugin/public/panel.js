@@ -2807,10 +2807,12 @@
         presence = presence || {};
       }
       try {
-        // The per-game list is only needed by the Games tab; the one-second
-        // poll asks for the light shape everywhere else.
-        const needGames = tab === 'compressor' && compressorTab === 'games';
-        compressor = await rpc(w, 'SlsCompressorGet', { raw: JSON.stringify({ light: !needGames }) });
+        // The per-game list and the statistics are only needed by their own
+        // tabs; every other view (and the one-second poll) asks for the light
+        // shape, which leaves both out.
+        const needFull = tab === 'compressor'
+          && (compressorTab === 'games' || compressorTab === 'stats');
+        compressor = await rpc(w, 'SlsCompressorGet', { raw: JSON.stringify({ light: !needFull }) });
         // The optimistic "Starting..." line gives way once the backend reports
         // this exact job (running, or already finished) from our request.
         const job = compressor && compressor.job;

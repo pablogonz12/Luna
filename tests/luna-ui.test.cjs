@@ -161,7 +161,18 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
       if(fn==='SlsPresenceGet')return JSON.stringify(presence||{success:true,state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}});
       if(fn==='SlsPlaytimeEdit')return JSON.stringify({success:true});
       if(fn==='SlsPresenceSetEnabled')return JSON.stringify({success:true,enabled:payload.enabled});
-      if(fn==='SlsCompressorGet')return JSON.stringify(compressor||compressorFixture());
+      if(fn==='SlsCompressorGet'){
+        // Mirror the backend: the light shape drops the per-game list and the
+        // statistics, so a tab that needs either must ask for the full one.
+        const data=compressor||compressorFixture();
+        if(payload&&payload.light){
+          const rest={...data};
+          delete rest.stats;
+          if(rest.status)rest.status={version:rest.status.version,summary:rest.status.summary};
+          return JSON.stringify(rest);
+        }
+        return JSON.stringify(data);
+      }
       if(fn==='SlsCompressorPutSettings')return JSON.stringify({success:true,settings:payload});
       if(fn==='SlsCompressorRun')return JSON.stringify({success:true,job:{action:payload.action,running:true}});
       if(fn==='SlsCompressorCancel')return JSON.stringify({success:true,cancelled:true});
