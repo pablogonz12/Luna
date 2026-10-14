@@ -57,6 +57,13 @@ handlers; other add-ons register their own actions instead of each hooking the
 library's jsx layer separately. Playtime keeps its own menu hook because it
 predates the registry and must stay independent.
 
+One rule keeps two menu-hooking add-ons from fighting: after the first wrap, an
+add-on may only re-wrap when Steam rebuilt the module (a new jsx module object).
+Wrapping another add-on's wrapper is not detachment - the inner wrapper still
+runs - and treating it as detachment makes both agents re-wrap each other on
+every re-arm beat. Each wrapper also falls back to the leaf function on
+re-entry, so a wrapper cycle can never recurse without bound.
+
 ## Why the current installer uses one patch and not four
 
 The patcher edits four places in `boot.lua` and refuses to run unless each anchor

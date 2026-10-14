@@ -344,6 +344,6 @@ assert(out.record.main == 84940 and out.record.extra == 175028 and out.record.co
 assert(out.record.all == 159766)
 
 out = call('SlsLunaInfo')
-assert(out.success == true and out.version == '0.3.0' and type(out.addons) == 'table')
+assert(out.success == true and out.version == '0.3.1' and type(out.addons) == 'table')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence')
