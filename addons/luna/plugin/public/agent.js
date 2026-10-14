@@ -42,6 +42,25 @@
       .then(raw => (typeof raw === 'string' ? JSON.parse(raw) : raw));
   }
 
+  // A per-game artwork request: the Luna panel (which owns the window's DOM)
+  // listens for this localStorage key and opens the SteamGridDB picker on the
+  // game. SharedJSContext has no DOM access, so localStorage is the hand-off.
+  const ARTWORK_REQUEST_KEY = 'slsLunaArtworkRequest';
+
+  function publishArtworkRequest(w, app) {
+    const appid = Number(app && app.appid);
+    if (!valid(appid)) return false;
+    const payload = JSON.stringify({ appid, name: nameOf(app), at: Date.now() });
+    try {
+      const storage = storageOf(w);
+      if (!storage) return false;
+      storage.setItem(ARTWORK_REQUEST_KEY, payload);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function defaultActions() {
     return [{
       id: 'hltb',
@@ -51,6 +70,16 @@
         if (!opened) throw Error('Steam could not open the browser for the HowLongToBeat search.');
         return true;
       }),
+    }, {
+      id: 'artwork',
+      label: 'Change artwork',
+      isEnabled: app => valid(app && app.appid),
+      run: (app, w) => {
+        if (!publishArtworkRequest(w, app)) {
+          throw Error('Could not open the Luna artwork picker.');
+        }
+        return true;
+      },
     }];
   }
 
@@ -662,9 +691,9 @@
     refreshHltbData(w).then(() => syncSortAs(w));
   }
 
-  return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, discoverMenuTools, openExternalUrl,
-    searchUrlFor, nameOf, defaultActions, collectLibrary, pushLibrary, rpc, setHltbRecords,
-    hltbSecondsFor, hltbMinutesFor, hltbSortKey, readHltbOrder, applyHltbSortAs, restoreHltbSortAs,
-    syncSortAs, isSortDropdown, withSortOption, withFreshOverviews, withHltbOverlay,
-    refreshHltbData, installLunaMenu, bootLunaMenu };
+  return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, ARTWORK_REQUEST_KEY, discoverMenuTools, openExternalUrl,
+    searchUrlFor, nameOf, defaultActions, publishArtworkRequest, collectLibrary, pushLibrary, rpc,
+    setHltbRecords, hltbSecondsFor, hltbMinutesFor, hltbSortKey, readHltbOrder, applyHltbSortAs,
+    restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption, withFreshOverviews,
+    withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
 });

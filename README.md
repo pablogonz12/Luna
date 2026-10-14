@@ -26,7 +26,7 @@ projects, then adds features designed to work well together.
 | **Cloud saves / CloudRedirect** | Optional upstream component; Luna page planned | CloudRedirect is separate software; a unified Luna page is not implemented yet |
 | **Decky Loader** | Planned / compatibility review | Optional install is being evaluated; Decky is a separate project and is not installed by Luna today |
 | **Moon settings, updates, fixes** | Planned | Bring useful controls into Luna's navigation without copying upstream UI code |
-| **Artwork picker / right-click actions** | Planned; the action menu is wired | A game right-click action can now open Luna features; artwork search/apply is still to come |
+| **Artwork picker / right-click actions** | Available (first version) | Right-click a game → Change artwork opens the Luna SteamGridDB picker: apply grid, hero, logo or icon images, with the previous file backed up and one-click Restore |
 | **`lsfg-vk` / frame generation** | Research/design | Optional setup and per-game controls only after upstream, hardware, and platform compatibility gates |
 | **OptiScaler / OptiClient** | Planned | Unified Luna management is a goal; OptiClient is a separate third-party project, and per-game support must be validated |
 | **HowLongToBeat (HLTB)** | Luna page + library sort and capsule hours available | The HowLongToBeat tab manages locally cached times (background fetch pass, skips unmatched games, pauses on rate limits). The library's SORT BY gains a HowLongToBeat option that labels each capsule with its hours. The game-page cell was attempted and removed; tracked as an issue |

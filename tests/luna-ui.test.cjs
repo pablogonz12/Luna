@@ -122,17 +122,21 @@ function compressorFixture(overrides){
   return Object.assign(base,overrides||{});
 }
 
-function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,edit,setEnabled}={}){
+function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,sgdbKey,edit,setEnabled}={}){
   const calls=[];
   const hltbState=Object.assign({success:true,count:0,games:{},library:[]},hltb||{});
   hltbState.count=Object.keys(hltbState.games||{}).length;
   const rateLimited=new Set();
   const storage=new Map();
+  const storageListeners=[];
+  const sgdbState={apiKey:sgdbKey||'',gridDir:'/home/tester/.local/share/Steam/userdata/1/config/grid',gridError:''};
   const w={
     document,
     localStorage:{getItem:key=>storage.has(key)?storage.get(key):null,
       setItem:(key,value)=>storage.set(key,String(value)),
       removeItem:key=>storage.delete(key)},
+    addEventListener:(type,fn)=>{if(type==='storage')storageListeners.push(fn);},
+    __emitStorage:()=>{storageListeners.forEach(fn=>fn({key:'slsLunaArtworkRequest'}));},
     setInterval:(fn,ms)=>{return 1;},
     clearInterval:()=>{},
     // The fetch-missing queue spaces requests out; tests skip the waiting.
@@ -183,6 +187,20 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
         return JSON.stringify({success:true});
       }
       if(fn==='__lumenOpenExternalUrl')return JSON.stringify({ok:true});
+      if(fn==='SlsSgdbGet')return JSON.stringify({success:true,apiKey:sgdbState.apiKey,
+        gridDir:sgdbState.gridDir,gridError:sgdbState.gridError});
+      if(fn==='SlsSgdbSetKey'){sgdbState.apiKey=(payload.key||'').trim();
+        return JSON.stringify({success:true,hasKey:sgdbState.apiKey!==''});}
+      if(fn==='SlsSgdbTest')return JSON.stringify(sgdbState.apiKey
+        ?{success:true}:{success:false,code:'no_key',error:'Add your SteamGridDB API key first.'});
+      if(fn==='SlsSgdbSearch')return JSON.stringify({success:true,
+        games:[{id:1,name:'Hades'},{id:2,name:'Hades II'}]});
+      if(fn==='SlsSgdbAssets')return JSON.stringify({success:true,total:1,assets:[
+        {id:11,url:'https://cdn.example/grid1.png',thumb:'https://cdn.example/t1.png',
+          width:600,height:900,style:'alternate',mime:'image/png',author:'artist1'}]});
+      if(fn==='SlsSgdbApply')return JSON.stringify({success:true,path:'/grid/out.png',
+        kind:payload.kind,backedUp:true});
+      if(fn==='SlsSgdbRestore')return JSON.stringify({success:true,restored:true});
       return JSON.stringify({success:true});
     }},
   };
@@ -777,6 +795,76 @@ test('the HowLongToBeat page offers a sort-direction switch that is remembered',
   await new Promise(resolve=>setTimeout(resolve,20));
   assert.equal(storage.get('slsLunaHltbOrder'),'long','flipping must persist the preference');
   assert.match(textOf(document.getElementById('sls-luna-overlay')),/Library order: longest first/);
+});
+
+test('the SteamGridDB page saves and tests the API key',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='SteamGridDB');
+  assert.ok(tab,'the SteamGridDB tab must exist');
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  let overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/SteamGridDB/,'the page must explain the key and attribution');
+  const input=findNode(overlay,node=>node.tagName==='INPUT'&&node.placeholder==='SteamGridDB API key');
+  assert.ok(input,'the key field must exist');
+  input.value='my-key';
+  const save=findNode(overlay,node=>node.textContent==='Save key'&&typeof node.onclick==='function');
+  save.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const call=calls.filter(entry=>entry.fn==='SlsSgdbSetKey').pop();
+  assert.ok(call&&call.payload.key==='my-key','saving must send the key');
+  overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/Key saved/,'the page must confirm the save');
+  const test=findNode(overlay,node=>node.textContent==='Test key'&&typeof node.onclick==='function');
+  test.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.ok(calls.some(entry=>entry.fn==='SlsSgdbTest'),'testing must call the backend');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/key works/);
+});
+
+test('a right-click artwork request opens the picker and applying calls the backend',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls,storage}=fakeWindow(document,{sgdbKey:'my-key'});
+  mount(w);
+  storage.set('slsLunaArtworkRequest',JSON.stringify({appid:1145360,name:'Hades',at:Date.now()}));
+  w.__emitStorage();
+  await new Promise(resolve=>setTimeout(resolve,80));
+  const overlay=document.getElementById('sls-luna-overlay');
+  assert.ok(overlay,'the picker must open from the request');
+  assert.match(textOf(overlay),/Artwork for Hades \(#1145360\)/,'the requested game must be shown');
+  const search=calls.filter(entry=>entry.fn==='SlsSgdbSearch').pop();
+  assert.ok(search&&search.payload.term==='Hades','the game name must be searched');
+  const assets=calls.filter(entry=>entry.fn==='SlsSgdbAssets').pop();
+  assert.ok(assets&&assets.payload.gameId===1&&assets.payload.kind==='grid',
+    'the best match assets must load for the grid kind');
+  const card=findNode(document.getElementById('sls-luna-overlay'),node=>node.className==='sls-luna-asset');
+  assert.ok(card,'the asset card must render');
+  card.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const apply=calls.filter(entry=>entry.fn==='SlsSgdbApply').pop();
+  assert.ok(apply,'clicking an asset must apply it');
+  assert.deepEqual(apply.payload,{appid:1145360,kind:'grid',url:'https://cdn.example/grid1.png',mime:'image/png'});
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Artwork applied/);
+  const hero=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Hero'&&typeof node.onclick==='function');
+  hero.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const heroAssets=calls.filter(entry=>entry.fn==='SlsSgdbAssets').pop();
+  assert.equal(heroAssets.payload.kind,'hero','switching kind must reload assets');
+  const restore=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Restore previous hero'&&typeof node.onclick==='function');
+  restore.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const restoreCall=calls.filter(entry=>entry.fn==='SlsSgdbRestore').pop();
+  assert.deepEqual(restoreCall.payload,{appid:1145360,kind:'hero'});
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/previous artwork is back/);
 });
 
 test('the SORT BY label is restored only while the HLTB sort is stored',()=>{

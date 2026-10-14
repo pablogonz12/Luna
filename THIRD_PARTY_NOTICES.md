@@ -14,6 +14,7 @@ terms for the specific distribution.
 | CloudRedirect | [Selectively11/CloudRedirect](https://github.com/Selectively11/CloudRedirect) | Optional cloud-save component integrated by LuaTools-Moon | Review its current license before bundling or redistribution |
 | Decky Loader | [SteamDeckHomebrew/decky-loader](https://github.com/SteamDeckHomebrew/decky-loader) | Potential optional Steam Deck integration; not installed by Luna today | Upstream repository displays GPL-2.0; no Decky code copied or bundled |
 | btrfs-game-compressor | [pgm1207/btrfs-game-compressor](https://github.com/pgm1207/btrfs-game-compressor) | Separate external tool invoked by the compressor add-on; not installed by this repository | Review the tool repository's current license before redistribution |
+| SteamGridDB | [steamgriddb.com](https://www.steamgriddb.com/) | Artwork source for the Luna picker; the user's own API key is stored locally and images are fetched directly from SteamGridDB | Artwork belongs to its uploaders; the API is used under SteamGridDB's terms with the user's key, and nothing is redistributed |
 | SLS Luna add-on source repositories | [playtime](https://github.com/pgm1207/slsteam-playtime), [presence](https://github.com/pgm1207/slsteam-presence), and this repository | Source commits and file hashes for currently pinned payloads are recorded in [`vendor/MANIFEST.json`](vendor/MANIFEST.json) | Preserve the notices and licenses present in each source repository |
 
 ## Attribution policy

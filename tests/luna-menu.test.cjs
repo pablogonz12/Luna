@@ -9,7 +9,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf,
-  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,setHltbRecords,hltbSortKey,
+  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,ARTWORK_REQUEST_KEY,setHltbRecords,hltbSortKey,
   applyHltbSortAs,restoreHltbSortAs,syncSortAs,isSortDropdown,withSortOption,withFreshOverviews,
   withHltbOverlay,hltbMinutesFor}=require('../addons/luna/plugin/public/agent.js');
 
@@ -109,7 +109,7 @@ test('the focused game gains the HowLongToBeat action after its primary action',
   tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}},{type:'fav',props:{}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Change artwork']);
   assert.equal(menu.list().some(entry=>entry.id==='hltb'),true);
   menu.dispose();
   assert.equal(w.__SlsLunaMenu,undefined);
@@ -136,7 +136,7 @@ test('a focused label authorizes the game even when child actions mention other 
   tools.jsx.jsx(tools.Outer,{overview:app,instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Grand Theft Auto V Enhanced',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[app]}},{type:'dlc',props:{app:{appid:999}}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Change artwork']);
   menu.dispose();
 });
 
@@ -149,7 +149,7 @@ test('rendering the same menu again keeps exactly one Luna item',()=>{
   tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const twice=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:once.props.children});
   const count=(twice.props.children||[]).filter(child=>child&&child.props
-    &&child.props.children&&child.props.children[0]==='HowLongToBeat').length;
+    &&child.props.children&&child.props.children[0]==='HowLongToBeat','Change artwork').length;
   assert.equal(count,1);
   menu.dispose();
 });
@@ -164,7 +164,7 @@ test('selecting an action opens the browser through the Steam client',async()=>{
   const el=tools.jsx.jsx(tools.Inner,{label:'Ori & the Blind Forest',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:387290}]}}]});
   const item=(el.props.children||[]).find(child=>child&&child.props&&child.props.children
-    &&child.props.children[0]==='HowLongToBeat');
+    &&child.props.children[0]==='HowLongToBeat','Change artwork');
   assert.ok(item,'the HowLongToBeat item must be present');
   await item.props.onSelected();
   assert.deepEqual(opened,['https://howlongtobeat.com/?q=Ori%20%26%20the%20Blind%20Forest']);
@@ -224,7 +224,7 @@ test('an action whose eligibility throws is treated as disabled',()=>{
     tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
     const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
       {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-    assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
+    assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Change artwork']);
     menu.dispose();
   }finally{console.warn=originalWarn;}
 });
@@ -252,7 +252,7 @@ test('ensure stays quiet while another add-on wraps on top, and re-arms after a 
   class InnerProbe{HideIfSubmenu(){} HideMenu(){} render(){}}
   const el=module.jsx(InnerProbe,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat'],
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Change artwork'],
     'the chain through the other wrapper must still insert Luna items');
 
   // Steam rebuilds the bundle in place: fresh functions, no wrapper, and no
@@ -264,7 +264,7 @@ test('ensure stays quiet while another add-on wraps on top, and re-arms after a 
   assert.equal(module.jsx,ourWrapper,'the wrapper must be back on the module');
   const again=module.jsx(InnerProbe,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(again),['HowLongToBeat'],
+  assert.deepEqual(labelsAfterPrimary(again),['HowLongToBeat','Change artwork'],
     'the re-armed hook must insert the item');
   assert.equal(menu.ensure(),false,'a healthy hook must not re-arm again');
   menu.dispose();
@@ -287,7 +287,7 @@ test('a foreign wrapper that calls through still terminates and inserts once',()
   const el=module.jsx(InnerProbe,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
   assert.ok(depth<=1,'the chain must not recurse');
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Change artwork']);
   menu.dispose();
 });
 
@@ -317,12 +317,12 @@ test('fetching HowLongToBeat times is not a right-click action: the Luna page ow
   const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})},
     Millennium:{callServerMethod:()=>JSON.stringify({success:true,record:{name:'Hades'}})}};
   const menu=installLunaMenu(w,tools);
-  assert.deepEqual(menu.list().map(entry=>entry.id),['hltb'],
-    'only the search link stays on the context menu');
+  assert.deepEqual(menu.list().map(entry=>entry.id),['hltb','artwork'],
+    'the search link and the artwork action stay on the context menu');
   tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Change artwork']);
   menu.dispose();
 });
 
@@ -417,6 +417,27 @@ test('sorting rewrites sort_as while active and restores every original after',(
   assert.equal(three.sort_as,'gamma');
   assert.equal(restoreHltbSortAs(),false,'nothing left to restore');
   setHltbRecords({});
+});
+
+test('the Change artwork action hands the game to the Luna picker',async()=>{
+  const tools=fixture();
+  const store=new Map();
+  const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})},
+    localStorage:{getItem:key=>store.has(key)?store.get(key):null,
+      setItem:(key,value)=>store.set(key,String(value)),removeItem:key=>store.delete(key)}};
+  const menu=installLunaMenu(w,tools);
+  tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
+  const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
+    {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
+  const item=(el.props.children||[]).find(child=>child&&child.props&&child.props.children
+    &&child.props.children[0]==='Change artwork');
+  assert.ok(item,'the artwork action must be offered');
+  await item.props.onSelected();
+  const request=JSON.parse(store.get(ARTWORK_REQUEST_KEY));
+  assert.equal(request.appid,1145360);
+  assert.equal(request.name,'Hades');
+  assert.ok(request.at>0,'the request must be timestamped');
+  menu.dispose();
 });
 
 test('the grid gets a fresh overviews array so its memo re-sorts with the current keys',()=>{
@@ -547,10 +568,10 @@ test('the rendered library dropdown carries the HowLongToBeat option',()=>{
   const seenBefore=menu.sort.seen;
   const el=tools.jsx.jsx(Dropdown,{rgOptions:SORT_ENUM.slice(),onChange(){},selectedOption:4});
   assert.equal(el.props.rgOptions.length,11,'the rendered dropdown must gain the option');
-  assert.equal(el.props.rgOptions[10].label,'HowLongToBeat');
+  assert.equal(el.props.rgOptions[10].label,'HowLongToBeat','Change artwork');
   assert.equal(menu.sort.seen,seenBefore+1,'the sighting must be reported for verification');
   const game=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(game),['HowLongToBeat'],'game menus keep their items');
+  assert.deepEqual(labelsAfterPrimary(game),['HowLongToBeat','Change artwork'],'game menus keep their items');
   menu.dispose();
 });
