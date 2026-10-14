@@ -29,6 +29,10 @@
     hltb: '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M12 7v5l3.5 2" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M4 5.5L6.5 3M20 5.5L17.5 3" stroke="currentColor" stroke-width="2"/>',
+    steamgrid: '<rect x="4" y="4" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>'
+      + '<rect x="13" y="4" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>'
+      + '<rect x="4" y="13" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>'
+      + '<path d="M16.5 13.5v6M13.5 16.5h6" stroke="currentColor" stroke-width="2"/>',
     about: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M12 11v5m0-8v.5" stroke="currentColor" stroke-width="2"/>',
   };
@@ -37,6 +41,7 @@
     { id: 'presence', label: 'Presence' },
     { id: 'compressor', label: 'Compressor' },
     { id: 'hltb', label: 'HowLongToBeat' },
+    { id: 'steamgrid', label: 'SteamGridDB' },
     { id: 'about', label: 'About' },
   ];
   // Floating panels the add-ons draw when Luna is not present.
@@ -182,6 +187,11 @@
       '.sls-luna-mini i.done{background:#57cb5c;}',
       '.sls-luna-mini i.failed{background:#ff8080;}',
       '.sls-luna-error{color:#ff8080;font-size:13px;margin:8px 0 0;}',
+      '.sls-luna-assets{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px;margin:10px 0 0;}',
+      '.sls-luna-asset{cursor:pointer;border:1px solid rgba(255,255,255,.09);border-radius:3px;overflow:hidden;background:#10161c;}',
+      '.sls-luna-asset:hover{border-color:#3cb0ff;}',
+      '.sls-luna-asset img{display:block;width:100%;height:auto;}',
+      '.sls-luna-asset .who{font-size:11px;color:#8d97a1;padding:3px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
     ].join('');
     (document.head || document.body).appendChild(style);
   }
@@ -313,6 +323,14 @@
     let hltbQueue = null;
     let hltbEdit = null;
     let hltbNotice = null;
+    let sgdb = null;
+    let sgdbGame = null;
+    let sgdbKind = 'grid';
+    let sgdbResults = null;
+    let sgdbAssets = null;
+    let sgdbBusy = false;
+    let sgdbNotice = null;
+    let artworkRequest = '';
     let compressorTab = 'status';
     let compressorQuery = '';
     let pendingAction = null;
@@ -361,6 +379,16 @@
       hltbSearch.focus();
       if (typeof hltbSearch.setSelectionRange === 'function') hltbSearch.setSelectionRange(start, end);
     };
+
+    // SteamGridDB page: the API key field and the game search keep their nodes
+    // across paints, like the other search boxes.
+    const sgdbKeyInput = document.createElement('input');
+    sgdbKeyInput.className = 'sls-luna-search';
+    sgdbKeyInput.placeholder = 'SteamGridDB API key';
+    const sgdbSearch = document.createElement('input');
+    sgdbSearch.className = 'sls-luna-search';
+    sgdbSearch.placeholder = 'Find a game on SteamGridDB';
+    sgdbSearch.oninput = () => { /* read on submit, the node survives paints */ };
 
     // A running compressor job is polled while the menu stays open; the timer
     // dies with the menu so a closed window never keeps talking to the backend.
@@ -1773,8 +1801,315 @@
       return body;
     }
 
-    function aboutBody() {
+    // ---- SteamGridDB page: key, search, assets, apply, restore -------------
+
+    async function refreshSgdb() {
+      try {
+        sgdb = await rpc(w, 'SlsSgdbGet');
+      } catch (error) {
+        sgdb = sgdb || {};
+      }
+      repaintIfOpen();
+    }
+
+    async function saveSgdbKey() {
+      // Read the field before any repaint: the page re-syncs it from the
+      // backend on every paint, which would clear an unsaved value.
+      const key = sgdbKeyInput.value.trim();
+      sgdbNotice = null;
+      sgdbBusy = true;
+      repaintIfOpen();
+      try {
+        await rpc(w, 'SlsSgdbSetKey', { raw: JSON.stringify({ key }) });
+        await refreshSgdb();
+        sgdbKeyInput.value = (sgdb && sgdb.apiKey) || '';
+        sgdbNotice = key ? 'Key saved.' : 'Key cleared.';
+      } catch (error) {
+        sgdbNotice = String(error && error.message ? error.message : error);
+      }
+      sgdbBusy = false;
+      repaintIfOpen();
+    }
+
+    async function testSgdbKey() {
+      sgdbNotice = null;
+      sgdbBusy = true;
+      repaintIfOpen();
+      try {
+        await rpc(w, 'SlsSgdbTest');
+        sgdbNotice = 'SteamGridDB is reachable and the key works.';
+      } catch (error) {
+        sgdbNotice = String(error && error.message ? error.message : error);
+      }
+      sgdbBusy = false;
+      repaintIfOpen();
+    }
+
+    async function searchSgdb(term) {
+      if (!term) { sgdbNotice = 'Type a game name first.'; repaintIfOpen(); return; }
+      sgdbNotice = null;
+      sgdbBusy = true;
+      sgdbResults = null;
+      repaintIfOpen();
+      try {
+        const out = await rpc(w, 'SlsSgdbSearch', { raw: JSON.stringify({ term }) });
+        sgdbResults = Array.isArray(out.games) ? out.games : [];
+        if (!sgdbResults.length) {
+          sgdbNotice = 'No SteamGridDB game matched "' + term + '".';
+        } else if (sgdbGame && !sgdbGame.sgdbId) {
+          // Coming from a right-click request: use the best match but keep the
+          // list visible so a different game can be picked.
+          sgdbGame.sgdbId = Number(sgdbResults[0].id);
+          sgdbGame.sgdbName = sgdbResults[0].name;
+          loadSgdbAssets();
+        }
+      } catch (error) {
+        sgdbNotice = String(error && error.message ? error.message : error);
+      }
+      sgdbBusy = false;
+      repaintIfOpen();
+    }
+
+    function pickSgdbGame(game) {
+      if (!game) return;
+      sgdbGame = Object.assign({}, sgdbGame || {}, { sgdbId: Number(game.id), sgdbName: game.name });
+      sgdbResults = null;
+      loadSgdbAssets();
+    }
+
+    async function loadSgdbAssets() {
+      if (!sgdbGame || !sgdbGame.sgdbId) return;
+      sgdbAssets = null;
+      sgdbNotice = null;
+      sgdbBusy = true;
+      repaintIfOpen();
+      try {
+        const out = await rpc(w, 'SlsSgdbAssets', {
+          raw: JSON.stringify({ gameId: sgdbGame.sgdbId, kind: sgdbKind }),
+        });
+        sgdbAssets = Array.isArray(out.assets) ? out.assets : [];
+        if (!sgdbAssets.length) {
+          sgdbNotice = 'No usable ' + sgdbKind + ' images for this game (PNG or JPEG only).';
+        }
+      } catch (error) {
+        sgdbNotice = String(error && error.message ? error.message : error);
+      }
+      sgdbBusy = false;
+      repaintIfOpen();
+    }
+
+    async function applySgdbAsset(asset) {
+      if (!sgdbGame) return;
+      sgdbNotice = null;
+      sgdbBusy = true;
+      repaintIfOpen();
+      try {
+        const out = await rpc(w, 'SlsSgdbApply', {
+          raw: JSON.stringify({ appid: Number(sgdbGame.appid), kind: sgdbKind,
+            url: asset.url, mime: asset.mime }),
+        });
+        sgdbNotice = 'Artwork applied' + (out && out.backedUp ? ' (the previous file is backed up).' : '.')
+          + ' If Steam does not refresh it right away, reopen the game page.';
+      } catch (error) {
+        sgdbNotice = String(error && error.message ? error.message : error);
+      }
+      sgdbBusy = false;
+      repaintIfOpen();
+    }
+
+    async function restoreSgdbAsset() {
+      if (!sgdbGame) return;
+      sgdbNotice = null;
+      sgdbBusy = true;
+      repaintIfOpen();
+      try {
+        const out = await rpc(w, 'SlsSgdbRestore', {
+          raw: JSON.stringify({ appid: Number(sgdbGame.appid), kind: sgdbKind }),
+        });
+        if (out.restored) sgdbNotice = 'The previous artwork is back.';
+        else if (out.removed) sgdbNotice = 'Custom artwork removed; Steam shows its own again.';
+        else sgdbNotice = 'Nothing to restore for this slot.';
+      } catch (error) {
+        sgdbNotice = String(error && error.message ? error.message : error);
+      }
+      sgdbBusy = false;
+      repaintIfOpen();
+    }
+
+    // The agent's "Change artwork" action writes a request into localStorage
+    // (it has no DOM); the panel owns the window, so it opens the picker here.
+    function consumeArtworkRequest() {
+      let raw = null;
+      try { raw = w.localStorage && w.localStorage.getItem('slsLunaArtworkRequest'); } catch (_) {}
+      if (!raw || raw === artworkRequest) return false;
+      let request = null;
+      try { request = JSON.parse(raw); } catch (_) { return false; }
+      artworkRequest = raw;
+      if (!request || !request.appid) return false;
+      sgdbGame = { appid: Number(request.appid), name: String(request.name || ('App ' + request.appid)) };
+      sgdbResults = null;
+      sgdbAssets = null;
+      sgdbNotice = null;
+      sgdbKind = 'grid';
+      tab = 'steamgrid';
+      openMenu();
+      // The status (key, grid folder) may not be loaded yet: refresh first,
+      // then search for the requested game's artwork.
+      refreshSgdb().then(() => {
+        if (sgdb && sgdb.apiKey) searchSgdb(sgdbGame.name);
+        else { sgdbNotice = 'Add your SteamGridDB API key below, then press Find game.'; repaintIfOpen(); }
+      });
+      return true;
+    }
+
+    function steamgridBody() {
       const body = document.createElement('div');
+      const key = (sgdb && sgdb.apiKey) || '';
+      const info = document.createElement('p');
+      info.className = 'sls-luna-note';
+      info.innerHTML = 'Artwork comes from <strong>SteamGridDB</strong> with your own free API key '
+        + '(steamgriddb.com \u2192 profile \u2192 API). Chosen images are written to Steam\u2019s custom '
+        + 'artwork folder; the file that was there is backed up, and Restore brings it back or removes '
+        + 'the custom one.';
+      body.appendChild(info);
+
+      sgdbKeyInput.value = key;
+      body.appendChild(sgdbKeyInput);
+      const keyRow = document.createElement('div');
+      keyRow.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:0 0 4px;';
+      const save = document.createElement('button');
+      save.className = 'sls-luna-btn';
+      save.textContent = 'Save key';
+      save.disabled = sgdbBusy;
+      save.onclick = () => saveSgdbKey();
+      const test = document.createElement('button');
+      test.className = 'sls-luna-btn secondary';
+      test.textContent = 'Test key';
+      test.disabled = sgdbBusy || !key;
+      test.onclick = () => testSgdbKey();
+      keyRow.append(save, test);
+      body.appendChild(keyRow);
+
+      if (key && sgdb && sgdb.gridDir) {
+        const where = document.createElement('p');
+        where.className = 'sls-luna-note';
+        where.innerHTML = 'Writing to <strong>' + sgdb.gridDir + '</strong>';
+        body.appendChild(where);
+      } else if (key && sgdb && sgdb.gridError) {
+        const broken = document.createElement('p');
+        broken.className = 'sls-luna-error';
+        broken.textContent = 'Steam artwork folder unavailable: ' + sgdb.gridError;
+        body.appendChild(broken);
+      }
+
+      if (sgdbNotice) {
+        const notice = document.createElement('p');
+        notice.className = /(fail|reject|unavailable|error)/i.test(sgdbNotice) ? 'sls-luna-error' : 'sls-luna-note';
+        notice.textContent = sgdbNotice;
+        body.appendChild(notice);
+      }
+      if (sgdbBusy) {
+        const busy = document.createElement('p');
+        busy.className = 'sls-luna-note';
+        busy.textContent = 'Working\u2026';
+        body.appendChild(busy);
+      }
+
+      if (!key) return body;
+
+      const searchRow = document.createElement('div');
+      searchRow.style.cssText = 'display:flex;gap:8px;margin:10px 0 4px;';
+      const find = document.createElement('button');
+      find.className = 'sls-luna-btn';
+      find.textContent = 'Find game';
+      find.disabled = sgdbBusy;
+      find.onclick = () => searchSgdb(sgdbSearch.value.trim());
+      searchRow.append(sgdbSearch, find);
+      body.appendChild(searchRow);
+
+      if (sgdbResults && sgdbResults.length) {
+        const list = document.createElement('div');
+        list.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 10px;';
+        sgdbResults.forEach(game => {
+          const chip = document.createElement('button');
+          chip.className = 'sls-luna-subtab';
+          chip.textContent = game.name;
+          chip.onclick = () => pickSgdbGame(game);
+          list.appendChild(chip);
+        });
+        body.appendChild(list);
+      }
+
+      if (!sgdbGame) {
+        const hint = document.createElement('p');
+        hint.className = 'sls-luna-note';
+        hint.innerHTML = 'Right-click any game in the library \u2192 <strong>Change artwork</strong>, or search '
+          + 'above. Nothing is written until you pick an image.';
+        body.appendChild(hint);
+        return body;
+      }
+
+      const head = document.createElement('p');
+      head.className = 'sls-luna-note';
+      head.innerHTML = 'Artwork for <strong>' + sgdbGame.name + '</strong> (#' + sgdbGame.appid + ')'
+        + (sgdbGame.sgdbName && sgdbGame.sgdbName !== sgdbGame.name
+          ? ' \u00b7 matched as "' + sgdbGame.sgdbName + '"' : '')
+        + (sgdbGame.sgdbId ? '' : ' \u00b7 <span style="color:#8d97a1">searching\u2026</span>');
+      body.appendChild(head);
+
+      const kinds = [['grid', 'Grid 600\u00d7900'], ['hero', 'Hero'], ['logo', 'Logo'], ['icon', 'Icon']];
+      const chips = document.createElement('div');
+      chips.className = 'sls-luna-subtabs';
+      kinds.forEach(pair => {
+        const chip = document.createElement('button');
+        chip.className = 'sls-luna-subtab' + (sgdbKind === pair[0] ? ' active' : '');
+        chip.textContent = pair[1];
+        chip.onclick = () => { sgdbKind = pair[0]; loadSgdbAssets(); };
+        chips.appendChild(chip);
+      });
+      body.appendChild(chips);
+
+      if (sgdbAssets && sgdbAssets.length) {
+        const grid = document.createElement('div');
+        grid.className = 'sls-luna-assets';
+        sgdbAssets.forEach(asset => {
+          const card = document.createElement('div');
+          card.className = 'sls-luna-asset';
+          card.title = (asset.style || '') + (asset.author ? ' \u00b7 ' + asset.author : '');
+          const img = document.createElement('img');
+          img.src = asset.thumb || asset.url;
+          img.alt = '';
+          const who = document.createElement('div');
+          who.className = 'who';
+          who.textContent = (asset.width && asset.height ? asset.width + '\u00d7' + asset.height : '')
+            + (asset.author ? ' \u00b7 ' + asset.author : '');
+          card.append(img, who);
+          card.onclick = () => applySgdbAsset(asset);
+          grid.appendChild(card);
+        });
+        body.appendChild(grid);
+      }
+
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 0;';
+      const restore = document.createElement('button');
+      restore.className = 'sls-luna-btn secondary';
+      restore.textContent = 'Restore previous ' + sgdbKind;
+      restore.disabled = sgdbBusy;
+      restore.onclick = () => restoreSgdbAsset();
+      const close = document.createElement('button');
+      close.className = 'sls-luna-btn secondary';
+      close.textContent = 'Close picker';
+      close.onclick = () => {
+        sgdbGame = null; sgdbAssets = null; sgdbResults = null; sgdbNotice = null;
+        repaintIfOpen();
+      };
+      actions.append(restore, close);
+      body.appendChild(actions);
+      return body;
+    }
+
+    function aboutBody() {      const body = document.createElement('div');
       const note = document.createElement('p');
       note.className = 'sls-luna-note';
       note.innerHTML = 'SLS Luna wraps the SLSsteam-Moon add-ons for Lumen: one installer, one boot hook, '
@@ -1805,7 +2140,7 @@
     }
 
     const TITLES = { playtime: 'Playtime', presence: 'Presence', compressor: 'Compressor',
-      hltb: 'HowLongToBeat', about: 'About SLS Luna' };
+      hltb: 'HowLongToBeat', steamgrid: 'SteamGridDB artwork', about: 'About SLS Luna' };
 
     function paint() {
       const restoreSearch = document.activeElement === search && tab === 'playtime';
@@ -1847,6 +2182,7 @@
       body.appendChild(tab === 'presence' ? presenceBody()
         : tab === 'compressor' ? compressorBody()
         : tab === 'hltb' ? hltbBody()
+        : tab === 'steamgrid' ? steamgridBody()
         : tab === 'about' ? aboutBody() : playtimeBody());
 
       main.append(head, body);
@@ -1893,6 +2229,11 @@
       } catch (error) {
         hltb = hltb || {};
       }
+      try {
+        sgdb = await rpc(w, 'SlsSgdbGet');
+      } catch (error) {
+        sgdb = sgdb || {};
+      }
       maybeAutoFetch();
       repaintIfOpen();
     }
@@ -1922,6 +2263,12 @@
     // Safety net: an add-on that mounted its floating panel before the flag was
     // set is removed on the next pass.
     w.setInterval(() => { removeFloating(document); }, 4000);
+    // The agent's "Change artwork" right-click lands here as a storage event
+    // (SharedJSContext writes it; the panel owns the window and opens the UI).
+    if (typeof w.addEventListener === 'function') {
+      w.addEventListener('storage', () => { consumeArtworkRequest(); });
+    }
+    (w.setTimeout || setTimeout)(() => { consumeArtworkRequest(); }, 2500);
     // Keep the game-page HLTB cell and the SORT BY label in step with Steam's
     // own rendering; a MutationObserver where available, a slow beat otherwise.
     if (typeof w.MutationObserver === 'function') {

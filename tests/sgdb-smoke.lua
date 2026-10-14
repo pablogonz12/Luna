@@ -1,0 +1,301 @@
+-- SLS Luna SteamGridDB backend smoke test: key storage, search, asset
+-- filtering, applying with backup, restore, and the refusal paths.
+--
+-- The network is a fake http module and HOME is disposable, so this never
+-- talks to SteamGridDB and never touches real Steam artwork.
+assert(os.getenv('LUNA_TEST_HOME') == os.getenv('HOME'), 'Test must run in isolated HOME')
+
+local function skip(text, pos)
+  return (text:find('[^ \t\r\n]', pos) or (#text + 1))
+end
+
+local function decode_value(text, pos)
+  pos = skip(text, pos)
+  local c = text:sub(pos, pos)
+  if c == '{' then
+    local out = {}
+    pos = skip(text, pos + 1)
+    if text:sub(pos, pos) == '}' then return out, pos + 1 end
+    while true do
+      local key
+      key, pos = decode_value(text, pos)
+      pos = skip(text, pos) + 1 -- ':'
+      local value
+      value, pos = decode_value(text, pos)
+      out[key] = value
+      pos = skip(text, pos)
+      if text:sub(pos, pos) == '}' then return out, pos + 1 end
+      pos = pos + 1 -- ','
+    end
+  end
+  if c == '[' then
+    local out = {}
+    pos = skip(text, pos + 1)
+    if text:sub(pos, pos) == ']' then return out, pos + 1 end
+    while true do
+      local value
+      value, pos = decode_value(text, pos)
+      out[#out + 1] = value
+      pos = skip(text, pos)
+      if text:sub(pos, pos) == ']' then return out, pos + 1 end
+      pos = pos + 1 -- ','
+    end
+  end
+  if c == '"' then
+    local out, escaped = {}, false
+    pos = pos + 1
+    while pos <= #text do
+      local ch = text:sub(pos, pos)
+      if escaped then
+        if ch == 'n' then out[#out + 1] = '\n'
+        elseif ch == 'r' then out[#out + 1] = '\r'
+        elseif ch == 't' then out[#out + 1] = '\t'
+        elseif ch == 'u' then
+          out[#out + 1] = utf8.char(tonumber(text:sub(pos + 1, pos + 4), 16))
+          pos = pos + 4
+        else out[#out + 1] = ch end
+        escaped = false
+      elseif ch == '\\' then escaped = true
+      elseif ch == '"' then return table.concat(out), pos + 1
+      else out[#out + 1] = ch end
+      pos = pos + 1
+    end
+    error('unterminated string')
+  end
+  local number = text:match('^-?%d+%.?%d*[eE]?[-+]?%d*', pos)
+  if number then return tonumber(number), pos + #number end
+  if text:sub(pos, pos + 3) == 'true' then return true, pos + 4 end
+  if text:sub(pos, pos + 4) == 'false' then return false, pos + 5 end
+  if text:sub(pos, pos + 3) == 'null' then return nil, pos + 4 end
+  error('unexpected byte at ' .. pos)
+end
+
+local function encode(value)
+  local kind = type(value)
+  if kind == 'nil' then return 'null' end
+  if kind == 'boolean' then return value and 'true' or 'false' end
+  if kind == 'number' then
+    if value == math.floor(value) and math.abs(value) < 2 ^ 53 then return string.format('%d', value) end
+    return string.format('%.10g', value)
+  end
+  if kind == 'string' then
+    return '"' .. value:gsub('[%z\1-\31\\"]', function(ch)
+      if ch == '"' then return '\\"' end
+      if ch == '\\' then return '\\\\' end
+      if ch == '\n' then return '\\n' end
+      if ch == '\r' then return '\\r' end
+      if ch == '\t' then return '\\t' end
+      return string.format('\\u%04x', ch:byte())
+    end) .. '"'
+  end
+  if kind == 'table' then
+    local count, array = 0, true
+    for key in pairs(value) do
+      count = count + 1
+      if type(key) ~= 'number' or key ~= math.floor(key) or key < 1 then array = false end
+    end
+    if count > 0 and array then
+      local parts = {}
+      for index = 1, #value do parts[#parts + 1] = encode(value[index]) end
+      return '[' .. table.concat(parts, ',') .. ']'
+    end
+    local names = {}
+    for key in pairs(value) do names[#names + 1] = tostring(key) end
+    table.sort(names)
+    local parts = {}
+    for _, name in ipairs(names) do parts[#parts + 1] = encode(name) .. ':' .. encode(value[name]) end
+    return '{' .. table.concat(parts, ',') .. '}'
+  end
+  error('cannot encode ' .. kind)
+end
+
+package.preload['json'] = function()
+  return {
+    encode = encode,
+    decode = function(text) return decode_value(text, 1) end,
+    array = function(t) return t or {} end,
+  }
+end
+package.preload['fs'] = function()
+  return {
+    create_directories = function(dir)
+      local ok = os.execute('mkdir -p ' .. string.format('%q', dir))
+      assert(ok == true or ok == 0, 'mkdir failed')
+      return true
+    end,
+    parent_path = function(path) return (path:match('^(.*)/[^/]*$')) or '.' end,
+    exists = function(path)
+      local f = io.open(path, 'rb')
+      if f then f:close(); return true end
+      return false
+    end,
+    join = function(...) return table.concat({ ... }, '/') end,
+    list = function() return {} end,
+  }
+end
+
+local json = require('json')
+local home = os.getenv('HOME')
+local repo = os.getenv('LUNA_REPO') or '.'
+
+-- A disposable, bootstrapped Steam root with one MostRecent account.
+local STEAMID = '76561190000000000'
+local ACCOUNT_ID = 1066557597
+local steam_root = home .. '/.local/share/Steam'
+local grid_dir = steam_root .. '/userdata/' .. ACCOUNT_ID .. '/config/grid'
+do
+  assert(os.execute('mkdir -p ' .. string.format('%q', steam_root .. '/config')))
+  local marker = assert(io.open(steam_root .. '/steam.sh', 'wb')); marker:write('#!/bin/sh\n'); marker:close()
+  local users = assert(io.open(steam_root .. '/config/loginusers.vdf', 'wb'))
+  users:write('"users"\n{\n\t"' .. STEAMID .. '"\n\t{\n\t\t"MostRecent" "1"\n\t}\n}\n')
+  users:close()
+end
+
+-- Fake SteamGridDB.
+local wire = { calls = {} }
+function wire.get(url, options)
+  table.insert(wire.calls, { url = url, headers = options and options.headers })
+  local authorization = options and options.headers and options.headers['Authorization'] or ''
+  if url:find('/search/autocomplete/', 1, true) then
+    if authorization ~= 'Bearer good-key' then return { status = 401, body = '{"success":false}' } end
+    return { status = 200, body = '{"success":true,"data":[{"id":1,"name":"Hades"},{"id":2,"name":"Hades II"}]}' }
+  end
+  if url:find('/grids/game/1', 1, true) then
+    if authorization ~= 'Bearer good-key' then return { status = 401, body = '{"success":false}' } end
+    return { status = 200, body = '{"success":true,"data":[' ..
+      '{"id":11,"url":"https://cdn.example/grid1.png","thumb":"https://cdn.example/t1.png",' ..
+      '"width":600,"height":900,"style":"alternate","mime":"image/png","author":{"name":"artist1"}},' ..
+      '{"id":12,"url":"https://cdn.example/grid2.jpg","thumb":"https://cdn.example/t2.jpg",' ..
+      '"width":600,"height":900,"style":"alternate","mime":"image/jpeg","author":{"name":"artist2"}},' ..
+      '{"id":13,"url":"https://cdn.example/grid3.webp","width":600,"height":900,"mime":"image/webp"},' ..
+      '{"id":14,"url":"https://cdn.example/grid4.png","width":600,"height":900,"mime":"image/png","nsfw":true}' ..
+      ']}' }
+  end
+  if url == 'https://cdn.example/grid1.png' then return { status = 200, body = 'PNG1DATA' } end
+  if url == 'https://cdn.example/grid2.jpg' then return { status = 200, body = 'JPG2DATA' } end
+  return { status = 404, body = '{"success":false}' }
+end
+package.preload['http'] = function() return wire end
+
+local backend = dofile(repo .. '/addons/sgdb/plugin/backend/main.lua')
+local registry = {}
+backend.register(registry)
+
+local function call(name, arg)
+  assert(type(registry[name]) == 'function', 'missing RPC: ' .. name)
+  if type(arg) ~= 'table' then return json.decode(registry[name](arg)) end
+  local keys = {}
+  for key in pairs(arg) do
+    if type(key) == 'string' then keys[#keys + 1] = key end
+  end
+  table.sort(keys)
+  local vals = {}
+  for index, key in ipairs(keys) do vals[index] = arg[key] end
+  return json.decode(registry[name](table.unpack(vals, 1, #keys)))
+end
+
+local function file_text(path)
+  local f = io.open(path, 'rb')
+  if not f then return nil end
+  local raw = f:read('*a'); f:close()
+  return raw
+end
+
+-- ---------------------------------------------------------------- config
+
+local state = call('SlsSgdbGet')
+assert(state.success == true and state.apiKey == '', 'the key must start empty')
+assert(state.gridDir == grid_dir, 'the grid directory must resolve from loginusers: ' .. tostring(state.gridDir))
+assert(state.gridError == '')
+
+local saved = call('SlsSgdbSetKey', { raw = json.encode({ key = 'good-key' }) })
+assert(saved.success == true and saved.hasKey == true)
+assert(call('SlsSgdbGet').apiKey == 'good-key', 'the key must persist')
+
+local tested = call('SlsSgdbTest')
+assert(tested.success == true, 'a good key must validate: ' .. tostring(tested.error))
+
+call('SlsSgdbSetKey', { raw = json.encode({ key = 'bad-key' }) })
+local rejected = call('SlsSgdbTest')
+assert(rejected.success == false and rejected.code == 'bad_key', 'a bad key must be reported as such')
+local refused = call('SlsSgdbSearch', { raw = json.encode({ term = 'hades' }) })
+assert(refused.success == false and refused.code == 'bad_key')
+call('SlsSgdbSetKey', { raw = json.encode({ key = 'good-key' }) })
+
+-- ---------------------------------------------------------------- search & assets
+
+local search = call('SlsSgdbSearch', { raw = json.encode({ term = 'hades' }) })
+assert(search.success == true and #search.games == 2 and search.games[1].name == 'Hades')
+assert(search.games[1].id == 1)
+
+local assets = call('SlsSgdbAssets', { raw = json.encode({ gameId = 1, kind = 'grid' }) })
+assert(assets.success == true and #assets.assets == 2, 'webp and nsfw must be filtered out')
+assert(assets.assets[1].mime == 'image/png' and assets.assets[1].author == 'artist1')
+assert(assets.total == 4)
+
+-- ---------------------------------------------------------------- apply & restore
+
+local applied = call('SlsSgdbApply', { raw = json.encode({ appid = 1145360, kind = 'grid',
+  url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
+assert(applied.success == true and applied.backedUp == false, tostring(applied.error))
+assert(file_text(grid_dir .. '/1145360p.png') == 'PNG1DATA', 'the image must land in the grid folder')
+
+local replaced = call('SlsSgdbApply', { raw = json.encode({ appid = 1145360, kind = 'grid',
+  url = 'https://cdn.example/grid2.jpg', mime = 'image/jpeg' }) })
+assert(replaced.success == true and replaced.backedUp == true, 'the previous file must be backed up')
+assert(file_text(grid_dir .. '/1145360p.jpg') == 'JPG2DATA')
+assert(file_text(grid_dir .. '/1145360p.png') == nil, 'only one extension may remain')
+assert(file_text(grid_dir .. '/1145360p.png.sls-luna.bak') == 'PNG1DATA')
+
+local restored = call('SlsSgdbRestore', { raw = json.encode({ appid = 1145360, kind = 'grid' }) })
+assert(restored.success == true and restored.restored == true)
+assert(file_text(grid_dir .. '/1145360p.png') == 'PNG1DATA', 'the backup must come back')
+assert(file_text(grid_dir .. '/1145360p.jpg') == nil)
+assert(file_text(grid_dir .. '/1145360p.png.sls-luna.bak') == nil)
+
+-- No backup: restore removes the custom file, and says so.
+call('SlsSgdbApply', { raw = json.encode({ appid = 620, kind = 'hero',
+  url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
+assert(file_text(grid_dir .. '/620_hero.png') == 'PNG1DATA')
+os.remove(grid_dir .. '/620_hero.png.sls-luna.bak')
+local removed = call('SlsSgdbRestore', { raw = json.encode({ appid = 620, kind = 'hero' }) })
+assert(removed.success == true and removed.restored == false and removed.removed == true)
+assert(file_text(grid_dir .. '/620_hero.png') == nil)
+
+-- ---------------------------------------------------------------- refusals
+
+local bad_mime = call('SlsSgdbApply', { raw = json.encode({ appid = 1145360, kind = 'grid',
+  url = 'https://cdn.example/grid3.webp', mime = 'image/webp' }) })
+assert(bad_mime.success == false and bad_mime.code == 'mime')
+local bad_appid = call('SlsSgdbApply', { raw = json.encode({ appid = 0, kind = 'grid',
+  url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
+assert(bad_appid.success == false and bad_appid.code == 'invalid')
+local bad_kind = call('SlsSgdbApply', { raw = json.encode({ appid = 1, kind = 'banner',
+  url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
+assert(bad_kind.success == false and bad_kind.code == 'invalid')
+local missing = call('SlsSgdbApply', { raw = json.encode({ appid = 1, kind = 'grid',
+  url = 'https://cdn.example/nope.png', mime = 'image/png' }) })
+assert(missing.success == false and missing.code == 'http')
+local no_search = call('SlsSgdbSearch', { raw = json.encode({ term = '   ' }) })
+assert(no_search.success == false)
+
+-- ---------------------------------------------------------------- accounts
+
+do
+  local users = assert(io.open(steam_root .. '/config/loginusers.vdf', 'wb'))
+  users:write('"users"\n{\n\t"' .. STEAMID .. '"\n\t{\n\t}\n\t"76561198000000001"\n\t{\n\t}\n}\n')
+  users:close()
+  local ambiguous = call('SlsSgdbGet')
+  assert(ambiguous.gridDir == '' and ambiguous.gridError:find('ambiguous', 1, true) ~= nil,
+    'two accounts without MostRecent must be refused: ' .. tostring(ambiguous.gridError))
+  -- The override environment variable resolves it anyway.
+  local account, note = backend.resolve_account(steam_root)
+  assert(account == nil and note:find('ambiguous', 1, true) ~= nil)
+end
+
+assert(backend.kind_suffix('grid') == 'p' and backend.kind_suffix('hero') == '_hero'
+  and backend.kind_suffix('logo') == '_logo' and backend.kind_suffix('icon') == '_icon')
+assert(backend.account_id(STEAMID) == ACCOUNT_ID)
+assert(backend.account_id('123') == nil)
+
+print('Luna SteamGridDB backend OK: key gate, search, asset filtering, apply/backup/restore, refusals, accounts')
