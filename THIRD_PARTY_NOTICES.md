@@ -12,6 +12,7 @@ terms for the specific distribution.
 | SLSsteam | [AceSLS/SLSsteam](https://github.com/AceSLS/SLSsteam) | Upstream project from which slsteam-moon is forked | Repository displays AGPL-3.0; retain original notices through the fork lineage |
 | Lumen | [swwayps/lumen](https://github.com/swwayps/lumen) | Runtime/bridge used to host plugin and add-on code | No license file was visible when this notice was written; clarify before redistribution |
 | CloudRedirect | [Selectively11/CloudRedirect](https://github.com/Selectively11/CloudRedirect) | Optional cloud-save component integrated by LuaTools-Moon | Review its current license before bundling or redistribution |
+| Decky Loader | [SteamDeckHomebrew/decky-loader](https://github.com/SteamDeckHomebrew/decky-loader) | Potential optional Steam Deck integration; not installed by Luna today | Upstream repository displays GPL-2.0; no Decky code copied or bundled |
 | btrfs-game-compressor | [pgm1207/btrfs-game-compressor](https://github.com/pgm1207/btrfs-game-compressor) | Separate external tool invoked by the compressor add-on; not installed by this repository | Review the tool repository's current license before redistribution |
 | SLS Luna add-on source repositories | [playtime](https://github.com/pgm1207/slsteam-playtime), [presence](https://github.com/pgm1207/slsteam-presence), and this repository | Source commits and file hashes for currently pinned payloads are recorded in [`vendor/MANIFEST.json`](vendor/MANIFEST.json) | Preserve the notices and licenses present in each source repository |
 
