@@ -12,7 +12,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.1.0'
+local VERSION = '0.2.0'
 local home = os.getenv('HOME') or ''
 local data_dir = home .. '/.local/share/slssteam-integrations'
 local config_path = data_dir .. '/sgdb.json'
@@ -20,6 +20,9 @@ local config_path = data_dir .. '/sgdb.json'
 local API = 'https://www.steamgriddb.com/api/v2'
 local USER_AGENT = 'SLS-Luna/0.1 (Steam custom artwork manager)'
 local MAX_IMAGE_BYTES = 8 * 1024 * 1024
+-- Live apply pushes the bytes through Steam's own API; keep that path for
+-- reasonable sizes so the CDP binding is not asked to carry huge strings.
+local MAX_LIVE_BYTES = 4 * 1024 * 1024
 local MAX_ASSETS = 60
 
 -- kind -> Steam file suffix (the part between the appid and the extension)
@@ -28,7 +31,14 @@ local KINDS = {
   hero = '_hero',
   logo = '_logo',
   icon = '_icon',
+  wide = '',
 }
+
+-- Steam's SetCustomArtworkForApp asset types, mapped empirically against a
+-- live client (a 1x1 image per type shows which file Steam writes):
+-- 0 -> <appid>p (grid), 1 -> <appid>_hero, 2 -> <appid>_logo, 3 -> <appid>
+-- (wide/landscape). Icons have no live type; they are file-only.
+local LIVE_TYPES = { grid = 0, hero = 1, logo = 2, wide = 3 }
 
 -- Allowed image types for Steam's grid files. Anything else (webp, gif) would
 -- need conversion, which a Lua add-on cannot do faithfully.
@@ -214,6 +224,95 @@ local function url_encode(text)
   end)
 end
 
+function M.base64(data)
+  local alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+  local out = {}
+  for index = 1, #data, 3 do
+    local a, b, c = data:byte(index, index + 2)
+    local group = a * 65536 + (b or 0) * 256 + (c or 0)
+    local first = math.floor(group / 262144) % 64
+    local second = math.floor(group / 4096) % 64
+    local third = math.floor(group / 64) % 64
+    local fourth = group % 64
+    out[#out + 1] = alphabet:sub(first + 1, first + 1) .. alphabet:sub(second + 1, second + 1)
+      .. (b and alphabet:sub(third + 1, third + 1) or '=')
+      .. (c and alphabet:sub(fourth + 1, fourth + 1) or '=')
+  end
+  return table.concat(out)
+end
+
+-- The assets endpoint: grids take a dimension filter for the wide slot, the
+-- other kinds are their own collections.
+local function assets_url(gameId, kind)
+  if kind == 'grid' then return API .. '/grids/game/' .. tostring(gameId) end
+  if kind == 'wide' then return API .. '/grids/game/' .. tostring(gameId) .. '?dimensions=920x430' end
+  local collection = kind == 'hero' and 'heroes' or (tostring(kind) .. 's')
+  return API .. '/' .. collection .. '/game/' .. tostring(gameId)
+end
+
+-- Shared by the panel's Assets call and the auto picker: fetch and sanitize the
+-- candidate list. Returns assets, total or nil, code, error.
+local function fetch_assets(config, gameId, kind)
+  local response, why = http_get(assets_url(gameId, kind), api_headers(config.apiKey))
+  if not response then return nil, nil, 'unavailable', why end
+  if response.status == 401 then
+    return nil, nil, 'bad_key', 'SteamGridDB rejected that API key.'
+  end
+  if response.status ~= 200 then
+    return nil, nil, 'http', 'SteamGridDB assets failed (HTTP ' .. tostring(response.status) .. ').'
+  end
+  local parsed = decode_body(response.body)
+  if not parsed or type(parsed.data) ~= 'table' then
+    return nil, nil, 'unexpected', 'SteamGridDB returned an unexpected response.'
+  end
+  return M.sanitize_assets(parsed.data), #parsed.data
+end
+
+-- Shared by Apply and Auto: download one asset and place it in the grid
+-- folder, backing up whatever occupied the slot. ok, detail.
+local function place_asset(appid, kind, url, mime)
+  local extension = ALLOWED_MIME[tostring(mime)]
+  if not extension then
+    return false, { code = 'mime', error = 'That image type cannot be used by Steam (use PNG or JPEG).' }
+  end
+  if tostring(url or '') == '' then
+    return false, { code = 'invalid', error = 'Missing image URL.' }
+  end
+  local directory, why = grid_dir()
+  if not directory then return false, { code = 'no_steam', error = tostring(why) } end
+  fs.create_directories(directory)
+  local response, down_why = http_get(url, { ['User-Agent'] = USER_AGENT })
+  if not response then return false, { code = 'unavailable', error = down_why } end
+  if response.status ~= 200 then
+    return false, { code = 'http',
+      error = 'The image download failed (HTTP ' .. tostring(response.status) .. ').' }
+  end
+  local body = response.body
+  if type(body) ~= 'string' or #body == 0 then
+    return false, { code = 'unexpected', error = 'The image download was empty.' }
+  end
+  if #body > MAX_IMAGE_BYTES then
+    return false, { code = 'too_big', error = 'That image is too large.' }
+  end
+  local slot = math.floor(appid)
+  local base = directory .. '/' .. tostring(slot) .. KINDS[kind]
+  local existing = slot_files(directory, slot, kind)
+  local backup = nil
+  if #existing > 0 then
+    clear_backups(directory, slot, kind)
+    backup = existing[1] .. '.sls-luna.bak'
+    local moved, move_why = os.rename(existing[1], backup)
+    if not moved then
+      return false, { code = 'io', error = 'Could not back up the current artwork: ' .. tostring(move_why) }
+    end
+    for index = 2, #existing do os.remove(existing[index]) end
+  end
+  local target = base .. '.' .. extension
+  local saved, save_why = write_file_atomic(target, body)
+  if not saved then return false, { code = 'io', error = tostring(save_why) } end
+  return true, { path = target, kind = kind, backedUp = backup ~= nil }
+end
+
 -- Keep only what the panel shows, drop flagged content, and offer the four
 -- styles Steam can actually display. Sorted by SteamGridDB's own score.
 function M.sanitize_assets(rows)
@@ -330,29 +429,15 @@ function M.register(registry)
   registry.SlsSgdbAssets = function(raw)
     local ok, entry = pcall(json.decode, tostring(raw or ''))
     if not ok or type(entry) ~= 'table' or not tonumber(entry.gameId) or not KINDS[tostring(entry.kind)] then
-      return reply({ success = false, error = 'Send {"gameId": <id>, "kind": "grid|hero|logo|icon"}.' })
+      return reply({ success = false, error = 'Send {"gameId": <id>, "kind": "grid|wide|hero|logo|icon"}.' })
     end
     local config = load_config()
     if config.apiKey == '' then
       return reply({ success = false, code = 'no_key', error = 'Add your SteamGridDB API key first.' })
     end
-    local plural = tostring(entry.kind) .. 's'
-    local response, why = http_get(API .. '/' .. plural .. '/game/' .. tostring(math.floor(entry.gameId)),
-      api_headers(config.apiKey))
-    if not response then return reply({ success = false, code = 'unavailable', error = why }) end
-    if response.status == 401 then
-      return reply({ success = false, code = 'bad_key', error = 'SteamGridDB rejected that API key.' })
-    end
-    if response.status ~= 200 then
-      return reply({ success = false, code = 'http',
-        error = 'SteamGridDB assets failed (HTTP ' .. tostring(response.status) .. ').' })
-    end
-    local parsed = decode_body(response.body)
-    if not parsed or type(parsed.data) ~= 'table' then
-      return reply({ success = false, code = 'unexpected', error = 'SteamGridDB returned an unexpected response.' })
-    end
-    return reply({ success = true, assets = M.sanitize_assets(parsed.data),
-      total = #parsed.data })
+    local assets, total, code, why = fetch_assets(config, math.floor(entry.gameId), tostring(entry.kind))
+    if not assets then return reply({ success = false, code = code, error = why }) end
+    return reply({ success = true, assets = assets, total = total })
   end
 
   -- Download one asset and place it in the Steam grid folder, backing up the
@@ -370,48 +455,80 @@ function M.register(registry)
     if not KINDS[kind] then
       return reply({ success = false, code = 'invalid', error = 'Unknown artwork kind.' })
     end
-    local extension = ALLOWED_MIME[tostring(entry.mime)]
-    if not extension then
-      return reply({ success = false, code = 'mime',
-        error = 'That image type cannot be used by Steam (use PNG or JPEG).' })
+    local placed, detail = place_asset(appid, kind, entry.url, entry.mime)
+    if not placed then
+      return reply({ success = false, code = detail.code, error = detail.error })
     end
-    local url = tostring(entry.url or '')
-    if url == '' then return reply({ success = false, code = 'invalid', error = 'Missing image URL.' }) end
+    return reply({ success = true, path = detail.path, kind = kind, backedUp = detail.backedUp,
+      live = LIVE_TYPES[kind] ~= nil })
+  end
 
+  -- One pass that fills every slot with SteamGridDB's top-ranked usable image.
+  -- Per-kind results so the page can show exactly what happened.
+  registry.SlsSgdbAuto = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) or not tonumber(entry.gameId) then
+      return reply({ success = false, error = 'Send {"appid": <id>, "gameId": <id>}.' })
+    end
+    local appid = tonumber(entry.appid)
+    local gameId = math.floor(tonumber(entry.gameId))
+    if not (appid > 0 and appid <= 4294967295) then
+      return reply({ success = false, code = 'invalid', error = 'Invalid app id.' })
+    end
+    local config = load_config()
+    if config.apiKey == '' then
+      return reply({ success = false, code = 'no_key', error = 'Add your SteamGridDB API key first.' })
+    end
+    local results = {}
+    for _, kind in ipairs({ 'grid', 'wide', 'hero', 'logo', 'icon' }) do
+      local assets, _, code, why = fetch_assets(config, gameId, kind)
+      if not assets then
+        results[#results + 1] = { kind = kind, ok = false, code = code, error = why }
+      elseif #assets == 0 then
+        results[#results + 1] = { kind = kind, ok = false, code = 'none',
+          error = 'No usable ' .. kind .. ' images.' }
+      else
+        local asset = assets[1]
+        local placed, detail = place_asset(appid, kind, asset.url, asset.mime)
+        if placed then
+          results[#results + 1] = { kind = kind, ok = true, path = detail.path,
+            backedUp = detail.backedUp, author = asset.author, width = asset.width, height = asset.height,
+            live = LIVE_TYPES[kind] ~= nil }
+        else
+          results[#results + 1] = { kind = kind, ok = false, code = detail.code, error = detail.error }
+        end
+      end
+    end
+    return reply({ success = true, results = results })
+  end
+
+  -- The bytes of the slot's current file, base64-encoded, so the agent can ask
+  -- Steam's own SetCustomArtworkForApp to apply and refresh it immediately
+  -- (the only context with SteamClient.Apps is SharedJSContext).
+  registry.SlsSgdbLive = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) or not KINDS[tostring(entry.kind)] then
+      return reply({ success = false, error = 'Send {"appid": <id>, "kind": "..."}.' })
+    end
+    local kind = tostring(entry.kind)
+    local type_number = LIVE_TYPES[kind]
+    if type_number == nil then
+      return reply({ success = false, code = 'no_live', error = 'Steam has no live update for this slot.' })
+    end
     local directory, why = grid_dir()
     if not directory then return reply({ success = false, code = 'no_steam', error = tostring(why) }) end
-    fs.create_directories(directory)
-
-    local response, down_why = http_get(url, { ['User-Agent'] = USER_AGENT })
-    if not response then return reply({ success = false, code = 'unavailable', error = down_why }) end
-    if response.status ~= 200 then
-      return reply({ success = false, code = 'http',
-        error = 'The image download failed (HTTP ' .. tostring(response.status) .. ').' })
+    local files = slot_files(directory, math.floor(tonumber(entry.appid)), kind)
+    if #files == 0 then
+      return reply({ success = false, code = 'none', error = 'Nothing has been applied to this slot yet.' })
     end
-    local body = response.body
-    if type(body) ~= 'string' or #body == 0 then
-      return reply({ success = false, code = 'unexpected', error = 'The image download was empty.' })
+    local body = read_file(files[1])
+    if not body then return reply({ success = false, code = 'io', error = 'Could not read the artwork file.' }) end
+    if #body > MAX_LIVE_BYTES then
+      return reply({ success = false, code = 'too_big',
+        error = 'The image is too large for a live update; restart Steam to see it.' })
     end
-    if #body > MAX_IMAGE_BYTES then
-      return reply({ success = false, code = 'too_big', error = 'That image is too large.' })
-    end
-
-    local base = directory .. '/' .. tostring(math.floor(appid)) .. KINDS[kind]
-    local existing = slot_files(directory, math.floor(appid), kind)
-    local backup = nil
-    if #existing > 0 then
-      clear_backups(directory, math.floor(appid), kind)
-      backup = existing[1] .. '.sls-luna.bak'
-      local moved, move_why = os.rename(existing[1], backup)
-      if not moved then
-        return reply({ success = false, code = 'io', error = 'Could not back up the current artwork: ' .. tostring(move_why) })
-      end
-      for index = 2, #existing do os.remove(existing[index]) end
-    end
-    local target = base .. '.' .. extension
-    local saved, save_why = write_file_atomic(target, body)
-    if not saved then return reply({ success = false, code = 'io', error = tostring(save_why) }) end
-    return reply({ success = true, path = target, kind = kind, backedUp = backup ~= nil })
+    local extension = files[1]:match('%.([%w]+)$') or 'png'
+    return reply({ success = true, base64 = M.base64(body), extension = extension, type = type_number })
   end
 
   -- Restore the backup for one slot, or remove the custom artwork when there

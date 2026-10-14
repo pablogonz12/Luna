@@ -46,6 +46,13 @@
   // listens for this localStorage key and opens the SteamGridDB picker on the
   // game. SharedJSContext has no DOM access, so localStorage is the hand-off.
   const ARTWORK_REQUEST_KEY = 'slsLunaArtworkRequest';
+  // The panel asks for a live refresh after applying artwork; the agent is the
+  // only context with SteamClient.Apps, so it performs the call and reports the
+  // outcome back through another key.
+  const ARTWORK_LIVE_KEY = 'slsLunaArtworkLive';
+  const ARTWORK_LIVE_RESULT_KEY = 'slsLunaArtworkLiveResult';
+  const SORT_LIVE_KEY = 'slsLunaSortLive';
+  let lastArtworkLive = '';
 
   function publishArtworkRequest(w, app) {
     const appid = Number(app && app.appid);
@@ -59,6 +66,45 @@
     } catch (_) {
       return false;
     }
+  }
+
+  // Apply the already-written artwork through Steam's own API so the library
+  // updates without a restart: the backend hands over the file's bytes, and
+  // SetCustomArtworkForApp (confirmed live for types 0..3) does the rest.
+  async function handleArtworkLive(w) {
+    const storage = storageOf(w);
+    if (!storage) return false;
+    let raw = null;
+    try { raw = storage.getItem(ARTWORK_LIVE_KEY); } catch (_) { return false; }
+    if (!raw || raw === lastArtworkLive) return false;
+    lastArtworkLive = raw;
+    let request = null;
+    try { request = JSON.parse(raw); } catch (_) { return false; }
+    const appid = Number(request && request.appid);
+    const kinds = Array.isArray(request && request.kinds) ? request.kinds : [];
+    if (!valid(appid) || !kinds.length) return false;
+    const apps = w.SteamClient && w.SteamClient.Apps;
+    const results = [];
+    for (const kind of kinds) {
+      try {
+        if (!apps || typeof apps.SetCustomArtworkForApp !== 'function') {
+          throw Error('Steam artwork API unavailable');
+        }
+        const live = await rpc(w, 'SlsSgdbLive', { appid, kind });
+        if (!live || live.success !== true) {
+          throw Error((live && live.error) || 'No live payload for this slot.');
+        }
+        await apps.SetCustomArtworkForApp(appid, live.base64, live.extension, Number(live.type));
+        results.push({ kind, ok: true });
+      } catch (error) {
+        results.push({ kind, ok: false, error: String((error && error.message) || error) });
+      }
+    }
+    try {
+      storage.setItem(ARTWORK_LIVE_RESULT_KEY,
+        JSON.stringify({ at: request.at || Date.now(), appid, results }));
+    } catch (_) { /* the panel just will not see the outcome */ }
+    return true;
   }
 
   function defaultActions() {
@@ -232,6 +278,17 @@
   let sortAsSeen = null;    // overviews already captured in this patch session
   let currentOrder = 'short';
   let sortSeen = 0;
+  let liveSortValue;
+  let lastHealAt = 0;
+
+  function readStoredSort(w) {
+    const storage = storageOf(w);
+    try {
+      return storage ? JSON.parse(storage.getItem('AppGridDisplaySettings') || '{}').eSortBy : null;
+    } catch (_) {
+      return null;
+    }
+  }
 
   function setHltbRecords(records) {
     hltbRecords = records || {};
@@ -361,11 +418,32 @@
   function withSortOption(props, w) {
     if (!isSortDropdown(props)) return null;
     sortSeen += 1;
+    // Publish Steam's live sort value so the panel's label work reflects the
+    // truth (Steam's own label lookup has no case for Luna's value, and other
+    // views keep their own local sort state).
+    if (props.selectedOption !== undefined && props.selectedOption !== liveSortValue) {
+      liveSortValue = props.selectedOption;
+      try {
+        const storage = storageOf(w);
+        if (storage) storage.setItem(SORT_LIVE_KEY, String(liveSortValue));
+      } catch (_) { /* diagnostics only */ }
+    }
+    // Steam's state can drift from the stored choice (a view with its own sort
+    // state, or a reset). When the stored setting is Luna's but the live value
+    // is not, put the stored choice back - a throttled single call, never a
+    // fight: if the user picks another sort, the stored setting changes with it
+    // and this stops firing.
+    if (props.selectedOption !== undefined && props.selectedOption !== SORT_VALUE
+        && readStoredSort(w) === SORT_VALUE && typeof props.onChange === 'function'
+        && Date.now() - lastHealAt > 10000) {
+      lastHealAt = Date.now();
+      const change = props.onChange;
+      const schedule = (w && w.setTimeout) || setTimeout;
+      schedule(() => { try { change(SORT_VALUE); } catch (_) { /* the next render retries */ } }, 400);
+    }
     // Only the explicit paths may change the keys: the stored choice (kept in
     // step by syncSortAs on beats and storage events) and a pick through
-    // onChange below. Several views render this same option list with their
-    // own local sort state - and the context-menu variant has no selection at
-    // all - so a foreign selectedOption must never restore the keys.
+    // onChange below.
     if (props.selectedOption === SORT_VALUE && !sortAsPatched) applyHltbSortAs(w);
     const appended = props.rgOptions.some(option => option && option.data === SORT_VALUE)
       ? props.rgOptions
@@ -682,18 +760,23 @@
     };
     if (typeof w.setInterval === 'function') w.setInterval(beat, 30000);
     if (typeof w.setTimeout === 'function') w.setTimeout(() => pushLibrary(w), 60000);
-    // The panel writes the sort order in localStorage; the storage event tells
-    // this context to rewrite the keys (and nudge the grid) right away.
+    // The panel writes the sort order and artwork requests in localStorage;
+    // the storage event tells this context to react right away.
     if (typeof w.addEventListener === 'function') {
-      w.addEventListener('storage', () => { syncSortAs(w); });
+      w.addEventListener('storage', () => {
+        syncSortAs(w);
+        handleArtworkLive(w);
+      });
     }
     pushLibrary(w);
     refreshHltbData(w).then(() => syncSortAs(w));
+    handleArtworkLive(w);
   }
 
-  return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, ARTWORK_REQUEST_KEY, discoverMenuTools, openExternalUrl,
-    searchUrlFor, nameOf, defaultActions, publishArtworkRequest, collectLibrary, pushLibrary, rpc,
-    setHltbRecords, hltbSecondsFor, hltbMinutesFor, hltbSortKey, readHltbOrder, applyHltbSortAs,
-    restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption, withFreshOverviews,
+  return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, ARTWORK_REQUEST_KEY, ARTWORK_LIVE_KEY,
+    ARTWORK_LIVE_RESULT_KEY, SORT_LIVE_KEY, discoverMenuTools, openExternalUrl,
+    searchUrlFor, nameOf, defaultActions, publishArtworkRequest, handleArtworkLive, collectLibrary,
+    pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor, hltbSortKey, readHltbOrder,
+    applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption, withFreshOverviews,
     withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
 });
