@@ -199,8 +199,12 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
         {id:11,url:'https://cdn.example/grid1.png',thumb:'https://cdn.example/t1.png',
           width:600,height:900,style:'alternate',mime:'image/png',author:'artist1'}]});
       if(fn==='SlsSgdbApply')return JSON.stringify({success:true,path:'/grid/out.png',
-        kind:payload.kind,backedUp:true});
+        kind:payload.kind,backedUp:true,live:payload.kind!=='icon'});
       if(fn==='SlsSgdbRestore')return JSON.stringify({success:true,restored:true});
+      if(fn==='SlsSgdbAuto')return JSON.stringify({success:true,results:[
+        {kind:'grid',ok:true,live:true},{kind:'wide',ok:true,live:true},
+        {kind:'hero',ok:true,live:true},{kind:'logo',ok:true,live:true},
+        {kind:'icon',ok:true,live:false}]});
       return JSON.stringify({success:true});
     }},
   };
@@ -865,6 +869,28 @@ test('a right-click artwork request opens the picker and applying calls the back
   const restoreCall=calls.filter(entry=>entry.fn==='SlsSgdbRestore').pop();
   assert.deepEqual(restoreCall.payload,{appid:1145360,kind:'hero'});
   assert.match(textOf(document.getElementById('sls-luna-overlay')),/previous artwork is back/);
+});
+
+test('the auto picker fills every slot and asks the agent for a live refresh',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls,storage}=fakeWindow(document,{sgdbKey:'my-key'});
+  mount(w);
+  storage.set('slsLunaArtworkRequest',JSON.stringify({appid:1145360,name:'Hades',at:Date.now()}));
+  w.__emitStorage();
+  await new Promise(resolve=>setTimeout(resolve,80));
+  const auto=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Apply best to every slot'&&typeof node.onclick==='function');
+  assert.ok(auto,'the auto button must be offered');
+  auto.onclick();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const call=calls.filter(entry=>entry.fn==='SlsSgdbAuto').pop();
+  assert.ok(call,'auto must call the backend');
+  assert.deepEqual(call.payload,{appid:1145360,gameId:1});
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Applied the best match to 5 of 5 slots/);
+  const live=JSON.parse(storage.get('slsLunaArtworkLive'));
+  assert.equal(live.appid,1145360);
+  assert.deepEqual(live.kinds,['grid','wide','hero','logo'],'icon has no live slot and is skipped');
 });
 
 test('the SORT BY label is restored only while the HLTB sort is stored',()=>{

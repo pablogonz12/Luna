@@ -1419,10 +1419,15 @@
     let overlayTimer = null;
     function refreshDomOverlays() {
       let stored = null;
+      let live = null;
       try {
         stored = JSON.parse((w.localStorage && w.localStorage.getItem('AppGridDisplaySettings')) || '{}').eSortBy;
+        live = w.localStorage && w.localStorage.getItem('slsLunaSortLive');
       } catch (_) { /* storage unavailable */ }
-      enforceSortLabel(document, stored);
+      // The stored choice is the fallback truth; once the agent has seen the
+      // live dropdown, only the live value may claim the label.
+      const liveValue = (live === null || live === undefined || live === '') ? stored : Number(live);
+      enforceSortLabel(document, liveValue);
     }
     function scheduleOverlayRefresh(delay) {
       if (overlayTimer) return;
@@ -1908,13 +1913,83 @@
           raw: JSON.stringify({ appid: Number(sgdbGame.appid), kind: sgdbKind,
             url: asset.url, mime: asset.mime }),
         });
-        sgdbNotice = 'Artwork applied' + (out && out.backedUp ? ' (the previous file is backed up).' : '.')
-          + ' If Steam does not refresh it right away, reopen the game page.';
+        sgdbNotice = 'Artwork applied' + (out && out.backedUp ? ' (the previous file is backed up)' : '') + '.';
+        const liveKinds = out && out.live ? [sgdbKind] : [];
+        const at = liveKinds.length ? requestLiveArtwork(sgdbGame.appid, liveKinds) : null;
+        sgdbBusy = false;
+        repaintIfOpen();
+        if (at) finishLiveNotice(at, 'Applied and refreshed in Steam right away.');
       } catch (error) {
         sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbBusy = false;
+        repaintIfOpen();
       }
-      sgdbBusy = false;
+    }
+
+    // The live refresh runs in the agent (only SharedJSContext has
+    // SteamClient.Apps). The panel writes the request and reads the agent's
+    // result a moment later so the page can report what really happened.
+    function requestLiveArtwork(appid, kinds) {
+      try {
+        if (!w.localStorage) return null;
+        const at = Date.now();
+        w.localStorage.setItem('slsLunaArtworkLive',
+          JSON.stringify({ appid: Number(appid), kinds, at }));
+        return at;
+      } catch (_) { return null; }
+    }
+
+    function readLiveResult(at) {
+      try {
+        const raw = w.localStorage && w.localStorage.getItem('slsLunaArtworkLiveResult');
+        if (!raw) return null;
+        const result = JSON.parse(raw);
+        return result && result.at === at ? result : null;
+      } catch (_) { return null; }
+    }
+
+    function finishLiveNotice(at, successText) {
+      const schedule = w.setTimeout || setTimeout;
+      schedule(() => {
+        const result = readLiveResult(at);
+        if (!result) {
+          sgdbNotice = (sgdbNotice || '') + ' Steam will show it after the next refresh.';
+          repaintIfOpen();
+          return;
+        }
+        const failed = result.results.filter(entry => !entry.ok);
+        sgdbNotice = failed.length
+          ? 'Applied, but Steam could not refresh live for ' + failed.map(entry => entry.kind).join(', ')
+            + ' - restart Steam to see it.'
+          : successText;
+        repaintIfOpen();
+      }, 2500);
+    }
+
+    async function autoApplySgdb() {
+      if (!sgdbGame || !sgdbGame.sgdbId) return;
+      sgdbNotice = null;
+      sgdbBusy = true;
       repaintIfOpen();
+      try {
+        const out = await rpc(w, 'SlsSgdbAuto', {
+          raw: JSON.stringify({ appid: Number(sgdbGame.appid), gameId: sgdbGame.sgdbId }),
+        });
+        const results = Array.isArray(out.results) ? out.results : [];
+        const ok = results.filter(entry => entry.ok);
+        const failed = results.filter(entry => !entry.ok);
+        sgdbNotice = 'Applied the best match to ' + ok.length + ' of ' + results.length + ' slots'
+          + (failed.length ? ' (' + failed.map(entry => entry.kind).join(', ') + ' had nothing usable)' : '') + '.';
+        const liveKinds = ok.filter(entry => entry.live).map(entry => entry.kind);
+        const at = liveKinds.length ? requestLiveArtwork(sgdbGame.appid, liveKinds) : null;
+        sgdbBusy = false;
+        repaintIfOpen();
+        if (at) finishLiveNotice(at, 'Steam refreshed every slot live.');
+      } catch (error) {
+        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbBusy = false;
+        repaintIfOpen();
+      }
     }
 
     async function restoreSgdbAsset() {
@@ -2057,7 +2132,8 @@
         + (sgdbGame.sgdbId ? '' : ' \u00b7 <span style="color:#8d97a1">searching\u2026</span>');
       body.appendChild(head);
 
-      const kinds = [['grid', 'Grid 600\u00d7900'], ['hero', 'Hero'], ['logo', 'Logo'], ['icon', 'Icon']];
+      const kinds = [['grid', 'Grid 600\u00d7900'], ['wide', 'Wide 920\u00d7430'], ['hero', 'Hero'],
+        ['logo', 'Logo'], ['icon', 'Icon']];
       const chips = document.createElement('div');
       chips.className = 'sls-luna-subtabs';
       kinds.forEach(pair => {
@@ -2092,6 +2168,11 @@
 
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 0;';
+      const auto = document.createElement('button');
+      auto.className = 'sls-luna-btn';
+      auto.textContent = 'Apply best to every slot';
+      auto.disabled = sgdbBusy || !sgdbGame.sgdbId;
+      auto.onclick = () => autoApplySgdb();
       const restore = document.createElement('button');
       restore.className = 'sls-luna-btn secondary';
       restore.textContent = 'Restore previous ' + sgdbKind;
@@ -2104,7 +2185,7 @@
         sgdbGame = null; sgdbAssets = null; sgdbResults = null; sgdbNotice = null;
         repaintIfOpen();
       };
-      actions.append(restore, close);
+      actions.append(auto, restore, close);
       body.appendChild(actions);
       return body;
     }

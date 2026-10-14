@@ -9,9 +9,10 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf,
-  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,ARTWORK_REQUEST_KEY,setHltbRecords,hltbSortKey,
-  applyHltbSortAs,restoreHltbSortAs,syncSortAs,isSortDropdown,withSortOption,withFreshOverviews,
-  withHltbOverlay,hltbMinutesFor}=require('../addons/luna/plugin/public/agent.js');
+  collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,ARTWORK_REQUEST_KEY,ARTWORK_LIVE_KEY,
+  ARTWORK_LIVE_RESULT_KEY,setHltbRecords,hltbSortKey,applyHltbSortAs,restoreHltbSortAs,syncSortAs,
+  isSortDropdown,withSortOption,withFreshOverviews,withHltbOverlay,hltbMinutesFor,
+  handleArtworkLive}=require('../addons/luna/plugin/public/agent.js');
 
 test('search URL trims and encodes the game name',()=>{
   assert.equal(searchUrlFor('  Hades  '),'https://howlongtobeat.com/?q=Hades');
@@ -438,6 +439,59 @@ test('the Change artwork action hands the game to the Luna picker',async()=>{
   assert.equal(request.name,'Hades');
   assert.ok(request.at>0,'the request must be timestamped');
   menu.dispose();
+});
+
+test('the stored HLTB sort is restored when Steam state drifts',()=>{
+  const scheduled=[];
+  const store=new Map();
+  store.set('AppGridDisplaySettings',JSON.stringify({eSortBy:SORT_VALUE}));
+  const w={appStore:{allApps:[{appid:1,display_name:'A',sort_as:'a'}]},
+    localStorage:{getItem:key=>store.has(key)?store.get(key):null,
+      setItem:(key,value)=>store.set(key,String(value)),removeItem:key=>store.delete(key)},
+    setTimeout:fn=>{scheduled.push(fn);return 0;}};
+  setHltbRecords({'1':{main:3600}});
+  const changes=[];
+  withSortOption({rgOptions:SORT_ENUM.slice(),selectedOption:4,onChange:value=>changes.push(value)},w);
+  assert.equal(scheduled.length,1,'a drifted live sort must schedule a heal');
+  scheduled.shift()();
+  assert.deepEqual(changes,[SORT_VALUE],'the stored choice must be restored');
+  assert.equal(store.get('slsLunaSortLive'),'4','the live value must be published for the panel');
+  withSortOption({rgOptions:SORT_ENUM.slice(),selectedOption:4,onChange:value=>changes.push(value)},w);
+  assert.equal(scheduled.length,0,'the heal must be throttled');
+  store.set('AppGridDisplaySettings',JSON.stringify({eSortBy:4}));
+  withSortOption({rgOptions:SORT_ENUM.slice(),selectedOption:1,onChange:value=>changes.push(value)},w);
+  assert.equal(scheduled.length,0,'another stored choice must never be fought');
+  setHltbRecords({});
+});
+
+test('live artwork requests are applied through Steam own API',async()=>{
+  const store=new Map();
+  const applied=[];
+  const w={
+    SteamClient:{Apps:{SetCustomArtworkForApp:(appid,base64,extension,type)=>{
+      applied.push([appid,base64,extension,type]);
+      return Promise.resolve();
+    }}},
+    localStorage:{getItem:key=>store.has(key)?store.get(key):null,
+      setItem:(key,value)=>store.set(key,String(value)),removeItem:key=>store.delete(key)},
+    Millennium:{callServerMethod:(plugin,fn,args)=>{
+      assert.equal(fn,'SlsSgdbLive');
+      if(args.kind==='icon'){
+        return Promise.resolve(JSON.stringify({success:false,code:'no_live',error:'no icon slot'}));
+      }
+      return Promise.resolve(JSON.stringify({success:true,base64:'AAA',extension:'png',
+        type:args.kind==='grid'?0:3}));
+    }},
+  };
+  store.set(ARTWORK_LIVE_KEY,JSON.stringify({appid:1145360,kinds:['grid','wide','icon'],at:1234}));
+  assert.equal(await handleArtworkLive(w),true,'the request must be consumed');
+  assert.deepEqual(applied,[[1145360,'AAA','png',0],[1145360,'AAA','png',3]]);
+  const result=JSON.parse(store.get(ARTWORK_LIVE_RESULT_KEY));
+  assert.equal(result.at,1234);
+  assert.deepEqual(result.results.map(entry=>[entry.kind,entry.ok]),
+    [['grid',true],['wide',true],['icon',false]]);
+  assert.equal(await handleArtworkLive(w),false,'an unchanged request is not replayed');
+  assert.equal(await handleArtworkLive({localStorage:{getItem:()=>null}}),false,'no storage, no crash');
 });
 
 test('the grid gets a fresh overviews array so its memo re-sorts with the current keys',()=>{

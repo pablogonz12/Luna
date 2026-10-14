@@ -48,20 +48,28 @@ reimplementation of Steam ROM Manager's bulk ROM parsing/import workflow. Steam
 ROM Manager is a separate bulk game importer/artwork manager; Luna should only
 integrate or delegate to it if a concrete supported interface is established.
 
-**Implemented (first version, add-on `sgdb` 0.1.0):** the library right-click
-menu carries **Change artwork** (the agent writes a request to localStorage;
-the panel opens the picker on that game), and the Luna menu has a **SteamGridDB**
-page. The user adds their own free SteamGridDB API key (stored locally in
+**Implemented (add-on `sgdb` 0.2.0):** the library right-click menu carries
+**Change artwork** (the agent writes a request to localStorage; the panel opens
+the picker on that game), and the Luna menu has a **SteamGridDB** page. The user
+adds their own free SteamGridDB API key (stored locally in
 `~/.local/share/slssteam-integrations/sgdb.json`), the page searches
-SteamGridDB, matches the game, and lists grid / hero / logo / icon images
-(PNG or JPEG only - anything else cannot be displayed by Steam). Applying
-downloads the image into `userdata/<account>/config/grid/` with Steam's own
-file naming, **backs up** whatever file was there, and **Restore** puts it back
-or removes the custom file. Nothing is written before an image is picked.
+SteamGridDB, matches the game, and lists **grid / wide / hero / logo / icon**
+images (PNG or JPEG only - anything else cannot be displayed by Steam).
+**Apply best to every slot** fills all five with SteamGridDB's top-ranked usable
+image in one pass. Applying downloads the image into
+`userdata/<account>/config/grid/` with Steam's own file naming, **backs up**
+whatever file was there, and **Restore** puts it back or removes the custom
+file. Nothing is written before an image is picked.
 
-Still open: landscape grids, per-image style filters and an NSFW toggle, and
-verifying how quickly Steam's library picks up each slot (a reopen or restart
-may be needed). See the delivery sequence below.
+**Live refresh:** after applying, the panel asks the agent to push the same
+bytes through Steam's own `SetCustomArtworkForApp`, so the library shows the
+new art without a restart. The asset types were mapped empirically against a
+live client (0=grid, 1=hero, 2=logo, 3=wide); **icons have no live type** and
+appear after a restart. The file itself is always written, so nothing depends
+on the live call.
+
+Still open: per-image style filters, an NSFW toggle, and portrait-grid
+thumbnails in the picker.
 
 ### Proposed flow
 

@@ -160,6 +160,30 @@ function wire.get(url, options)
     if authorization ~= 'Bearer good-key' then return { status = 401, body = '{"success":false}' } end
     return { status = 200, body = '{"success":true,"data":[{"id":1,"name":"Hades"},{"id":2,"name":"Hades II"}]}' }
   end
+  if url:find('dimensions=920x430', 1, true) then
+    if authorization ~= 'Bearer good-key' then return { status = 401, body = '{"success":false}' } end
+    return { status = 200, body = '{"success":true,"data":[' ..
+      '{"id":31,"url":"https://cdn.example/wide1.png","thumb":"https://cdn.example/tw.png",' ..
+      '"width":920,"height":430,"mime":"image/png","author":{"name":"artistW"}}]}' }
+  end
+  if url:find('/heroes/game/1', 1, true) then
+    if authorization ~= 'Bearer good-key' then return { status = 401, body = '{"success":false}' } end
+    return { status = 200, body = '{"success":true,"data":[' ..
+      '{"id":21,"url":"https://cdn.example/hero1.jpg","thumb":"https://cdn.example/th.jpg",' ..
+      '"width":1920,"height":620,"mime":"image/jpeg","author":{"name":"artistH"}}]}' }
+  end
+  if url:find('/logos/game/1', 1, true) then
+    if authorization ~= 'Bearer good-key' then return { status = 401, body = '{"success":false}' } end
+    return { status = 200, body = '{"success":true,"data":[' ..
+      '{"id":41,"url":"https://cdn.example/logo1.png","thumb":"https://cdn.example/tl.png",' ..
+      '"width":800,"height":310,"mime":"image/png","author":{"name":"artistL"}}]}' }
+  end
+  if url:find('/icons/game/1', 1, true) then
+    if authorization ~= 'Bearer good-key' then return { status = 401, body = '{"success":false}' } end
+    return { status = 200, body = '{"success":true,"data":[' ..
+      '{"id":51,"url":"https://cdn.example/icon1.png","thumb":"https://cdn.example/ti.png",' ..
+      '"width":256,"height":256,"mime":"image/png","author":{"name":"artistI"}}]}' }
+  end
   if url:find('/grids/game/1', 1, true) then
     if authorization ~= 'Bearer good-key' then return { status = 401, body = '{"success":false}' } end
     return { status = 200, body = '{"success":true,"data":[' ..
@@ -173,6 +197,10 @@ function wire.get(url, options)
   end
   if url == 'https://cdn.example/grid1.png' then return { status = 200, body = 'PNG1DATA' } end
   if url == 'https://cdn.example/grid2.jpg' then return { status = 200, body = 'JPG2DATA' } end
+  if url == 'https://cdn.example/wide1.png' then return { status = 200, body = 'WIDEDATA' } end
+  if url == 'https://cdn.example/hero1.jpg' then return { status = 200, body = 'HERODATA' } end
+  if url == 'https://cdn.example/logo1.png' then return { status = 200, body = 'LOGODATA' } end
+  if url == 'https://cdn.example/icon1.png' then return { status = 200, body = 'ICONDATA' } end
   return { status = 404, body = '{"success":false}' }
 end
 package.preload['http'] = function() return wire end
@@ -294,8 +322,62 @@ do
 end
 
 assert(backend.kind_suffix('grid') == 'p' and backend.kind_suffix('hero') == '_hero'
-  and backend.kind_suffix('logo') == '_logo' and backend.kind_suffix('icon') == '_icon')
+  and backend.kind_suffix('logo') == '_logo' and backend.kind_suffix('icon') == '_icon'
+  and backend.kind_suffix('wide') == '')
 assert(backend.account_id(STEAMID) == ACCOUNT_ID)
 assert(backend.account_id('123') == nil)
 
-print('Luna SteamGridDB backend OK: key gate, search, asset filtering, apply/backup/restore, refusals, accounts')
+-- ---------------------------------------------------------------- base64
+
+assert(backend.base64('') == '')
+assert(backend.base64('a') == 'YQ==')
+assert(backend.base64('ab') == 'YWI=')
+assert(backend.base64('abc') == 'YWJj')
+assert(backend.base64('PNG1DATA') == 'UE5HMURBVEE=')
+
+-- ---------------------------------------------------------------- wide assets
+
+do
+  -- The accounts section below poisons loginusers.vdf on purpose; restore a
+  -- single MostRecent account for the artwork sections.
+  local users = assert(io.open(steam_root .. '/config/loginusers.vdf', 'wb'))
+  users:write('"users"\n{\n\t"' .. STEAMID .. '"\n\t{\n\t\t"MostRecent" "1"\n\t}\n}\n')
+  users:close()
+end
+
+local wide = call('SlsSgdbAssets', { raw = json.encode({ gameId = 1, kind = 'wide' }) })
+assert(wide.success == true and #wide.assets == 1 and wide.assets[1].width == 920
+  and wide.assets[1].author == 'artistW', 'the wide grid must use the dimension filter')
+
+-- ---------------------------------------------------------------- auto picker
+
+local auto = call('SlsSgdbAuto', { raw = json.encode({ appid = 620, gameId = 1 }) })
+assert(auto.success == true and #auto.results == 5, 'the auto picker must cover five slots')
+local by_kind = {}
+for _, result in ipairs(auto.results) do by_kind[result.kind] = result end
+for _, kind in ipairs({ 'grid', 'wide', 'hero', 'logo', 'icon' }) do
+  assert(by_kind[kind] and by_kind[kind].ok == true, 'auto must fill ' .. kind .. ': '
+    .. tostring(by_kind[kind] and by_kind[kind].error))
+end
+assert(by_kind.grid.live == true and by_kind.wide.live == true and by_kind.hero.live == true
+  and by_kind.logo.live == true and by_kind.icon.live == false,
+  'icons have no live update, the other slots do')
+assert(file_text(grid_dir .. '/620p.png') == 'PNG1DATA')
+assert(file_text(grid_dir .. '/620.png') == 'WIDEDATA')
+assert(file_text(grid_dir .. '/620_hero.jpg') == 'HERODATA')
+assert(file_text(grid_dir .. '/620_logo.png') == 'LOGODATA')
+assert(file_text(grid_dir .. '/620_icon.png') == 'ICONDATA')
+
+-- ---------------------------------------------------------------- live payload
+
+local live = call('SlsSgdbLive', { raw = json.encode({ appid = 620, kind = 'grid' }) })
+assert(live.success == true and live.type == 0 and live.extension == 'png'
+  and live.base64 == 'UE5HMURBVEE=', 'the live payload must carry the applied file')
+local live_wide = call('SlsSgdbLive', { raw = json.encode({ appid = 620, kind = 'wide' }) })
+assert(live_wide.success == true and live_wide.type == 3 and live_wide.extension == 'png')
+local live_icon = call('SlsSgdbLive', { raw = json.encode({ appid = 620, kind = 'icon' }) })
+assert(live_icon.success == false and live_icon.code == 'no_live')
+local live_none = call('SlsSgdbLive', { raw = json.encode({ appid = 1145360, kind = 'logo' }) })
+assert(live_none.success == false and live_none.code == 'none')
+
+print('Luna SteamGridDB backend OK: key gate, search, asset filtering, apply/backup/restore, wide, auto, live, refusals, accounts')
