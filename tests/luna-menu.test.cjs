@@ -95,7 +95,7 @@ test('the focused game gains the HowLongToBeat action after its primary action',
   tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}},{type:'fav',props:{}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times']);
   assert.equal(menu.list().some(entry=>entry.id==='hltb'),true);
   menu.dispose();
   assert.equal(w.__SlsLunaMenu,undefined);
@@ -122,7 +122,7 @@ test('a focused label authorizes the game even when child actions mention other 
   tools.jsx.jsx(tools.Outer,{overview:app,instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Grand Theft Auto V Enhanced',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[app]}},{type:'dlc',props:{app:{appid:999}}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times']);
   menu.dispose();
 });
 
@@ -190,12 +190,12 @@ test('other add-ons can register and remove their own game actions through the r
   tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Change artwork']);
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times','Change artwork']);
   assert.equal(menu.unregister('hltb'),true);
   assert.equal(menu.unregister('missing'),false);
   const el2=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el2),['Change artwork']);
+  assert.deepEqual(labelsAfterPrimary(el2),['Fetch HowLongToBeat times','Change artwork']);
   menu.dispose();
 });
 
@@ -210,7 +210,7 @@ test('an action whose eligibility throws is treated as disabled',()=>{
     tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
     const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
       {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-    assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat']);
+    assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times']);
     menu.dispose();
   }finally{console.warn=originalWarn;}
 });
@@ -227,7 +227,8 @@ test('ensure re-arms the hook after a UI reload replaces the jsx functions',()=>
   tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
   const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
-  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat'],'the re-armed hook must insert the item');
+  assert.deepEqual(labelsAfterPrimary(el),['HowLongToBeat','Fetch HowLongToBeat times'],
+    'the re-armed hook must insert the item');
   assert.equal(menu.ensure(),false,'a healthy hook must not re-arm again');
   menu.dispose();
   assert.equal(tools.jsx.jsx,foreign.jsx,'dispose restores the chain it found');
@@ -252,4 +253,51 @@ test('booting retries until the library module appears and only arms once',()=>{
     assert.ok(w.__SlsLunaMenu,'the retry beat must install the menu once the module exists');
     w.__SlsLunaMenu.dispose();
   }finally{console.warn=originalWarn;}
+});
+
+function menuItemFor(tools,el,label){
+  return (el.props.children||[]).find(child=>child&&child.props&&child.props.children
+    &&child.props.children[0]===label);
+}
+
+test('fetching HowLongToBeat times asks the Luna backend and returns the cached record',async()=>{
+  const tools=fixture();
+  const calls=[];
+  const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})},
+    Millennium:{callServerMethod:(plugin,fn,args)=>{
+      calls.push([plugin,fn,args]);
+      if(fn==='SlsHltbFetch')return JSON.stringify({success:true,record:{name:'Hades',main:84940,extra:175028}});
+      return JSON.stringify({success:false,error:'unexpected method'});
+    }}};
+  const menu=installLunaMenu(w,tools);
+  tools.jsx.jsx(tools.Outer,{overview:{appid:1145360,display_name:'Hades'},instance:{}});
+  const el=tools.jsx.jsx(tools.Inner,{label:'Hades',labelId:'l',children:[
+    {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
+  const item=menuItemFor(tools,el,'Fetch HowLongToBeat times');
+  assert.ok(item,'the fetch action must be offered');
+  const record=await item.props.onSelected();
+  assert.equal(record.main,84940);
+  assert.deepEqual(calls,[['lumen','SlsHltbFetch',{appid:1145360,name:'Hades'}]]);
+  menu.dispose();
+});
+
+test('a refused HowLongToBeat fetch is contained and logged with the backend reason',async()=>{
+  const tools=fixture();
+  const errors=[];
+  const originalError=console.error;
+  console.error=(...args)=>errors.push(args.map(String).join(' '));
+  try{
+    const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Orion Drift'})},
+      Millennium:{callServerMethod:()=>JSON.stringify({success:false,
+        error:'No confident HowLongToBeat match for "Orion Drift".'})}};
+    const menu=installLunaMenu(w,tools);
+    tools.jsx.jsx(tools.Outer,{overview:{appid:1,display_name:'Orion Drift'},instance:{}});
+    const el=tools.jsx.jsx(tools.Inner,{label:'Orion Drift',labelId:'l',children:[
+      {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1}]}}]});
+    const item=menuItemFor(tools,el,'Fetch HowLongToBeat times');
+    await item.props.onSelected();
+    assert.equal(errors.some(line=>line.includes('No confident HowLongToBeat match')),true,
+      'the backend reason must reach the console');
+    menu.dispose();
+  }finally{console.error=originalError;}
 });

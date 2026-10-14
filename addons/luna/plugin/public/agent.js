@@ -11,9 +11,10 @@
  * menu. Nothing here touches game files; every action decides its own behavior
  * through the backend contract.
  *
- * First action: HowLongToBeat. It opens the game's completion-time search in
- * the user's browser through Steam's own URL handlers, so no library data is
- * sent anywhere: the browser performs the lookup, not Luna.
+ * Actions: HowLongToBeat (opens the game's search page in the browser through
+ * Steam's own URL handlers) and Fetch HowLongToBeat times (asks Luna's backend
+ * for a user-triggered lookup and caches it locally; no library data leaves the
+ * machine, and nothing is fetched automatically).
  */
 (function (root, factory) {
   const api = factory();
@@ -31,6 +32,15 @@
     return HLTB_SEARCH + encodeURIComponent(String(name == null ? '' : name).trim());
   }
 
+  // Luna backend call through the Lumen bridge.
+  function rpc(w, method, args) {
+    if (!w || !w.Millennium || typeof w.Millennium.callServerMethod !== 'function') {
+      return Promise.reject(Error('The Lumen bridge is unavailable.'));
+    }
+    return Promise.resolve(w.Millennium.callServerMethod('lumen', method, args || {}))
+      .then(raw => (typeof raw === 'string' ? JSON.parse(raw) : raw));
+  }
+
   function defaultActions() {
     return [{
       id: 'hltb',
@@ -40,6 +50,17 @@
         if (!opened) throw Error('Steam could not open the browser for the HowLongToBeat search.');
         return true;
       }),
+    }, {
+      id: 'hltb-fetch',
+      label: 'Fetch HowLongToBeat times',
+      isEnabled: app => Boolean(nameOf(app)) && valid(app && app.appid),
+      run: (app, w) => rpc(w, 'SlsHltbFetch', { appid: Number(app.appid), name: nameOf(app) })
+        .then(out => {
+          if (!out || out.success !== true) {
+            throw Error((out && out.error) || 'The HowLongToBeat fetch failed.');
+          }
+          return out.record;
+        }),
     }];
   }
 
