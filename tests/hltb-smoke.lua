@@ -172,6 +172,16 @@ function wire.post(url, body, options)
   if wire.mode == 'garbage' then
     return { status = 200, body = 'not json at all' }
   end
+  if wire.mode == 'capture' then
+    -- Verbatim rows captured from a real HowLongToBeat search for "Hades"
+    -- (three of the five results), so the parser is exercised against the
+    -- live response shape and its noise rows, not only against fixtures.
+    return { status = 200, body = '{"count":5,"data":[' ..
+      '{"game_id":37527,"game_name":"Hades","comp_main":84940,"comp_plus":175028,"comp_100":343055,"comp_all":159766},' ..
+      '{"game_id":118387,"game_name":"Hades II","comp_main":115073,"comp_plus":192059,"comp_100":377989,"comp_all":201415},' ..
+      '{"game_id":8328,"game_name":"Might & Magic Heroes VI: Shades of Darkness","comp_main":62520,' ..
+      '"comp_plus":77940,"comp_100":0,"comp_all":68015}]}' }
+  end
   local payload = json.decode(body)
   local query = table.concat(payload.searchTerms, ' ')
   return { status = 200, body = '{"count":1,"data":[{"game_id":1,"game_name":' .. json.encode(query) ..
@@ -323,6 +333,15 @@ assert(out.success == true and out.removed == true)
 assert(call('SlsHltbGet').count == before, 'forget must remove exactly one record')
 out = call('SlsHltbForget', { appid = 367520 })
 assert(out.success == true and out.removed == false)
+
+-- Real captured response shape: "Hades" must win over "Hades II" and the
+-- unrelated noise row, and the seconds must map to the right buckets.
+wire.mode = 'capture'
+out = call('SlsHltbFetch', { appid = 1091500, name = 'Hades' })
+assert(out.success == true, 'capture fetch failed: ' .. tostring(out.error))
+assert(out.record.match == 'exact' and out.record.name == 'Hades')
+assert(out.record.main == 84940 and out.record.extra == 175028 and out.record.completionist == 343055)
+assert(out.record.all == 159766)
 
 out = call('SlsLunaInfo')
 assert(out.success == true and out.version == '0.3.0' and type(out.addons) == 'table')
