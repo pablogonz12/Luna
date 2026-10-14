@@ -336,7 +336,9 @@
       sortAsPatched = [];
       sortAsSeen = new WeakSet();
     }
-    for (const overview of overviews) {      if (!overview || overview.appid == null) continue;
+    let changed = false;
+    for (const overview of overviews) {
+      if (!overview || overview.appid == null) continue;
       const appid = Number(overview.appid);
       if (!valid(appid)) continue;
       const key = hltbSortKey(appid, overview.display_name || overview.name || '');
@@ -344,7 +346,7 @@
       // as if it were the original.
       if (sortAsSeen.has(overview)) {
         if (overview.sort_as !== key) {
-          try { overview.sort_as = key; } catch (_) { /* fine */ }
+          try { overview.sort_as = key; changed = true; } catch (_) { /* fine */ }
         }
         continue;
       }
@@ -355,7 +357,9 @@
       } catch (_) { continue; }
       sortAsSeen.add(overview);
       sortAsPatched.push([overview, original]);
+      changed = true;
     }
+    if (changed) keysVersion += 1;
     return sortAsPatched.length > 0;
   }
 
@@ -369,6 +373,7 @@
     }
     sortAsPatched = null;
     sortAsSeen = null;
+    keysVersion += 1;
     return true;
   }
 
@@ -460,10 +465,21 @@
   }
 
   // Steam's grid memoizes the sorted order and `sort_as` is not observable.
-  // Handing the grid a fresh array on every render makes its memo recompute, so
-  // the order follows the current keys - no poking of Steam's sort state.
+  // Handing the grid a fresh array makes its memo recompute; each input array
+  // is sliced once per key change (not once per render), so the order follows
+  // the current keys without rebuilding the grid on every paint.
+  let keysVersion = 0;
+  let slicedVersion = 0;
+  let slicedArrays = new WeakSet();
+
   function withFreshOverviews(props) {
     if (!props || !Array.isArray(props.appOverviews) || props.eSortBy === undefined) return null;
+    if (slicedVersion !== keysVersion) {
+      slicedVersion = keysVersion;
+      slicedArrays = new WeakSet();
+    }
+    if (slicedArrays.has(props.appOverviews)) return null;
+    slicedArrays.add(props.appOverviews);
     return { ...props, appOverviews: props.appOverviews.slice() };
   }
 
@@ -472,14 +488,49 @@
   // HowLongToBeat is active, re-point that overlay at Steam's own hours-played
   // rendering with the cached minutes, so each capsule reads like
   // "23.6 hours". Games without times keep Steam's default (nothing shown).
+  // Diagnostics (which decisions were taken, and why one was skipped) land in
+  // localStorage so a live client can be inspected without guessing.
+  const OVERLAY_DIAG_KEY = 'slsLunaOverlayDiag';
+  const overlayDiag = { rewrites: 0, misses: 0, seen: {}, reasons: {}, samples: [] };
+  let overlayDiagAt = 0;
+
+  function noteOverlayDiag(hit, props, reason) {
+    if (hit) overlayDiag.rewrites += 1;
+    else {
+      overlayDiag.misses += 1;
+      overlayDiag.reasons[reason] = (overlayDiag.reasons[reason] || 0) + 1;
+      if (overlayDiag.samples.length < 5) {
+        overlayDiag.samples.push(Object.keys(props || {}).sort().join(','));
+      }
+    }
+    const key = String(props && props.sortByType);
+    overlayDiag.seen[key] = (overlayDiag.seen[key] || 0) + 1;
+    const now = Date.now();
+    if (now - overlayDiagAt > 2000) {
+      overlayDiagAt = now;
+      try {
+        const storage = storageOf();
+        if (storage) storage.setItem(OVERLAY_DIAG_KEY, JSON.stringify(overlayDiag));
+      } catch (_) { /* diagnostics only */ }
+    }
+  }
+
   function withHltbOverlay(props) {
-    if (!props || props.sortByType !== SORT_VALUE) return null;
-    if (!props.app || props.id === undefined || props.strCollectionId !== undefined) return null;
+    const decision = hltbOverlayDecision(props);
+    noteOverlayDiag(decision.ok, props, decision.reason);
+    return decision.ok ? decision.props : null;
+  }
+
+  function hltbOverlayDecision(props) {
+    if (!props || props.sortByType !== SORT_VALUE) return { ok: false, reason: 'other_sort' };
+    if (!props.app) return { ok: false, reason: 'no_app' };
+    if (props.id === undefined) return { ok: false, reason: 'no_id' };
+    if (props.strCollectionId !== undefined) return { ok: false, reason: 'has_collection' };
     const minutes = hltbMinutesFor(props.app.appid);
-    if (!minutes) return null;
+    if (!minutes) return { ok: false, reason: 'no_minutes' };
     const clone = Object.assign(Object.create(Object.getPrototypeOf(props.app)), props.app);
     clone.minutes_playtime_forever = minutes;
-    return { ...props, sortByType: 4, app: clone }; // 4 = Steam's hours-played sort
+    return { ok: true, props: { ...props, sortByType: 4, app: clone } }; // 4 = Steam's hours-played sort
   }
 
   function refreshHltbData(w) {
