@@ -804,7 +804,8 @@ test('the HowLongToBeat page offers a sort-direction switch that is remembered',
 test('the SteamGridDB page saves and tests the API key',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
-  const {w,calls}=fakeWindow(document,{});
+  const {w,calls,storage}=fakeWindow(document,{});
+  storage.set('slsLunaBeta','1'); // the picker lives behind the beta switch
   mount(w);
   document.getElementById('sls-luna-btn').click();
   await new Promise(resolve=>setTimeout(resolve,30));
@@ -836,6 +837,7 @@ test('a right-click artwork request opens the picker and applying calls the back
   const document=fakeDom();
   menubarFixture(document,true);
   const {w,calls,storage}=fakeWindow(document,{sgdbKey:'my-key'});
+  storage.set('slsLunaBeta','1');
   mount(w);
   storage.set('slsLunaArtworkRequest',JSON.stringify({appid:1145360,name:'Hades',at:Date.now()}));
   w.__emitStorage();
@@ -875,6 +877,7 @@ test('the auto picker fills every slot and asks the agent for a live refresh',as
   const document=fakeDom();
   menubarFixture(document,true);
   const {w,calls,storage}=fakeWindow(document,{sgdbKey:'my-key'});
+  storage.set('slsLunaBeta','1');
   mount(w);
   storage.set('slsLunaArtworkRequest',JSON.stringify({appid:1145360,name:'Hades',at:Date.now()}));
   w.__emitStorage();
@@ -891,6 +894,49 @@ test('the auto picker fills every slot and asks the agent for a live refresh',as
   const live=JSON.parse(storage.get('slsLunaArtworkLive'));
   assert.equal(live.appid,1145360);
   assert.deepEqual(live.kinds,['grid','wide','hero','logo'],'icon has no live slot and is skipped');
+});
+
+test('beta features stay hidden until the Settings switch is on',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,storage}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  let overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/Settings/,'the Settings tab must exist');
+  assert.doesNotMatch(textOf(overlay),/SteamGridDB/,'beta pages must be hidden by default');
+  const settings=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-tab')
+    &&node.textContent==='Settings');
+  settings.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/Show beta features/,'the switch must be on the Settings page');
+  assert.match(textOf(overlay),/hidden/,'the page must say beta pages are hidden');
+  const row=findNode(overlay,node=>node.className==='sls-luna-row'
+    &&(node.textContent||'').includes('Show beta features'));
+  const switchBox=findNode(row,node=>(node.className||'').startsWith('sls-luna-switch'));
+  switchBox.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(storage.get('slsLunaBeta'),'1','the switch must persist');
+  overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/SteamGridDB/,'turning it on must reveal the beta tab');
+});
+
+test('an artwork request with beta off points at the Settings switch',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,storage}=fakeWindow(document,{sgdbKey:'my-key'});
+  mount(w);
+  storage.set('slsLunaArtworkRequest',JSON.stringify({appid:1145360,name:'Hades',at:Date.now()}));
+  w.__emitStorage();
+  await new Promise(resolve=>setTimeout(resolve,80));
+  const overlay=document.getElementById('sls-luna-overlay');
+  assert.ok(overlay,'the menu must open');
+  const text=textOf(overlay);
+  assert.match(text,/Show beta features/,'the request must land on the Settings page');
+  assert.match(text,/beta features are off/,'the reason must be explained');
+  assert.doesNotMatch(text,/Artwork for Hades/,'no picker without beta on');
 });
 
 test('the SORT BY label is restored only while the HLTB sort is stored',()=>{

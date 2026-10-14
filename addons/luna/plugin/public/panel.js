@@ -33,15 +33,19 @@
       + '<rect x="13" y="4" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<rect x="4" y="13" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M16.5 13.5v6M13.5 16.5h6" stroke="currentColor" stroke-width="2"/>',
+    settings: '<circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/>'
+      + '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="currentColor" stroke-width="2"/>',
     about: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M12 11v5m0-8v.5" stroke="currentColor" stroke-width="2"/>',
   };
+  // Beta pages stay hidden until the Settings switch is on.
   const NAV = [
     { id: 'playtime', label: 'Playtime' },
     { id: 'presence', label: 'Presence' },
     { id: 'compressor', label: 'Compressor' },
     { id: 'hltb', label: 'HowLongToBeat' },
-    { id: 'steamgrid', label: 'SteamGridDB' },
+    { id: 'steamgrid', label: 'SteamGridDB', beta: true },
+    { id: 'settings', label: 'Settings' },
     { id: 'about', label: 'About' },
   ];
   // Floating panels the add-ons draw when Luna is not present.
@@ -405,7 +409,7 @@
       }, 1000);
     }
 
-    const sidebar = () => NAV.map(entry => {
+    const sidebar = () => visibleNav().map(entry => {
       const item = document.createElement('div');
       item.className = 'sls-luna-tab' + (entry.id === tab ? ' active' : '');
       const icon = document.createElement('span');
@@ -1375,6 +1379,26 @@
       } catch (_) { /* private mode; the order just stays default */ }
     }
 
+    // Beta pages (artwork picker today; frame generation and OptiScaler next)
+    // stay hidden until this switch on the Settings page is on.
+    const BETA_KEY = 'slsLunaBeta';
+    let betaNotice = null;
+    function betaFeatures() {
+      try {
+        return Boolean(w.localStorage && w.localStorage.getItem(BETA_KEY) === '1');
+      } catch (_) { return false; }
+    }
+    function setBetaFeatures(on) {
+      try {
+        if (!w.localStorage) return;
+        if (on) w.localStorage.setItem(BETA_KEY, '1');
+        else w.localStorage.removeItem(BETA_KEY);
+      } catch (_) { /* the switch just will not persist */ }
+    }
+    function visibleNav() {
+      return NAV.filter(entry => !entry.beta || betaFeatures());
+    }
+
     // ---- HowLongToBeat page: cached times, missing games, on-demand fetch --
 
     const hltbHours = seconds => (Math.max(0, Number(seconds) || 0) / 3600).toFixed(1) + ' h';
@@ -2021,6 +2045,16 @@
       try { request = JSON.parse(raw); } catch (_) { return false; }
       artworkRequest = raw;
       if (!request || !request.appid) return false;
+      if (!betaFeatures()) {
+        // The picker is a beta page; point the user at the switch instead of
+        // silently doing nothing.
+        tab = 'settings';
+        betaNotice = 'A game asked for the artwork picker, but beta features are off. '
+          + 'Turn them on to use SteamGridDB artwork.';
+        openMenu();
+        return true;
+      }
+      betaNotice = null;
       sgdbGame = { appid: Number(request.appid), name: String(request.name || ('App ' + request.appid)) };
       sgdbResults = null;
       sgdbAssets = null;
@@ -2190,6 +2224,60 @@
       return body;
     }
 
+    function settingsBody() {
+      const body = document.createElement('div');
+      const note = document.createElement('p');
+      note.className = 'sls-luna-note';
+      note.innerHTML = 'Luna hides in-development pages behind the switch below. Everything else in the '
+        + 'menu is considered stable.';
+      body.appendChild(note);
+
+      if (betaNotice) {
+        const notice = document.createElement('p');
+        notice.className = 'sls-luna-note';
+        notice.textContent = betaNotice;
+        body.appendChild(notice);
+      }
+
+      const on = betaFeatures();
+      const row = document.createElement('div');
+      row.className = 'sls-luna-row';
+      const text = document.createElement('div');
+      text.className = 'txt';
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = 'Show beta features';
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      sub.textContent = 'Reveals pages that are still being built: the artwork picker (SteamGridDB) '
+        + 'and, as they land, frame generation (lsfg-vk) and OptiScaler. They can be rough or incomplete.';
+      text.append(name, sub);
+      const box = document.createElement('div');
+      box.className = 'sls-luna-switch' + (on ? ' on' : '');
+      box.appendChild(document.createElement('span'));
+      box.onclick = () => {
+        setBetaFeatures(!on);
+        betaNotice = null;
+        repaintIfOpen();
+      };
+      row.append(text, box);
+      body.appendChild(row);
+
+      const state = document.createElement('p');
+      state.className = 'sls-luna-note';
+      state.innerHTML = on
+        ? '<strong>Beta pages visible now:</strong> SteamGridDB artwork below the stable tabs.'
+        : '<strong>Beta pages are hidden</strong> - turn the switch on to reach SteamGridDB artwork.';
+      body.appendChild(state);
+
+      const planned = document.createElement('p');
+      planned.className = 'sls-luna-note';
+      planned.textContent = 'Planned beta pages: frame generation (lsfg-vk) and OptiScaler. They will '
+        + 'appear in the menu under this same switch once their detection and installers are ready.';
+      body.appendChild(planned);
+      return body;
+    }
+
     function aboutBody() {      const body = document.createElement('div');
       const note = document.createElement('p');
       note.className = 'sls-luna-note';
@@ -2221,9 +2309,12 @@
     }
 
     const TITLES = { playtime: 'Playtime', presence: 'Presence', compressor: 'Compressor',
-      hltb: 'HowLongToBeat', steamgrid: 'SteamGridDB artwork', about: 'About SLS Luna' };
+      hltb: 'HowLongToBeat', steamgrid: 'SteamGridDB artwork', settings: 'Settings',
+      about: 'About SLS Luna' };
 
     function paint() {
+      const nav = visibleNav();
+      if (!nav.some(entry => entry.id === tab)) tab = 'settings';
       const restoreSearch = document.activeElement === search && tab === 'playtime';
       const selection = [search.selectionStart, search.selectionEnd];
       const existing = document.getElementById(OVERLAY_ID);
@@ -2264,6 +2355,7 @@
         : tab === 'compressor' ? compressorBody()
         : tab === 'hltb' ? hltbBody()
         : tab === 'steamgrid' ? steamgridBody()
+        : tab === 'settings' ? settingsBody()
         : tab === 'about' ? aboutBody() : playtimeBody());
 
       main.append(head, body);

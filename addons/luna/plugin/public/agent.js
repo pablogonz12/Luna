@@ -107,6 +107,17 @@
     return true;
   }
 
+  // Beta pages live behind the Luna Settings switch; the same localStorage key
+  // keeps the context menu honest (no artwork action while beta is off).
+  function betaEnabled(w) {
+    try {
+      const storage = storageOf(w);
+      return Boolean(storage && storage.getItem('slsLunaBeta') === '1');
+    } catch (_) {
+      return false;
+    }
+  }
+
   function defaultActions() {
     return [{
       id: 'hltb',
@@ -119,7 +130,7 @@
     }, {
       id: 'artwork',
       label: 'Change artwork',
-      isEnabled: app => valid(app && app.appid),
+      isEnabled: (app, w) => valid(app && app.appid) && betaEnabled(w),
       run: (app, w) => {
         if (!publishArtworkRequest(w, app)) {
           throw Error('Could not open the Luna artwork picker.');
@@ -826,8 +837,8 @@
 
   return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, ARTWORK_REQUEST_KEY, ARTWORK_LIVE_KEY,
     ARTWORK_LIVE_RESULT_KEY, SORT_LIVE_KEY, discoverMenuTools, openExternalUrl,
-    searchUrlFor, nameOf, defaultActions, publishArtworkRequest, handleArtworkLive, collectLibrary,
-    pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor, hltbSortKey, readHltbOrder,
-    applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption, withFreshOverviews,
-    withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
+    searchUrlFor, nameOf, betaEnabled, defaultActions, publishArtworkRequest, handleArtworkLive,
+    collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor, hltbSortKey,
+    readHltbOrder, applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption,
+    withFreshOverviews, withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
 });
