@@ -152,17 +152,21 @@ and appends value 12. Steam's comparator factory exports are non-configurable
 webpack getters, so instead of replacing it Luna relies on Steam's own fallback
 for unknown values - alphabetical order - and rewrites each game's `sort_as`
 field (a plain writable property) to a fixed-width time key while the option is
-selected, restoring every original when another sort is chosen. The grid caches
-its sorted order and `sort_as` is not observable, so after a key change the
-agent pokes Steam's own sort state (alphabetical first - whose comparator is
-the same fallback, so the keys stay in charge - then HowLongToBeat again) to
-make the library re-sort; the user sees only the corrected order. The direction
-is a Luna page switch (shortest main story first by default, longest first when
-off), stored in localStorage; the Storage event makes the agent re-key and
-re-nudge immediately. Games without times always sort last, and with no HLTB
-data or any failure the library behaves exactly as Steam's alphabetical sort.
-Everything is stored in `~/.local/share/slssteam-integrations/hltb.json`.
-Nothing is fetched automatically.
+selected, restoring every original when another sort is chosen. The grid
+memoizes its sorted order and `sort_as` is not observable, so the agent hands
+the grid a fresh `appOverviews` array on every render: its memo has to
+recompute, and the order follows the current keys (an earlier attempt to poke
+Steam's own sort setter was removed - that dropdown exposes no usable
+callback). The direction is a Luna page switch (shortest main story first by
+default, longest first when off), stored in localStorage; the Storage event
+makes the agent re-key immediately. Games without times always sort last, and
+with no HLTB data or any failure the library behaves exactly as Steam's
+alphabetical sort. The game-page stat cell takes its app id from the details
+React props (`details.unAppID`), which the agent publishes via localStorage
+because the page's DOM has no app link; the panel then builds the cell from the
+playtime cell's own classes. Everything is stored in
+`~/.local/share/slssteam-integrations/hltb.json`. Nothing is fetched
+automatically.
 
 ### In-Steam surfacing (design, verified against the installed client bundle)
 
