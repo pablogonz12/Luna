@@ -155,6 +155,17 @@ OptiClient is part of OptiScaler.
 
 ## 4. HowLongToBeat integration
 
+> **FROZEN at luna 0.10.2 / sgdb 0.2.0 (2026-10-14).** The user confirmed the
+> library sort, the capsule hour labels, the Luna page, the background pass and
+> the artwork picker all work. From here on, do **not** change any HLTB
+> behaviour unless a regression is reported. Any future change to the luna
+> agent, panel or backend must keep these behaviours exactly as they are today:
+> the SORT BY option (value 12) and the `sort_as` keys (including the forced
+> re-sort after a key change), the live-sort healing and the truthful SORT BY
+> label, the capsule hour labels and their diagnostics, the background pass and
+> its skip/pause rules, and the SteamGridDB picker with auto-apply and live
+> refresh.
+
 The experience goal is to match a Steam game to HLTB estimates (for example,
 main-story and completionist times) and display the result in Luna. Do not build
 against an assumed official public API: this research did not confirm a supported
