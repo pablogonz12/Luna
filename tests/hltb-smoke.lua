@@ -385,6 +385,23 @@ out = call('SlsHltbLibrary', { raw = json.encode({ games = 'nope' }) })
 assert(out.success == false)
 
 out = call('SlsLunaInfo')
-assert(out.success == true and out.version == '0.12.0' and type(out.addons) == 'table')
+assert(out.success == true and out.version == '0.13.0' and type(out.addons) == 'table')
+assert(out.prefs and out.prefs.store_hide_followed == nil, 'prefs must start empty')
 
-print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence')
+-- Preferences: the store switch writes here (the store page runs on another
+-- origin and cannot read localStorage), values are whitelisted and typed.
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'store_hide_followed', value = true }) })
+assert(out.success == true and out.prefs.store_hide_followed == true,
+  'the preference was not saved: ' .. tostring(out.error))
+out = call('SlsLunaInfo')
+assert(out.prefs.store_hide_followed == true, 'the preference did not persist')
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'store_hide_followed', value = false }) })
+assert(out.success == true and out.prefs.store_hide_followed == false)
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'store_hide_followed', value = 'yes' }) })
+assert(out.success == false, 'a wrongly typed preference was accepted')
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'nonsense', value = true }) })
+assert(out.success == false, 'an unknown preference was accepted')
+out = call('SlsLunaPrefsSet', { raw = json.encode({ value = true }) })
+assert(out.success == false, 'a keyless preference was accepted')
+
+print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs')

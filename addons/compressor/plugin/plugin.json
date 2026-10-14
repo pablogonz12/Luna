@@ -1,8 +1,10 @@
 {
   "name": "sls-compressor",
   "common_name": "SLS Compressor",
-  "description": "Btrfs game compression status and controls for the btrfs-game-compressor tool",
-  "version": "0.2.0",
+  "description": "Watch and drive the btrfs-game-compressor CLI from Lumen, with a per-game queue, safety guards, and a read-only Stats view of measured savings",
+  "version": "0.3.0",
   "backendType": "lua",
-  "include": ["public"]
+  "include": [
+    "public"
+  ]
 }

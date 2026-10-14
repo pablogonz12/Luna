@@ -10,12 +10,13 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.12.0'
+local VERSION = '0.13.0'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local data_dir = home .. '/.local/share/slssteam-integrations'
 local store_path = data_dir .. '/hltb.json'
 local library_path = data_dir .. '/hltb-library.json'
+local prefs_path = data_dir .. '/luna.json'
 
 local INIT_URL = 'https://howlongtobeat.com/api/search/site/init?t='
 local SEARCH_URL = 'https://howlongtobeat.com/api/search/site'
@@ -39,6 +40,44 @@ end
 local function valid_appid(v)
   local n = tonumber(v)
   return n and n > 0 and n <= 4294967295 and n == math.floor(n)
+end
+
+-- ------------------------------------------------------------------- prefs
+--
+-- Luna-owned settings that more than one surface needs: the store page runs on
+-- its own origin and cannot read the shell's localStorage, so the switches it
+-- obeys live here, where both the panel and the store script can ask over RPC.
+local PREF_KEYS = {
+  store_hide_followed = 'boolean',
+}
+
+local function default_prefs()
+  return { version = 1 }
+end
+
+local function load_prefs()
+  local raw = read_file(prefs_path)
+  if not raw then return default_prefs() end
+  local ok, decoded = pcall(json.decode, raw)
+  if not ok or type(decoded) ~= 'table' then return default_prefs() end
+  local prefs = default_prefs()
+  for key, kind in pairs(PREF_KEYS) do
+    if kind == 'boolean' and type(decoded[key]) == 'boolean' then prefs[key] = decoded[key] end
+  end
+  return prefs
+end
+
+local function persist_prefs(prefs)
+  fs.create_directories(fs.parent_path(prefs_path))
+  local tmp = prefs_path .. '.tmp'
+  local f = io.open(tmp, 'wb')
+  if not f then return false, 'cannot write prefs' end
+  f:write(json.encode(prefs))
+  local closed = f:close()
+  if not closed then os.remove(tmp); return false, 'cannot write prefs' end
+  local ok, err = os.rename(tmp, prefs_path)
+  if not ok then os.remove(tmp); return false, tostring(err) end
+  return true
 end
 
 -- ------------------------------------------------------------------ storage
@@ -353,7 +392,29 @@ end
 
 function M.register(registry)
   registry.SlsLunaInfo = function()
-    return reply({ success = true, version = VERSION, addons = installed(), data = data_dir })
+    return reply({ success = true, version = VERSION, addons = installed(), data = data_dir,
+      prefs = load_prefs() })
+  end
+
+  -- One write surface for the switches above. Keys are whitelisted so this can
+  -- never grow into a general file-write primitive.
+  registry.SlsLunaPrefsSet = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    if not ok or type(entry) ~= 'table' or type(entry.key) ~= 'string' or #entry.key > 64 then
+      return reply({ success = false, error = 'Send {key, value}.' })
+    end
+    local kind = PREF_KEYS[entry.key]
+    if kind == nil then
+      return reply({ success = false, error = 'Unknown preference.' })
+    end
+    if type(entry.value) ~= kind then
+      return reply({ success = false, error = 'Wrong value type for ' .. entry.key .. '.' })
+    end
+    local prefs = load_prefs()
+    prefs[entry.key] = entry.value
+    local saved, serr = persist_prefs(prefs)
+    if not saved then return reply({ success = false, error = tostring(serr) }) end
+    return reply({ success = true, prefs = prefs })
   end
 
   -- Whole local cache: appid -> record, plus the game list the agent reported.

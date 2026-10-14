@@ -73,6 +73,7 @@
   // profiles, and plain-language names for actions and game states.
   const COMPRESSOR_TABS = [
     { id: 'status', label: 'Status' },
+    { id: 'stats', label: 'Stats' },
     { id: 'settings', label: 'Settings' },
     { id: 'games', label: 'Games' },
     { id: 'log', label: 'Log' },
@@ -86,7 +87,8 @@
     ['lossless', 'Lossless'],
   ];
   const ACTION_LABELS = {
-    scan: 'library scan', preview: 'preview', run: 'compression pass', assets: 'asset inventory',
+    scan: 'library scan', preview: 'preview', run: 'compression pass',
+    recheck: 'measurement refresh', assets: 'asset inventory',
   };
   const STATUS_LABELS = {
     UNCOMPRESSED: 'uncompressed', UPDATED: 'changed since last pass', COMPRESSED: 'dedupe pending',
@@ -193,6 +195,13 @@
       '.sls-luna-mini i{display:block;height:100%;background:#3cb0ff;}',
       '.sls-luna-mini i.done{background:#57cb5c;}',
       '.sls-luna-mini i.failed{background:#ff8080;}',
+      '.sls-luna-chart{margin:0 0 16px;}',
+      '.sls-luna-chart-row{display:flex;align-items:center;gap:10px;padding:3px 0;}',
+      '.sls-luna-chart-label{flex:0 0 180px;color:#cfd3d7;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '.sls-luna-chart-track{flex:1 1 auto;height:12px;border-radius:3px;background:rgba(255,255,255,.06);overflow:hidden;}',
+      '.sls-luna-chart-fill{height:100%;background:linear-gradient(90deg,#2b7fb8,#3cb0ff);}',
+      '.sls-luna-chart-fill.alt{background:linear-gradient(90deg,#3d6b4a,#57cb5c);}',
+      '.sls-luna-chart-value{flex:0 0 118px;text-align:right;color:#9aa4ae;font-size:11px;}',
       '.sls-luna-error{color:#ff8080;font-size:13px;margin:8px 0 0;}',
       '.sls-luna-assets{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px;margin:10px 0 0;}',
       '.sls-luna-asset{cursor:pointer;border:1px solid rgba(255,255,255,.09);border-radius:3px;overflow:hidden;background:#10161c;}',
@@ -310,6 +319,122 @@
       });
   }
 
+  function isStoreWindow(w) {
+    try { return /(^|\.)store\.steampowered\.com$/.test(String(w.location && w.location.hostname || '')); }
+    catch (_) { return false; }
+  }
+
+  /* Store mode. The store runs on its own origin, so it can neither read the
+     shell's localStorage nor be seen by the Settings page: the switch comes from
+     the backend over RPC, and the followed list comes from the store's own
+     session. The response is only ever used to hide tiles - nothing is stored
+     and nothing leaves this machine. */
+  const STORE_HIDDEN_ATTR = 'data-sls-luna-hidden';
+  // Followed tiles are hidden on the store's browsing surfaces; search results
+  // and the game pages themselves stay untouched on purpose.
+  const STORE_QUIET = /^\/(search|app|account|login|join|checkout|cart|wishlist|points)(\/|$)/;
+
+  function mountStore(w) {
+    const document = w.document;
+    const state = { followed: null, show: false, interval: null, observer: null };
+    let scheduled = false;
+
+    const style = document.createElement('style');
+    style.id = 'sls-luna-store-style';
+    style.textContent = [
+      '[' + STORE_HIDDEN_ATTR + ']{display:none !important;}',
+      '#sls-luna-store-chip{position:fixed;left:12px;bottom:12px;z-index:2147483000;display:flex;align-items:center;',
+      'gap:8px;background:rgba(27,31,36,.92);color:#dcdedf;border:1px solid rgba(255,255,255,.16);border-radius:999px;',
+      'padding:6px 12px;font:12px "Motiva Sans",Arial,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4);}',
+      '#sls-luna-store-chip b{color:#66c0f4;font-weight:700;}',
+      '#sls-luna-store-chip button{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);color:#fff;',
+      'border-radius:999px;padding:3px 10px;font:11px "Motiva Sans",Arial,sans-serif;cursor:pointer;}',
+    ].join('');
+    if (document.head) document.head.appendChild(style);
+
+    const markedTiles = () => Array.prototype.slice.call(
+      document.querySelectorAll('[' + STORE_HIDDEN_ATTR + ']'));
+
+    function paintChip(count) {
+      let chip = document.getElementById('sls-luna-store-chip');
+      if (!chip) {
+        chip = document.createElement('div');
+        chip.id = 'sls-luna-store-chip';
+        const label = document.createElement('span');
+        const toggle = document.createElement('button');
+        toggle.onclick = () => {
+          if (state.show) {
+            state.show = false;
+            sweep();
+            return;
+          }
+          state.show = true;
+          markedTiles().forEach(node => node.removeAttribute(STORE_HIDDEN_ATTR));
+          paintChip(0);
+        };
+        chip.append(label, toggle);
+        (document.body || document.documentElement).appendChild(chip);
+      }
+      const label = chip.children[0];
+      const toggle = chip.children[1];
+      if (state.show) {
+        label.innerHTML = 'Luna: showing every tile';
+        toggle.textContent = 'hide again';
+      } else {
+        label.innerHTML = 'Luna hides <b>' + count + '</b> followed game' + (count === 1 ? '' : 's');
+        toggle.textContent = 'show';
+      }
+    }
+
+    /** Marks every tile whose appid(s) are all followed. */
+    function sweep() {
+      if (state.show || !state.followed) return;
+      let count = 0;
+      for (const tile of document.querySelectorAll('[data-ds-appid]')) {
+        const attr = String(tile.getAttribute('data-ds-appid') || '');
+        const ids = attr.split(',').map(part => part.trim()).filter(part => /^\d+$/.test(part));
+        if (!ids.length || !ids.every(id => state.followed.has(id))) continue;
+        if (!tile.getAttribute(STORE_HIDDEN_ATTR)) tile.setAttribute(STORE_HIDDEN_ATTR, '');
+        count += 1;
+      }
+      if (count > 0 || document.getElementById('sls-luna-store-chip')) paintChip(count);
+    }
+
+    function schedule() {
+      if (scheduled || state.show) return;
+      scheduled = true;
+      const later = () => { scheduled = false; sweep(); };
+      if (typeof w.setTimeout === 'function') w.setTimeout(later, 350);
+      else later();
+    }
+
+    async function start() {
+      if (STORE_QUIET.test(String(w.location && w.location.pathname || ''))) return;
+      let info = null;
+      try { info = await rpc(w, 'SlsLunaInfo'); } catch (_) { return; }
+      if (!info || !info.prefs || info.prefs.store_hide_followed !== true) return;
+      if (typeof w.fetch !== 'function') return;
+      let followed = null;
+      try {
+        const response = await w.fetch('/dynamicstore/userdata/', { credentials: 'include' });
+        if (!response || response.ok === false) return;
+        const data = await response.json();
+        followed = new Set((data && Array.isArray(data.rgFollowedApps) ? data.rgFollowedApps : []).map(String));
+      } catch (_) { return; }
+      if (!followed.size) return;
+      state.followed = followed;
+      sweep();
+      const root = document.body || document.documentElement;
+      if (typeof w.MutationObserver === 'function' && root) {
+        state.observer = new w.MutationObserver(schedule);
+        state.observer.observe(root, { childList: true, subtree: true });
+      }
+      if (typeof w.setInterval === 'function') state.interval = w.setInterval(schedule, 4000);
+    }
+
+    start();
+  }
+
   function mount(w) {
     const document = w.document;
     if (!document || w.__SlsLunaPanel) return;
@@ -317,6 +442,9 @@
     // Tells the feature add-ons to stay quiet in the shell: their settings live
     // in this menu while it is present.
     w.__SlsLunaUi = true;
+    // The store is a different origin with no menubar: no menu there, just the
+    // followed-games filter when the Settings switch asks for it.
+    if (isStoreWindow(w)) { mountStore(w); return; }
     styled(document);
     removeFloating(document);
 
@@ -339,6 +467,7 @@
     let sgdbNotice = null;
     let artworkRequest = '';
     let graphics = null;
+    let lunaInfo = null;
     let compressorTab = 'status';
     let compressorQuery = '';
     let pendingAction = null;
@@ -1062,6 +1191,157 @@
       return body;
     }
 
+    /* Horizontal bars for the Stats tab. Values are plain byte counts; the
+       widest entry fills the track so small libraries still read clearly. */
+    function compressorChart(body, title, entries, options) {
+      const opts = options || {};
+      const wrap = document.createElement('div');
+      const head = document.createElement('p');
+      head.className = 'sls-luna-note';
+      head.innerHTML = '<strong>' + title + '</strong>';
+      wrap.appendChild(head);
+      if (!entries.length) {
+        const empty = document.createElement('p');
+        empty.className = 'sls-luna-note';
+        empty.textContent = opts.empty || 'Nothing measured yet.';
+        wrap.appendChild(empty);
+        body.appendChild(wrap);
+        return;
+      }
+      const list = document.createElement('div');
+      list.className = 'sls-luna-chart';
+      const peak = entries.reduce((max, entry) => Math.max(max, Number(entry.value) || 0), 0) || 1;
+      entries.forEach(entry => {
+        const row = document.createElement('div');
+        row.className = 'sls-luna-chart-row';
+        const label = document.createElement('span');
+        label.className = 'sls-luna-chart-label';
+        label.textContent = entry.label;
+        if (entry.title) label.title = entry.title;
+        const track = document.createElement('div');
+        track.className = 'sls-luna-chart-track';
+        const fill = document.createElement('div');
+        fill.className = 'sls-luna-chart-fill' + (opts.alt ? ' alt' : '');
+        fill.style.width = Math.max(2, Math.round((Number(entry.value) || 0) * 100 / peak)) + '%';
+        track.appendChild(fill);
+        const value = document.createElement('span');
+        value.className = 'sls-luna-chart-value';
+        value.textContent = entry.display;
+        row.append(label, track, value);
+        list.appendChild(row);
+      });
+      wrap.appendChild(list);
+      body.appendChild(wrap);
+    }
+
+    /* The Stats tab: everything comes from the compressor's own ledgers (read
+       by the backend), Luna's recorded passes and the last scan. Nothing here
+       triggers a measurement - the button does that explicitly. */
+    function compressorStats(body) {
+      const stats = (compressor && compressor.stats) || null;
+      const job = compressor && compressor.job;
+      const note = document.createElement('p');
+      note.className = 'sls-luna-note';
+      note.innerHTML = 'Savings measured by the compressor itself: <strong>ZSTD compression</strong> (original vs '
+        + 'on-disk bytes per game) and <strong>deduplication</strong> (physical extent deltas, latest measurement '
+        + 'per directory). The categories overlap by design and are never added into one grand total.';
+      body.appendChild(note);
+
+      const actions = document.createElement('div');
+      actions.className = 'sls-luna-row';
+      const button = jobButton(body, 'Measure now', 'recheck', true, Boolean(job && job.running));
+      const hint = document.createElement('div');
+      hint.className = 'sub';
+      hint.textContent = 'Runs the compressor\u2019s own --recheck: it remeasures the installed games and '
+        + 'refreshes its ledger. Nothing is recompressed and no game file is touched.';
+      actions.append(button, hint);
+      body.appendChild(actions);
+
+      if (!stats) {
+        const empty = document.createElement('p');
+        empty.className = 'sls-luna-note';
+        empty.textContent = 'No statistics yet \u2014 the next Refresh loads them.';
+        body.appendChild(empty);
+        return;
+      }
+      const compression = stats.compression || {};
+      const dedupe = stats.dedupe || {};
+      const luna = stats.luna || {};
+      const library = stats.library || {};
+      const summary = (compressor && compressor.status && compressor.status.summary) || {};
+      const measuredSaved = (Number(compression.saved_bytes) || 0) + (Number(dedupe.saved_bytes) || 0);
+
+      const cards = document.createElement('div');
+      cards.className = 'sls-luna-stat';
+      [['Measured saved', formatBytes(measuredSaved), 'ZSTD + deduplication'],
+       ['Library on disk', formatBytes(library.bytes), (Number(library.games) || 0) + ' games in the last scan'],
+       ['Compacted', (Number(summary.compacted) || 0) + ' / ' + (Number(summary.game_count) || 0), 'games done'],
+       ['Luna passes', formatBytes(luna.saved_bytes), (Number(luna.measured) || 0) + ' games with savings']]
+        .forEach(pair => {
+          const cell = document.createElement('div');
+          const value = document.createElement('b');
+          value.textContent = String(pair[1]);
+          const label = document.createElement('i');
+          label.textContent = pair[0] + ' \u00b7 ' + pair[2];
+          cell.append(value, label);
+          cards.appendChild(cell);
+        });
+      body.appendChild(cards);
+
+      const compressionGames = listOf(compression.games).slice(0, 8);
+      compressorChart(body, 'ZSTD savings per game',
+        compressionGames.map(game => ({
+          label: game.name, title: game.path || '',
+          value: game.saved_bytes,
+          display: formatBytes(game.saved_bytes) + ' \u00b7 '
+            + pctText(game.original_bytes ? game.saved_bytes * 100 / game.original_bytes : 0) + '%',
+        })),
+        { empty: Number(compression.measured)
+          ? 'Nothing measured yet.'
+          : 'No measured ZSTD rows yet \u2014 press Measure now to fill this ledger.' });
+
+      const lunaGames = listOf(luna.games).slice(0, 8);
+      compressorChart(body, 'Savings recorded by Luna passes',
+        lunaGames.map(game => ({ label: game.name, value: game.saved_bytes,
+          display: formatBytes(game.saved_bytes) })),
+        { empty: 'No per-game savings were recorded yet \u2014 a pass that reclaims nothing records zero.' });
+
+      const dedupeEntries = listOf(dedupe.entries).slice(0, 8);
+      compressorChart(body, 'Deduplication per directory',
+        dedupeEntries.map(entry => ({
+          label: String(entry.path || '').split('/').pop() || String(entry.path || ''),
+          title: entry.path || '', value: entry.saved_bytes,
+          display: formatBytes(entry.saved_bytes),
+        })),
+        { empty: 'No deduplication passes recorded yet.', alt: true });
+
+      const libraryGames = listOf(compressor && compressor.status && compressor.status.games)
+        .slice()
+        .sort((a, b) => (Number(b.size_bytes) || 0) - (Number(a.size_bytes) || 0))
+        .slice(0, 8);
+      compressorChart(body, 'Biggest games in the library',
+        libraryGames.map(game => ({ label: game.name, value: game.size_bytes,
+          display: game.size_display || formatBytes(game.size_bytes) })),
+        { empty: 'No scan yet.', alt: true });
+
+      const total = Number(summary.game_count) || 0;
+      const done = Number(summary.compacted) || 0;
+      if (total > 0) {
+        const wrap = document.createElement('div');
+        const head = document.createElement('p');
+        head.className = 'sls-luna-note';
+        head.innerHTML = '<strong>Library progress</strong> \u00b7 ' + done + ' of ' + total + ' compacted ('
+          + pctText(done * 100 / total) + '%)';
+        const bar = document.createElement('div');
+        bar.className = 'sls-luna-progress';
+        const fill = document.createElement('div');
+        fill.style.width = pctText(done * 100 / total) + '%';
+        bar.appendChild(fill);
+        wrap.append(head, bar);
+        body.appendChild(wrap);
+      }
+    }
+
     function compressorSettings(body) {
       const settings = (compressor && compressor.settings) || {};
       const group = title => {
@@ -1353,9 +1633,9 @@
         item.onclick = () => {
           compressorTab = entry.id;
           paint();
-          // The full game list arrives with the next refresh, so entering the
-          // Games tab fills it immediately instead of showing an empty page.
-          if (entry.id === 'games') refresh();
+          // The full game list and the statistics arrive with the next refresh,
+          // so entering those tabs fills them immediately.
+          if (entry.id === 'games' || entry.id === 'stats') refresh();
         };
         strip.appendChild(item);
       });
@@ -1363,6 +1643,7 @@
       // The section builders append into the body they are handed; appending
       // their return value again would make the body its own child.
       if (compressorTab === 'settings') compressorSettings(body);
+      else if (compressorTab === 'stats') compressorStats(body);
       else if (compressorTab === 'games') compressorGames(body);
       else if (compressorTab === 'log') compressorLog(body);
       else compressorStatus(body);
@@ -2310,7 +2591,30 @@
           line((entry.kind === 'client' ? 'Client: ' : 'Files: ') + entry.path);
         });
       }
-      line('Per-game OptiScaler detection and management are planned; today Luna only reports what exists.');
+      line('Per-game OptiScaler management is planned; today Luna only reports what exists.');
+
+      section('OptiScaler Client (Luna port, read-only)');
+      const client = report.optiscaler_client;
+      if (!client) {
+        line('No OptiScaler Client configuration found.');
+      } else {
+        line('Config: ' + client.config + (client.app_dir ? ' \u00b7 app: ' + client.app_dir : '')
+          + ' \u00b7 ' + (Number(client.managed) || 0) + ' game(s) managed, '
+          + (Number(client.versions_cached) || 0) + ' OptiScaler version(s) cached.');
+        (Array.isArray(client.games) ? client.games : []).forEach(game => {
+          const bits = [];
+          if (game.installed) bits.push('OptiScaler installed');
+          else if (Array.isArray(game.files) && game.files.length) bits.push('files found');
+          if (game.fsr_version) bits.push('FSR ' + game.fsr_version + (game.fsr_native ? ' native' : ''));
+          if (game.fsr_swapped) bits.push('FSR4 swapped');
+          if (game.dlss_via) bits.push('DLSS via OptiScaler');
+          if (game.xess_via) bits.push('XeSS via OptiScaler');
+          if (game.exists === false) bits.push('path missing');
+          line(game.name + ' \u00b7 ' + (bits.join(', ') || 'nothing detected'));
+        });
+        line('This is the read side of the Luna port: it only reports what the client already did, without '
+          + 'touching its files. Deployment and per-game configuration come later, behind their own gate.');
+      }
 
       section('Steam');
       line((steamInfo.root ? 'Steam root: ' + steamInfo.root : 'No bootstrapped Steam installation found.')
@@ -2371,7 +2675,31 @@
       planned.textContent = 'Planned beta pages: frame generation (lsfg-vk) and OptiScaler. They will '
         + 'appear in the menu under this same switch once their detection and installers are ready.';
       body.appendChild(planned);
+
+      const storeHeader = document.createElement('p');
+      storeHeader.className = 'sls-luna-note';
+      storeHeader.innerHTML = '<strong>Store</strong>';
+      body.appendChild(storeHeader);
+      const storeOn = Boolean(lunaInfo && lunaInfo.prefs && lunaInfo.prefs.store_hide_followed);
+      switchRow(body, 'Hide followed games in the store',
+        'Store home and discovery lists stop showing games you already follow. Search and game pages stay '
+        + 'untouched, and the followed list is read from the store session on this machine. Takes effect on '
+        + 'the next store page load.',
+        storeOn, setStoreHide);
       return body;
+    }
+
+    // The store switch is stored in the backend, not localStorage: the store
+    // page runs on its own origin and can only read it over RPC.
+    async function setStoreHide(value) {
+      try {
+        const out = await rpc(w, 'SlsLunaPrefsSet', { key: 'store_hide_followed', value: Boolean(value) });
+        lunaInfo = Object.assign({}, lunaInfo || {}, { prefs: out.prefs });
+      } catch (error) {
+        betaNotice = 'Could not save the store preference: '
+          + String(error && error.message ? error.message : error);
+      }
+      repaintIfOpen();
     }
 
     function aboutBody() {      const body = document.createElement('div');
@@ -2508,6 +2836,11 @@
         graphics = await rpc(w, 'SlsGraphicsGet');
       } catch (error) {
         graphics = graphics || {};
+      }
+      try {
+        lunaInfo = await rpc(w, 'SlsLunaInfo');
+      } catch (error) {
+        lunaInfo = lunaInfo || {};
       }
       maybeAutoFetch();
       repaintIfOpen();

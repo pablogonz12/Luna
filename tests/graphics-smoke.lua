@@ -185,6 +185,21 @@ write(home .. '/homebrew/plugins/decky-lsfg-vk/plugin.json', '{"name":"decky-lsf
 write(home .. '/.local/share/OptiScalerClient/AppRun', '#!/bin/sh\n')
 write(home .. '/.config/optiscaler/settings.ini', 'version=0.9\n')
 
+-- OptiScaler Client: an appid-named record that resolves through the
+-- appmanifest, deployed files at two depths, and a manual record.
+write(home .. '/.config/OptiscalerClient/games.json',
+  '[{"Name":"appid_1133870","AppId":"1133870","InstallPath":"' .. home .. '/Steam/steamapps/common/SE2",'
+  .. '"IsOptiscalerInstalled":true,"FsrVersion":"4.0.2.0","FsrIsNative":true,"IsFsr4DllSwapped":false,'
+  .. '"DlssIsNative":false,"DlssViaOptiscaler":true},'
+  .. '{"Name":"Manual Game","AppId":"","InstallPath":"","IsOptiscalerInstalled":false}]')
+write(home .. '/Steam/steamapps/common/SE2/OptiScaler.ini', '[OptiScaler]\n')
+write(home .. '/Steam/steamapps/common/SE2/bin/nvngx.dll', 'stub')
+write(home .. '/Steam/steamapps/appmanifest_1133870.acf',
+  '"AppState"\n{\n\t"appid"\t\t"1133870"\n\t"name"\t\t"Space Engineers 2 (fixture)"\n}\n')
+write(home .. '/.config/OptiscalerClient/Cache/OptiScaler/1.2.3/marker', 'x')
+write(home .. '/.config/OptiscalerClient/Cache/OptiScaler/2.0.0/marker', 'x')
+os.execute('mkdir -p ' .. string.format('%q', home .. '/opt/optiscaler-client'))
+
 write(home .. '/.local/share/Steam/steam.sh', '#!/bin/sh\n')
 os.execute('mkdir -p ' .. string.format('%q', home .. '/.local/share/Steam/steamapps/common/SteamLinuxRuntime_sniper'))
 
@@ -216,9 +231,25 @@ assert(lsfg.config and lsfg.config.path:find('conf.toml', 1, true) ~= nil)
 assert(#lsfg.decky_plugins == 1)
 
 local opti = backend.optiscaler_report(home)
-local kinds = {}
-for _, entry in ipairs(opti) do kinds[entry.kind] = true end
+local kinds, paths = {}, {}
+for _, entry in ipairs(opti) do kinds[entry.kind] = true; paths[entry.path] = true end
 assert(kinds.client and kinds.files, 'both the client and file installs must be reported')
+assert(paths[home .. '/.local/share/OptiScalerClient'] and paths[home .. '/.config/optiscaler'],
+  'client and file installs must be listed by path')
+assert(paths[home .. '/.config/OptiscalerClient'], 'the OptiScaler Client config dir must count as an install')
+
+local client = backend.optiscaler_client(home)
+assert(client and client.config == home .. '/.config/OptiscalerClient', 'the client config must be found')
+assert(client.managed == 2 and client.versions_cached == 2, 'managed games and cached versions are wrong')
+assert(client.app_dir == home .. '/opt/optiscaler-client', 'the app dir override must be honoured')
+local se2 = client.games[1]
+assert(se2.name == 'Space Engineers 2 (fixture)', 'the appmanifest name must win over appid_')
+assert(se2.exists == true and se2.installed == true, 'the install path must be verified')
+assert(#se2.files == 2, 'the top-level and nested OptiScaler files must be found')
+assert(se2.fsr_version == '4.0.2.0' and se2.fsr_native == true and se2.dlss_via == true, 'upscaler flags are wrong')
+local manual = client.games[2]
+assert(manual.name == 'Manual Game' and manual.exists == false and #manual.files == 0, 'a manual record must stay as-is')
+assert(backend.optiscaler_client(home .. '/missing-home') == nil, 'no config means no report')
 
 local steam = backend.steam_report(home)
 assert(steam.root == home .. '/.local/share/Steam')
@@ -228,18 +259,24 @@ assert(#steam.runtimes == 1 and steam.runtimes[1] == 'SteamLinuxRuntime_sniper')
 assert(#backend.gpu_report(home .. '/missing-sysfs') == 0)
 local empty = backend.lsfg_report(home .. '/missing-home', {})
 assert(#empty.layers == 0 and empty.config == nil and #empty.decky_plugins == 0)
-assert(#backend.optiscaler_report(home .. '/missing-home') == 0)
+-- A missing home can still not invent installs; only the absolute app dir (the
+-- env override in tests) lives outside it.
+for _, entry in ipairs(backend.optiscaler_report(home .. '/missing-home')) do
+  assert(entry.path == home .. '/opt/optiscaler-client', 'only the absolute app dir may survive a missing home')
+end
 assert(backend.steam_report(home .. '/missing-home').root == '')
 
 -- ---------------------------------------------------------------- RPC
 
 local report = call('SlsGraphicsGet')
-assert(report.success == true and report.version == '0.1.0')
+assert(report.success == true and report.version == '0.2.0')
 assert(report.system.distro == 'Arch Linux (fixture)', 'the fake os-release must be used')
 assert(type(report.system.kernel) == 'string', 'the kernel must be reported')
 assert(#report.gpus == 2)
 assert(#report.lsfg.layers == 1 and report.lsfg.config ~= nil)
-assert(#report.optiscaler == 2)
+assert(#report.optiscaler >= 3, 'every install candidate must be reported')
+assert(report.optiscaler_client and report.optiscaler_client.managed == 2,
+  'the client report must ride along')
 assert(#report.steam.runtimes == 1)
 
-print('Luna Graphics backend OK: GPU, lsfg-vk layers/config/Decky, OptiScaler, Steam runtime, empty roots')
+print('Luna Graphics backend OK: GPU, lsfg-vk layers/config/Decky, OptiScaler + Client, Steam runtime, empty roots')

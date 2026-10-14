@@ -16,4 +16,5 @@ LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/test
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" \
   SLS_GRAPHICS_SYSFS="$tmp/home/sys" SLS_GRAPHICS_OS_RELEASE="$tmp/home/os-release" \
   SLS_GRAPHICS_SYSTEM_LAYER_DIRS="$tmp/home/no-system-layers" \
+  SLS_GRAPHICS_OPTISCALER_APP="$tmp/home/opt/optiscaler-client" \
   "$lua" "$root/tests/graphics-smoke.lua"
