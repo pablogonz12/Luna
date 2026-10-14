@@ -48,9 +48,11 @@ reimplementation of Steam ROM Manager's bulk ROM parsing/import workflow. Steam
 ROM Manager is a separate bulk game importer/artwork manager; Luna should only
 integrate or delegate to it if a concrete supported interface is established.
 
-**Implemented (add-on `sgdb` 0.2.0):** the library right-click menu carries
-**Change artwork** (the agent writes a request to localStorage; the panel opens
-the picker on that game), and the Luna menu has a **SteamGridDB** page. The user
+**Implemented (add-on `sgdb` 0.2.0, behind the beta switch):** the library
+right-click menu carries **Change artwork** (the agent writes a request to
+localStorage; the panel opens the picker on that game) and the Luna menu has a
+**SteamGridDB** page - both visible only when **Settings → Show beta features**
+is on. The user
 adds their own free SteamGridDB API key (stored locally in
 `~/.local/share/slssteam-integrations/sgdb.json`), the page searches
 SteamGridDB, matches the game, and lists **grid / wide / hero / logo / icon**
