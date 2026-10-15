@@ -86,33 +86,65 @@ menus requires completing and validating the Luna page integrations first.
 
 ## Install
 
-The repository is currently **private**, so installation requires GitHub access.
-Clone it, then run the installer:
+The repository is currently **private**, so you install it from a checkout (the
+`curl | bash` one-liner in `install.sh` starts working once it is public).
+
+**What you need first**
+
+- A Steam install for this user (`~/.local/share/Steam` or `~/.steam/steam`).
+- The supported base: **slsteam-moon + Lumen (+ its LuaTools backend)**, either
+  already working or absent. A complete base is reused untouched; if it is
+  absent, `install.sh` fetches the pinned upstream installer, verifies its
+  SHA256 and runs it with auto-launch disabled; a **partial** base is a stop
+  condition, because Luna never removes or replaces base components itself.
+- `python3` and `bash` (`curl` only for the bootstrap path).
+- **Steam fully closed** - the installer patches Lumen's `boot.lua` and the
+  add-ons live inside its runtime.
+- Do not run as root.
+
+**Install**
 
 ```bash
 git clone https://github.com/pgm1207/Luna.git
 cd Luna
-bash install.sh
+
+bash scripts/preflight.sh                 # read-only: what is here, what is missing
+bash scripts/install-local.sh --dry-run   # the exact plan; writes nothing
+bash scripts/install-local.sh             # install the Luna add-ons
 ```
 
-The installer reuses a complete existing LuaTools-Moon stack. If the base is
-missing, it invokes the upstream installer at a pinned commit and verifies its
-SHA256 before running it; Steam is not auto-launched until Luna's add-ons are
-installed. Luna add-on payloads are separately pinned and integrity-checked.
-Existing Moon/Lumen installations are not silently upgraded. A partial base is a
-stop condition, not an invitation for Luna to remove or replace it.
+`install.sh` is the one-shot version: the same checks, plus it bootstraps the
+base when it is missing (pinned commit, SHA256-verified, `--nolaunch`).
+`bash install.sh --help` lists its options (`--only NAME`, `--force`,
+`--dry-run`, and the upstream release-channel flags).
 
-For an existing installation, inspect before changing anything:
+Then **restart Steam** (Steam → Exit, then launch it again): the Luna button
+appears next to Lumen's in the menu bar and holds every page.
+
+**Verify**
 
 ```bash
-bash scripts/preflight.sh          # read-only environment and safety checks
-bash scripts/status.sh              # installed files and drift
-bash scripts/install-local.sh --dry-run
-bash scripts/install-local.sh       # Steam must be fully closed
+bash scripts/status.sh               # installed files vs. the pinned payloads
+python3 scripts/luna.py verify       # manifest, payload and drift checks
 ```
 
-Use `--only NAME` to install one add-on, or `--force` only after reviewing the
-differences. See the [installation roadmap](docs/INSTALL_PLAN.md) for the planned
+In the client, the Luna menu's **Health** page shows the installed versions
+against the pinned bundle, the `boot.lua` marker/backup state, the Lumen/Steam
+paths, the current settings and the data files, with *Copy diagnostics*.
+
+**If it refuses**
+
+The installer is fail-closed on purpose: Steam running, a Lumen sidecar still
+alive, a `boot.lua` that drifted, a partial base, or an installed payload that
+differs from the pin. Each message names the file or process to look at; use
+`--force` only after reading the diff it prints.
+
+**Other machines and updates**
+
+`luna release` builds a verified bundle and `luna update --bundle/--url/--latest`
+installs it without a checkout - see [Updating](#updating).
+
+See the [installation roadmap](docs/INSTALL_PLAN.md) for the planned
 optional-component flow, including Decky Loader and CloudRedirect.
 
 ## What Luna protects
@@ -147,10 +179,8 @@ source.
 ## Development checks
 
 ```bash
-node --test tests/*.test.cjs
-python3 -m unittest discover -s tests -p 'test_*.py'
-bash scripts/test-backend.sh
-python3 scripts/luna.py verify --sources
+bash scripts/test-all.sh                   # everything CI runs: UI, backends, installer
+python3 scripts/luna.py verify --sources   # also compares against local checkouts
 ```
 
 Luna is a private preview. Versions, supported distributions, optional installs,
