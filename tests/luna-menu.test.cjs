@@ -64,18 +64,21 @@ function webpackFixture(requireName){
     const element={type,props:{...props,children}};
     if(props&&'key' in props)element.key=props.key;
     return element;},
-    isValidElement:e=>!!e?.props};
+    isValidElement:e=>!!e?.props,
+    useState:()=>[],
+    Fragment:{}};
   const calls=[];
   const jsxs=(t,p)=>{calls.push(p);return {type:t,props:p};};
   const jsx={jsx:(t,p)=>{calls.push(p);return {type:t,props:p};},jsxs};
   const MenuItem=new Function('return function contextMenuItem(){return "onSelected"}')();
   MenuItem.prototype.OnClick=function(){};
   const moduleExports={...jsx,MenuItem};
-  const exports={1:moduleExports};
+  const exports={1:moduleExports,2:React};
   const require=id=>exports[id];
   require.m={
     1:new Function('return function(module,exports,'+requireName+'){' +
       'const nativeName="BuildManageSubmenu";'+requireName+'(1);}')(),
+    2:new Function('return function(module,exports){const a="react"}')(),
   };
   return {SP_REACT:React,__expectedJsx:moduleExports,__calls:calls,
     webpackChunksteamui:{push(chunk){chunk[2](require);}}};
@@ -97,6 +100,20 @@ test('discovers the native menu dependencies when Steam minifies the require par
     const w=webpackFixture(requireName);
     const found=discoverMenuTools(w);
     assert.ok(found,'menu tools were not discovered for require alias '+requireName);
+    assert.equal(found.jsx,w.__expectedJsx);
+    assert.equal(found.item.name,'contextMenuItem');
+  }
+});
+
+test('still discovers the menu when Steam stops exposing window.SP_REACT',()=>{
+  // The 2026-10 client update removed SP_REACT from SharedJSContext; requiring
+  // it silently killed the sort option and every jsx-based hook.
+  for(const requireName of ['r','t']){
+    const w=webpackFixture(requireName);
+    delete w.SP_REACT;
+    const found=discoverMenuTools(w);
+    assert.ok(found,'the menu tools must come from the module graph instead');
+    assert.equal(typeof found.React.createElement,'function');
     assert.equal(found.jsx,w.__expectedJsx);
     assert.equal(found.item.name,'contextMenuItem');
   }

@@ -3,6 +3,16 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.1 - 2026-10-15
+
+- **Fix: the HowLongToBeat library sort disappeared.** A Steam client update
+  stopped exposing `window.SP_REACT` in SharedJSContext, and the agent required
+  it before installing its jsx hooks, so the sort option (and the right-click
+  Luna actions, and Playtime's editors) silently stopped appearing. React is now
+  resolved from the same webpack module graph when the global is absent, and
+  both agents have a regression test for the missing global. Vendored Playtime
+  **0.6.1** carries the same fix.
+
 ## 0.14.0 - 2026-10-15
 
 - **Settings moved to the backend.** The beta switch, the HLTB order and the

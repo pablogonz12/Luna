@@ -240,10 +240,26 @@
      chunk, read the third (minified) require parameter of the native game-menu
      module, and inspect only that module's already-loaded dependencies. The
      lookups are independent per add-on on purpose: each payload stays
-     standalone and keeps working whatever else is installed. */
+     standalone and keeps working whatever else is installed. Steam used to
+     expose React as `window.SP_REACT`; a client update stopped doing that in
+     SharedJSContext, which silently killed every jsx-based hook. When it is
+     missing, React is resolved from the same module graph. */
+  function reactFromModules(require) {
+    try {
+      for (const id of Object.keys(require.m)) {
+        let exports;
+        try { exports = require(id); } catch (_) { continue; }
+        if (exports && typeof exports === 'object' && typeof exports.createElement === 'function'
+            && typeof exports.isValidElement === 'function' && typeof exports.useState === 'function') {
+          return exports;
+        }
+      }
+    } catch (_) { /* no usable module graph */ }
+    return null;
+  }
   function discoverMenuTools(w) {
     const chunks = w.webpackChunksteamui;
-    if (!chunks || !chunks.push || !w.SP_REACT) return null;
+    if (!chunks || !chunks.push) return null;
     let require;
     chunks.push([['sls-luna-menu-' + Date.now()], {}, r => { require = r; }]);
     if (!require || !require.m) return null;
@@ -256,7 +272,7 @@
     const escapedRequire = requireName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const dependencyPattern = new RegExp('\\b' + escapedRequire + '\\s*\\(\\s*(\\d+(?:e\\d+)?)\\s*\\)', 'g');
     const dependencies = [...factorySource.matchAll(dependencyPattern)].map(m => Number(m[1]));
-    let jsx, item;
+    let jsx, item, React = w.SP_REACT;
     for (const id of new Set(dependencies)) {
       const exports = require(id);
       if (exports && exports.jsx && exports.jsxs) jsx = exports;
@@ -266,7 +282,8 @@
         if (value.prototype && value.prototype.OnClick && source.includes('contextMenuItem') && source.includes('onSelected')) item = value;
       }
     }
-    return jsx && item ? { React: w.SP_REACT, jsx, item } : null;
+    if (!React) React = reactFromModules(require);
+    return jsx && item && React ? { React, jsx, item } : null;
   }
 
   /* ---- HowLongToBeat as a library sort option --------------------------
