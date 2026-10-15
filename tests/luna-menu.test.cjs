@@ -600,6 +600,24 @@ test('syncSortAs follows the stored sort choice',()=>{
   setHltbRecords({});
 });
 
+test('with no stored sort choice the keys follow the live dropdown, never a blind restore',()=>{
+  setHltbRecords({'1':{main:3600}});
+  const w=sortableWindow();  // no AppGridDisplaySettings at all, as after the client update
+  // Picking Luna's option in a view applies the keys and publishes the live value.
+  const picked=withSortOption({rgOptions:SORT_ENUM.slice(),onChange(){},selectedOption:SORT_VALUE},w);
+  assert.ok(picked,'the sort dropdown must be wrapped');
+  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha','picking the option applies the keys');
+  // The periodic sync must not undo a live Luna choice just because this client
+  // stopped persisting the setting.
+  assert.equal(syncSortAs(w),true,'a live HLTB choice must keep the keys applied');
+  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha','the order must survive the sync');
+  // An explicit switch away still restores the originals through onChange.
+  const other=withSortOption({rgOptions:SORT_ENUM.slice(),onChange(){},selectedOption:4},w);
+  other.onChange(4);
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha','switching away restores the originals');
+  setHltbRecords({});
+});
+
 test('only the real sort dropdown gains the HowLongToBeat option',()=>{
   const patched=withSortOption({rgOptions:SORT_ENUM.slice(),onChange(){},selectedOption:4});
   assert.ok(patched,'the sort dropdown must be recognized by its option values');

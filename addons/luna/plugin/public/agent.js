@@ -432,6 +432,16 @@
       current = storage ? JSON.parse(storage.getItem('AppGridDisplaySettings') || '{}').eSortBy : null;
     } catch (_) { current = null; }
     if (current === SORT_VALUE) return applyHltbSortAs(w);
+    if (current === null || current === undefined) {
+      // A 2026-10 Steam client update stopped persisting AppGridDisplaySettings
+      // in localStorage, so "nothing stored" now means "no opinion", not "not
+      // Luna". Re-apply while the sort dropdown itself still shows Luna's value
+      // (the wrapper publishes it), and otherwise leave the keys exactly as they
+      // are: restoring them under a view that is still sorted by cached times is
+      // what silently dropped the order. An explicit change still restores them
+      // through the dropdown's onChange wrapper.
+      return liveSortValue === SORT_VALUE ? applyHltbSortAs(w) : false;
+    }
     return restoreHltbSortAs();
   }
 
