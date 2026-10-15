@@ -3,6 +3,16 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.2 - 2026-10-15
+
+- **Fix: the HowLongToBeat order no longer held.** The same client update that
+  removed `SP_REACT` also stopped persisting `AppGridDisplaySettings` in
+  localStorage, and the periodic sort sync read "nothing stored" as "not Luna"
+  and restored Steam's own sort keys - so a view could show the cached hours
+  while sorting alphabetically. With no stored value the sync now follows the
+  live sort dropdown (and otherwise leaves the keys untouched); an explicit
+  change still restores them.
+
 ## 0.14.1 - 2026-10-15
 
 - **Fix: the HowLongToBeat library sort disappeared.** A Steam client update
