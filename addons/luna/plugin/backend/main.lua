@@ -465,7 +465,7 @@ local function addon_report()
   for _, name in ipairs(installed()) do
     local meta = read_json(base .. name .. '/plugin.json') or {}
     local files = 0
-    for _ in ipairs(dir_report(base .. name .. '/plugin')) do files = files + 1 end
+    for _ in ipairs(dir_report(base .. name)) do files = files + 1 end
     report[#report + 1] = {
       name = name,
       title = tostring(meta.name or name),
@@ -473,7 +473,7 @@ local function addon_report()
       files = files,
     }
   end
-  return report
+  return json.array(report)
 end
 
 local function build_health()
@@ -511,8 +511,8 @@ local function build_health()
       installedAt = snapshot.installedAt,
       source = snapshot.source,
       versions = snapshot.versions,
-      drift = drift,
-    } or { drift = {} },
+      drift = json.array(drift),
+    } or { drift = json.array({}) },
     lumen = {
       root = lumen_root,
       binary = path_exists(lumen_root .. '/lumen'),
@@ -535,7 +535,7 @@ local function build_health()
       prefs = load_prefs(),
       hltb = { cached = count_keys(store.games) },
       sgdb = { hasKey = type(sgdb.apiKey) == 'string' and sgdb.apiKey ~= '' },
-      files = dir_report(data_dir, 1),
+      files = json.array(dir_report(data_dir, 1)),
     },
   }
 end
