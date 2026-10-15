@@ -618,6 +618,23 @@ test('with no stored sort choice the keys follow the live dropdown, never a blin
   setHltbRecords({});
 });
 
+test('a grid rendering as Luna-sorted keeps the keys without a stored choice',()=>{
+  setHltbRecords({'1':{main:3600}});
+  const tools=fixture();
+  const w=sortableWindow();                 // no AppGridDisplaySettings at all
+  const api=installLunaMenu(w,tools);
+  assert.ok(api,'the menu must install');
+  // A section's dropdown only renders while its header is hovered, but its grid
+  // renders as Luna-sorted - that is the signal the sync must trust.
+  tools.jsx.jsx({name:'Grid'},{sortByType:SORT_VALUE,appOverviews:[{appid:1},{appid:2}]});
+  assert.equal(syncSortAs(w),true,'a grid on Luna\'s sort must apply the keys');
+  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha','the order must be Luna\'s');
+  const diag=JSON.parse(w.storage.get('slsLunaSortDiag')||'{}');
+  assert.equal(diag.event,'apply','the diagnostic must record the decision');
+  assert.ok(diag.patched>0,'the diagnostic must count the patched keys');
+  setHltbRecords({});
+});
+
 test('only the real sort dropdown gains the HowLongToBeat option',()=>{
   const patched=withSortOption({rgOptions:SORT_ENUM.slice(),onChange(){},selectedOption:4});
   assert.ok(patched,'the sort dropdown must be recognized by its option values');

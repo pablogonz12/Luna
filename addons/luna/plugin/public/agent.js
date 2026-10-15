@@ -307,6 +307,7 @@
   let currentOrder = 'short';
   let sortSeen = 0;
   let liveSortValue;
+  let hltbGridSeenAt = 0;   // last time a grid rendered as HLTB-sorted
   let lastHealAt = 0;
 
   function readStoredSort(w) {
@@ -316,6 +317,24 @@
     } catch (_) {
       return null;
     }
+  }
+
+  // One small record of the last decision, published for the Health page and
+  // for diagnosing "the order looks wrong" reports without a debugger.
+  const SORT_DIAG_KEY = 'slsLunaSortDiag';
+  function noteSortDiag(w, event) {
+    try {
+      const storage = storageOf(w);
+      if (!storage) return;
+      storage.setItem(SORT_DIAG_KEY, JSON.stringify({
+        event: event,
+        at: Math.round(Date.now() / 1000),
+        seen: sortSeen,
+        live: liveSortValue === undefined ? null : liveSortValue,
+        gridAge: hltbGridSeenAt ? Math.round((Date.now() - hltbGridSeenAt) / 1000) : null,
+        patched: Array.isArray(sortAsPatched) ? sortAsPatched.length : 0,
+      }));
+    } catch (_) { /* diagnostics only */ }
   }
 
   function setHltbRecords(records) {
@@ -388,6 +407,7 @@
       changed = true;
     }
     if (changed) keysVersion += 1;
+    noteSortDiag(w, 'apply');
     return sortAsPatched.length > 0;
   }
 
@@ -435,13 +455,20 @@
     if (current === null || current === undefined) {
       // A 2026-10 Steam client update stopped persisting AppGridDisplaySettings
       // in localStorage, so "nothing stored" now means "no opinion", not "not
-      // Luna". Re-apply while the sort dropdown itself still shows Luna's value
-      // (the wrapper publishes it), and otherwise leave the keys exactly as they
-      // are: restoring them under a view that is still sorted by cached times is
-      // what silently dropped the order. An explicit change still restores them
-      // through the dropdown's onChange wrapper.
-      return liveSortValue === SORT_VALUE ? applyHltbSortAs(w) : false;
+      // Luna". Re-apply while a view is still actually sorted by cached times
+      // (the dropdown value the wrapper saw, or a grid rendering with Luna's
+      // sort - the grid is the reliable signal, since a section's dropdown is
+      // only rendered while its header is hovered) and otherwise leave the keys
+      // exactly as they are: restoring them under a view that is still sorted by
+      // cached times is what silently dropped the order. An explicit change
+      // still restores them through the dropdown's onChange wrapper.
+      const live = liveSortValue === SORT_VALUE
+        || (hltbGridSeenAt > 0 && Date.now() - hltbGridSeenAt < 300000);
+      if (live) return applyHltbSortAs(w);
+      noteSortDiag(w, 'sync-keep');
+      return false;
     }
+    noteSortDiag(w, 'sync-restore');
     return restoreHltbSortAs();
   }
 
@@ -493,8 +520,8 @@
       : props.rgOptions.concat([{ data: SORT_VALUE, label: SORT_LABEL }]);
     const onChange = typeof props.onChange === 'function'
       ? value => {
-        if (value === SORT_VALUE) applyHltbSortAs(w);
-        else restoreHltbSortAs();
+        if (value === SORT_VALUE) { noteSortDiag(w, 'change-apply'); applyHltbSortAs(w); }
+        else { noteSortDiag(w, 'change-restore'); restoreHltbSortAs(); }
         return props.onChange(value);
       }
       : props.onChange;
@@ -746,6 +773,7 @@
           }
           // While that option is active, each capsule shows its cached hours.
           if (args[0] && args[0].sortByType === SORT_VALUE) {
+            hltbGridSeenAt = Date.now();
             const overlay = withHltbOverlay(args[0]);
             if (overlay) args[0] = overlay;
           }

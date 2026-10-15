@@ -3,6 +3,14 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.3 - 2026-10-15
+
+- **Fix: the cached-times order now actually holds.** 0.14.2 stopped the blind
+  restore but only trusted the sort dropdown, and a section's dropdown is only
+  rendered while its header is hovered. The sync now also trusts the grid
+  itself (a grid rendering as cached-times-sorted is the reliable signal) and
+  records the last decision in `slsLunaSortDiag` for the Health page.
+
 ## 0.14.2 - 2026-10-15
 
 - **Fix: the HowLongToBeat order no longer held.** The same client update that
