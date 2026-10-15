@@ -9,11 +9,5 @@ jobs:
         with:
           node-version: '22'
       - run: sudo apt-get update && sudo apt-get install -y lua5.4
-      - run: node --test tests/*.test.cjs
-      - run: python3 -m unittest discover -s tests -p 'test_*.py'
-      - run: bash scripts/test-backend.sh
-      - run: python3 scripts/luna.py verify
-      - run: python3 -m py_compile scripts/luna.py tests/*.py
-      - run: luac -p tests/bridge-smoke.lua tests/compressor-smoke.lua bridge/bridge.lua addons/*/plugin/backend/main.lua
-      - run: for f in addons/*/plugin/public/*.js; do node --check "$f"; done
-      - run: bash -n scripts/*.sh
+      # One entry point, the same one a local run uses.
+      - run: bash scripts/test-all.sh

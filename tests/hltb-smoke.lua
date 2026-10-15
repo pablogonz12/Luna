@@ -385,7 +385,7 @@ out = call('SlsHltbLibrary', { raw = json.encode({ games = 'nope' }) })
 assert(out.success == false)
 
 out = call('SlsLunaInfo')
-assert(out.success == true and out.version == '0.13.0' and type(out.addons) == 'table')
+assert(out.success == true and out.version == '0.14.0' and type(out.addons) == 'table')
 assert(out.prefs and out.prefs.store_hide_followed == nil, 'prefs must start empty')
 
 -- Preferences: the store switch writes here (the store page runs on another
@@ -408,4 +408,27 @@ out = call('SlsLunaPrefsSet', { payload = { key = 'store_hide_followed', value =
 assert(out.success == true and out.prefs.store_hide_followed == true,
   'a decoded table payload must be accepted too')
 
-print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs')
+-- The client settings (beta switch, HLTB order) live here too: boolean and
+-- string keys with a value whitelist.
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'beta', value = true }) })
+assert(out.success == true and out.prefs.beta == true, 'the beta switch was not saved')
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'hltb_order', value = 'long' }) })
+assert(out.success == true and out.prefs.hltb_order == 'long', 'the HLTB order was not saved')
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'hltb_order', value = 'sideways' }) })
+assert(out.success == false, 'an unknown order value was accepted')
+out = call('SlsLunaInfo')
+assert(out.prefs.beta == true and out.prefs.hltb_order == 'long', 'the client settings did not persist')
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'beta', value = 'yes' }) })
+assert(out.success == false, 'a wrongly typed beta value was accepted')
+
+-- Health: read-only diagnostics, tolerant of a bare environment.
+out = call('SlsLunaHealth')
+assert(out.success == true and type(out.health) == 'table', 'the health report was not returned')
+assert(out.health.version == '0.14.0', 'the health report has no version')
+assert(type(out.health.lumen) == 'table' and type(out.health.lumen.boot) == 'table',
+  'the Lumen block is missing')
+assert(type(out.health.data) == 'table' and type(out.health.data.prefs) == 'table',
+  'the data block is missing')
+assert(out.health.data.prefs.beta == true, 'the health report does not carry the preferences')
+
+print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs, health')

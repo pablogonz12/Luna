@@ -37,6 +37,8 @@
       + '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="currentColor" stroke-width="2"/>',
     graphics: '<rect x="3" y="4" width="18" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M9 20h6M12 16v4M7 8h4M7 11h8" stroke="currentColor" stroke-width="2"/>',
+    health: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>'
+      + '<path d="M6.5 12h2.5l1.5-3 2.5 6 2-4 1 1h1.5" fill="none" stroke="currentColor" stroke-width="2"/>',
     about: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M12 11v5m0-8v.5" stroke="currentColor" stroke-width="2"/>',
   };
@@ -48,6 +50,7 @@
     { id: 'hltb', label: 'HowLongToBeat' },
     { id: 'steamgrid', label: 'SteamGridDB', beta: true },
     { id: 'graphics', label: 'Graphics', beta: true },
+    { id: 'health', label: 'Health' },
     { id: 'settings', label: 'Settings' },
     { id: 'about', label: 'About' },
   ];
@@ -477,6 +480,7 @@
     let artworkRequest = '';
     let graphics = null;
     let lunaInfo = null;
+    let lunaHealth = null;
     let compressorTab = 'status';
     let compressorQuery = '';
     let pendingAction = null;
@@ -1660,37 +1664,78 @@
     }
 
     // The remembered direction of the library sort; the agent picks it up
-    // through a storage event and rewrites the keys right away.
+    // through a storage event and rewrites the keys right away. The choice is
+    // owned by the backend (it syncs across machines and survives a CEF cache
+    // reset); localStorage stays the fast mirror the agent reads.
     const HLTB_ORDER_KEY = 'slsLunaHltbOrder';
-    function hltbOrder() {
-      try {
-        return w.localStorage && w.localStorage.getItem(HLTB_ORDER_KEY) === 'long' ? 'long' : 'short';
-      } catch (_) { return 'short'; }
-    }
-    function setHltbOrder(order) {
-      try {
-        if (w.localStorage) w.localStorage.setItem(HLTB_ORDER_KEY, order);
-      } catch (_) { /* private mode; the order just stays default */ }
-    }
-
-    // Beta pages (artwork picker today; frame generation and OptiScaler next)
-    // stay hidden until this switch on the Settings page is on.
     const BETA_KEY = 'slsLunaBeta';
     let betaNotice = null;
+    function localItem(key) {
+      try { return w.localStorage ? w.localStorage.getItem(key) : null; } catch (_) { return null; }
+    }
+    function setLocalItem(key, value) {
+      try { if (w.localStorage) w.localStorage.setItem(key, value); } catch (_) { /* private mode */ }
+    }
+    function clearLocalItem(key) {
+      try { if (w.localStorage) w.localStorage.removeItem(key); } catch (_) { /* private mode */ }
+    }
+    function prefValue(key) {
+      if (!lunaInfo || !lunaInfo.prefs) return undefined;
+      return lunaInfo.prefs[key];
+    }
+    function savePref(key, value) {
+      if (lunaInfo) {
+        lunaInfo.prefs = Object.assign({}, lunaInfo.prefs || {});
+        lunaInfo.prefs[key] = value;
+      }
+      rpc(w, 'SlsLunaPrefsSet', { raw: JSON.stringify({ key: key, value: value }) })
+        .catch(() => { /* the local mirror keeps working this session */ });
+    }
+    function hltbOrder() {
+      const stored = prefValue('hltb_order');
+      if (stored === 'long' || stored === 'short') return stored;
+      return localItem(HLTB_ORDER_KEY) === 'long' ? 'long' : 'short';
+    }
+    function setHltbOrder(order) {
+      const value = order === 'long' ? 'long' : 'short';
+      setLocalItem(HLTB_ORDER_KEY, value);
+      savePref('hltb_order', value);
+    }
+    // Beta pages (artwork picker, Graphics) stay hidden until this switch on the
+    // Settings page is on.
     function betaFeatures() {
-      try {
-        return Boolean(w.localStorage && w.localStorage.getItem(BETA_KEY) === '1');
-      } catch (_) { return false; }
+      const stored = prefValue('beta');
+      if (typeof stored === 'boolean') return stored;
+      return localItem(BETA_KEY) === '1';
     }
     function setBetaFeatures(on) {
-      try {
-        if (!w.localStorage) return;
-        if (on) w.localStorage.setItem(BETA_KEY, '1');
-        else w.localStorage.removeItem(BETA_KEY);
-      } catch (_) { /* the switch just will not persist */ }
+      setLocalItem(BETA_KEY, on ? '1' : '0');
+      savePref('beta', Boolean(on));
     }
     function visibleNav() {
       return NAV.filter(entry => !entry.beta || betaFeatures());
+    }
+    /* One-time: a choice that only existed locally (or on the other machine's
+       localStorage) is pushed up once the backend has no value yet; afterwards
+       the backend value is mirrored down so the agent keeps reading
+       localStorage. Idempotent: refresh() runs it on every open. */
+    async function migratePrefs() {
+      const prefs = (lunaInfo && lunaInfo.prefs) || {};
+      const patch = {};
+      if (prefs.beta === undefined && localItem(BETA_KEY) === '1') patch.beta = true;
+      if (prefs.hltb_order === undefined && localItem(HLTB_ORDER_KEY) === 'long') patch.hltb_order = 'long';
+      for (const key of Object.keys(patch)) {
+        try {
+          const out = await rpc(w, 'SlsLunaPrefsSet',
+            { raw: JSON.stringify({ key: key, value: patch[key] }) });
+          if (out && out.prefs) lunaInfo = Object.assign({}, lunaInfo, { prefs: out.prefs });
+        } catch (_) { /* the local mirror still works */ }
+      }
+      const fresh = (lunaInfo && lunaInfo.prefs) || {};
+      if (fresh.beta !== undefined) setLocalItem(BETA_KEY, fresh.beta ? '1' : '0');
+      if (fresh.hltb_order !== undefined) {
+        setLocalItem(HLTB_ORDER_KEY, fresh.hltb_order === 'long' ? 'long' : 'short');
+      }
     }
 
     // ---- HowLongToBeat page: cached times, missing games, on-demand fetch --
@@ -2633,6 +2678,113 @@
       return body;
     }
 
+    /* Health page: local diagnostics only. Paths, versions, marker counts and
+       file sizes, so a problem can be described without a shell. */
+    function healthBody() {
+      const body = document.createElement('div');
+      const health = lunaHealth || null;
+      const note = document.createElement('p');
+      note.className = 'sls-luna-note';
+      note.innerHTML = 'Local diagnostics only: paths, versions, marker counts and file sizes. '
+        + 'Nothing leaves this machine - use <strong>Copy diagnostics</strong> when reporting a problem.';
+      body.appendChild(note);
+      if (!health) {
+        const empty = document.createElement('p');
+        empty.className = 'sls-luna-note';
+        empty.textContent = 'No health report yet - the next Refresh loads it.';
+        body.appendChild(empty);
+        return body;
+      }
+      const line = text => {
+        const node = document.createElement('p');
+        node.className = 'sls-luna-note';
+        node.textContent = text;
+        body.appendChild(node);
+      };
+      const section = title => {
+        const node = document.createElement('p');
+        node.className = 'sls-luna-note';
+        node.innerHTML = '<strong>' + title + '</strong>';
+        body.appendChild(node);
+      };
+      const lumen = health.lumen || {};
+      const boot = lumen.boot || {};
+      const steam = health.steam || {};
+      const data = health.data || {};
+      const install = health.install || {};
+      const cards = document.createElement('div');
+      cards.className = 'sls-luna-stat';
+      [['Add-ons', (lumen.addons || []).length, 'under sls-addons'],
+       ['Boot patch', boot.patched ? 'yes' : 'no', (boot.markers || 0) + ' marker(s)'],
+       ['Backup', boot.backup ? 'kept' : 'absent', 'boot.lua original'],
+       ['HLTB cache', (data.hltb && data.hltb.cached) || 0, 'cached games']]
+        .forEach(pair => {
+          const cell = document.createElement('div');
+          const value = document.createElement('b');
+          value.textContent = String(pair[1]);
+          const label = document.createElement('i');
+          label.textContent = pair[0] + ' \u00b7 ' + pair[2];
+          cell.append(value, label);
+          cards.appendChild(cell);
+        });
+      body.appendChild(cards);
+
+      section('Add-ons');
+      const pinned = install.versions || {};
+      (lumen.addons || []).forEach(entry => {
+        const want = pinned[entry.name];
+        line(entry.name + ' ' + (entry.version || '?')
+          + (want && String(want) !== String(entry.version) ? ' \u00b7 pinned ' + want : '')
+          + ' \u00b7 ' + (entry.files || 0) + ' entries');
+      });
+      if ((install.drift || []).length) line('Drift: ' + install.drift.join('; '));
+
+      section('Paths');
+      line('Lumen: ' + (lumen.root || '?') + (lumen.binary ? ' (binary present)' : ' (binary missing)')
+        + (lumen.luatools ? ' \u00b7 LuaTools present' : ' \u00b7 LuaTools missing')
+        + (lumen.bridge ? ' \u00b7 bridge present' : ' \u00b7 bridge missing'));
+      line('Boot: ' + (boot.path || '?'));
+      line('Steam: ' + (steam.root || '?') + (steam.exists ? '' : ' (steam.sh missing)'));
+      line('Data: ' + (data.dir || '?'));
+      if (install.installedAt || install.generated) {
+        line('Last install: ' + (install.installedAt ? clock(install.installedAt) : '?')
+          + (install.generated ? ' \u00b7 manifest ' + String(install.generated).slice(0, 10) : '')
+          + (install.source ? ' \u00b7 ' + install.source : ''));
+      } else {
+        line('Last install: not recorded by this installer version (run install --force once).');
+      }
+
+      section('Settings');
+      const prefs = data.prefs || {};
+      line('Beta features: ' + (prefs.beta ? 'on' : 'off')
+        + ' \u00b7 HLTB order: ' + (prefs.hltb_order || 'short')
+        + ' \u00b7 Store filter: ' + (prefs.store_hide_followed ? 'on' : 'off')
+        + ' \u00b7 SteamGridDB key: ' + (data.sgdb && data.sgdb.hasKey ? 'stored' : 'not set'));
+
+      section('Data files');
+      (data.files || []).forEach(entry => {
+        line(entry.name + (entry.directory
+          ? '/ (' + (entry.files != null ? entry.files : 0) + ' entries)'
+          : ' \u00b7 ' + formatBytes(entry.size || 0)));
+      });
+
+      const copy = document.createElement('button');
+      copy.className = 'sls-luna-btn secondary';
+      copy.textContent = 'Copy diagnostics';
+      copy.onclick = () => {
+        const area = document.createElement('textarea');
+        area.rows = 10;
+        area.style.width = '100%';
+        area.value = JSON.stringify({ report: health, prefs: (lunaInfo && lunaInfo.prefs) || {} }, null, 2);
+        body.insertBefore(area, body.firstChild ? body.firstChild.nextSibling : null);
+        area.focus();
+        area.select();
+        try { if (document.execCommand) document.execCommand('copy'); } catch (_) { /* select-only */ }
+      };
+      body.appendChild(copy);
+      return body;
+    }
+
     function settingsBody() {
       const body = document.createElement('div');
       const note = document.createElement('p');
@@ -2744,7 +2896,7 @@
 
     const TITLES = { playtime: 'Playtime', presence: 'Presence', compressor: 'Compressor',
       hltb: 'HowLongToBeat', steamgrid: 'SteamGridDB artwork', graphics: 'Graphics (read-only)',
-      settings: 'Settings', about: 'About SLS Luna' };
+      health: 'Health (local diagnostics)', settings: 'Settings', about: 'About SLS Luna' };
 
     function paint() {
       const nav = visibleNav();
@@ -2790,6 +2942,7 @@
         : tab === 'hltb' ? hltbBody()
         : tab === 'steamgrid' ? steamgridBody()
         : tab === 'graphics' ? graphicsBody()
+        : tab === 'health' ? healthBody()
         : tab === 'settings' ? settingsBody()
         : tab === 'about' ? aboutBody() : playtimeBody());
 
@@ -2853,6 +3006,13 @@
         lunaInfo = await rpc(w, 'SlsLunaInfo');
       } catch (error) {
         lunaInfo = lunaInfo || {};
+      }
+      await migratePrefs();
+      try {
+        const report = await rpc(w, 'SlsLunaHealth');
+        lunaHealth = (report && report.health) || report || {};
+      } catch (error) {
+        lunaHealth = lunaHealth || {};
       }
       maybeAutoFetch();
       repaintIfOpen();
