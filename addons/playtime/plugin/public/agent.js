@@ -95,9 +95,27 @@
     if(!Number.isFinite(hours)||hours<0||hours>10000000)throw Error('Use a number between 0 and 10,000,000 hours.');
     return hours;
   }
+  // Steam used to expose React as `window.SP_REACT`. A client update stopped
+  // doing that in SharedJSContext, which silently killed every jsx-based hook
+  // (menu actions, the playtime editors). When it is missing, resolve React
+  // from the same module graph: any already-loaded module that exports React
+  // itself (createElement + isValidElement + useState).
+  function reactFromModules(require) {
+    try {
+      for (const id of Object.keys(require.m)) {
+        let exports;
+        try { exports = require(id); } catch (_) { continue; }
+        if (exports && typeof exports === 'object' && typeof exports.createElement === 'function'
+            && typeof exports.isValidElement === 'function' && typeof exports.useState === 'function') {
+          return exports;
+        }
+      }
+    } catch (_) { /* no usable module graph */ }
+    return null;
+  }
   function discoverMenuTools(w) {
     const chunks=w.webpackChunksteamui;
-    if(!chunks?.push||!w.SP_REACT)return null;
+    if(!chunks?.push)return null;
     let require;
     chunks.push([['sls-playtime-menu-'+Date.now()],{},r=>{require=r;}]);
     if(!require?.m)return null;
@@ -136,7 +154,8 @@
       showModal=Object.values(exports||{}).find(value=>typeof value==='function'&&String(value).includes('bForcePopOut'));
       if(showModal)break;
     }
-    return jsx&&item&&showModal?{React:w.SP_REACT,jsx,item,showModal}:null;
+    const React=w.SP_REACT||reactFromModules(require);
+    return jsx&&item&&showModal&&React?{React,jsx,item,showModal}:null;
   }
   function installPlaytimeMenu(w,rpc,refreshLibrary,providedTools) {
     if(w.__SlsPlaytimeMenu)return w.__SlsPlaytimeMenu;
