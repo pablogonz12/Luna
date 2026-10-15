@@ -53,6 +53,33 @@ def stub_bin(home, running=''):
     # Mirrors pgrep: exit 0 and a pid when the name matches, exit 1 otherwise.
     script.write_text('#!/bin/sh\nname="$4"\ncase ",%s," in *",$name,"*) echo 4242; exit 0;; esac\nexit 1\n' % running)
     script.chmod(0o755)
+    # gh: what the updater uses. `release view` reports $LUNA_TEST_TAG and
+    # `release download` copies $LUNA_TEST_BUNDLE to the requested --dir.
+    gh = directory / 'gh'
+    gh.write_text('''#!/bin/sh
+case "$1 $2" in
+  "release view")
+    tag="${LUNA_TEST_TAG:-v9.9.9}"
+    printf '{"tagName":"%s","assets":[]}\\n' "$tag"
+    ;;
+  "release download")
+    dir=""
+    while [ $# -gt 0 ]; do
+      case "$1" in --dir) dir="$2"; shift 2 ;; *) shift ;; esac
+    done
+    [ -n "$dir" ] || exit 3
+    [ -n "${LUNA_TEST_BUNDLE:-}" ] || exit 4
+    cp "$LUNA_TEST_BUNDLE" "$dir/luna-test.tar.gz" || exit 5
+    [ -f "$LUNA_TEST_BUNDLE.sha256" ] && cp "$LUNA_TEST_BUNDLE.sha256" "$dir/luna-test.tar.gz.sha256"
+    ;;
+  *) exit 0 ;;
+esac
+''')
+    gh.chmod(0o755)
+    # systemctl: the timer tests only need the calls to succeed.
+    systemctl = directory / 'systemctl'
+    systemctl.write_text('#!/bin/sh\ncase "$2" in is-enabled) echo enabled;; is-active) echo active;; esac\nexit 0\n')
+    systemctl.chmod(0o755)
     return directory
 
 
@@ -356,6 +383,87 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn('DRY RUN', result.stdout)
         self.assertFalse(self.addons.exists())
+
+    # -- update checks, unattended updates, timer ------------------------
+    def bundle_and_env(self, extra=None):
+        out = self.temp / 'dist'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        env = dict(self.env, LUNA_TEST_BUNDLE=str(bundle),
+                   LUNA_TEST_TAG='v%s' % self.bundle_version())
+        if extra:
+            env.update(extra)
+        return bundle, env
+
+    def test_install_keeps_a_standalone_updater_copy(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        copy = self.home / '.local/share/Lumen/sls-luna/luna.py'
+        self.assertTrue(copy.is_file(), 'the updater copy is missing')
+        self.assertEqual(copy.read_bytes(), (HERE / 'scripts' / 'luna.py').read_bytes())
+
+    def test_check_reports_the_installed_and_latest_versions(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        _, env = self.bundle_and_env()
+        result = self.luna('check', '--force', env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['installed'], self.bundle_version())
+        self.assertEqual(report['latest'], 'v%s' % self.bundle_version())
+        self.assertFalse(report['available'], 'the same version cannot be an update')
+        cached = json.loads((self.home / '.local/share/Lumen/sls-luna/update-check.json').read_text())
+        self.assertEqual(cached['latest'], report['latest'])
+        # A newer release is offered.
+        result = self.luna('check', '--force', env=dict(env, LUNA_TEST_TAG='v99.0.0'))
+        report = json.loads(result.stdout)
+        self.assertTrue(report['available'], 'a newer release must be offered')
+
+    def test_autoupdate_applies_a_newer_release_when_steam_is_closed(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        # Pretend the installed add-on is old, and let the stub offer the real one.
+        plugin = self.addons / 'luna' / 'plugin.json'
+        stale = json.loads(plugin.read_text())
+        stale['version'] = '0.0.1'
+        plugin.write_text(json.dumps(stale))
+        (self.data / 'luna.json').write_text(json.dumps({'version': 1, 'auto_update': 'install'}))
+        _, env = self.bundle_and_env()
+        result = self.luna('autoupdate', '--verbose', env=env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        last = json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
+        self.assertEqual(last['result'], 'applied', result.stdout)
+        self.assertEqual(json.loads((self.addons / 'luna' / 'plugin.json').read_text())['version'],
+                         self.bundle_version(), 'the newer payloads must be installed')
+
+    def test_autoupdate_defers_while_steam_runs_and_never_installs(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        (self.data / 'luna.json').write_text(json.dumps({'version': 1, 'auto_update': 'install'}))
+        _, env = self.bundle_and_env()
+        result = self.luna('autoupdate', '--verbose', env=env, running='steam,')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        last = json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
+        self.assertEqual(last['result'], 'deferred')
+        self.assertIn('Steam', last['reason'])
+
+    def test_autoupdate_does_nothing_when_the_mode_is_off(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        _, env = self.bundle_and_env()
+        result = self.luna('autoupdate', '--verbose', env=env)
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').exists())
+
+    def test_timer_on_status_off_manages_the_units(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        unit_dir = self.home / '.config/systemd/user'
+        result = self.luna('timer', 'on')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        service = unit_dir / 'luna-autoupdate.service'
+        timer = unit_dir / 'luna-autoupdate.timer'
+        self.assertTrue(service.is_file() and timer.is_file(), 'the units were not written')
+        self.assertIn('autoupdate', service.read_text())
+        self.assertIn('OnCalendar', timer.read_text())
+        status = json.loads(self.luna('timer', 'status').stdout)
+        self.assertEqual(status['enabled'], 'enabled')
+        self.assertEqual(self.luna('timer', 'off').returncode, 0)
+        self.assertFalse(timer.exists() and service.exists(), 'the units were not removed')
 
 
 if __name__ == '__main__':

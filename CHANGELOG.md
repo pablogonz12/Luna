@@ -3,6 +3,20 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.4 - 2026-10-15
+
+- **Updates inside the menu.** The Health page shows the installed version
+  against the newest release (checked through your own `gh` auth, cached six
+  hours) with *Check now*, *Install update* (queued, because applying needs
+  Steam closed) and an Off / Notify / Install switch. The Health tab carries a
+  dot while an update is available or queued.
+- **Unattended updates (opt-in).** Choosing Notify or Install enables a systemd
+  user timer (`luna-autoupdate.timer`, every 30 minutes) that runs a standalone
+  updater copy at `~/.local/share/Lumen/sls-luna/luna.py`: it checks, and in
+  Install mode applies a newer release whenever Steam is closed. New commands:
+  `luna check`, `luna autoupdate`, `luna timer on|off|status`. Every install
+  refreshes the updater copy and the install snapshot.
+
 ## 0.14.3 - 2026-10-15
 
 - **Fix: the cached-times order now actually holds.** 0.14.2 stopped the blind
