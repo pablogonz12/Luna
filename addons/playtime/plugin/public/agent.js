@@ -7,6 +7,15 @@
   'use strict';
   const valid = id => Number.isSafeInteger(Number(id)) && Number(id) > 0 && Number(id) <= 4294967295;
   const parseRpc = raw => typeof raw === 'string' ? JSON.parse(raw) : raw;
+  // The lifetime total every surface must show. Steam tracks some of these
+  // games itself: when the backend reports the official playtime from
+  // localconfig.vdf it is the base, and a manual edit is a correction on top of
+  // it. Shortcuts have no official number and keep the locally tracked count.
+  const lifetimeSeconds = record => {
+    const official = Number(record && record.officialSeconds) || 0;
+    const base = official > 0 ? official : (Number(record && record.trackedSeconds) || 0);
+    return Math.max(0, base + (Number(record && record.adjustmentSeconds) || 0));
+  };
   // Publish local totals into the same model Steam uses for its library cards.
   // Steam replaces these records on overview updates, so reapply after updates.
   function libraryAdapter(w) {
@@ -18,7 +27,7 @@
     const patch=o=>{
       const record=games[String(o?.appid)];
       if(!record||!eligible(o))return;
-      o.minutes_playtime_forever=Math.max(0,(Number(record.trackedSeconds)||0)+(Number(record.adjustmentSeconds)||0))/60;
+      o.minutes_playtime_forever=lifetimeSeconds(record)/60;
       // Only actual per-game history can populate the recent bucket.
       if(Number(record.lastPlayed)>0){
         o.rt_last_time_locally_played=Number(record.lastPlayed);
@@ -67,11 +76,11 @@
       if(!patchedDetails.has(details)&&Object.getOwnPropertyDescriptor(details,'nPlaytimeForever')?.configurable!==false){
         let native=details.nPlaytimeForever;
         Object.defineProperty(details,'nPlaytimeForever',{configurable:true,enumerable:true,
-          get(){const local=games[String(overview.appid)];return local&&eligible(overview)?Math.max(0,(Number(local.trackedSeconds)||0)+(Number(local.adjustmentSeconds)||0))/60:native;},
+          get(){const local=games[String(overview.appid)];return local&&eligible(overview)?lifetimeSeconds(local)/60:native;},
           set(value){native=value;}});
         patchedDetails.add(details);
       }
-      if(!patchedDetails.has(details))details.nPlaytimeForever=Math.max(0,(Number(record.trackedSeconds)||0)+(Number(record.adjustmentSeconds)||0))/60;
+      if(!patchedDetails.has(details))details.nPlaytimeForever=lifetimeSeconds(record)/60;
     }
     return {patchDetails,update(snapshot){games=snapshot.games||{};editable=new Set(Array.isArray(snapshot.apps)?snapshot.apps.map(Number):[]);apply();for(const {overview,details} of detailsByApp.values())patchDetails(overview,details);}};
   }
@@ -142,7 +151,7 @@
       if(!latest?.success||!canSetPlaytime(app,latest))throw Error('This game is not eligible for local playtime editing.');
       snapshot=latest;
       const record=latest.games?.[String(app.appid)];
-      const total=record?Math.max(0,(Number(record.trackedSeconds)||0)+(Number(record.adjustmentSeconds)||0))/3600:(Number(app.minutes_playtime_forever)||0)/60;
+      const total=record?lifetimeSeconds(record)/3600:(Number(app.minutes_playtime_forever)||0)/60;
       function Dialog({closeModal}){
         const [value,setValue]=React.useState(String(Number(total.toFixed(4))));
         const [error,setError]=React.useState('');
@@ -503,5 +512,5 @@
     w.setInterval(refresh,30000);
     w.setInterval(()=>{agent.pulse().then(()=>{if(agent.active.size)noteResult(true);},e=>{noteResult(false,e);console.warn('[SLS Playtime] pulse failed',e);});},10000);
   }
-  return {SessionAgent,parseRpc,bootAgent,libraryAdapter,canSetPlaytime,parseHours,discoverMenuTools,installPlaytimeMenu};
+  return {SessionAgent,parseRpc,bootAgent,libraryAdapter,canSetPlaytime,parseHours,discoverMenuTools,installPlaytimeMenu,lifetimeSeconds};
 });

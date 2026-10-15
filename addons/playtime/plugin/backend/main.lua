@@ -25,6 +25,10 @@ local DIR=HOME..'/.local/share/slssteam-integrations'
 local LEGACY=DIR..'/playtime.json'
 local MAX=4294967295
 local SCHEMA=2
+-- Ledger model (not the file schema): 1 means "the official lifetime playtime
+-- from localconfig.vdf is the base for games Steam tracks". A ledger without
+-- this marker predates the model and its adjustments are retired once.
+local OFFICIAL_BASE=1
 local MAX_EVENTS=200
 local MAX_PULSE=30
 local MAX_SECONDS=36000000000
@@ -53,13 +57,18 @@ local function valid_day_key(k)
   return os.date('%Y-%m-%d',t)==k
 end
 local function blank(account)
-  return {version=SCHEMA,account=account or '',games={},events={},daily={},titles={},active={},acked={},ackOrder={}}
+  return {version=SCHEMA,account=account or '',games={},events={},daily={},titles={},active={},acked={},ackOrder={},officialBase=OFFICIAL_BASE}
 end
 local function reply(data) return json.encode(data) end
 -- Rebuild a trusted in-memory ledger from decoded JSON. Anything unusable is
 -- dropped here, once, instead of throwing in the middle of a later heartbeat.
 local function sanitize(obj,account,keep_sessions)
   local data=blank(account)
+  -- A ledger only belongs to the official-base model when it says so; anything
+  -- older is migrated by the caller once a localconfig.vdf is available. The
+  -- default from blank() must not be inherited here, or an old ledger would
+  -- look migrated without its adjustments ever being retired.
+  if tonumber(obj.officialBase)==OFFICIAL_BASE then data.officialBase=OFFICIAL_BASE else data.officialBase=nil end
   for k,v in pairs(type(obj.games)=='table' and obj.games or {}) do
     if valid_id(k) and type(v)=='table' then
       local key=tostring(tonumber(k))
@@ -174,6 +183,148 @@ local function vdf_parse(raw,pos,depth)
     end
   end
   return out,#raw+1
+end
+
+-- Steam's text KeyValues (localconfig.vdf and friends). The binary parser above
+-- covers shortcuts.vdf; this one walks the text form into nested tables, with
+-- '//' comments skipped and quoted escapes kept simple on purpose. Only the
+-- shape the official playtime needs is guaranteed; junk degrades to {}.
+local function text_vdf_parse(raw)
+  local pos,length=1,#raw
+  local function skip()
+    while pos<=length do
+      local ch=raw:sub(pos,pos)
+      if ch==' ' or ch=='\t' or ch=='\r' or ch=='\n' then
+        pos=pos+1
+      elseif ch=='/' and raw:sub(pos+1,pos+1)=='/' then
+        local nl=raw:find('\n',pos,true)
+        pos=nl and nl+1 or length+1
+      else
+        return
+      end
+    end
+  end
+  local function read_string()
+    local out={}
+    pos=pos+1
+    while pos<=length do
+      local ch=raw:sub(pos,pos)
+      if ch=='\\' then
+        out[#out+1]=raw:sub(pos+1,pos+1)
+        pos=pos+2
+      elseif ch=='"' then
+        pos=pos+1
+        return table.concat(out)
+      else
+        out[#out+1]=ch
+        pos=pos+1
+      end
+    end
+    return table.concat(out)
+  end
+  local parse_object
+  parse_object=function()
+    local out={}
+    while true do
+      skip()
+      if pos>length then return out end
+      if raw:sub(pos,pos)=='}' then
+        pos=pos+1
+        return out
+      end
+      if raw:sub(pos,pos)=='"' then
+        local key=read_string()
+        skip()
+        local nextch=raw:sub(pos,pos)
+        if nextch=='{' then
+          pos=pos+1
+          out[key]=parse_object()
+        elseif nextch=='"' then
+          out[key]=read_string()
+        else
+          out[key]=''
+        end
+      else
+        pos=pos+1
+      end
+    end
+  end
+  local out={}
+  while true do
+    skip()
+    if pos>length then return out end
+    if raw:sub(pos,pos)=='"' then
+      local key=read_string()
+      skip()
+      local nextch=raw:sub(pos,pos)
+      if nextch=='{' then
+        pos=pos+1
+        out[key]=parse_object()
+      elseif nextch=='"' then
+        out[key]=read_string()
+      end
+    else
+      pos=pos+1
+    end
+  end
+end
+
+local function copy_file(src,dst)
+  local raw=read_file(src)
+  if not raw then return false end
+  local f=io.open(dst,'wb')
+  if not f then return false end
+  local written=f:write(raw)
+  local closed=f:close()
+  if not written or not closed then os.remove(dst); return false end
+  return true
+end
+
+-- Official lifetime playtime per app, straight from Steam's own localconfig.vdf
+-- (`Playtime`, minutes). For a game Steam tracks, this - not the ledger's own
+-- since-inception count - is the number the user sees in the library, so it is
+-- the base every surface must agree with. Cached by file size with a slow TTL:
+-- the panel polls once a second and must not re-parse half a megabyte each time.
+local official_cache={path='',size=-1,at=0,map={}}
+local function official_playtimes(root,account)
+  if root=='' or account=='' then return {} end
+  -- Steam's userdata directory is named after the 32-bit account id, while the
+  -- ledger is keyed by the steamid64.
+  local account_number=tonumber(account)
+  if not account_number or account_number<=76561197960265728 then return {} end
+  local path=root..'/userdata/'..(account_number-76561197960265728)..'/config/localconfig.vdf'
+  local now=os.time()
+  local size=-1
+  local handle=io.open(path,'rb')
+  if handle then size=handle:seek('end') or -1; handle:close() end
+  if path==official_cache.path and size==official_cache.size and now-official_cache.at<300 then
+    return official_cache.map
+  end
+  local map={}
+  local raw=read_file(path)
+  if raw then
+    local ok,store=pcall(text_vdf_parse,raw)
+    if ok and type(store)=='table' then
+      local node=store.UserLocalConfigStore
+      node=type(node)=='table' and node.Software or nil
+      node=type(node)=='table' and node.Valve or nil
+      node=type(node)=='table' and node.Steam or nil
+      node=type(node)=='table' and node.apps or nil
+      if type(node)=='table' then
+        for key,value in pairs(node) do
+          if type(value)=='table' then
+            local id=tonumber(key)
+            local minutes=tonumber(value.Playtime)
+            if id and valid_id(id) and minutes and minutes>0 then
+              map[tostring(math.floor(id))]=math.floor(minutes*60)
+            end
+          end
+        end
+      end
+    end
+  end
+  official_cache={path=path,size=size,at=now,map=map}
+  return map
 end
 local function account_id(steamid64)
   local n=tonumber(steamid64)
@@ -379,6 +530,29 @@ function M.register(registry)
   end
   local data,loadnote=read_state(ledger,account or '')
   if loadnote~='' then note=note..'. '..loadnote end
+  -- Ledger model change (2026-10-15): for games Steam itself tracks, the base
+  -- is now the official lifetime playtime from localconfig.vdf, so any old
+  -- since-inception adjustment is retired once. The pre-change bytes are kept
+  -- beside the ledger; a fresh ledger is born on the new model already.
+  local official=official_playtimes(root,data.account)
+  local hasOfficial=false
+  for _ in pairs(official) do hasOfficial=true; break end
+  if hasOfficial and tonumber(data.officialBase or 0)~=OFFICIAL_BASE then
+    local retired=0
+    for key,record in pairs(data.games) do
+      if (official[key] or 0)>0 and math.abs(record.adjustmentSeconds or 0)>1 then
+        record.adjustmentSeconds=0
+        retired=retired+1
+      end
+    end
+    data.officialBase=OFFICIAL_BASE
+    if retired>0 then
+      if not fs.exists(ledger..'.pre-official') then copy_file(ledger,ledger..'.pre-official') end
+      note=note..('. Retired '..retired..' legacy adjustment(s) where Steam owns the total')
+    end
+    local saved,migerr=persist(data,ledger)
+    if not saved then note=note..'. Could not persist the official-base migration: '..tostring(migerr) end
+  end
   local runtime={healthy=false,error='',reportedAt=0,note=note,
     file=(ledger:match('[^/]+$') or ledger)}
   -- Two different questions, so two different sets:
@@ -606,7 +780,18 @@ function M.register(registry)
     -- is megabytes, and the panel only needs totals plus a short diagnostic
     -- tail. SlsPlaytimeExport still returns the complete record for backups.
     local snap=refresh_inventory()
-    return reply({success=true,games=data.games,active=data.active,
+    -- Wire copy: officialSeconds rides along for display only and is never
+    -- persisted, so the ledger stays the source of truth for our own counts
+    -- while every surface can agree with Steam's own number.
+    local official=official_playtimes(root,data.account)
+    local wire={}
+    for key,record in pairs(data.games) do
+      local copy={title=record.title,trackedSeconds=record.trackedSeconds,
+        adjustmentSeconds=record.adjustmentSeconds,lastPlayed=record.lastPlayed}
+      if official[key] then copy.officialSeconds=official[key] end
+      wire[key]=copy
+    end
+    return reply({success=true,games=wire,active=data.active,
       apps=json.array(snap.ids),trackedApps=json.array(snap.trackIds),
       stats=stats(data),account=data.account,
       runtime=runtime,schema=SCHEMA,recent=recent_events(data,20),titles=data.titles,
@@ -623,7 +808,12 @@ function M.register(registry)
     if not hours or hours<0 or hours>10000000 or hours~=hours then return reply({success=false,error='Invalid hours'}) end
     local saved,err=transaction(function()
       local entry=game(tonumber(obj.id))
-      entry.adjustmentSeconds=hours*3600-entry.trackedSeconds
+      -- For games Steam tracks itself the correction is anchored to Steam's
+      -- own lifetime number: the edit sets the displayed total, Steam's
+      -- counter keeps running underneath, and both stay in agreement.
+      local official=official_playtimes(root,data.account)[tostring(math.floor(tonumber(obj.id)))]
+      local base=official or entry.trackedSeconds
+      entry.adjustmentSeconds=hours*3600-base
     end)
     return reply({success=saved,error=err})
   end
