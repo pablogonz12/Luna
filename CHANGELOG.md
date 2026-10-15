@@ -3,6 +3,13 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.5 - 2026-10-15
+
+- **Fix: the unattended-update timer could not set itself up** when it ran from
+  the standalone updater copy (it tried to copy `luna.py` from a repository that
+  is not there). It now copies *itself* when needed and skips a self-copy, with
+  a regression test that drives the copy directly.
+
 ## 0.14.4 - 2026-10-15
 
 - **Updates inside the menu.** The Health page shows the installed version

@@ -698,11 +698,21 @@ def download_release(tag, work):
 
 
 def write_tooling():
-    """Keep a standalone updater copy the timer can run without a checkout."""
+    """Keep a standalone updater copy the timer can run without a checkout.
+
+    Called both by the installer (from a checkout) and by the copy itself, so
+    the source is *this* file, never a fixed path relative to it.
+    """
     tools = luna_tools_dir()
     tools.mkdir(parents=True, exist_ok=True)
     target = tools / 'luna.py'
-    shutil.copy2(ROOT / 'scripts' / 'luna.py', target)
+    source = Path(__file__).resolve()
+    try:
+        if source.samefile(target):
+            return target
+    except OSError:
+        pass
+    shutil.copy2(source, target)
     target.chmod(0o755)
     return target
 
