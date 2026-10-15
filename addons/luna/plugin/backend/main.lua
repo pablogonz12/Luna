@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.13.0'
+local VERSION = '0.14.0'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local data_dir = home .. '/.local/share/slssteam-integrations'
@@ -49,6 +49,16 @@ end
 -- obeys live here, where both the panel and the store script can ask over RPC.
 local PREF_KEYS = {
   store_hide_followed = 'boolean',
+  -- Client settings used to live only in the shell's localStorage: a CEF cache
+  -- reset lost them and the laptop could not follow the desktop. They live here
+  -- now, and the panel mirrors them back into localStorage for the agent.
+  beta = 'boolean',
+  hltb_order = 'string',
+}
+
+-- Allowed values for the string settings.
+local PREF_VALUES = {
+  hltb_order = { short = true, long = true },
 }
 
 local function default_prefs()
@@ -62,7 +72,13 @@ local function load_prefs()
   if not ok or type(decoded) ~= 'table' then return default_prefs() end
   local prefs = default_prefs()
   for key, kind in pairs(PREF_KEYS) do
-    if kind == 'boolean' and type(decoded[key]) == 'boolean' then prefs[key] = decoded[key] end
+    local value = decoded[key]
+    if kind == 'boolean' and type(value) == 'boolean' then
+      prefs[key] = value
+    elseif kind == 'string' and type(value) == 'string' then
+      local allowed = PREF_VALUES[key]
+      if allowed and allowed[value] then prefs[key] = value end
+    end
   end
   return prefs
 end
@@ -390,6 +406,140 @@ local function installed()
   return names
 end
 
+-- ---------------------------------------------------------------- health
+
+-- Read-only diagnostics for the Health page: everything support needs to see at
+-- a glance, from local files only, and never anything secret (the SteamGridDB
+-- key is reported as a boolean, never its value).
+local function path_exists(path)
+  local handle = io.open(path, 'rb')
+  if handle then handle:close(); return true end
+  return false
+end
+
+local function read_json(path)
+  local raw = read_file(path)
+  if not raw then return nil end
+  local ok, decoded = pcall(json.decode, raw)
+  if ok and type(decoded) == 'table' then return decoded end
+  return nil
+end
+
+local function count_keys(value)
+  local count = 0
+  for _ in pairs(type(value) == 'table' and value or {}) do count = count + 1 end
+  return count
+end
+
+local function dir_report(path, depth)
+  local report = {}
+  local ok, items = pcall(fs.list, path)
+  if not ok or type(items) ~= 'table' then return report end
+  for _, item in ipairs(items) do
+    local name = tostring(item.name or '')
+    if name ~= '' and name:sub(1, 1) ~= '.' then
+      local entry = { name = name, directory = item.is_directory == true }
+      if item.is_directory and (depth or 0) > 0 then
+        local nested = 0
+        local ok_nested, nested_items = pcall(fs.list, path .. '/' .. name)
+        if ok_nested and type(nested_items) == 'table' then
+          for _ in ipairs(nested_items) do nested = nested + 1 end
+        end
+        entry.files = nested
+      else
+        local handle = io.open(path .. '/' .. name, 'rb')
+        if handle then
+          entry.size = handle:seek('end') or 0
+          handle:close()
+        end
+      end
+      report[#report + 1] = entry
+    end
+  end
+  table.sort(report, function(a, b) return a.name < b.name end)
+  return report
+end
+
+local function addon_report()
+  local report = {}
+  for _, name in ipairs(installed()) do
+    local meta = read_json(base .. name .. '/plugin.json') or {}
+    local files = 0
+    for _ in ipairs(dir_report(base .. name .. '/plugin')) do files = files + 1 end
+    report[#report + 1] = {
+      name = name,
+      title = tostring(meta.name or name),
+      version = tostring(meta.version or ''),
+      files = files,
+    }
+  end
+  return report
+end
+
+local function build_health()
+  local lumen_root = home .. '/.local/share/Lumen'
+  local boot_path = lumen_root .. '/lua/boot.lua'
+  local boot = read_file(boot_path)
+  local markers = 0
+  if boot then
+    for _ in boot:gmatch('SLS%-ADDONS%-INTEGRATION') do markers = markers + 1 end
+  end
+  local addons = addon_report()
+  local snapshot = read_json(base .. 'luna-manifest.json')
+  local drift = {}
+  if snapshot and type(snapshot.versions) == 'table' then
+    local seen = {}
+    for _, entry in ipairs(addons) do
+      seen[entry.name] = true
+      local pinned = snapshot.versions[entry.name]
+      if pinned and entry.version ~= tostring(pinned) then
+        drift[#drift + 1] = entry.name .. ': installed ' .. entry.version .. ', pinned ' .. tostring(pinned)
+      end
+    end
+    for name, pinned in pairs(snapshot.versions) do
+      if not seen[name] then drift[#drift + 1] = name .. ': pinned ' .. tostring(pinned) .. ', not installed' end
+    end
+  end
+  local store = load_store()
+  local sgdb = read_json(data_dir .. '/sgdb.json') or {}
+  local steam_root = home .. '/.local/share/Steam'
+  return {
+    version = VERSION,
+    generatedAt = os.time(),
+    install = snapshot and {
+      generated = snapshot.generated,
+      installedAt = snapshot.installedAt,
+      source = snapshot.source,
+      versions = snapshot.versions,
+      drift = drift,
+    } or { drift = {} },
+    lumen = {
+      root = lumen_root,
+      binary = path_exists(lumen_root .. '/lumen'),
+      luatools = path_exists(lumen_root .. '/luatools/backend/main.lua'),
+      bridge = path_exists(base .. 'bridge.lua'),
+      boot = {
+        path = boot_path,
+        patched = markers > 0,
+        markers = markers,
+        backup = path_exists(boot_path .. '.sls-addons.original'),
+      },
+      addons = addons,
+    },
+    steam = {
+      root = steam_root,
+      exists = path_exists(steam_root .. '/steam.sh'),
+    },
+    data = {
+      dir = data_dir,
+      prefs = load_prefs(),
+      hltb = { cached = count_keys(store.games) },
+      sgdb = { hasKey = type(sgdb.apiKey) == 'string' and sgdb.apiKey ~= '' },
+      files = dir_report(data_dir, 1),
+    },
+  }
+end
+
 function M.register(registry)
   registry.SlsLunaInfo = function()
     return reply({ success = true, version = VERSION, addons = installed(), data = data_dir,
@@ -417,11 +567,21 @@ function M.register(registry)
     if type(entry.value) ~= kind then
       return reply({ success = false, error = 'Wrong value type for ' .. entry.key .. '.' })
     end
+    local allowed = PREF_VALUES[entry.key]
+    if allowed and not allowed[entry.value] then
+      return reply({ success = false, error = 'Unknown value for ' .. entry.key .. '.' })
+    end
     local prefs = load_prefs()
     prefs[entry.key] = entry.value
     local saved, serr = persist_prefs(prefs)
     if not saved then return reply({ success = false, error = tostring(serr) }) end
     return reply({ success = true, prefs = prefs })
+  end
+
+  -- Read-only diagnostics for the Health page: paths, versions, marker counts
+  -- and file sizes, so a problem can be described without a shell.
+  registry.SlsLunaHealth = function()
+    return reply({ success = true, health = build_health() })
   end
 
   -- Whole local cache: appid -> record, plus the game list the agent reported.

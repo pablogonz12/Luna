@@ -21,6 +21,9 @@ Commands:
     luna uninstall [--only NAME]
     luna verify [--sources]             manifest, payload and drift checks
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
+    luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256) for other machines
+    luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
+                                        verify and install a released bundle
 """
 import argparse
 import hashlib
@@ -29,7 +32,10 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -400,6 +406,180 @@ def cmd_status(options):
     return 1 if degraded else EXIT_OK
 
 
+def write_install_snapshot():
+    """Record what this installer put on disk, for the Health page.
+
+    The payload hashes stay in vendor/MANIFEST.json (and in `luna verify`);
+    this is the small machine-local copy the running add-ons can read.
+    """
+    manifest = load_manifest()
+    snapshot = {
+        'generated': manifest.get('generated', ''),
+        'installedAt': int(time.time()),
+        'source': repo_revision(),
+        'versions': {name: addon_version(name) for name in ADDONS},
+        'sources': {name: str((manifest.get('addons', {}).get(name) or {})
+                              .get('source_commit', ''))[:12] for name in ADDONS},
+    }
+    path = addons_dir() / 'luna-manifest.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + '\n')
+    return path
+
+
+def repo_revision():
+    try:
+        result = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--short', 'HEAD'],
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except OSError:
+        pass
+    return ''
+
+
+def cmd_release(options):
+    """Build a bundle another machine can install with `luna update`."""
+    load_manifest()  # fail early when the pins are missing
+    version = addon_version('luna')
+    out_dir = Path(options.out).expanduser() if options.out else ROOT / 'dist'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = 'luna-%s' % version
+    bundle = out_dir / (name + '.tar.gz')
+    entries = [
+        ('addons', ROOT / 'addons'),
+        ('vendor/MANIFEST.json', MANIFEST_PATH),
+        ('scripts/luna.py', ROOT / 'scripts' / 'luna.py'),
+        ('scripts/patch-lumen.py', PATCHER),
+        ('bridge/bridge.lua', BRIDGE_SOURCE),
+    ]
+    readme = ROOT / 'README.md'
+    if readme.is_file():
+        entries.append(('README.md', readme))
+    changelog = ROOT / 'CHANGELOG.md'
+    if changelog.is_file():
+        entries.append(('CHANGELOG.md', changelog))
+    with tarfile.open(bundle, 'w:gz') as tar:
+        for arcname, path in entries:
+            tar.add(path, arcname='%s/%s' % (name, arcname), recursive=path.is_dir())
+    digest = sha256(bundle)
+    checksum = out_dir / (bundle.name + '.sha256')
+    checksum.write_text('%s  %s\n' % (digest, bundle.name))
+    print('bundle : %s' % bundle)
+    print('sha256 : %s' % digest)
+    print('version: %s (%s)' % (version, ', '.join('%s %s' % (n, addon_version(n)) for n in ADDONS)))
+    if options.publish:
+        gh = shutil.which('gh')
+        if not gh:
+            print('gh CLI not found; publish manually: %s' % bundle, file=sys.stderr)
+            return 1
+        tag = 'v%s' % version
+        view = subprocess.run([gh, 'release', 'view', tag], capture_output=True, text=True)
+        if view.returncode == 0:
+            args = [gh, 'release', 'upload', tag, str(bundle), str(checksum), '--clobber']
+        else:
+            args = [gh, 'release', 'create', tag, str(bundle), str(checksum),
+                    '--title', 'Luna %s' % version,
+                    '--notes', ('Luna %s: pinned payloads plus scripts/luna.py.\n\n'
+                                'Install on another machine: `luna update --latest` (needs gh).'
+                                % version)]
+        result = subprocess.run(args, capture_output=True, text=True)
+        if result.returncode != 0:
+            print('gh failed: %s' % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
+            return 1
+        print('published: %s' % tag)
+    return EXIT_OK
+
+
+def cmd_update(options):
+    """Verify a released bundle and install it with the bundled script."""
+    temp_dir = Path(tempfile.mkdtemp(prefix='luna-update-'))
+    try:
+        bundle = None
+        if options.bundle:
+            bundle = Path(options.bundle).expanduser()
+        elif options.latest:
+            gh = shutil.which('gh')
+            if not gh:
+                print('--latest needs the gh CLI (or use --bundle / --url)', file=sys.stderr)
+                return 1
+            result = subprocess.run([gh, 'release', 'download',
+                                     '--pattern', 'luna-*.tar.gz',
+                                     '--pattern', 'luna-*.tar.gz.sha256',
+                                     '--dir', str(temp_dir), '--clobber'],
+                                    capture_output=True, text=True)
+            if result.returncode != 0:
+                print('gh release download failed: %s'
+                      % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
+                return 1
+            found = sorted(temp_dir.glob('luna-*.tar.gz'))
+            if not found:
+                print('no luna-*.tar.gz asset in the newest release', file=sys.stderr)
+                return 1
+            bundle = found[-1]
+        elif options.url:
+            bundle = temp_dir / 'luna-bundle.tar.gz'
+            try:
+                urllib.request.urlretrieve(options.url, bundle)
+            except Exception as error:  # noqa: BLE001 - report the URL failure
+                print('download failed: %s' % error, file=sys.stderr)
+                return 1
+            try:
+                urllib.request.urlretrieve(options.url + '.sha256', str(bundle) + '.sha256')
+            except Exception:  # noqa: BLE001 - the sidecar is optional
+                pass
+        else:
+            print('Point at a bundle: --bundle FILE, --url URL or --latest', file=sys.stderr)
+            return 2
+        if not bundle.is_file():
+            print('bundle not found: %s' % bundle, file=sys.stderr)
+            return 2
+        checksum_file = Path(str(bundle) + '.sha256')
+        if checksum_file.is_file():
+            expected = checksum_file.read_text().split()[0].strip().lower()
+            actual = sha256(bundle)
+            if expected != actual:
+                print('REFUSING: sha256 mismatch (bundle %s, sidecar %s)'
+                      % (actual[:12], expected[:12]), file=sys.stderr)
+                return 1
+            print('sha256 : verified (%s)' % actual[:12])
+        else:
+            print('note   : no .sha256 beside the bundle; the payload hashes in the '
+                  'bundled manifest are still enforced')
+        extract_dir = temp_dir / 'unpacked'
+        extract_dir.mkdir()
+        with tarfile.open(bundle) as tar:
+            try:
+                tar.extractall(extract_dir, filter='data')
+            except TypeError:  # Python < 3.12 has no extraction filter
+                tar.extractall(extract_dir)
+        roots = [entry for entry in extract_dir.iterdir() if entry.is_dir()]
+        root = roots[0] if len(roots) == 1 else extract_dir
+        script = root / 'scripts' / 'luna.py'
+        if not script.is_file():
+            print('REFUSING: the bundle does not contain scripts/luna.py', file=sys.stderr)
+            return 1
+        version = '?'
+        bundled_manifest = root / 'vendor' / 'MANIFEST.json'
+        if bundled_manifest.is_file():
+            try:
+                manifest = json.loads(bundled_manifest.read_text())
+                version = str((manifest.get('addons', {}).get('luna') or {})
+                              .get('plugin_version', '?'))
+            except ValueError:
+                version = '?'
+        print('bundle : %s (Luna %s)' % (bundle.name, version))
+        command = [sys.executable, str(script), 'install', '--force']
+        for name in options.only or []:
+            command += ['--only', name]
+        if options.dry_run:
+            command.append('--dry-run')
+        result = subprocess.run(command)
+        return result.returncode
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def cmd_install(options):
     targets = selected_addons(options)
     reasons = refuse_reasons(for_install=True)
@@ -421,6 +601,7 @@ def cmd_install(options):
         print('\nDRY RUN: %d file(s) would change, nothing was written.' % len(to_write))
         return EXIT_OK
     if not to_write:
+        write_install_snapshot()
         print('\nAlready installed and identical to the pinned payloads. Nothing to do.')
         return EXIT_OK
     differing = [row for row in to_write if row[4] == 'differs']
@@ -447,6 +628,7 @@ def cmd_install(options):
         print('Every change made by this run was rolled back.', file=sys.stderr)
         return 1
 
+    write_install_snapshot()
     print('\ninstalled: %s' % ', '.join('%s %s' % (name, addon_version(name)) for name in targets))
     print('bridge   : %s' % (addons_dir() / 'bridge.lua'))
     print('boot.lua : %s' % patcher('check').stdout.strip())
@@ -487,6 +669,9 @@ def cmd_uninstall(options):
     if bridge.is_file():
         bridge.unlink()
         print('removed bridge.lua')
+    snapshot = addons_dir() / 'luna-manifest.json'
+    if snapshot.is_file():
+        snapshot.unlink()
     print('Local playtime and presence data were left untouched.')
     return EXIT_OK
 
@@ -655,7 +840,8 @@ def build_parser():
     sub = parser.add_subparsers(dest='command')
     for name, handler in (('preflight', cmd_preflight), ('status', cmd_status),
                           ('install', cmd_install), ('uninstall', cmd_uninstall),
-                          ('verify', cmd_verify), ('vendor', cmd_vendor)):
+                          ('verify', cmd_verify), ('vendor', cmd_vendor),
+                          ('release', cmd_release), ('update', cmd_update)):
         child = sub.add_parser(name)
         child.set_defaults(handler=handler)
         child.add_argument('--only', action='append', default=[],
@@ -663,6 +849,16 @@ def build_parser():
         if name == 'install':
             child.add_argument('--force', action='store_true',
                                help='replace installed files that differ from the pinned payloads')
+            child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+        if name == 'release':
+            child.add_argument('--out', help='output directory (default: dist/)')
+            child.add_argument('--publish', action='store_true',
+                               help='create or refresh a GitHub release with the bundle (needs gh)')
+        if name == 'update':
+            child.add_argument('--bundle', help='install from a local bundle tarball')
+            child.add_argument('--url', help='install from a bundle URL (a .sha256 beside it is verified)')
+            child.add_argument('--latest', action='store_true',
+                               help='download the newest release asset (needs gh)')
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
         if name in ('verify', 'vendor'):
             child.add_argument('--sources', action='store_true',

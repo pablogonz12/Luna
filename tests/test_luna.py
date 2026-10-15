@@ -5,11 +5,13 @@ Everything runs against a disposable HOME with a minimal Lumen fixture, so no
 real Lumen, Steam or user data is touched. `pgrep` is stubbed so the tests never
 depend on whether the developer's own Steam is open.
 """
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -293,6 +295,67 @@ class LunaTestCase(unittest.TestCase):
                                 capture_output=True, text=True, env=env)
         self.assertIn('compared against', result.stdout)
         self.assertEqual(result.returncode, 0, result.stdout)
+
+    # -- release / update / snapshot -------------------------------------
+    def bundle_version(self):
+        return json.loads((HERE / 'addons/luna/plugin/plugin.json').read_text())['version']
+
+    def test_install_records_a_manifest_snapshot(self):
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        snapshot = json.loads((self.addons / 'luna-manifest.json').read_text())
+        self.assertEqual(snapshot['versions']['luna'], self.bundle_version())
+        self.assertIn('playtime', snapshot['versions'])
+        self.assertTrue(snapshot['installedAt'] > 0)
+
+    def test_release_builds_a_bundle_other_machines_can_use(self):
+        out = self.temp / 'dist'
+        result = self.luna('release', '--out', str(out))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        bundles = sorted(out.glob('luna-*.tar.gz'))
+        self.assertEqual(len(bundles), 1)
+        sidecar = Path(str(bundles[0]) + '.sha256')
+        self.assertTrue(sidecar.is_file(), 'the checksum sidecar is missing')
+        digest = sidecar.read_text().split()[0]
+        self.assertEqual(hashlib.sha256(bundles[0].read_bytes()).hexdigest(), digest)
+        with tarfile.open(bundles[0]) as tar:
+            names = tar.getnames()
+        prefix = 'luna-%s/' % self.bundle_version()
+        for expected in ('vendor/MANIFEST.json', 'scripts/luna.py', 'scripts/patch-lumen.py',
+                         'bridge/bridge.lua', 'addons/luna/plugin/plugin.json',
+                         'addons/playtime/plugin/backend/main.lua'):
+            self.assertIn(prefix + expected, names)
+
+    def test_update_installs_from_a_verified_bundle(self):
+        out = self.temp / 'dist'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        result = self.luna('update', '--bundle', str(bundle))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('sha256 : verified', result.stdout)
+        for name in ('playtime', 'presence'):
+            self.assertTrue(self.installed(name, 'backend/main.lua'))
+        self.assertEqual(self.boot.read_text().count('SLS-ADDONS-INTEGRATION'), 1)
+        self.assertEqual(self.luna('verify').returncode, 0)
+
+    def test_update_refuses_a_tampered_bundle(self):
+        out = self.temp / 'dist'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        bundle.write_bytes(bundle.read_bytes() + b'x')
+        result = self.luna('update', '--bundle', str(bundle))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('sha256 mismatch', result.stderr + result.stdout)
+        self.assertFalse(self.addons.exists(), 'a tampered bundle must not be installed')
+
+    def test_update_dry_run_writes_nothing(self):
+        out = self.temp / 'dist'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        result = self.luna('update', '--bundle', str(bundle), '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('DRY RUN', result.stdout)
+        self.assertFalse(self.addons.exists())
 
 
 if __name__ == '__main__':

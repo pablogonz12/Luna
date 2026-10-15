@@ -208,8 +208,22 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
         return JSON.stringify({success:true});
       }
       if(fn==='__lumenOpenExternalUrl')return JSON.stringify({ok:true});
-      if(fn==='SlsLunaInfo')return JSON.stringify({success:true,version:'0.13.0',
+      if(fn==='SlsLunaInfo')return JSON.stringify({success:true,version:'0.14.0',
         addons:{luna:true},prefs:Object.assign({},prefsState)});
+      if(fn==='SlsLunaHealth')return JSON.stringify({success:true,health:{
+        version:'0.14.0',generatedAt:Date.now()/1000,
+        install:{generated:'2026-10-15T10:00:00+0200',installedAt:Date.now()/1000-3600,source:'bundle',
+          versions:{luna:'0.14.0',sgdb:'0.2.0',playtime:'0.5.5'},drift:['sgdb: installed 0.2.0, pinned 0.3.0']},
+        lumen:{root:'/home/tester/.local/share/Lumen',binary:true,luatools:true,bridge:true,
+          boot:{path:'/home/tester/.local/share/Lumen/lua/boot.lua',patched:true,markers:1,backup:true},
+          addons:[{name:'luna',title:'sls-luna',version:'0.14.0',files:3},
+            {name:'sgdb',title:'sls-sgdb',version:'0.2.0',files:2}]},
+        steam:{root:'/home/tester/.local/share/Steam',exists:true},
+        data:{dir:'/home/tester/.local/share/slssteam-integrations',
+          prefs:{version:1,store_hide_followed:false,beta:false,hltb_order:'short'},
+          hltb:{cached:3533},sgdb:{hasKey:true},
+          files:[{name:'hltb.json',directory:false,size:560000},
+            {name:'playtime',directory:true,files:3}]}}});
       if(fn==='SlsLunaPrefsSet'){prefsState[payload.key]=payload.value;
         return JSON.stringify({success:true,prefs:Object.assign({},prefsState)});}
       if(fn==='SlsSgdbGet')return JSON.stringify({success:true,apiKey:sgdbState.apiKey,
@@ -1179,4 +1193,74 @@ test('the compressor Stats tab charts the measured ledgers and can refresh them'
   await new Promise(resolve=>setTimeout(resolve,20));
   const call=calls.filter(entry=>entry.fn==='SlsCompressorRun').pop();
   assert.ok(call&&call.payload.action==='recheck','the measurement must run the recheck action');
+});
+
+test('the backend owns beta and the HLTB order, with localStorage as the mirror',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls,storage,prefs}=fakeWindow(document,{});
+  storage.set('slsLunaBeta','1');            // a choice made before the backend owned it
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,50));
+  const betaCall=calls.filter(entry=>entry.fn==='SlsLunaPrefsSet'&&entry.payload.key==='beta').pop();
+  assert.ok(betaCall&&betaCall.payload.value===true,'the local beta choice must migrate to the backend');
+  assert.equal(prefs.beta,true,'the backend must hold the migrated value');
+  const overlay=()=>document.getElementById('sls-luna-overlay');
+  const settings=findNode(overlay(),node=>(node.className||'').startsWith('sls-luna-tab')
+    &&node.textContent==='Settings');
+  settings.onclick();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const betaRow=findNode(overlay(),node=>(node.className||'')==='sls-luna-row'
+    &&textOf(node).includes('Show beta features'));
+  assert.ok(betaRow,'the beta switch row must exist');
+  const betaToggle=findNode(betaRow,node=>(node.className||'').startsWith('sls-luna-switch'));
+  assert.ok(betaToggle.className.includes(' on'),'the migrated choice must paint as on');
+  betaToggle.onclick();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const offCall=calls.filter(entry=>entry.fn==='SlsLunaPrefsSet'&&entry.payload.key==='beta').pop();
+  assert.equal(offCall.payload.value,false,'turning the switch off must reach the backend');
+  assert.equal(storage.get('slsLunaBeta'),'0','the agent mirror must be updated');
+
+  const hltbTab=findNode(overlay(),node=>(node.className||'').startsWith('sls-luna-tab')
+    &&node.textContent==='HowLongToBeat');
+  hltbTab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const orderRow=findNode(overlay(),node=>(node.className||'')==='sls-luna-row'
+    &&/Library order:/.test(textOf(node)));
+  assert.ok(orderRow,'the HLTB order switch must exist');
+  const orderSwitch=findNode(orderRow,node=>(node.className||'').startsWith('sls-luna-switch'));
+  orderSwitch.onclick();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const orderCall=calls.filter(entry=>entry.fn==='SlsLunaPrefsSet'&&entry.payload.key==='hltb_order').pop();
+  assert.ok(orderCall&&orderCall.payload.value==='long','the order choice must reach the backend');
+  assert.equal(storage.get('slsLunaHltbOrder'),'long','the agent mirror must hold the order');
+});
+
+test('the Health page lists versions, drift and copyable diagnostics',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,50));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='Health');
+  assert.ok(tab,'the Health tab must exist');
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/Local diagnostics only/,'the page must say it is local');
+  assert.match(text,/Boot patch/,'the boot marker card must exist');
+  assert.match(text,/luna 0\.14\.0/,'the add-on versions must be listed');
+  assert.match(text,/pinned 0\.3\.0/,'drift against the pinned version must show');
+  assert.match(text,/Lumen: \/home\/tester/,'the paths must be listed');
+  assert.match(text,/3533/,'the HLTB cache count must be shown');
+  assert.match(text,/Beta features: off/,'the settings summary must be shown');
+  const copy=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.tagName==='BUTTON'&&node.textContent==='Copy diagnostics');
+  assert.ok(copy,'the diagnostics button must exist');
+  copy.onclick();
+  const area=findNode(document.getElementById('sls-luna-overlay'),node=>node.tagName==='TEXTAREA');
+  assert.ok(area&&/sls-luna/.test(area.value||''),'the diagnostics text must land in the textarea');
 });

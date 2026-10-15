@@ -23,6 +23,9 @@ projects, then adds features designed to work well together.
 | **Presence** | Available | Show selected non-Steam activity to friends through the supported integration |
 | **Compressor** | Available | Manage Btrfs game compression jobs and progress from Steam; the Stats sub-tab charts the savings its own ledgers measured |
 | **Store filter** | Available | Settings → Hide followed games in the store: store home and discovery lists stop showing games you already follow (search and game pages stay untouched; the list is read from the store session on this machine) |
+| **Settings that follow you** | Available | The switches (beta features, HLTB order, store filter) live in Luna's backend file, so a CEF cache reset cannot lose them and both machines follow the same choice; the shell mirrors them into localStorage for the agent |
+| **Health page** | Available | A local diagnostics tab: add-on versions versus the pinned bundle, boot.lua marker/backup state, Lumen and Steam paths, settings and data-file sizes, plus Copy diagnostics for bug reports |
+| **Bundle releases** | Available | `luna release` builds a verified bundle (payloads + pins + sha256), `luna update --bundle/--url/--latest` installs it on another machine - no repo checkout or file sync needed |
 | **One-step setup** | Available, private preview | Install the upstream base when needed, then add Luna's integrity-checked payloads |
 | **Cloud saves / CloudRedirect** | Optional upstream component; Luna page planned | CloudRedirect is separate software; a unified Luna page is not implemented yet |
 | **Decky Loader** | Planned / compatibility review | Optional install is being evaluated; Decky is a separate project and is not installed by Luna today |
@@ -38,6 +41,31 @@ projects, then adds features designed to work well together.
 The Compressor page requires the separate
 [btrfs-game-compressor](https://github.com/pgm1207/btrfs-game-compressor) tool;
 the current installer does not install or update that executable.
+
+## Updating
+
+`luna install` works from a checkout. For other machines (or when the checkout
+is not there), build and publish a bundle and update from it:
+
+```bash
+# on the source machine
+python3 scripts/luna.py release --publish        # dist/luna-<version>.tar.gz + .sha256 (+ gh release)
+
+# on the target machine (any copy of scripts/luna.py)
+python3 scripts/luna.py update --latest          # newest release asset, needs gh
+python3 scripts/luna.py update --bundle FILE     # or a local bundle
+```
+
+`update` verifies the bundle's sha256 (when a sidecar is present), extracts it,
+and runs the bundled installer, which verifies every payload against the pinned
+manifest before writing. A tampered bundle is refused and nothing is installed.
+
+## Health
+
+The **Health** page in the Luna menu reports what a bug report needs: installed
+add-on versions against the pinned bundle, `boot.lua` patch markers and backup,
+Lumen/Steam paths, the current settings, and the data files with sizes. *Copy
+diagnostics* puts the whole report on the clipboard.
 
 ## How Luna fits into the stack
 
