@@ -113,6 +113,65 @@ def data_dir():
     return home() / '.local/share/slssteam-integrations'
 
 
+def luna_tools_dir():
+    """Machine-local Luna tooling: the standalone updater copy and its units.
+
+    It sits under the Lumen directory on purpose: that tree is excluded from the
+    user's Syncthing folders, so two machines never fight over the copies.
+    """
+    return lumen_root() / 'sls-luna'
+
+
+def read_json_file(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def write_json_file(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
+    return path
+
+
+def find_gh():
+    """The gh CLI, from PATH or the usual user locations."""
+    found = shutil.which('gh')
+    if found:
+        return found
+    for candidate in (home() / '.local/bin/gh', Path('/usr/local/bin/gh'), Path('/usr/bin/gh')):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def installed_version():
+    """The luna add-on version actually on disk.
+
+    Read from the installed payload first, so the standalone updater copy (which
+    has no repository around it) reports the truth too.
+    """
+    for candidate in (addons_dir() / 'luna' / 'plugin.json',
+                      payload_path('luna', 'plugin/plugin.json')):
+        try:
+            return str(json.loads(candidate.read_text()).get('version', '?'))
+        except (OSError, ValueError):
+            continue
+    return '?'
+
+
+def version_key(text):
+    """Sortable tuple for tags like v0.14.3 or 0.14.3-rc1 (best effort)."""
+    numbers = []
+    for part in str(text or '').strip().lstrip('v').replace('-', '.').split('.'):
+        digits = ''.join(ch for ch in part if ch.isdigit())
+        numbers.append(int(digits) if digits else 0)
+    while len(numbers) < 3:
+        numbers.append(0)
+    return tuple(numbers[:3])
+
+
 def payload_path(addon, source_rel):
     """Where a payload file lives in this repo (mirrors the add-on project)."""
     return ROOT / 'addons' / addon / source_rel
@@ -499,24 +558,10 @@ def cmd_update(options):
         if options.bundle:
             bundle = Path(options.bundle).expanduser()
         elif options.latest:
-            gh = shutil.which('gh')
-            if not gh:
-                print('--latest needs the gh CLI (or use --bundle / --url)', file=sys.stderr)
+            bundle, error = download_release(latest_release()[0], temp_dir)
+            if bundle is None:
+                print('gh release download failed: %s' % error, file=sys.stderr)
                 return 1
-            result = subprocess.run([gh, 'release', 'download',
-                                     '--pattern', 'luna-*.tar.gz',
-                                     '--pattern', 'luna-*.tar.gz.sha256',
-                                     '--dir', str(temp_dir), '--clobber'],
-                                    capture_output=True, text=True)
-            if result.returncode != 0:
-                print('gh release download failed: %s'
-                      % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
-                return 1
-            found = sorted(temp_dir.glob('luna-*.tar.gz'))
-            if not found:
-                print('no luna-*.tar.gz asset in the newest release', file=sys.stderr)
-                return 1
-            bundle = found[-1]
         elif options.url:
             bundle = temp_dir / 'luna-bundle.tar.gz'
             try:
@@ -531,22 +576,78 @@ def cmd_update(options):
         else:
             print('Point at a bundle: --bundle FILE, --url URL or --latest', file=sys.stderr)
             return 2
-        if not bundle.is_file():
-            print('bundle not found: %s' % bundle, file=sys.stderr)
-            return 2
-        checksum_file = Path(str(bundle) + '.sha256')
-        if checksum_file.is_file():
-            expected = checksum_file.read_text().split()[0].strip().lower()
-            actual = sha256(bundle)
-            if expected != actual:
-                print('REFUSING: sha256 mismatch (bundle %s, sidecar %s)'
-                      % (actual[:12], expected[:12]), file=sys.stderr)
-                return 1
-            print('sha256 : verified (%s)' % actual[:12])
-        else:
-            print('note   : no .sha256 beside the bundle; the payload hashes in the '
-                  'bundled manifest are still enforced')
-        extract_dir = temp_dir / 'unpacked'
+        return install_bundle(bundle, only=options.only, dry_run=options.dry_run)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+LUNA_REPO = 'pgm1207/Luna'
+UPDATE_TTL = 6 * 3600
+
+
+def gh_json(args):
+    gh = find_gh()
+    if not gh:
+        return None, 'the gh CLI is not installed (update checks use your own GitHub auth)'
+    result = subprocess.run([gh] + args, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None, (result.stderr.strip() or result.stdout.strip() or 'gh failed')
+    try:
+        return json.loads(result.stdout), ''
+    except ValueError:
+        return None, 'gh returned something that is not JSON'
+
+
+def latest_release():
+    data, error = gh_json(['release', 'view', '--json', 'tagName,assets', '-R', LUNA_REPO])
+    if data is None:
+        return '', error
+    return str(data.get('tagName') or ''), ''
+
+
+def check_updates(force=False):
+    """Compare the installed version with the newest release; cached for 6h."""
+    cache_path = luna_tools_dir() / 'update-check.json'
+    cached = read_json_file(cache_path) or {}
+    now = int(time.time())
+    installed = installed_version()
+    if (not force and cached.get('latest') and cached.get('checkedAt')
+            and now - int(cached['checkedAt']) < UPDATE_TTL):
+        cached['installed'] = installed
+        cached['available'] = version_key(cached.get('latest')) > version_key(installed)
+        return cached
+    latest, error = latest_release()
+    report = {
+        'installed': installed,
+        'latest': latest,
+        'checkedAt': now,
+        'checkError': error,
+        'available': bool(latest) and version_key(latest) > version_key(installed),
+    }
+    write_json_file(cache_path, report)
+    return report
+
+
+def install_bundle(bundle, only=None, dry_run=False):
+    """Verify a bundle and run the installer inside it."""
+    bundle = Path(bundle)
+    if not bundle.is_file():
+        print('bundle not found: %s' % bundle, file=sys.stderr)
+        return 2
+    checksum_file = Path(str(bundle) + '.sha256')
+    if checksum_file.is_file():
+        expected = checksum_file.read_text().split()[0].strip().lower()
+        actual = sha256(bundle)
+        if expected != actual:
+            print('REFUSING: sha256 mismatch (bundle %s, sidecar %s)'
+                  % (actual[:12], expected[:12]), file=sys.stderr)
+            return 1
+        print('sha256 : verified (%s)' % actual[:12])
+    else:
+        print('note   : no .sha256 beside the bundle; the payload hashes in the '
+              'bundled manifest are still enforced')
+    with tempfile.TemporaryDirectory(prefix='luna-bundle-') as work:
+        extract_dir = Path(work) / 'unpacked'
         extract_dir.mkdir()
         with tarfile.open(bundle) as tar:
             try:
@@ -570,14 +671,156 @@ def cmd_update(options):
                 version = '?'
         print('bundle : %s (Luna %s)' % (bundle.name, version))
         command = [sys.executable, str(script), 'install', '--force']
-        for name in options.only or []:
+        for name in only or []:
             command += ['--only', name]
-        if options.dry_run:
+        if dry_run:
             command.append('--dry-run')
         result = subprocess.run(command)
         return result.returncode
+
+
+def download_release(tag, work):
+    """Fetch a release's bundle + checksum with the user's gh auth."""
+    gh = find_gh()
+    if not gh:
+        return None, 'the gh CLI is not installed'
+    result = subprocess.run([gh, 'release', 'download', tag,
+                             '--pattern', 'luna-*.tar.gz',
+                             '--pattern', 'luna-*.tar.gz.sha256',
+                             '--dir', str(work), '--clobber', '-R', LUNA_REPO],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        return None, (result.stderr.strip() or result.stdout.strip() or 'download failed')
+    found = sorted(work.glob('luna-*.tar.gz'))
+    if not found:
+        return None, 'the release has no bundle asset'
+    return found[-1], ''
+
+
+def write_tooling():
+    """Keep a standalone updater copy the timer can run without a checkout."""
+    tools = luna_tools_dir()
+    tools.mkdir(parents=True, exist_ok=True)
+    target = tools / 'luna.py'
+    shutil.copy2(ROOT / 'scripts' / 'luna.py', target)
+    target.chmod(0o755)
+    return target
+
+
+def unit_paths():
+    unit_dir = home() / '.config/systemd/user'
+    return unit_dir, unit_dir / 'luna-autoupdate.service', unit_dir / 'luna-autoupdate.timer'
+
+
+def cmd_check(options):
+    """Print the update check as JSON (the Luna menu reads it)."""
+    print(json.dumps(check_updates(force=getattr(options, 'force', False)), sort_keys=True))
+    return EXIT_OK
+
+
+def cmd_timer(options):
+    """Enable, disable or report the unattended-update timer."""
+    unit_dir, service, timer = unit_paths()
+    if options.action == 'status':
+        enabled = subprocess.run(['systemctl', '--user', 'is-enabled', 'luna-autoupdate.timer'],
+                                 capture_output=True, text=True)
+        active = subprocess.run(['systemctl', '--user', 'is-active', 'luna-autoupdate.timer'],
+                                capture_output=True, text=True)
+        print(json.dumps({'enabled': enabled.stdout.strip() or 'unknown',
+                          'active': active.stdout.strip() or 'unknown',
+                          'units': str(unit_dir)}, sort_keys=True))
+        return EXIT_OK
+    if options.action == 'on':
+        write_tooling()
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        service.write_text(
+            '[Unit]\n'
+            'Description=SLS Luna updates (applies a newer release when Steam is closed)\n'
+            'After=graphical-session.target\n\n'
+            '[Service]\n'
+            'Type=oneshot\n'
+            'Environment=PATH=%%h/.local/bin:/usr/local/bin:/usr/bin\n'
+            'ExecStart=%s %s autoupdate\n' % (sys.executable, luna_tools_dir() / 'luna.py'))
+        timer.write_text(
+            '[Unit]\n'
+            'Description=Check the SLS Luna release channel every 30 minutes\n\n'
+            '[Timer]\n'
+            'OnCalendar=*:0/30\n'
+            'Persistent=true\n'
+            'RandomizedDelaySec=120\n\n'
+            '[Install]\n'
+            'WantedBy=timers.target\n')
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        result = subprocess.run(['systemctl', '--user', 'enable', '--now', 'luna-autoupdate.timer'],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            print('FAILED: %s' % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
+            return 1
+        print('unattended updates: on (%s)' % timer)
+        return EXIT_OK
+    if options.action == 'off':
+        subprocess.run(['systemctl', '--user', 'disable', '--now', 'luna-autoupdate.timer'],
+                       capture_output=True)
+        for path in (timer, service):
+            if path.exists():
+                path.unlink()
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        print('unattended updates: off')
+        return EXIT_OK
+    print('unknown timer action: %s' % options.action, file=sys.stderr)
+    return 2
+
+
+def cmd_autoupdate(options):
+    """Timer entry point: check quietly and apply when Steam is closed.
+
+    Modes come from the Health page switch (data/luna.json -> auto_update):
+    "off" does nothing, "notify" only records what it found, "install" applies a
+    newer release. A queued update (pending.json) always applies.
+    """
+    tools = luna_tools_dir()
+    pending_path = tools / 'pending.json'
+    result_path = tools / 'autoupdate.json'
+    prefs = read_json_file(data_dir() / 'luna.json') or {}
+    mode = str(prefs.get('auto_update') or 'off')
+    pending = read_json_file(pending_path) or {}
+    verbose = bool(getattr(options, 'verbose', False))
+
+    def record(payload):
+        payload['mode'] = mode
+        payload['at'] = int(time.time())
+        write_json_file(result_path, payload)
+        if verbose:
+            print(json.dumps(payload, sort_keys=True))
+        return EXIT_OK
+
+    if mode not in ('notify', 'install') and not pending:
+        return EXIT_OK
+    reasons = refuse_reasons(for_install=True)
+    if reasons:
+        return record({'result': 'deferred', 'reason': reasons[0]})
+    report = check_updates(force=True)
+    installed = report.get('installed') or '?'
+    latest = report.get('latest') or ''
+    if not latest:
+        return record({'result': 'error', 'reason': report.get('checkError') or 'no release found'})
+    if not pending and version_key(latest) <= version_key(installed):
+        return record({'result': 'current', 'version': installed})
+    if mode == 'notify' and not pending:
+        return record({'result': 'available', 'version': latest, 'installed': installed})
+
+    work = Path(tempfile.mkdtemp(prefix='luna-autoupdate-'))
+    try:
+        bundle, error = download_release(latest, work)
+        if bundle is None:
+            return record({'result': 'error', 'reason': error, 'version': latest})
+        code = install_bundle(bundle)
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
+    if code == 0 and pending_path.exists():
+        pending_path.unlink()
+    return record({'result': 'applied' if code == 0 else 'failed',
+                   'version': latest, 'installedBefore': installed, 'exit': code})
 
 
 def cmd_install(options):
@@ -602,6 +845,7 @@ def cmd_install(options):
         return EXIT_OK
     if not to_write:
         write_install_snapshot()
+        write_tooling()
         print('\nAlready installed and identical to the pinned payloads. Nothing to do.')
         return EXIT_OK
     differing = [row for row in to_write if row[4] == 'differs']
@@ -629,6 +873,7 @@ def cmd_install(options):
         return 1
 
     write_install_snapshot()
+    write_tooling()
     print('\ninstalled: %s' % ', '.join('%s %s' % (name, addon_version(name)) for name in targets))
     print('bridge   : %s' % (addons_dir() / 'bridge.lua'))
     print('boot.lua : %s' % patcher('check').stdout.strip())
@@ -841,7 +1086,9 @@ def build_parser():
     for name, handler in (('preflight', cmd_preflight), ('status', cmd_status),
                           ('install', cmd_install), ('uninstall', cmd_uninstall),
                           ('verify', cmd_verify), ('vendor', cmd_vendor),
-                          ('release', cmd_release), ('update', cmd_update)):
+                          ('release', cmd_release), ('update', cmd_update),
+                          ('check', cmd_check), ('autoupdate', cmd_autoupdate),
+                          ('timer', cmd_timer)):
         child = sub.add_parser(name)
         child.set_defaults(handler=handler)
         child.add_argument('--only', action='append', default=[],
@@ -850,6 +1097,13 @@ def build_parser():
             child.add_argument('--force', action='store_true',
                                help='replace installed files that differ from the pinned payloads')
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+        if name == 'check':
+            child.add_argument('--force', action='store_true', help='ignore the 6h cache')
+        if name == 'autoupdate':
+            child.add_argument('--verbose', action='store_true', help='print the decision')
+        if name == 'timer':
+            child.add_argument('action', choices=['on', 'off', 'status'],
+                               help='enable, disable or report the unattended-update timer')
         if name == 'release':
             child.add_argument('--out', help='output directory (default: dist/)')
             child.add_argument('--publish', action='store_true',

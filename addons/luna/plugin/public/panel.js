@@ -481,6 +481,9 @@
     let graphics = null;
     let lunaInfo = null;
     let lunaHealth = null;
+    let lunaUpdate = null;
+    let lunaCheckedAt = 0;
+    let healthNotice = null;
     let compressorTab = 'status';
     let compressorQuery = '';
     let pendingAction = null;
@@ -555,6 +558,13 @@
       }, 1000);
     }
 
+    /* A dot next to Health when an update is available or already queued, so it
+       is visible without opening the page. */
+    function updateBadge() {
+      const update = lunaUpdate || {};
+      return Boolean(update.available || update.pending);
+    }
+
     const sidebar = () => visibleNav().map(entry => {
       const item = document.createElement('div');
       item.className = 'sls-luna-tab' + (entry.id === tab ? ' active' : '');
@@ -562,7 +572,7 @@
       icon.className = 'ico';
       icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + ICON[entry.id] + '</svg>';
       const label = document.createElement('span');
-      label.textContent = entry.label;
+      label.textContent = entry.label + (entry.id === 'health' && updateBadge() ? ' \u2022' : '');
       item.append(icon, label);
       item.onclick = () => {
         tab = entry.id;
@@ -2683,6 +2693,13 @@
     function healthBody() {
       const body = document.createElement('div');
       const health = lunaHealth || null;
+      if (healthNotice) {
+        const notice = document.createElement('p');
+        notice.className = 'sls-luna-error';
+        notice.textContent = healthNotice;
+        body.appendChild(notice);
+        healthNotice = null;
+      }
       const note = document.createElement('p');
       note.className = 'sls-luna-note';
       note.innerHTML = 'Local diagnostics only: paths, versions, marker counts and file sizes. '
@@ -2768,6 +2785,57 @@
           : ' \u00b7 ' + formatBytes(entry.size || 0)));
       });
 
+      section('Updates');
+      const update = lunaUpdate || {};
+      line('Installed: ' + (update.installed || '?') + ' \u00b7 latest: ' + (update.latest || 'unknown')
+        + (update.available ? ' \u00b7 update available' : (update.latest ? ' \u00b7 up to date' : ''))
+        + (update.checkedAt ? ' \u00b7 checked ' + age(update.checkedAt) + ' ago' : ''));
+      if (update.checkError) line('Check: ' + update.checkError);
+      if (update.pending) line('Queued: ' + (update.pendingTag || 'latest')
+        + ' - it lands the next time Steam is closed.');
+      if (update.last) {
+        line('Last unattended run: ' + (update.last.result || '?')
+          + (update.last.version ? ' ' + update.last.version : '')
+          + (update.last.reason ? ' \u00b7 ' + update.last.reason : '')
+          + (update.last.at ? ' \u00b7 ' + age(update.last.at) + ' ago' : ''));
+      }
+      const updateActions = document.createElement('div');
+      updateActions.className = 'sls-luna-row';
+      const checkButton = document.createElement('button');
+      checkButton.className = 'sls-luna-btn secondary';
+      checkButton.textContent = 'Check now';
+      checkButton.onclick = () => runUpdateAction({ action: 'check' });
+      const installButton = document.createElement('button');
+      installButton.className = 'sls-luna-btn';
+      installButton.textContent = update.pending ? 'Queued' : 'Install update';
+      installButton.disabled = !update.available || update.pending;
+      installButton.onclick = () => runUpdateAction({ action: 'install', tag: update.latest });
+      const cancelButton = document.createElement('button');
+      cancelButton.className = 'sls-luna-btn secondary';
+      cancelButton.textContent = 'Cancel queued';
+      cancelButton.disabled = !update.pending;
+      cancelButton.onclick = () => runUpdateAction({ action: 'cancel' });
+      updateActions.append(checkButton, installButton, cancelButton);
+      body.appendChild(updateActions);
+      line('Applying an update needs Steam closed, so a queued one waits for the next exit - '
+        + 'or turn on unattended updates and it applies by itself.');
+      const modeRow = document.createElement('div');
+      modeRow.className = 'sls-luna-subtabs';
+      [['off', 'Off'], ['notify', 'Notify me'], ['install', 'Install automatically']]
+        .forEach(pair => {
+          const button = document.createElement('button');
+          button.className = 'sls-luna-subtab' + ((update.autoUpdate || 'off') === pair[0] ? ' active' : '');
+          button.textContent = pair[1];
+          button.onclick = () => runUpdateAction({ action: 'mode', value: pair[0] });
+          modeRow.appendChild(button);
+        });
+      body.appendChild(modeRow);
+      if ((update.autoUpdate || 'off') !== 'off') {
+        line(update.timerUnits
+          ? 'This machine is set up: the timer checks every 30 minutes and applies while Steam is closed.'
+          : 'This machine is not set up yet: pick the mode again to enable its timer.');
+      }
+
       const copy = document.createElement('button');
       copy.className = 'sls-luna-btn secondary';
       copy.textContent = 'Copy diagnostics';
@@ -2783,6 +2851,32 @@
       };
       body.appendChild(copy);
       return body;
+    }
+
+    /* One place for the update actions: the mode switch also turns the user
+       timer on or off, because that is what makes an unattended apply possible
+       while Steam is closed. */
+    async function runUpdateAction(payload) {
+      try {
+        if (payload.action === 'mode') {
+          await rpc(w, 'SlsLunaPrefsSet',
+            { raw: JSON.stringify({ key: 'auto_update', value: payload.value }) });
+          await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'timer',
+            value: payload.value === 'off' ? 'off' : 'on' }) });
+          await refresh();
+          repaintIfOpen();
+          return;
+        }
+        const request = payload.action === 'check' ? { action: 'check', force: true } : payload;
+        const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify(request) });
+        if (out && out.update) lunaUpdate = out.update;
+        await refresh();
+        repaintIfOpen();
+      } catch (error) {
+        healthNotice = 'Update action failed: '
+          + String(error && error.message ? error.message : error);
+        repaintIfOpen();
+      }
     }
 
     function settingsBody() {
@@ -3013,6 +3107,21 @@
         lunaHealth = (report && report.health) || report || {};
       } catch (error) {
         lunaHealth = lunaHealth || {};
+      }
+      try {
+        const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'status' }) });
+        lunaUpdate = (out && out.update) || lunaUpdate || {};
+      } catch (error) {
+        lunaUpdate = lunaUpdate || {};
+      }
+      // A real check talks to GitHub through the updater; the Python side caches
+      // it for six hours, and opening the menu throttles the call anyway.
+      if (Date.now() - lunaCheckedAt > 30 * 60 * 1000) {
+        lunaCheckedAt = Date.now();
+        try {
+          const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'check' }) });
+          if (out && out.update) lunaUpdate = out.update;
+        } catch (_) { /* offline or gh missing; the status stays */ }
       }
       maybeAutoFetch();
       repaintIfOpen();

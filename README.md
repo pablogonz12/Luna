@@ -44,21 +44,32 @@ the current installer does not install or update that executable.
 
 ## Updating
 
-`luna install` works from a checkout. For other machines (or when the checkout
-is not there), build and publish a bundle and update from it:
+The **Health** page in the Luna menu checks the release channel and shows the
+installed version against the newest release, with **Check now**, **Install
+update** and a three-way switch:
+
+- **Off** - never checks.
+- **Notify me** - a user timer checks every 30 minutes and records what it found;
+  the Health page shows it (and the Health tab gains a dot). Nothing is installed.
+- **Install automatically** - the same timer installs a newer release by itself.
+
+Applying an update needs Steam closed, so one queued from the menu lands on the
+next Steam exit - or, with the timer, whenever Steam is closed. The check uses
+your own `gh` authentication (no token is stored by Luna) and is cached for six
+hours. The timer is a plain systemd user unit (`luna-autoupdate.timer`) running
+the standalone updater copy at `~/.local/share/Lumen/sls-luna/luna.py`.
 
 ```bash
-# on the source machine
-python3 scripts/luna.py release --publish        # dist/luna-<version>.tar.gz + .sha256 (+ gh release)
-
-# on the target machine (any copy of scripts/luna.py)
-python3 scripts/luna.py update --latest          # newest release asset, needs gh
-python3 scripts/luna.py update --bundle FILE     # or a local bundle
+python3 scripts/luna.py check --force        # JSON: installed, latest, available
+python3 scripts/luna.py update --latest      # apply now (Steam must be closed)
+python3 scripts/luna.py timer on|off|status  # the unattended timer
 ```
 
-`update` verifies the bundle's sha256 (when a sidecar is present), extracts it,
-and runs the bundled installer, which verifies every payload against the pinned
-manifest before writing. A tampered bundle is refused and nothing is installed.
+On the source machine, `luna release --publish` builds the bundle, writes its
+`.sha256` and can create the GitHub release; on any other machine
+`luna update --bundle FILE`, `--url URL` or `--latest` verifies it and installs
+with the bundled installer, so no checkout is needed. A tampered bundle is
+refused and nothing is installed.
 
 ## Health
 

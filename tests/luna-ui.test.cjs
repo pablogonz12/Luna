@@ -139,6 +139,9 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
   const storage=new Map();
   const storageListeners=[];
   const prefsState=Object.assign({version:1,store_hide_followed:false},prefs||{});
+  const updateState={installed:'0.14.3',latest:'0.14.9',available:true,
+    checkedAt:Math.floor(Date.now()/1000)-120,checkError:'',pending:false,pendingTag:'',
+    autoUpdate:'notify',last:{result:'current',version:'0.14.3',at:Math.floor(Date.now()/1000)-3600}};
   const sgdbState={apiKey:sgdbKey||'',gridDir:'/home/tester/.local/share/Steam/userdata/1/config/grid',gridError:''};
   const w={
     document,
@@ -210,6 +213,16 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
       if(fn==='__lumenOpenExternalUrl')return JSON.stringify({ok:true});
       if(fn==='SlsLunaInfo')return JSON.stringify({success:true,version:'0.14.0',
         addons:{luna:true},prefs:Object.assign({},prefsState)});
+      if(fn==='SlsLunaUpdate'){
+        const action=(payload&&payload.action)||'status';
+        if(action==='install'){updateState.pending=true;updateState.pendingTag=payload.tag||'0.14.9';
+          return JSON.stringify({success:true,queued:true,update:Object.assign({},updateState)});}
+        if(action==='cancel'){updateState.pending=false;updateState.pendingTag='';
+          return JSON.stringify({success:true,update:Object.assign({},updateState)});}
+        if(action==='timer')return JSON.stringify({success:true,timer:'unattended updates: on',
+          update:Object.assign({},updateState)});
+        return JSON.stringify({success:true,update:Object.assign({},updateState)});
+      }
       if(fn==='SlsLunaHealth')return JSON.stringify({success:true,health:{
         version:'0.14.0',generatedAt:Date.now()/1000,
         install:{generated:'2026-10-15T10:00:00+0200',installedAt:Date.now()/1000-3600,source:'bundle',
@@ -1245,7 +1258,7 @@ test('the Health page lists versions, drift and copyable diagnostics',async()=>{
   document.getElementById('sls-luna-btn').click();
   await new Promise(resolve=>setTimeout(resolve,50));
   const tab=findNode(document.getElementById('sls-luna-overlay'),
-    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='Health');
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Health'));
   assert.ok(tab,'the Health tab must exist');
   tab.onclick();
   await new Promise(resolve=>setTimeout(resolve,30));
@@ -1263,4 +1276,51 @@ test('the Health page lists versions, drift and copyable diagnostics',async()=>{
   copy.onclick();
   const area=findNode(document.getElementById('sls-luna-overlay'),node=>node.tagName==='TEXTAREA');
   assert.ok(area&&/sls-luna/.test(area.value||''),'the diagnostics text must land in the textarea');
+});
+
+test('the Health page reports updates and can queue one',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Health'));
+  assert.ok(tab,'the Health tab must exist');
+  assert.match(tab.textContent,/\u2022/,'an available update must dot the tab');
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/Installed: 0\.14\.3/,'the installed version must be shown');
+  assert.match(text,/latest: 0\.14\.9/,'the newest release must be shown');
+  assert.match(text,/update available/,'the availability must be stated');
+  assert.match(text,/Last unattended run: current 0\.14\.3/,'the last run must be shown');
+  const install=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.tagName==='BUTTON'&&node.textContent==='Install update');
+  assert.ok(install&&!install.disabled,'the install button must be offered');
+  install.onclick();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const queued=calls.filter(entry=>entry.fn==='SlsLunaUpdate'&&entry.payload.action==='install').pop();
+  assert.ok(queued&&queued.payload.tag==='0.14.9','the update must be queued with the latest tag');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Queued: 0\.14\.9/,
+    'the queued state must be visible');
+  const mode=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.tagName==='BUTTON'&&node.textContent==='Install automatically');
+  assert.ok(mode,'the unattended mode control must exist');
+  mode.onclick();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const timer=calls.filter(entry=>entry.fn==='SlsLunaUpdate'&&entry.payload.action==='timer').pop();
+  assert.ok(timer&&timer.payload.value==='on','the mode control must enable the timer');
+  const pref=calls.filter(entry=>entry.fn==='SlsLunaPrefsSet'&&entry.payload.key==='auto_update').pop();
+  assert.ok(pref&&pref.payload.value==='install','the mode must be stored in the backend');
+  const check=calls.filter(entry=>entry.fn==='SlsLunaUpdate'&&entry.payload.action==='check').pop();
+  assert.ok(check,'opening the menu must run a (cached) check');
+  const checkNow=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.tagName==='BUTTON'&&node.textContent==='Check now');
+  checkNow.onclick();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const forced=calls.filter(entry=>entry.fn==='SlsLunaUpdate'&&entry.payload.action==='check'
+    &&entry.payload.force===true).pop();
+  assert.ok(forced,'Check now must bypass the cache');
 });

@@ -10,9 +10,13 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.14.3'
+local VERSION = '0.14.4'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
+local lumen_root = home .. '/.local/share/Lumen'
+-- The standalone updater copy the installer keeps here, plus the small files
+-- that describe an update in flight. This tree is not synced between machines.
+local update_dir = lumen_root .. '/sls-luna'
 local data_dir = home .. '/.local/share/slssteam-integrations'
 local store_path = data_dir .. '/hltb.json'
 local library_path = data_dir .. '/hltb-library.json'
@@ -54,11 +58,15 @@ local PREF_KEYS = {
   -- now, and the panel mirrors them back into localStorage for the agent.
   beta = 'boolean',
   hltb_order = 'string',
+  -- Updates: off (never checks), notify (records what it found) or install
+  -- (the user timer applies a newer release whenever Steam is closed).
+  auto_update = 'string',
 }
 
 -- Allowed values for the string settings.
 local PREF_VALUES = {
   hltb_order = { short = true, long = true },
+  auto_update = { off = true, notify = true, install = true },
 }
 
 local function default_prefs()
@@ -476,6 +484,70 @@ local function addon_report()
   return json.array(report)
 end
 
+-- ------------------------------------------------------------------ updates
+
+local function shq(value)
+  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+local function updater_path()
+  return update_dir .. '/luna.py'
+end
+
+local function python_bin()
+  for _, candidate in ipairs({ '/usr/bin/python3', '/usr/local/bin/python3' }) do
+    if path_exists(candidate) then return candidate end
+  end
+  return 'python3'
+end
+
+local function write_json(path, value)
+  fs.create_directories(fs.parent_path(path))
+  local handle = io.open(path, 'wb')
+  if not handle then return false end
+  local written = handle:write(json.encode(value))
+  local closed = handle:close()
+  return (written and closed) and true or false
+end
+
+-- Runs the standalone updater. Only the small actions come through here: the
+-- download-and-apply belongs to the user's timer, never inside an RPC.
+local function run_updater(args)
+  if not path_exists(updater_path()) then
+    return nil, 'the updater is not installed yet; run install --force once'
+  end
+  local pipe = io.popen(python_bin() .. ' ' .. shq(updater_path()) .. ' ' .. args .. ' 2>&1')
+  if not pipe then return nil, 'could not run the updater' end
+  local output = pipe:read('*a') or ''
+  local ok, why, code = pipe:close()
+  if not ok then
+    local message = (output:gsub('%s+$', ''))
+    return nil, (message ~= '' and message or ('the updater exited with ' .. tostring(code or why)))
+  end
+  return output, nil
+end
+
+local function update_state()
+  local snapshot = read_json(base .. 'luna-manifest.json') or {}
+  local cached = read_json(update_dir .. '/update-check.json') or {}
+  local pending = read_json(update_dir .. '/pending.json') or {}
+  local prefs = load_prefs()
+  return {
+    installed = tostring((snapshot.versions or {}).luna or ''),
+    latest = tostring(cached.latest or ''),
+    available = cached.available == true,
+    checkedAt = tonumber(cached.checkedAt) or 0,
+    checkError = tostring(cached.checkError or ''),
+    pending = pending.tag ~= nil,
+    pendingTag = tostring(pending.tag or ''),
+    autoUpdate = tostring(prefs.auto_update or 'off'),
+    -- The mode is shared between machines (the prefs file syncs) but the timer
+    -- is per machine, so the page has to say whether this one is set up.
+    timerUnits = path_exists(home .. '/.config/systemd/user/luna-autoupdate.timer'),
+    last = read_json(update_dir .. '/autoupdate.json'),
+  }
+end
+
 local function build_health()
   local lumen_root = home .. '/.local/share/Lumen'
   local boot_path = lumen_root .. '/lua/boot.lua'
@@ -582,6 +654,43 @@ function M.register(registry)
   -- and file sizes, so a problem can be described without a shell.
   registry.SlsLunaHealth = function()
     return reply({ success = true, health = build_health() })
+  end
+
+  -- Update plumbing for the Health page. `status` reads local files only;
+  -- `check` asks GitHub through the standalone updater (cached for six hours);
+  -- `install` queues the update for the user timer, which applies it while
+  -- Steam is closed; `timer` toggles that unattended mode.
+  registry.SlsLunaUpdate = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
+    if action == '' or action == 'status' then
+      return reply({ success = true, update = update_state() })
+    end
+    if action == 'check' then
+      local out, err = run_updater('check' .. (entry.force == true and ' --force' or ''))
+      if not out then return reply({ success = false, error = err }) end
+      return reply({ success = true, update = update_state() })
+    end
+    if action == 'install' then
+      local queued = write_json(update_dir .. '/pending.json',
+        { tag = tostring(entry.tag or ''), requestedAt = os.time() })
+      if not queued then return reply({ success = false, error = 'could not queue the update' }) end
+      return reply({ success = true, queued = true, update = update_state() })
+    end
+    if action == 'cancel' then
+      os.remove(update_dir .. '/pending.json')
+      return reply({ success = true, update = update_state() })
+    end
+    if action == 'timer' then
+      local value = tostring(entry.value or '')
+      if value ~= 'on' and value ~= 'off' and value ~= 'status' then
+        return reply({ success = false, error = 'Send on, off or status.' })
+      end
+      local out, err = run_updater('timer ' .. value)
+      if not out then return reply({ success = false, error = err }) end
+      return reply({ success = true, timer = (out:gsub('%s+$', '')), update = update_state() })
+    end
+    return reply({ success = false, error = 'Unknown update action.' })
   end
 
   -- Whole local cache: appid -> record, plus the game list the agent reported.
