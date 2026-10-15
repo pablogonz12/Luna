@@ -678,6 +678,17 @@ test('buildRows ranks recorded games first and marks non-Steam entries',()=>{
   assert.deepEqual(filtered.map(row=>row.id),['1']);
 });
 
+test('the playtime total uses the official Steam playtime as the base',()=>{
+  const rows=buildRows({apps:[2101960,3212112756],games:{
+    '2101960':{title:'Cronos',trackedSeconds:100,adjustmentSeconds:12488,officialSeconds:33240,lastPlayed:10},
+    '3212112756':{title:'Minecraft',trackedSeconds:3600,adjustmentSeconds:60,lastPlayed:5},
+  },titles:{},shortcutNames:{'3212112756':'Minecraft'}},'');
+  const byId=Object.fromEntries(rows.map(row=>[row.id,row]));
+  assert.equal(byId['2101960'].total,33240+12488,
+    'a Steam-tracked game must show the official total plus any correction');
+  assert.equal(byId['3212112756'].total,3660,'a shortcut keeps its locally tracked total');
+});
+
 test('buildHltbRows merges the library with cached times and sorts missing first',()=>{
   const rows=buildHltbRows(
     {'1145360':{name:'Hades',main:84940,match:'exact'}},

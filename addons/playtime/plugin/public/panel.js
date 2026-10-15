@@ -6,6 +6,13 @@
 })(typeof window !== 'undefined' ? window : null, function () {
   'use strict';
   const hours=seconds=>((Number(seconds)||0)/3600).toFixed(2);
+  // Same rule as the agent: an official Steam playtime, when the backend has
+  // one, is the base; a manual edit is a correction on top of it.
+  const lifetimeSeconds=record=>{
+    const official=Number(record&&record.officialSeconds)||0;
+    const base=official>0?official:(Number(record&&record.trackedSeconds)||0);
+    return Math.max(0,base+(Number(record&&record.adjustmentSeconds)||0));
+  };
   /* Pure list building, kept separate from the DOM so it can be tested. Every
      trackable id is listed - manifests and shortcuts alike - because the panel is
      the only way to edit either. */
@@ -24,7 +31,7 @@
       const name=resolved||('App '+id);
       // shortcutNames is exactly the non-Steam set, so one lookup classifies the row.
       return {id,record,name,shortcut:Boolean(shortcuts[id]),
-        total:Math.max(0,(record.trackedSeconds||0)+(record.adjustmentSeconds||0)),
+        total:lifetimeSeconds(record),
         known:Boolean(resolved)};
     });
     const filtered=rows.filter(row=>(row.name+' '+row.id).toLowerCase().includes(needle));
@@ -124,5 +131,5 @@
   }
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>mount(w),{once:true});else mount(w);
   }
-  return {buildRows,hours,mount};
+  return {buildRows,hours,lifetimeSeconds,mount};
 });

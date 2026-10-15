@@ -58,6 +58,15 @@
 
   const parse = raw => (typeof raw === 'string' ? JSON.parse(raw) : raw);
   const hours = seconds => ((Number(seconds) || 0) / 3600).toFixed(2);
+  /* The lifetime total the playtime backend publishes: for games Steam tracks
+     itself the official playtime (localconfig.vdf, read-only) is the base and a
+     manual edit is a correction on top of it; shortcuts, which Steam never
+     records, keep the locally tracked count. */
+  const lifetimeSeconds = record => {
+    const official = Number(record && record.officialSeconds) || 0;
+    const base = official > 0 ? official : (Number(record && record.trackedSeconds) || 0);
+    return Math.max(0, base + (Number(record && record.adjustmentSeconds) || 0));
+  };
   // Compact "how long ago" and "at what time" text for scan and job stamps.
   const age = seconds => {
     const value = Math.max(0, Math.floor(Date.now() / 1000 - (Number(seconds) || 0)));
@@ -2976,7 +2985,7 @@
         record,
         name,
         shortcut: Boolean(shortcuts[id]),
-        total: Math.max(0, (record.trackedSeconds || 0) + (record.adjustmentSeconds || 0)),
+        total: lifetimeSeconds(record),
         known: name !== ('App ' + id),
       };
     }).filter(row => (row.name + ' ' + row.id).toLowerCase().includes(filter))
