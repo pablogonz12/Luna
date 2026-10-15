@@ -465,6 +465,22 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(self.luna('timer', 'off').returncode, 0)
         self.assertFalse(timer.exists() and service.exists(), 'the units were not removed')
 
+    def test_the_standalone_copy_can_manage_its_own_units(self):
+        """The timer entry point runs the copy, which must not copy itself from
+        a repository that is not there (the live bug found on 2026-10-15)."""
+        self.assertEqual(self.luna('install').returncode, 0)
+        copy = self.home / '.local/share/Lumen/sls-luna/luna.py'
+        self.assertTrue(copy.is_file())
+        result = subprocess.run([sys.executable, str(copy), 'timer', 'on'],
+                                capture_output=True, text=True, env=self.env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue(copy.is_file(), 'the copy must survive its own timer action')
+        self.assertTrue((self.home / '.config/systemd/user/luna-autoupdate.timer').is_file())
+        check = subprocess.run([sys.executable, str(copy), 'check', '--force'],
+                               capture_output=True, text=True, env=dict(self.env, LUNA_TEST_TAG='v1.0.0'))
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertIn('"installed"', check.stdout)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

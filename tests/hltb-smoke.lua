@@ -385,7 +385,7 @@ out = call('SlsHltbLibrary', { raw = json.encode({ games = 'nope' }) })
 assert(out.success == false)
 
 out = call('SlsLunaInfo')
-assert(out.success == true and out.version == '0.14.4' and type(out.addons) == 'table')
+assert(out.success == true and out.version == '0.14.5' and type(out.addons) == 'table')
 assert(out.prefs and out.prefs.store_hide_followed == nil, 'prefs must start empty')
 
 -- Preferences: the store switch writes here (the store page runs on another
@@ -424,7 +424,7 @@ assert(out.success == false, 'a wrongly typed beta value was accepted')
 -- Health: read-only diagnostics, tolerant of a bare environment.
 out = call('SlsLunaHealth')
 assert(out.success == true and type(out.health) == 'table', 'the health report was not returned')
-assert(out.health.version == '0.14.4', 'the health report has no version')
+assert(out.health.version == '0.14.5', 'the health report has no version')
 assert(type(out.health.lumen) == 'table' and type(out.health.lumen.boot) == 'table',
   'the Lumen block is missing')
 assert(type(out.health.data) == 'table' and type(out.health.data.prefs) == 'table',
