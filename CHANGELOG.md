@@ -3,6 +3,23 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.8 - 2026-10-21
+
+- **Update reliability.** Stale update locks expire instead of wedging every
+  future update; releases refuse dirty trees and verify their own manifest.
+- **Backup and restore.** `luna backup` snapshots playtime, presence, HLTB,
+  prefs, the artwork key and compressor settings with a hash manifest;
+  `luna restore` validates, refuses while Steam runs, and never overwrites a
+  newer file without `--force`.
+- **Artwork undo history.** Every replaced file is stashed (keep 5, op-logged);
+  failed writes roll back; Undo steps back losslessly and Steam artwork resets
+  the slot to Steam's own art. Legacy single-level backups are imported.
+- **Secrets.** The SteamGridDB key is never echoed to the panel (masked tail
+  only); the field is write-only. Key file stays owner-only.
+- **Two-machine awareness.** Synced heartbeats show the other machine in
+  `preflight`; it warns against Steam on both at once and points at
+  `luna reconcile` while localconfig conflicts wait.
+
 ## 0.14.7 - 2026-10-21
 
 - **Two machines, one library.** Steam's synced `localconfig.vdf` no longer
