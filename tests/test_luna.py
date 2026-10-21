@@ -709,6 +709,34 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('running', result.stdout + result.stderr)
 
+    def test_preflight_nudges_reconcile_and_warns_about_peers(self):
+        import time as _time
+        config = self.home / '.local/share/Steam/userdata/9/config'
+        config.mkdir(parents=True)
+        (config / 'localconfig.vdf').write_text('"UserLocalConfigStore"\n{\n}\n')
+        (config / 'localconfig.sync-conflict-20261001-000000-DDD.vdf').write_text(
+            '"UserLocalConfigStore"\n{\n}\n')
+        beats = self.data / 'heartbeats'
+        beats.mkdir(parents=True)
+        beats.joinpath('othermachine.json').write_text(json.dumps(
+            {'machine': 'othermachine', 'at': int(_time.time()) - 600,
+             'steamRunning': True, 'luna': '0.14.7'}))
+        result = self.luna('preflight')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1 localconfig conflict(s)', result.stdout)
+        self.assertIn('luna reconcile', result.stdout)
+        self.assertIn('othermachine', result.stdout)
+        self.assertIn('both machines', result.stdout)
+
+    def test_check_writes_a_heartbeat(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        _, env = self.bundle_and_env()
+        self.assertEqual(self.luna('check', '--force', env=env).returncode, 0)
+        beats = sorted((self.home / '.local/share/slssteam-integrations/heartbeats').glob('*.json'))
+        self.assertEqual(len(beats), 1, 'check must leave exactly our own heartbeat')
+        entry = json.loads(beats[0].read_text())
+        self.assertIn('at', entry)
+
     def test_the_standalone_copy_can_manage_its_own_units(self):
         """The timer entry point runs the copy, which must not copy itself from
         a repository that is not there (the live bug found on 2026-10-15)."""

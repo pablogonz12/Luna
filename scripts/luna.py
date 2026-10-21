@@ -443,6 +443,80 @@ def luna_tools_dir():
     return lumen_root() / 'sls-luna'
 
 
+def machine_id():
+    """Stable per-machine id. Machine-local on purpose (never synced): it is
+    how one machine tells its own heartbeat apart from the other's."""
+    path = luna_tools_dir() / 'machine-id'
+    try:
+        existing = path.read_text().strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    import uuid
+    ident = uuid.uuid4().hex[:12]
+    try:
+        luna_tools_dir().mkdir(parents=True, exist_ok=True)
+        path.write_text(ident + '\n')
+    except OSError:
+        pass
+    return ident
+
+
+HEARTBEAT_TTL = 2 * 3600
+HEARTBEAT_PRUNE = 7 * 24 * 3600
+
+
+def heartbeat_dir():
+    """Synced heartbeats: data_dir *is* shared between machines, so each
+    machine's periodic check-in is visible to the other."""
+    return data_dir() / 'heartbeats'
+
+
+def write_heartbeat():
+    """Record this machine's presence for the other machine to see."""
+    try:
+        directory = heartbeat_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        entry = {'machine': machine_id(),
+                 'at': int(time.time()),
+                 'steamRunning': bool(process_running('steam') or process_running('steamwebhelper')),
+                 'luna': installed_version()}
+        (directory / (entry['machine'] + '.json')).write_text(json.dumps(entry) + '\n')
+        now = time.time()
+        for child in directory.glob('*.json'):
+            try:
+                if now - child.stat().st_mtime > HEARTBEAT_PRUNE:
+                    child.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def read_peers(max_age=HEARTBEAT_TTL):
+    """Heartbeats from *other* machines fresh enough to matter."""
+    me = machine_id()
+    peers = []
+    try:
+        files = sorted(heartbeat_dir().glob('*.json'))
+    except OSError:
+        return peers
+    now = time.time()
+    for path in files:
+        if path.stem == me:
+            continue
+        try:
+            entry = json.loads(path.read_text())
+            at = int(entry.get('at') or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        if now - at > max_age:
+            continue
+        peers.append(entry)
+    return peers
+
+
 def read_json_file(path):
     try:
         return json.loads(path.read_text())
@@ -740,6 +814,21 @@ def cmd_preflight(options):
                  'present' if (data / 'presence.json').is_file() else 'absent'))
     else:
         print('data       : %s (absent - no playtime recorded yet)' % data)
+    conflicts = [p for user in _steam_user_configs()
+                 for p in (user / 'config').glob('localconfig.sync-conflict-*.vdf')]
+    if conflicts:
+        print('sync       : %d localconfig conflict(s) waiting - close Steam on both machines, '
+              'let Syncthing settle, then run: luna reconcile' % len(conflicts))
+    else:
+        print('sync       : no localconfig conflicts')
+    for peer in read_peers():
+        ago = int(time.time() - int(peer.get('at') or 0))
+        print('peer       : %s seen %dm ago, Steam %s, Luna %s%s'
+              % (peer.get('machine', '?'), ago // 60,
+                 'running - avoid Steam on both machines at once'
+                 if peer.get('steamRunning') else 'closed',
+                 peer.get('luna', '?'),
+                 '' if peer.get('steamRunning') else ''))
     reasons = refuse_reasons(for_install=True)
     if reasons:
         print('\nREFUSALS (install/uninstall would stop):')
@@ -1202,6 +1291,7 @@ def unit_paths():
 
 def cmd_check(options):
     """Print the update check as JSON (the Luna menu reads it)."""
+    write_heartbeat()
     print(json.dumps(check_updates(force=getattr(options, 'force', False)), sort_keys=True))
     return EXIT_OK
 
@@ -1275,6 +1365,7 @@ def cmd_autoupdate(options):
     mode = str(prefs.get('auto_update') or 'off')
     pending = read_json_file(pending_path) or {}
     verbose = bool(getattr(options, 'verbose', False))
+    write_heartbeat()
 
     def record(payload):
         payload['mode'] = mode
