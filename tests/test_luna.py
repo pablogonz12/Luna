@@ -532,6 +532,95 @@ class LunaTestCase(unittest.TestCase):
         self.assertFalse((unit_dir / 'luna-autoupdate.timer').exists(),
                          'uninstall must not leave the worker behind')
 
+    # -- reconcile -----------------------------------------------------
+    def render_vdf(self, doc):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('luna_mod', str(HERE / 'scripts' / 'luna.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.render_vdf(doc)
+
+    def test_reconcile_merges_newest_lastplayed_and_archives_conflicts(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('luna_mod', str(HERE / 'scripts' / 'luna.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        config = self.home / '.local/share/Steam/userdata/1/config'
+        config.mkdir(parents=True)
+        live_apps = {'10': {'LastPlayed': '100', 'Playtime': '5'},
+                     '20': {'LastPlayed': '200', 'Playtime': '0'}}
+        live = {'UserLocalConfigStore': {'Software': {'Valve': {'Steam': {'Apps': live_apps}}}}}
+        (config / 'localconfig.vdf').write_text(module.render_vdf(live))
+        old_apps = {'10': {'LastPlayed': '999', 'Playtime': '0'},
+                    '30': {'LastPlayed': '50', 'Playtime': '0'}}
+        old = {'UserLocalConfigStore': {'Software': {'Valve': {'Steam': {'Apps': old_apps}}}}}
+        conflict = config / 'localconfig.sync-conflict-20261001-000000-AAA.vdf'
+        conflict.write_text(module.render_vdf(old))
+        # The conflict is the older copy; the live file is newest and wins
+        # every non-recency key.
+        import os as _os, time as _time
+        _os.utime(conflict, (_time.time() - 86400, _time.time() - 86400))
+        result = self.luna('reconcile', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('would merge', result.stdout)
+        self.assertTrue((config / 'localconfig.sync-conflict-20261001-000000-AAA.vdf').is_file(),
+                        'dry run must not move anything')
+        result = self.luna('reconcile')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        merged = module.parse_vdf((config / 'localconfig.vdf').read_text())
+        apps = merged['UserLocalConfigStore']['Software']['Valve']['Steam']['Apps']
+        self.assertEqual(apps['10']['LastPlayed'], '999', 'newest timestamp must win')
+        self.assertEqual(apps['10']['Playtime'], '5', 'other keys come from the live file')
+        self.assertEqual(apps['20']['LastPlayed'], '200')
+        self.assertEqual(apps['30']['LastPlayed'], '50', 'apps only in the conflict must survive')
+        archives = sorted(config.glob('localconfig.reconciled-*'))
+        self.assertEqual(len(archives), 1)
+        self.assertTrue((archives[0] / 'localconfig.sync-conflict-20261001-000000-AAA.vdf').is_file())
+        # Idempotent: a second run finds nothing to do.
+        self.assertIn('no conflicts', self.luna('reconcile').stdout)
+
+    def test_reconcile_merges_recent_blob_and_seen_state(self):
+        import importlib.util, struct
+        spec = importlib.util.spec_from_file_location('luna_mod', str(HERE / 'scripts' / 'luna.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        config = self.home / '.local/share/Steam/userdata/2/config'
+        config.mkdir(parents=True)
+        blob_live = struct.pack('<IIIIII', 10, 0, 100, 0x02000000, 777, 50).hex()
+        blob_old = struct.pack('<IIIIII', 10, 0, 90, 20, 0, 60).hex()
+        seen_live = '{"version":1,"mapSections":{"A":{"vecSeenIDs":["1:100"]}}}'
+        seen_old = '{"version":1,"mapSections":{"A":{"vecSeenIDs":["1:90","2:50"]}}}'
+        live = {'UserLocalConfigStore': {'Software': {'Valve': {'Steam': {
+            'Apps': {}, 'RecentLocalPlayedGameIDs': blob_live,
+            'GamepadHomeWhatsNewSeen_9': seen_live}}}}}
+        old = {'UserLocalConfigStore': {'Software': {'Valve': {'Steam': {
+            'Apps': {}, 'RecentLocalPlayedGameIDs': blob_old,
+            'GamepadHomeWhatsNewSeen_9': seen_old}}}}}
+        (config / 'localconfig.vdf').write_text(module.render_vdf(live))
+        (config / 'localconfig.sync-conflict-20261001-000000-BBB.vdf').write_text(module.render_vdf(old))
+        self.assertEqual(self.luna('reconcile').returncode, 0)
+        merged = module.parse_vdf((config / 'localconfig.vdf').read_text())
+        steam = merged['UserLocalConfigStore']['Software']['Valve']['Steam']
+        entries = module._decode_recent(steam['RecentLocalPlayedGameIDs'])
+        by_id = {(kind, ident): stamp for kind, ident, stamp in entries}
+        self.assertEqual(by_id[('app', 10)], 100)
+        self.assertEqual(by_id[('shortcut', 777)], 50)
+        self.assertEqual(by_id[('app', 20)], 60)
+        seen = json.loads(steam['GamepadHomeWhatsNewSeen_9'])
+        self.assertIn('1:100', seen['mapSections']['A']['vecSeenIDs'])
+        self.assertIn('2:50', seen['mapSections']['A']['vecSeenIDs'])
+
+    def test_reconcile_refuses_while_steam_runs(self):
+        config = self.home / '.local/share/Steam/userdata/3/config'
+        config.mkdir(parents=True)
+        (config / 'localconfig.vdf').write_text('"UserLocalConfigStore"\n{\n}\n')
+        (config / 'localconfig.sync-conflict-20261001-000000-CCC.vdf').write_text(
+            '"UserLocalConfigStore"\n{\n}\n')
+        result = self.luna('reconcile', running='steam,')
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue((config / 'localconfig.sync-conflict-20261001-000000-CCC.vdf').is_file(),
+                        'refusal must not move anything')
+
     def test_the_standalone_copy_can_manage_its_own_units(self):
         """The timer entry point runs the copy, which must not copy itself from
         a repository that is not there (the live bug found on 2026-10-15)."""

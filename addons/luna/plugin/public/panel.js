@@ -2772,6 +2772,11 @@
         + (lumen.bridge ? ' \u00b7 bridge present' : ' \u00b7 bridge missing'));
       line('Boot: ' + (boot.path || '?'));
       line('Steam: ' + (steam.root || '?') + (steam.exists ? '' : ' (steam.sh missing)'));
+      if (Number(steam.localconfigConflicts || 0) > 0) {
+        line('Steam sync conflicts: ' + steam.localconfigConflicts + ' localconfig cop'
+          + (Number(steam.localconfigConflicts) === 1 ? 'y' : 'ies')
+          + ' waiting - close Steam on both machines, let Syncthing settle, then run: luna reconcile');
+      }
       line('Data: ' + (data.dir || '?'));
       if (install.installedAt || install.generated) {
         line('Last install: ' + (install.installedAt ? clock(install.installedAt) : '?')

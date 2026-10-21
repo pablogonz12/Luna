@@ -231,7 +231,7 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
           boot:{path:'/home/tester/.local/share/Lumen/lua/boot.lua',patched:true,markers:1,backup:true},
           addons:[{name:'luna',title:'sls-luna',version:'0.14.0',files:3},
             {name:'sgdb',title:'sls-sgdb',version:'0.2.0',files:2}]},
-        steam:{root:'/home/tester/.local/share/Steam',exists:true},
+        steam:{root:'/home/tester/.local/share/Steam',exists:true,localconfigConflicts:2},
         data:{dir:'/home/tester/.local/share/slssteam-integrations',
           prefs:{version:1,store_hide_followed:false,beta:false,hltb_order:'short'},
           hltb:{cached:3533},sgdb:{hasKey:true},
@@ -1306,6 +1306,7 @@ test('the Health page lists versions, drift and copyable diagnostics',async()=>{
   assert.match(text,/Lumen: \/home\/tester/,'the paths must be listed');
   assert.match(text,/3533/,'the HLTB cache count must be shown');
   assert.match(text,/Beta features: off/,'the settings summary must be shown');
+  assert.match(text,/sync conflicts: 2/,'waiting localconfig conflicts must be surfaced');
   const copy=findNode(document.getElementById('sls-luna-overlay'),
     node=>node.tagName==='BUTTON'&&node.textContent==='Copy diagnostics');
   assert.ok(copy,'the diagnostics button must exist');
