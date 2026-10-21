@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.14.5'
+local VERSION = '0.14.6'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local lumen_root = home .. '/.local/share/Lumen'
@@ -484,6 +484,18 @@ local function addon_report()
   return json.array(report)
 end
 
+-- Expected payload layout per add-on (mirrors scripts/luna.py ADDON_FILES).
+-- Lets the Health page flag a half-installed add-on even when its
+-- plugin.json version still matches the snapshot.
+local EXPECTED_FILES = {
+  luna = { 'backend/main.lua', 'public/agent.js', 'public/panel.js', 'plugin.json' },
+  sgdb = { 'backend/main.lua', 'plugin.json' },
+  graphics = { 'backend/main.lua', 'plugin.json' },
+  playtime = { 'backend/main.lua', 'public/agent.js', 'public/panel.js', 'plugin.json' },
+  presence = { 'backend/main.lua', 'public/agent.js', 'public/panel.js', 'plugin.json' },
+  compressor = { 'backend/main.lua', 'public/panel.js', 'plugin.json' },
+}
+
 -- ------------------------------------------------------------------ updates
 
 local function shq(value)
@@ -566,6 +578,11 @@ local function build_health()
       local pinned = snapshot.versions[entry.name]
       if pinned and entry.version ~= tostring(pinned) then
         drift[#drift + 1] = entry.name .. ': installed ' .. entry.version .. ', pinned ' .. tostring(pinned)
+      end
+      for _, rel in ipairs(EXPECTED_FILES[entry.name] or {}) do
+        if not path_exists(base .. entry.name .. '/' .. rel) then
+          drift[#drift + 1] = entry.name .. '/' .. rel .. ': missing from the installed add-on'
+        end
       end
     end
     for name, pinned in pairs(snapshot.versions) do

@@ -1015,6 +1015,42 @@ test('an artwork request with beta off points at the Settings switch',async()=>{
   assert.doesNotMatch(text,/Artwork for Hades/,'no picker without beta on');
 });
 
+test('an artwork request is consumed once and never replays on restart',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const first=fakeWindow(document,{sgdbKey:'my-key'});
+  first.storage.set('slsLunaBeta','1');
+  mount(first.w);
+  first.storage.set('slsLunaArtworkRequest',JSON.stringify({appid:1145360,name:'Hades',at:Date.now()}));
+  first.w.__emitStorage();
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.ok(document.getElementById('sls-luna-overlay'),'the picker must open from the request');
+  assert.equal(first.storage.get('slsLunaArtworkRequest'),undefined,'the request must be claimed');
+  // A fresh mount sharing the same storage (a Steam restart) must stay shut.
+  const document2=fakeDom();
+  menubarFixture(document2,true);
+  const second=fakeWindow(document2,{sgdbKey:'my-key'});
+  second.storage.set('slsLunaBeta','1');
+  second.w.localStorage.getItem=(key)=>first.storage.get(key) ?? null;
+  second.w.localStorage.setItem=(key,value)=>first.storage.set(key,String(value));
+  second.w.localStorage.removeItem=(key)=>first.storage.delete(key);
+  mount(second.w);
+  await new Promise(resolve=>setTimeout(resolve,120));
+  assert.equal(document2.getElementById('sls-luna-overlay'),null,'a consumed request must not reopen the menu');
+});
+
+test('a stale artwork request is ignored',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,storage}=fakeWindow(document,{sgdbKey:'my-key'});
+  storage.set('slsLunaBeta','1');
+  mount(w);
+  storage.set('slsLunaArtworkRequest',JSON.stringify({appid:1145360,name:'Hades',at:Date.now()-10*60*1000}));
+  w.__emitStorage();
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(document.getElementById('sls-luna-overlay'),null,'a ten-minute-old request must stay shut');
+});
+
 test('the Graphics beta page reports the detection read-only',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);

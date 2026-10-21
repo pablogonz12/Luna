@@ -435,6 +435,12 @@ class LunaTestCase(unittest.TestCase):
 
     def test_autoupdate_defers_while_steam_runs_and_never_installs(self):
         self.assertEqual(self.luna('install').returncode, 0)
+        # Make an update available so the Steam guard, not the
+        # up-to-date check, decides the outcome.
+        plugin = self.addons / 'luna' / 'plugin.json'
+        stale = json.loads(plugin.read_text())
+        stale['version'] = '0.0.1'
+        plugin.write_text(json.dumps(stale))
         (self.data / 'luna.json').write_text(json.dumps({'version': 1, 'auto_update': 'install'}))
         _, env = self.bundle_and_env()
         result = self.luna('autoupdate', '--verbose', env=env, running='steam,')
@@ -464,6 +470,67 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(status['enabled'], 'enabled')
         self.assertEqual(self.luna('timer', 'off').returncode, 0)
         self.assertFalse(timer.exists() and service.exists(), 'the units were not removed')
+
+    def test_release_refuses_a_dirty_tree(self):
+        target = HERE / 'addons/luna/plugin/public/panel.js'
+        original = target.read_bytes()
+        try:
+            target.write_bytes(original + b'\n// dirty\n')
+            out = self.temp / 'dist-dirty'
+            result = self.luna('release', '--out', str(out))
+            self.assertNotEqual(result.returncode, 0, 'a dirty tree must not release')
+            self.assertIn('does not match the manifest', result.stdout + result.stderr)
+        finally:
+            target.write_bytes(original)
+
+    def test_update_refuses_a_bundle_with_a_bad_inner_manifest(self):
+        out = self.temp / 'dist-inner'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        import io as _io
+        bundle = next(out.glob('luna-*.tar.gz'))
+        raw = bundle.read_bytes()
+        # Flip one payload byte inside the compressed stream: the outer
+        # checksum is recomputed below, so only the inner manifest check
+        # can catch it.
+        mutated = bytearray(raw)
+        mutated[len(mutated) // 2] ^= 0x01
+        bundle.write_bytes(bytes(mutated))
+        (Path(str(bundle) + '.sha256')).write_text(
+            '%s  %s\n' % (__import__('hashlib').sha256(bytes(mutated)).hexdigest(), bundle.name))
+        result = self.luna('update', '--bundle', str(bundle))
+        self.assertNotEqual(result.returncode, 0, 'a corrupt bundle must not install')
+        self.assertFalse(self.addons.exists(), 'a corrupt bundle must not install')
+
+    def test_status_degrades_on_a_missing_installed_file(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        (self.addons / 'presence/public/panel.js').unlink()
+        result = self.luna('status')
+        self.assertEqual(result.returncode, 1, 'a missing file must degrade status')
+        self.assertIn('presence', result.stdout)
+        self.assertIn('new', result.stdout)
+
+    def test_notify_records_available_while_steam_runs(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        plugin = self.addons / 'luna' / 'plugin.json'
+        stale = json.loads(plugin.read_text())
+        stale['version'] = '0.0.1'
+        plugin.write_text(json.dumps(stale))
+        (self.data / 'luna.json').write_text(json.dumps({'version': 1, 'auto_update': 'notify'}))
+        _, env = self.bundle_and_env()
+        result = self.luna('autoupdate', '--verbose', env=env, running='steam,')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        last = json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
+        # Notify is read-only: Steam running must not block the report.
+        self.assertEqual(last['result'], 'available')
+
+    def test_full_uninstall_disables_the_timer(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        self.assertEqual(self.luna('timer', 'on').returncode, 0)
+        unit_dir = self.home / '.config/systemd/user'
+        self.assertTrue((unit_dir / 'luna-autoupdate.timer').is_file())
+        self.assertEqual(self.luna('uninstall').returncode, 0)
+        self.assertFalse((unit_dir / 'luna-autoupdate.timer').exists(),
+                         'uninstall must not leave the worker behind')
 
     def test_the_standalone_copy_can_manage_its_own_units(self):
         """The timer entry point runs the copy, which must not copy itself from

@@ -2386,14 +2386,20 @@
 
     // The agent's "Change artwork" action writes a request into localStorage
     // (it has no DOM); the panel owns the window, so it opens the picker here.
+    // One-shot: the key is claimed (removed) on first read so a restart never
+    // replays an old request. Stale requests (older than the TTL) are ignored.
+    const ARTWORK_REQUEST_TTL_MS = 5 * 60 * 1000;
     function consumeArtworkRequest() {
       let raw = null;
       try { raw = w.localStorage && w.localStorage.getItem('slsLunaArtworkRequest'); } catch (_) {}
       if (!raw || raw === artworkRequest) return false;
+      artworkRequest = raw;
+      try { if (w.localStorage) w.localStorage.removeItem('slsLunaArtworkRequest'); } catch (_) {}
       let request = null;
       try { request = JSON.parse(raw); } catch (_) { return false; }
-      artworkRequest = raw;
       if (!request || !request.appid) return false;
+      if (typeof request.at === 'number' && Number.isFinite(request.at)
+        && Date.now() - request.at > ARTWORK_REQUEST_TTL_MS) return false;
       if (!betaFeatures()) {
         // The picker is a beta page; point the user at the switch instead of
         // silently doing nothing.
@@ -2509,9 +2515,13 @@
 
       const head = document.createElement('p');
       head.className = 'sls-luna-note';
-      head.innerHTML = 'Artwork for <strong>' + sgdbGame.name + '</strong> (#' + sgdbGame.appid + ')'
+      // Names come from the local library and SteamGridDB: text, never HTML.
+      const esc = text => String(text == null ? '' : text)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+      head.innerHTML = 'Artwork for <strong>' + esc(sgdbGame.name) + '</strong> (#' + sgdbGame.appid + ')'
         + (sgdbGame.sgdbName && sgdbGame.sgdbName !== sgdbGame.name
-          ? ' \u00b7 matched as "' + sgdbGame.sgdbName + '"' : '')
+          ? ' \u00b7 matched as &quot;' + esc(sgdbGame.sgdbName) + '&quot;' : '')
         + (sgdbGame.sgdbId ? '' : ' \u00b7 <span style="color:#8d97a1">searching\u2026</span>');
       body.appendChild(head);
 
@@ -2830,7 +2840,10 @@
           modeRow.appendChild(button);
         });
       body.appendChild(modeRow);
-      if ((update.autoUpdate || 'off') !== 'off') {
+      if (update.pending && !update.timerUnits) {
+        line('An update is queued but this machine has no timer worker yet: '
+          + 'it lands the next time the timer runs, so keep this page open or pick a mode to enable it.');
+      } else if ((update.autoUpdate || 'off') !== 'off') {
         line(update.timerUnits
           ? 'This machine is set up: the timer checks every 30 minutes and applies while Steam is closed.'
           : 'This machine is not set up yet: pick the mode again to enable its timer.');
@@ -2855,7 +2868,8 @@
 
     /* One place for the update actions: the mode switch also turns the user
        timer on or off, because that is what makes an unattended apply possible
-       while Steam is closed. */
+       while Steam is closed. Queuing an update also ensures the timer worker
+       exists (without changing the mode), or the queue would sit forever. */
     async function runUpdateAction(payload) {
       try {
         if (payload.action === 'mode') {
@@ -2870,6 +2884,11 @@
         const request = payload.action === 'check' ? { action: 'check', force: true } : payload;
         const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify(request) });
         if (out && out.update) lunaUpdate = out.update;
+        if (payload.action === 'install' && out && out.queued && !lunaUpdate.timerUnits) {
+          try {
+            await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'timer', value: 'on' }) });
+          } catch (_) { /* the queue stands; the Health page explains the setup */ }
+        }
         await refresh();
         repaintIfOpen();
       } catch (error) {
@@ -3116,7 +3135,9 @@
       }
       // A real check talks to GitHub through the updater; the Python side caches
       // it for six hours, and opening the menu throttles the call anyway.
-      if (Date.now() - lunaCheckedAt > 30 * 60 * 1000) {
+      // "Off" means never check, even from the menu: the Health page then
+      // only shows the last known status.
+      if ((lunaUpdate.autoUpdate || 'off') !== 'off' && Date.now() - lunaCheckedAt > 30 * 60 * 1000) {
         lunaCheckedAt = Date.now();
         try {
           const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'check' }) });
@@ -3154,8 +3175,15 @@
     w.setInterval(() => { removeFloating(document); }, 4000);
     // The agent's "Change artwork" right-click lands here as a storage event
     // (SharedJSContext writes it; the panel owns the window and opens the UI).
+    // Only artwork keys wake the consumer; anything else is unrelated traffic.
     if (typeof w.addEventListener === 'function') {
-      w.addEventListener('storage', () => { consumeArtworkRequest(); });
+      w.addEventListener('storage', event => {
+        try {
+          if (event && typeof event.key === 'string'
+            && event.key !== 'slsLunaArtworkRequest') return;
+        } catch (_) { /* a bare emitter without a key still consumes */ }
+        consumeArtworkRequest();
+      });
     }
     (w.setTimeout || setTimeout)(() => { consumeArtworkRequest(); }, 2500);
     // Keep the game-page HLTB cell and the SORT BY label in step with Steam's
