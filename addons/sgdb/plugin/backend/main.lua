@@ -12,7 +12,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.2.1'
+local VERSION = '0.2.2'
 local home = os.getenv('HOME') or ''
 local data_dir = home .. '/.local/share/slssteam-integrations'
 local config_path = data_dir .. '/sgdb.json'
@@ -177,21 +177,150 @@ local function slot_files(directory, appid, kind)
   return out
 end
 
--- The backup keeps the original full name so Restore can put it back with the
--- right extension (Steam keys the slot by name, not by bytes).
-local function slot_backup(directory, appid, kind)
-  local base = directory .. '/' .. tostring(appid) .. KINDS[kind]
-  for _, ext in ipairs(SLOT_EXTS) do
-    local path = base .. '.' .. ext .. '.sls-luna.bak'
-    if fs.exists(path) then return path, base .. '.' .. ext end
-  end
-  return nil
+-- Undo history: every replaced file lands in
+-- <grid>/.sls-luna-history/<appid><suffix>/<timestamp>-<n>.<ext>, newest kept
+-- (HISTORY_KEEP each), plus one append-only op log at the history root.
+-- Undo steps back through the chain; Reset removes the custom file so Steam
+-- shows its own artwork again. History survives both.
+local HISTORY_KEEP = 5
+local OP_LOG_MAX = 200
+
+local function history_root(directory)
+  return directory .. '/.sls-luna-history'
 end
 
-local function clear_backups(directory, appid, kind)
-  local base = directory .. '/' .. tostring(appid) .. KINDS[kind]
-  os.remove(base .. '.sls-luna.bak') -- legacy naming, if any
-  for _, ext in ipairs(SLOT_EXTS) do os.remove(base .. '.' .. ext .. '.sls-luna.bak') end
+local function slot_history_dir(directory, appid, kind)
+  return history_root(directory) .. '/' .. tostring(appid) .. KINDS[kind]
+end
+
+local function op_log_path(directory)
+  return history_root(directory) .. '/op-log.json'
+end
+
+local function read_bytes(path)
+  local f = io.open(path, 'rb')
+  if not f then return nil end
+  local raw = f:read('*a')
+  f:close()
+  return raw
+end
+
+local function list_dir(dir)
+  local names, seen = {}, {}
+  local function add(name)
+    name = tostring(name or '')
+    if name ~= '' and not seen[name] then seen[name] = true; names[#names + 1] = name end
+  end
+  local ok, fs = pcall(require, 'fs')
+  if ok and type(fs) == 'table' and type(fs.list) == 'function' then
+    local ok_list, items = pcall(fs.list, dir)
+    if ok_list and type(items) == 'table' then
+      for _, item in ipairs(items) do
+        add(type(item) == 'table' and item.name or item)
+      end
+    end
+  end
+  -- The test harness ships an fs shim whose list() is a stub; ls is the
+  -- fallback there (and on any Lumen without the shim).
+  local pipe = io.popen("ls -1 '" .. dir:gsub("'", "'\\''") .. "' 2>/dev/null")
+  if pipe then
+    for line in pipe:lines() do add(line) end
+    pipe:close()
+  end
+  return names
+end
+
+local function history_entries(directory, appid, kind)
+  local out = {}
+  for _, name in ipairs(list_dir(slot_history_dir(directory, appid, kind))) do
+    if name:match('^%d+%-%d+%.[%w]+$') then out[#out + 1] = name end
+  end
+  table.sort(out)
+  return out
+end
+
+local function prune_history(directory, appid, kind)
+  local entries = history_entries(directory, appid, kind)
+  while #entries > HISTORY_KEEP do
+    os.remove(slot_history_dir(directory, appid, kind) .. '/' .. entries[1])
+    table.remove(entries, 1)
+  end
+end
+
+local function log_op(directory, entry)
+  local path = op_log_path(directory)
+  local log = {}
+  local raw = read_bytes(path)
+  if raw then
+    local ok, parsed = pcall(json.decode, raw)
+    if ok and type(parsed) == 'table' then log = parsed end
+  end
+  log[#log + 1] = entry
+  while #log > OP_LOG_MAX do table.remove(log, 1) end
+  fs.create_directories(history_root(directory))
+  write_file_atomic(path, json.encode(log))
+end
+
+-- Stash the slot's current file(s) into history before they are replaced.
+-- Old single-level `.sls-luna.bak` files are imported, not dropped.
+local function push_history(directory, appid, kind, author)
+  local slot = math.floor(appid)
+  local current = slot_files(directory, slot, kind)
+  local legacy = {}
+  do
+    local base = directory .. '/' .. tostring(slot) .. KINDS[kind]
+    os.remove(base .. '.sls-luna.bak') -- legacy naming, if any
+    for _, ext in ipairs(SLOT_EXTS) do
+      local path = base .. '.' .. ext .. '.sls-luna.bak'
+      if fs.exists(path) then legacy[#legacy + 1] = path end
+    end
+  end
+  if #current == 0 and #legacy == 0 then return 0 end
+  local dir = slot_history_dir(directory, slot, kind)
+  fs.create_directories(dir)
+  local stamp = os.time()
+  local stored = 0
+  local function stash(path)
+    local body = read_bytes(path)
+    if not body then return end
+    local ext = path:match('%.([%w]+)$') or 'png'
+    local name = string.format('%d-%d.%s', stamp, stored + 1, ext)
+    if write_file_atomic(dir .. '/' .. name, body) then stored = stored + 1 end
+  end
+  for _, path in ipairs(current) do stash(path) end
+  for _, path in ipairs(legacy) do
+    stash(path)
+    os.remove(path)
+  end
+  prune_history(directory, slot, kind)
+  if stored > 0 then
+    log_op(directory, { at = stamp, appid = slot, kind = kind,
+      author = tostring(author or ''), files = stored })
+  end
+  return stored
+end
+
+local function history_depth(directory, appid, kind)
+  return #history_entries(directory, appid, kind)
+end
+
+-- Remove up to `count` newest history entries and return their bytes with
+-- extensions, so callers can write them back under the slot's own names.
+local function pop_entries(directory, appid, kind, count)
+  local dir = slot_history_dir(directory, math.floor(appid), kind)
+  local entries = history_entries(directory, appid, kind)
+  local popped = {}
+  while count > 0 and #entries > 0 do
+    local name = entries[#entries]
+    local body = read_bytes(dir .. '/' .. name)
+    os.remove(dir .. '/' .. name)
+    entries[#entries] = nil
+    if body then
+      popped[#popped + 1] = { ext = name:match('%.([%w]+)$') or 'png', body = body }
+    end
+    count = count - 1
+  end
+  return popped
 end
 
 -- ------------------------------------------------------------------ http
@@ -275,8 +404,8 @@ local function fetch_assets(config, gameId, kind)
 end
 
 -- Shared by Apply and Auto: download one asset and place it in the grid
--- folder, backing up whatever occupied the slot. ok, detail.
-local function place_asset(appid, kind, url, mime)
+-- folder, stashing whatever occupied the slot into undo history. ok, detail.
+local function place_asset(appid, kind, url, mime, author)
   local extension = ALLOWED_MIME[tostring(mime)]
   if not extension then
     return false, { code = 'mime', error = 'That image type cannot be used by Steam (use PNG or JPEG).' }
@@ -303,20 +432,29 @@ local function place_asset(appid, kind, url, mime)
   local slot = math.floor(appid)
   local base = directory .. '/' .. tostring(slot) .. KINDS[kind]
   local existing = slot_files(directory, slot, kind)
-  local backup = nil
+  -- Transactional order: stash first, write second, clean up last. The old
+  -- bytes are safe in history before anything is removed; if the write
+  -- fails, the stashed copies are put back and the slot is unchanged.
+  local stashed = 0
   if #existing > 0 then
-    clear_backups(directory, slot, kind)
-    backup = existing[1] .. '.sls-luna.bak'
-    local moved, move_why = os.rename(existing[1], backup)
-    if not moved then
-      return false, { code = 'io', error = 'Could not back up the current artwork: ' .. tostring(move_why) }
-    end
-    for index = 2, #existing do os.remove(existing[index]) end
+    stashed = push_history(directory, slot, kind, author)
   end
   local target = base .. '.' .. extension
   local saved, save_why = write_file_atomic(target, body)
-  if not saved then return false, { code = 'io', error = tostring(save_why) } end
-  return true, { path = target, kind = kind, backedUp = backup ~= nil }
+  if not saved then
+    if stashed > 0 then
+      os.remove(target)
+      for _, item in ipairs(pop_entries(directory, slot, kind, stashed)) do
+        write_file_atomic(base .. '.' .. item.ext, item.body)
+      end
+    end
+    return false, { code = 'io', error = tostring(save_why) }
+  end
+  for _, path in ipairs(existing) do
+    if path ~= target then os.remove(path) end
+  end
+  return true, { path = target, kind = kind, backedUp = stashed > 0,
+    history = history_depth(directory, slot, kind) }
 end
 
 -- Keep only what the panel shows, drop flagged content, and offer the four
@@ -495,7 +633,7 @@ function M.register(registry)
           error = 'No usable ' .. kind .. ' images.' }
       else
         local asset = assets[1]
-        local placed, detail = place_asset(appid, kind, asset.url, asset.mime)
+        local placed, detail = place_asset(appid, kind, asset.url, asset.mime, asset.author)
         if placed then
           results[#results + 1] = { kind = kind, ok = true, path = detail.path,
             backedUp = detail.backedUp, author = asset.author, width = asset.width, height = asset.height,
@@ -537,9 +675,9 @@ function M.register(registry)
     return reply({ success = true, base64 = M.base64(body), extension = extension, type = type_number })
   end
 
-  -- Restore the backup for one slot, or remove the custom artwork when there
-  -- is nothing to restore (Steam then shows its own default art again).
-  registry.SlsSgdbRestore = function(raw)
+  -- Undo one Luna change for a slot: the current file is stashed (so Undo
+  -- toggles losslessly) and the newest history entry takes its place.
+  registry.SlsSgdbUndo = function(raw)
     local ok, entry = pcall(json.decode, tostring(raw or ''))
     if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) or not KINDS[tostring(entry.kind)] then
       return reply({ success = false, error = 'Send {"appid": <id>, "kind": "..."}.' })
@@ -549,18 +687,53 @@ function M.register(registry)
     local directory, why = grid_dir()
     if not directory then return reply({ success = false, code = 'no_steam', error = tostring(why) }) end
     local current = slot_files(directory, appid, kind)
-    local backup, original = slot_backup(directory, appid, kind)
-    if backup then
-      for _, path in ipairs(current) do os.remove(path) end
-      local restored, restore_why = os.rename(backup, original)
-      if not restored then
-        return reply({ success = false, code = 'io', error = 'Could not restore: ' .. tostring(restore_why) })
-      end
-      return reply({ success = true, restored = true })
+    if history_depth(directory, appid, kind) == 0 then
+      return reply({ success = false, code = 'empty', error = 'Nothing to undo for this slot.' })
     end
-    if #current == 0 then return reply({ success = true, restored = false, removed = false }) end
+    local base = directory .. '/' .. tostring(appid) .. KINDS[kind]
+    if #current > 0 then push_history(directory, appid, kind, nil) end
     for _, path in ipairs(current) do os.remove(path) end
-    return reply({ success = true, restored = false, removed = true })
+    local popped = pop_entries(directory, appid, kind, 1)
+    if #popped == 0 then
+      return reply({ success = false, code = 'io', error = 'Could not read the undo entry.' })
+    end
+    local target = base .. '.' .. popped[1].ext
+    local saved, save_why = write_file_atomic(target, popped[1].body)
+    if not saved then return reply({ success = false, code = 'io', error = tostring(save_why) }) end
+    return reply({ success = true, undone = true, path = target,
+      history = history_depth(directory, appid, kind) })
+  end
+
+  -- Reset one slot to Steam's own artwork: the custom file is removed (the
+  -- history is kept, so Undo can still bring a Luna change back).
+  registry.SlsSgdbReset = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) or not KINDS[tostring(entry.kind)] then
+      return reply({ success = false, error = 'Send {"appid": <id>, "kind": "..."}.' })
+    end
+    local appid = math.floor(tonumber(entry.appid))
+    local kind = tostring(entry.kind)
+    local directory, why = grid_dir()
+    if not directory then return reply({ success = false, code = 'no_steam', error = tostring(why) }) end
+    local current = slot_files(directory, appid, kind)
+    if #current == 0 then return reply({ success = true, removed = false }) end
+    for _, path in ipairs(current) do os.remove(path) end
+    return reply({ success = true, removed = true,
+      history = history_depth(directory, appid, kind) })
+  end
+
+  -- How many undo steps a slot has, so the panel can enable the button.
+  registry.SlsSgdbHistory = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) then
+      return reply({ success = false, error = 'Send {"appid": <id>}.' })
+    end
+    local appid = math.floor(tonumber(entry.appid))
+    local directory, why = grid_dir()
+    if not directory then return reply({ success = false, code = 'no_steam', error = tostring(why) }) end
+    local depths = {}
+    for kind in pairs(KINDS) do depths[kind] = history_depth(directory, appid, kind) end
+    return reply({ success = true, history = depths })
   end
 end
 

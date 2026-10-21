@@ -2365,18 +2365,42 @@
       }
     }
 
-    async function restoreSgdbAsset() {
+    async function undoSgdbAsset() {
       if (!sgdbGame) return;
       sgdbNotice = null;
       sgdbBusy = true;
       repaintIfOpen();
       try {
-        const out = await rpc(w, 'SlsSgdbRestore', {
+        const out = await rpc(w, 'SlsSgdbUndo', {
           raw: JSON.stringify({ appid: Number(sgdbGame.appid), kind: sgdbKind }),
         });
-        if (out.restored) sgdbNotice = 'The previous artwork is back.';
-        else if (out.removed) sgdbNotice = 'Custom artwork removed; Steam shows its own again.';
-        else sgdbNotice = 'Nothing to restore for this slot.';
+        sgdbNotice = 'Undone: the previous artwork is back'
+          + (out && typeof out.history === 'number' && out.history > 0
+            ? ' (' + out.history + ' step' + (out.history === 1 ? '' : 's') + ' left)' : '')
+          + '.';
+        const at = requestLiveArtwork(sgdbGame.appid, [sgdbKind]);
+        sgdbBusy = false;
+        repaintIfOpen();
+        if (at) finishLiveNotice(at, '');
+      } catch (error) {
+        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbBusy = false;
+        repaintIfOpen();
+      }
+    }
+
+    async function resetSgdbAsset() {
+      if (!sgdbGame) return;
+      sgdbNotice = null;
+      sgdbBusy = true;
+      repaintIfOpen();
+      try {
+        const out = await rpc(w, 'SlsSgdbReset', {
+          raw: JSON.stringify({ appid: Number(sgdbGame.appid), kind: sgdbKind }),
+        });
+        sgdbNotice = out && out.removed
+          ? 'Custom artwork removed; Steam shows its own again.'
+          : 'Nothing custom in this slot; Steam already shows its own.';
       } catch (error) {
         sgdbNotice = String(error && error.message ? error.message : error);
       }
@@ -2566,11 +2590,18 @@
       auto.textContent = 'Apply best to every slot';
       auto.disabled = sgdbBusy || !sgdbGame.sgdbId;
       auto.onclick = () => autoApplySgdb();
-      const restore = document.createElement('button');
-      restore.className = 'sls-luna-btn secondary';
-      restore.textContent = 'Restore previous ' + sgdbKind;
-      restore.disabled = sgdbBusy;
-      restore.onclick = () => restoreSgdbAsset();
+      const undo = document.createElement('button');
+      undo.className = 'sls-luna-btn secondary';
+      undo.textContent = 'Undo ' + sgdbKind;
+      undo.title = 'Step back through Luna-applied artwork for this slot';
+      undo.disabled = sgdbBusy;
+      undo.onclick = () => undoSgdbAsset();
+      const reset = document.createElement('button');
+      reset.className = 'sls-luna-btn secondary';
+      reset.textContent = 'Steam artwork';
+      reset.title = 'Remove the custom file so Steam shows its own artwork';
+      reset.disabled = sgdbBusy;
+      reset.onclick = () => resetSgdbAsset();
       const close = document.createElement('button');
       close.className = 'sls-luna-btn secondary';
       close.textContent = 'Close picker';
@@ -2578,7 +2609,7 @@
         sgdbGame = null; sgdbAssets = null; sgdbResults = null; sgdbNotice = null;
         repaintIfOpen();
       };
-      actions.append(auto, restore, close);
+      actions.append(auto, undo, reset, close);
       body.appendChild(actions);
       return body;
     }

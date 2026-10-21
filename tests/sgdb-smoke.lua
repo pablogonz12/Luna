@@ -261,7 +261,7 @@ assert(assets.success == true and #assets.assets == 2, 'webp and nsfw must be fi
 assert(assets.assets[1].mime == 'image/png' and assets.assets[1].author == 'artist1')
 assert(assets.total == 4)
 
--- ---------------------------------------------------------------- apply & restore
+-- ---------------------------------------------------------------- apply, undo & reset
 
 local applied = call('SlsSgdbApply', { raw = json.encode({ appid = 1145360, kind = 'grid',
   url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
@@ -270,25 +270,31 @@ assert(file_text(grid_dir .. '/1145360p.png') == 'PNG1DATA', 'the image must lan
 
 local replaced = call('SlsSgdbApply', { raw = json.encode({ appid = 1145360, kind = 'grid',
   url = 'https://cdn.example/grid2.jpg', mime = 'image/jpeg' }) })
-assert(replaced.success == true and replaced.backedUp == true, 'the previous file must be backed up')
+assert(replaced.success == true and replaced.backedUp == true, 'the previous file must be stashed')
 assert(file_text(grid_dir .. '/1145360p.jpg') == 'JPG2DATA')
 assert(file_text(grid_dir .. '/1145360p.png') == nil, 'only one extension may remain')
-assert(file_text(grid_dir .. '/1145360p.png.sls-luna.bak') == 'PNG1DATA')
+assert(file_text(grid_dir .. '/.sls-luna-history/1145360p/') == nil, 'history is a directory, not a file')
 
-local restored = call('SlsSgdbRestore', { raw = json.encode({ appid = 1145360, kind = 'grid' }) })
-assert(restored.success == true and restored.restored == true)
-assert(file_text(grid_dir .. '/1145360p.png') == 'PNG1DATA', 'the backup must come back')
+local history = call('SlsSgdbHistory', { raw = json.encode({ appid = 1145360 }) })
+assert(history.success == true and history.history.grid == 1, 'one undo step must be recorded')
+
+local undone = call('SlsSgdbUndo', { raw = json.encode({ appid = 1145360, kind = 'grid' }) })
+assert(undone.success == true and undone.undone == true, tostring(undone.error))
+assert(file_text(grid_dir .. '/1145360p.png') == 'PNG1DATA', 'undo must bring the previous file back')
 assert(file_text(grid_dir .. '/1145360p.jpg') == nil)
-assert(file_text(grid_dir .. '/1145360p.png.sls-luna.bak') == nil)
 
--- No backup: restore removes the custom file, and says so.
+local empty = call('SlsSgdbUndo', { raw = json.encode({ appid = 1145360, kind = 'wide' }) })
+assert(empty.success == false and empty.code == 'empty', 'undo with no history must fail closed')
+
+-- Reset removes the custom file so Steam shows its own art; history survives.
 call('SlsSgdbApply', { raw = json.encode({ appid = 620, kind = 'hero',
   url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
 assert(file_text(grid_dir .. '/620_hero.png') == 'PNG1DATA')
-os.remove(grid_dir .. '/620_hero.png.sls-luna.bak')
-local removed = call('SlsSgdbRestore', { raw = json.encode({ appid = 620, kind = 'hero' }) })
-assert(removed.success == true and removed.restored == false and removed.removed == true)
+local reset = call('SlsSgdbReset', { raw = json.encode({ appid = 620, kind = 'hero' }) })
+assert(reset.success == true and reset.removed == true)
 assert(file_text(grid_dir .. '/620_hero.png') == nil)
+local reset_again = call('SlsSgdbReset', { raw = json.encode({ appid = 620, kind = 'hero' }) })
+assert(reset_again.success == true and reset_again.removed == false)
 
 -- ---------------------------------------------------------------- refusals
 
