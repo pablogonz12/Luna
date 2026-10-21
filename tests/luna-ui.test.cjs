@@ -252,7 +252,8 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
           width:600,height:900,style:'alternate',mime:'image/png',author:'artist1'}]});
       if(fn==='SlsSgdbApply')return JSON.stringify({success:true,path:'/grid/out.png',
         kind:payload.kind,backedUp:true,live:payload.kind!=='icon'});
-      if(fn==='SlsSgdbRestore')return JSON.stringify({success:true,restored:true});
+      if(fn==='SlsSgdbUndo')return JSON.stringify({success:true,undone:true,history:0});
+      if(fn==='SlsSgdbReset')return JSON.stringify({success:true,removed:true});
       if(fn==='SlsSgdbAuto')return JSON.stringify({success:true,results:[
         {kind:'grid',ok:true,live:true},{kind:'wide',ok:true,live:true},
         {kind:'hero',ok:true,live:true},{kind:'logo',ok:true,live:true},
@@ -940,13 +941,22 @@ test('a right-click artwork request opens the picker and applying calls the back
   await new Promise(resolve=>setTimeout(resolve,40));
   const heroAssets=calls.filter(entry=>entry.fn==='SlsSgdbAssets').pop();
   assert.equal(heroAssets.payload.kind,'hero','switching kind must reload assets');
-  const restore=findNode(document.getElementById('sls-luna-overlay'),
-    node=>node.textContent==='Restore previous hero'&&typeof node.onclick==='function');
-  restore.onclick();
+  const undo=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Undo hero'&&typeof node.onclick==='function');
+  assert.ok(undo,'the Undo button must be offered per slot');
+  undo.onclick();
   await new Promise(resolve=>setTimeout(resolve,40));
-  const restoreCall=calls.filter(entry=>entry.fn==='SlsSgdbRestore').pop();
-  assert.deepEqual(restoreCall.payload,{appid:1145360,kind:'hero'});
-  assert.match(textOf(document.getElementById('sls-luna-overlay')),/previous artwork is back/);
+  const undoCall=calls.filter(entry=>entry.fn==='SlsSgdbUndo').pop();
+  assert.deepEqual(undoCall.payload,{appid:1145360,kind:'hero'});
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Undone/);
+  const reset=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Steam artwork'&&typeof node.onclick==='function');
+  assert.ok(reset,'the Steam-artwork reset must be offered');
+  reset.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const resetCall=calls.filter(entry=>entry.fn==='SlsSgdbReset').pop();
+  assert.deepEqual(resetCall.payload,{appid:1145360,kind:'hero'});
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/its own again/);
 });
 
 test('the auto picker fills every slot and asks the agent for a live refresh',async()=>{
