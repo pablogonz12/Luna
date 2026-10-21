@@ -16,7 +16,7 @@
         }
       },
       "plugin_version": "0.3.1",
-      "source_commit": "487102fdd726e07217624cfd35c0b431eaf8174f",
+      "source_commit": "005a1b9d42085886d2afe9b3ff0de4d14e8a50a2",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "graphics": {
@@ -31,7 +31,7 @@
         }
       },
       "plugin_version": "0.2.0",
-      "source_commit": "487102fdd726e07217624cfd35c0b431eaf8174f",
+      "source_commit": "005a1b9d42085886d2afe9b3ff0de4d14e8a50a2",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "luna": {
@@ -49,12 +49,12 @@
           "source_path": "plugin/public/agent.js"
         },
         "public/panel.js": {
-          "sha256": "8740438b54c1db97fefd57978b52e43e0eb201e7a05cae4d0827556802ca66d3",
+          "sha256": "740ca9cdbd7fe5c2a22a94d9ea978e1e51e49410b19e70c5afc1e68d16e9fa66",
           "source_path": "plugin/public/panel.js"
         }
       },
       "plugin_version": "0.14.7",
-      "source_commit": "487102fdd726e07217624cfd35c0b431eaf8174f",
+      "source_commit": "005a1b9d42085886d2afe9b3ff0de4d14e8a50a2",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -106,20 +106,20 @@
     "sgdb": {
       "files": {
         "backend/main.lua": {
-          "sha256": "312c80f62e5735d416a159b6106858260361595a0252a1073c6c7bf3cc16db55",
+          "sha256": "f1fe294dc14ada8da6adbbe401d3504b65ed2d3710e7141af4e05a6563c65e8b",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
-          "sha256": "1d3ca89501ede6da38f9ec231ac444ec2f36fc99cb60fc65d35b064f047c2853",
+          "sha256": "4f2205818989f2d189595d720ab9e327a1f44d58fb79005dd89cb902f2e63d56",
           "source_path": "plugin/plugin.json"
         }
       },
-      "plugin_version": "0.2.1",
-      "source_commit": "487102fdd726e07217624cfd35c0b431eaf8174f",
+      "plugin_version": "0.2.2",
+      "source_commit": "005a1b9d42085886d2afe9b3ff0de4d14e8a50a2",
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-10-21T14:54:36+0200",
+  "generated": "2026-10-21T15:32:48+0200",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "fa3e18871c8a4ca4f0da432f5de0242c741e3299e3d35ba8af143b25b088b101",
