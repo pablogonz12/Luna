@@ -2191,8 +2191,8 @@
     }
 
     async function saveSgdbKey() {
-      // Read the field before any repaint: the page re-syncs it from the
-      // backend on every paint, which would clear an unsaved value.
+      // Read the field before any repaint: the backend never hands the key
+      // back (masked only), so the input is write-only and cleared on save.
       const key = sgdbKeyInput.value.trim();
       sgdbNotice = null;
       sgdbBusy = true;
@@ -2200,7 +2200,7 @@
       try {
         await rpc(w, 'SlsSgdbSetKey', { raw: JSON.stringify({ key }) });
         await refreshSgdb();
-        sgdbKeyInput.value = (sgdb && sgdb.apiKey) || '';
+        sgdbKeyInput.value = '';
         sgdbNotice = key ? 'Key saved.' : 'Key cleared.';
       } catch (error) {
         sgdbNotice = String(error && error.message ? error.message : error);
@@ -2444,7 +2444,7 @@
       // The status (key, grid folder) may not be loaded yet: refresh first,
       // then search for the requested game's artwork.
       refreshSgdb().then(() => {
-        if (sgdb && sgdb.apiKey) searchSgdb(sgdbGame.name);
+        if (sgdb && sgdb.hasKey) searchSgdb(sgdbGame.name);
         else { sgdbNotice = 'Add your SteamGridDB API key below, then press Find game.'; repaintIfOpen(); }
       });
       return true;
@@ -2452,16 +2452,18 @@
 
     function steamgridBody() {
       const body = document.createElement('div');
-      const key = (sgdb && sgdb.apiKey) || '';
+      const hasKey = Boolean(sgdb && sgdb.hasKey);
       const info = document.createElement('p');
       info.className = 'sls-luna-note';
       info.innerHTML = 'Artwork comes from <strong>SteamGridDB</strong> with your own free API key '
-        + '(steamgriddb.com \u2192 profile \u2192 API). Chosen images are written to Steam\u2019s custom '
-        + 'artwork folder; the file that was there is backed up, and Restore brings it back or removes '
-        + 'the custom one.';
+        + '(steamgriddb.com \u2192 profile \u2192 API). The key is stored owner-only on this machine '
+        + 'and never shown again. Chosen images are written to Steam\u2019s custom '
+        + 'artwork folder with undo history, and Steam artwork removes the custom one.';
       body.appendChild(info);
 
-      sgdbKeyInput.value = key;
+      sgdbKeyInput.placeholder = hasKey
+        ? 'Key stored (' + ((sgdb && sgdb.keyMasked) || 'stored') + ') \u2014 type a new one to replace it'
+        : 'SteamGridDB API key';
       body.appendChild(sgdbKeyInput);
       const keyRow = document.createElement('div');
       keyRow.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:0 0 4px;';
@@ -2473,17 +2475,17 @@
       const test = document.createElement('button');
       test.className = 'sls-luna-btn secondary';
       test.textContent = 'Test key';
-      test.disabled = sgdbBusy || !key;
+      test.disabled = sgdbBusy || !hasKey;
       test.onclick = () => testSgdbKey();
       keyRow.append(save, test);
       body.appendChild(keyRow);
 
-      if (key && sgdb && sgdb.gridDir) {
+      if (hasKey && sgdb && sgdb.gridDir) {
         const where = document.createElement('p');
         where.className = 'sls-luna-note';
         where.innerHTML = 'Writing to <strong>' + sgdb.gridDir + '</strong>';
         body.appendChild(where);
-      } else if (key && sgdb && sgdb.gridError) {
+      } else if (hasKey && sgdb && sgdb.gridError) {
         const broken = document.createElement('p');
         broken.className = 'sls-luna-error';
         broken.textContent = 'Steam artwork folder unavailable: ' + sgdb.gridError;
@@ -2503,7 +2505,7 @@
         body.appendChild(busy);
       }
 
-      if (!key) return body;
+      if (!hasKey) return body;
 
       const searchRow = document.createElement('div');
       searchRow.style.cssText = 'display:flex;gap:8px;margin:10px 0 4px;';

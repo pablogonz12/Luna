@@ -232,13 +232,16 @@ end
 -- ---------------------------------------------------------------- config
 
 local state = call('SlsSgdbGet')
-assert(state.success == true and state.apiKey == '', 'the key must start empty')
+assert(state.success == true and state.hasKey == false and state.apiKey == nil,
+  'the key must start unset and never be echoed back')
 assert(state.gridDir == grid_dir, 'the grid directory must resolve from loginusers: ' .. tostring(state.gridDir))
 assert(state.gridError == '')
 
 local saved = call('SlsSgdbSetKey', { raw = json.encode({ key = 'good-key' }) })
 assert(saved.success == true and saved.hasKey == true)
-assert(call('SlsSgdbGet').apiKey == 'good-key', 'the key must persist')
+local after = call('SlsSgdbGet')
+assert(after.hasKey == true and after.apiKey == nil, 'the full key must never leave the backend')
+assert(after.keyMasked == '••••-key', 'the masked hint must show the tail: ' .. tostring(after.keyMasked))
 
 local tested = call('SlsSgdbTest')
 assert(tested.success == true, 'a good key must validate: ' .. tostring(tested.error))

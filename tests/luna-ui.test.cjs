@@ -239,7 +239,8 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
             {name:'playtime',directory:true,files:3}]}}});
       if(fn==='SlsLunaPrefsSet'){prefsState[payload.key]=payload.value;
         return JSON.stringify({success:true,prefs:Object.assign({},prefsState)});}
-      if(fn==='SlsSgdbGet')return JSON.stringify({success:true,apiKey:sgdbState.apiKey,
+      if(fn==='SlsSgdbGet')return JSON.stringify({success:true,hasKey:sgdbState.apiKey!=='',
+        keyMasked:sgdbState.apiKey?('••••'+sgdbState.apiKey.slice(-4)):'',
         gridDir:sgdbState.gridDir,gridError:sgdbState.gridError});
       if(fn==='SlsSgdbSetKey'){sgdbState.apiKey=(payload.key||'').trim();
         return JSON.stringify({success:true,hasKey:sgdbState.apiKey!==''});}
