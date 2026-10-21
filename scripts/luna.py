@@ -26,6 +26,10 @@ Commands:
                                         verify and install a released bundle
     luna reconcile [--dry-run]          merge Syncthing sync-conflict copies of
                                         Steam's localconfig.vdf (newest timestamp wins)
+    luna backup [--out DIR]             snapshot Luna user data (playtime ledgers,
+                                        presence, HLTB, prefs, artwork key, settings)
+    luna restore ARCHIVE [--force]      restore a backup (never overwrites newer
+                                        files without --force)
 """
 import argparse
 import hashlib
@@ -1320,6 +1324,138 @@ def cmd_autoupdate(options):
         _release_lock(lock_path)
 
 
+# Files under ~/.local/share/slssteam-integrations/ that make up a backup.
+# Volatile compressor state (jobs, logs, queue, status) is deliberately left
+# out: it is rebuilt on the next run. Everything here is small, local JSON.
+BACKUP_PATHS = (
+    'playtime',
+    'presence.json',
+    'hltb.json',
+    'hltb-library.json',
+    'luna.json',
+    'sgdb.json',
+    'compressor/settings.json',
+)
+
+
+def _backup_entries():
+    """(relative path, absolute path) pairs that exist right now."""
+    base = data_dir()
+    entries = []
+    for rel in BACKUP_PATHS:
+        path = base / rel
+        if path.is_dir():
+            for child in sorted(path.rglob('*')):
+                if child.is_file():
+                    entries.append((str(child.relative_to(base)), child))
+        elif path.is_file():
+            entries.append((rel, path))
+    return entries
+
+
+def cmd_backup(options):
+    """Write one archive with the Luna user data plus a hash manifest."""
+    entries = _backup_entries()
+    if not entries:
+        print('nothing to back up: %s holds no Luna data' % data_dir())
+        return EXIT_OK
+    out_dir = Path(options.out).expanduser() if options.out else Path(tempfile.gettempdir())
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    archive = out_dir / ('luna-backup-%s.tar.gz' % stamp)
+    manifest = {'created': int(time.time()),
+                'createdBy': installed_version(),
+                'files': {rel: sha256(path) for rel, path in entries}}
+    with tempfile.TemporaryDirectory(prefix='luna-backup-') as work:
+        stage = Path(work) / 'stage'
+        (stage / 'data').mkdir(parents=True)
+        for rel, path in entries:
+            dest = stage / 'data' / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dest)
+        (stage / 'manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+        with tarfile.open(archive, 'w:gz') as tar:
+            tar.add(stage / 'manifest.json', arcname='luna-backup/manifest.json')
+            tar.add(stage / 'data', arcname='luna-backup/data')
+    print('backup : %s (%d file(s))' % (archive, len(entries)))
+    print('note   : includes the SteamGridDB API key (sgdb.json); keep the archive private')
+    return EXIT_OK
+
+
+def cmd_restore(options):
+    """Restore a backup archive after validating its manifest.
+
+    Refuses while Steam or the sidecar runs (same rule as install), and never
+    overwrites a file that is newer than the archived copy unless --force.
+    """
+    archive = Path(options.archive).expanduser() if options.archive else None
+    if not archive or not archive.is_file():
+        print('backup archive not found: %s' % (options.archive or ''), file=sys.stderr)
+        return 2
+    if process_running('steam') or process_running('steamwebhelper') or process_running('lumen'):
+        print('REFUSING to restore: Steam or the Lumen sidecar is running. '
+              'Close it completely (Steam -> Exit) first.')
+        return EXIT_REFUSED
+    with tempfile.TemporaryDirectory(prefix='luna-restore-') as work:
+        extract_dir = Path(work) / 'unpacked'
+        extract_dir.mkdir()
+        try:
+            _safe_extract(archive, extract_dir)
+        except (tarfile.TarError, ValueError, OSError) as error:
+            print('REFUSING: cannot safely unpack the archive: %s' % error, file=sys.stderr)
+            return 1
+        roots = [entry for entry in extract_dir.iterdir() if entry.is_dir()]
+        root = roots[0] if len(roots) == 1 else extract_dir
+        manifest_path = root / 'manifest.json'
+        data_root = root / 'data'
+        if not manifest_path.is_file() or not data_root.is_dir():
+            print('REFUSING: not a Luna backup (manifest.json + data/ required)', file=sys.stderr)
+            return 1
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            pinned = manifest.get('files') or {}
+        except ValueError:
+            print('REFUSING: the backup manifest is not valid JSON', file=sys.stderr)
+            return 1
+        if not isinstance(pinned, dict):
+            print('REFUSING: the backup manifest has no file list', file=sys.stderr)
+            return 1
+        problems, restored, skipped = [], 0, 0
+        for rel in sorted(pinned):
+            if '..' in Path(rel).parts or rel.startswith('/'):
+                problems.append('unsafe path in manifest: %r' % rel)
+                continue
+            source = data_root / rel
+            if not source.is_file():
+                problems.append('archive is missing backed-up file: %s' % rel)
+                continue
+            if sha256(source) != pinned[rel]:
+                problems.append('archived file does not match the manifest: %s' % rel)
+                continue
+            dest = data_dir() / rel
+            if dest.is_file() and not options.force:
+                try:
+                    newer = dest.stat().st_mtime > source.stat().st_mtime
+                except OSError:
+                    newer = False
+                if newer:
+                    print('skip   : %s (current copy is newer; re-run with --force to overwrite)' % rel)
+                    skipped += 1
+                    continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_name(dest.name + '.luna-tmp')
+            shutil.copy2(source, tmp)
+            os.replace(tmp, dest)
+            restored += 1
+        if problems:
+            print('REFUSING: the backup did not validate:')
+            for problem in problems:
+                print('  - %s' % problem, file=sys.stderr)
+            return 1
+    print('restored %d file(s), skipped %d newer file(s)' % (restored, skipped))
+    return EXIT_OK
+
+
 def cmd_install(options):
     targets = selected_addons(options)
     reasons = refuse_reasons(for_install=True)
@@ -1609,6 +1745,7 @@ def build_parser():
                           ('release', cmd_release), ('update', cmd_update),
                           ('check', cmd_check), ('autoupdate', cmd_autoupdate),
                           ('reconcile', cmd_reconcile),
+                          ('backup', cmd_backup), ('restore', cmd_restore),
                           ('timer', cmd_timer)):
         child = sub.add_parser(name)
         child.set_defaults(handler=handler)
@@ -1621,6 +1758,12 @@ def build_parser():
         if name == 'reconcile':
             child.add_argument('--dry-run', action='store_true',
                                help='report what would merge without writing')
+        if name == 'backup':
+            child.add_argument('--out', help='output directory (default: system temp dir)')
+        if name == 'restore':
+            child.add_argument('archive', help='backup archive to restore')
+            child.add_argument('--force', action='store_true',
+                               help='overwrite files that are newer than the backup')
         if name == 'check':
             child.add_argument('--force', action='store_true', help='ignore the 6h cache')
         if name == 'autoupdate':

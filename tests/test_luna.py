@@ -645,6 +645,70 @@ class LunaTestCase(unittest.TestCase):
         self.assertTrue((config / 'localconfig.sync-conflict-20261001-000000-CCC.vdf').is_file(),
                         'refusal must not move anything')
 
+    def test_backup_restore_round_trip(self):
+        (self.data / 'playtime').mkdir(parents=True, exist_ok=True)
+        (self.data / 'playtime/1.json').write_text('{"version":2,"games":{}}')
+        (self.data / 'presence.json').write_text('{"version":1}')
+        out = self.temp / 'backups'
+        self.assertEqual(self.luna('backup', '--out', str(out)).returncode, 0)
+        archives = sorted(out.glob('luna-backup-*.tar.gz'))
+        self.assertEqual(len(archives), 1)
+        snapshot = {p.relative_to(self.data): p.read_bytes()
+                    for p in sorted(self.data.rglob('*')) if p.is_file()}
+        (self.data / 'playtime/1.json').write_text('{"version":2,"games":{"9":{}}}')
+        (self.data / 'presence.json').write_text('{"version":1,"owned":{"1":2}}')
+        (self.data / 'hltb.json').write_text('{"version":1,"games":{}}')
+        # The mutations are newer than the backup, so reverting to the
+        # snapshot is explicit (--force); the plain path is covered below.
+        result = self.luna('restore', str(archives[0]), '--force')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        restored = {p.relative_to(self.data): p.read_bytes()
+                    for p in sorted(self.data.rglob('*')) if p.is_file()}
+        self.assertEqual({k: v for k, v in restored.items() if k in snapshot}, snapshot,
+                         'restore must reproduce the backup byte-for-byte')
+        self.assertEqual(restored[Path('hltb.json')], b'{"version":1,"games":{}}',
+                         'files added after the backup are left alone')
+
+    def test_restore_never_overwrites_newer_without_force(self):
+        (self.data / 'presence.json').write_text('{"version":1}')
+        out = self.temp / 'backups-newer'
+        self.assertEqual(self.luna('backup', '--out', str(out)).returncode, 0)
+        archive = next(out.glob('luna-backup-*.tar.gz'))
+        import time as _time
+        _time.sleep(1.1)
+        (self.data / 'presence.json').write_text('{"version":1,"owned":{"1":2}}')
+        result = self.luna('restore', str(archive))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('newer', result.stdout)
+        self.assertIn('"owned"', (self.data / 'presence.json').read_text(),
+                      'the newer copy must survive without --force')
+        result = self.luna('restore', str(archive), '--force')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn('"owned"', (self.data / 'presence.json').read_text())
+
+    def test_restore_refuses_a_tampered_archive(self):
+        (self.data / 'presence.json').write_text('{"version":1}')
+        out = self.temp / 'backups-tamper'
+        self.assertEqual(self.luna('backup', '--out', str(out)).returncode, 0)
+        archive = next(out.glob('luna-backup-*.tar.gz'))
+        mutated = bytearray(archive.read_bytes())
+        mutated[len(mutated) // 2] ^= 0x01
+        archive.write_bytes(bytes(mutated))
+        (self.data / 'presence.json').write_text('{"version":2}')
+        result = self.luna('restore', str(archive))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.data / 'presence.json').read_text(), '{"version":2}',
+                         'a tampered archive must change nothing')
+
+    def test_restore_refuses_while_steam_runs(self):
+        (self.data / 'presence.json').write_text('{"version":1}')
+        out = self.temp / 'backups-running'
+        self.assertEqual(self.luna('backup', '--out', str(out)).returncode, 0)
+        archive = next(out.glob('luna-backup-*.tar.gz'))
+        result = self.luna('restore', str(archive), running='steam,')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('running', result.stdout + result.stderr)
+
     def test_the_standalone_copy_can_manage_its_own_units(self):
         """The timer entry point runs the copy, which must not copy itself from
         a repository that is not there (the live bug found on 2026-10-15)."""
