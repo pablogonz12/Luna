@@ -918,14 +918,10 @@ def cmd_release(options):
 def cmd_update(options):
     """Verify a released bundle and install it with the bundled script."""
     lock_path = _update_lock()
-    try:
-        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(lock_fd)
-    except FileExistsError:
-        print('REFUSING: another update is already running (%s)' % lock_path, file=sys.stderr)
+    acquired, reason = _acquire_lock(lock_path)
+    if not acquired:
+        print('REFUSING: %s' % reason, file=sys.stderr)
         return 1
-    except OSError:
-        pass
     temp_dir = Path(tempfile.mkdtemp(prefix='luna-update-'))
     try:
         bundle = None
@@ -960,10 +956,7 @@ def cmd_update(options):
         return install_bundle(bundle, only=options.only, dry_run=options.dry_run)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
+        _release_lock(lock_path)
 
 
 LUNA_REPO = 'pgm1207/Luna'
@@ -1120,6 +1113,64 @@ def _update_lock():
     return tools / 'update.lock'
 
 
+LOCK_TTL = 3600
+
+
+def _acquire_lock(lock_path):
+    """Claim the update lock; clear it when stale (dead owner or too old).
+
+    Returns (True, '') on success or (False, reason). A kill -9 between
+    acquire and release must never wedge updates forever.
+    """
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        pass
+    except OSError:
+        return True, ''
+    else:
+        try:
+            os.write(fd, json.dumps(
+                {'pid': os.getpid(), 'at': int(time.time())}).encode())
+        finally:
+            os.close(fd)
+        return True, ''
+    try:
+        info = json.loads(lock_path.read_text())
+        owner, started = int(info.get('pid') or 0), int(info.get('at') or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        owner, started = 0, 0
+    alive = False
+    if owner > 0:
+        try:
+            os.kill(owner, 0)
+            alive = True
+        except (OSError, ProcessLookupError, PermissionError):
+            alive = False
+    if alive and time.time() - started < LOCK_TTL:
+        return False, 'another update is already running (%s)' % lock_path
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except (FileExistsError, OSError):
+        return False, 'another update is already running (%s)' % lock_path
+    try:
+        os.write(fd, json.dumps({'pid': os.getpid(), 'at': int(time.time())}).encode())
+    finally:
+        os.close(fd)
+    return True, ''
+
+
+def _release_lock(lock_path):
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+
+
 def write_tooling():
     """Keep a standalone updater copy the timer can run without a checkout.
 
@@ -1231,13 +1282,9 @@ def cmd_autoupdate(options):
 
     if mode not in ('notify', 'install') and not pending:
         return EXIT_OK
-    try:
-        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(lock_fd)
-    except FileExistsError:
-        return record({'result': 'deferred', 'reason': 'another update is already running'})
-    except OSError:
-        pass
+    acquired, reason = _acquire_lock(lock_path)
+    if not acquired:
+        return record({'result': 'deferred', 'reason': reason})
     try:
         # A check is read-only (gh only): notify mode must report even while
         # Steam runs. Only an actual install needs Steam and the sidecar gone.
@@ -1270,10 +1317,7 @@ def cmd_autoupdate(options):
         return record({'result': 'applied' if code == 0 else 'failed',
                        'version': target, 'installedBefore': installed, 'exit': code})
     finally:
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
+        _release_lock(lock_path)
 
 
 def cmd_install(options):

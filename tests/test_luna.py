@@ -523,6 +523,30 @@ class LunaTestCase(unittest.TestCase):
         # Notify is read-only: Steam running must not block the report.
         self.assertEqual(last['result'], 'available')
 
+    def test_stale_update_lock_is_cleared(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        lock = self.home / '.local/share/Lumen/sls-luna/update.lock'
+        # A dead owner from yesterday must not wedge updates forever.
+        lock.write_text(json.dumps({'pid': 424242, 'at': 1}))
+        out = self.temp / 'dist-lock'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        result = self.luna('update', '--bundle', str(bundle), '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(lock.exists(), 'a successful run releases the lock')
+
+    def test_live_update_lock_refuses_a_second_update(self):
+        import os as _os, time as _time
+        self.assertEqual(self.luna('install').returncode, 0)
+        lock = self.home / '.local/share/Lumen/sls-luna/update.lock'
+        lock.write_text(json.dumps({'pid': _os.getpid(), 'at': int(_time.time())}))
+        out = self.temp / 'dist-lock-live'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        result = self.luna('update', '--bundle', str(bundle), '--dry-run')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('already running', result.stderr + result.stdout)
+
     def test_full_uninstall_disables_the_timer(self):
         self.assertEqual(self.luna('install').returncode, 0)
         self.assertEqual(self.luna('timer', 'on').returncode, 0)
