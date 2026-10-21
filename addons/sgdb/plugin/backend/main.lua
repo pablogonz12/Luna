@@ -12,7 +12,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.2.0'
+local VERSION = '0.2.1'
 local home = os.getenv('HOME') or ''
 local data_dir = home .. '/.local/share/slssteam-integrations'
 local config_path = data_dir .. '/sgdb.json'
@@ -83,7 +83,13 @@ local function load_config()
 end
 
 local function save_config(data)
-  return write_file_atomic(config_path, json.encode(data))
+  local ok = write_file_atomic(config_path, json.encode(data))
+  if ok then
+    -- The SteamGridDB key is a user secret: owner-only, even though the
+    -- directory itself stays traversable.
+    os.execute('/bin/chmod 600 ' .. "'" .. tostring(config_path):gsub("'", "'\\''") .. "' 2>/dev/null")
+  end
+  return ok
 end
 
 -- ------------------------------------------------------------------ steam

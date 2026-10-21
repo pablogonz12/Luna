@@ -903,18 +903,31 @@ function M.register(registry)
 
   -- Best effort, and deliberately terminal: a compaction is checkpointed and
   -- resumable, so a stopped pass loses at most the current game's progress.
+  -- Uses /bin/kill explicitly: dash's builtin kill rejects the `--` separator
+  -- (CI failure: "Illegal number: -"), while procps kill handles group and
+  -- single-PID signalling portably. The outcome is verified, not assumed.
   registry.SlsCompressorCancel = function()
     local job = job_state()
     if not job or not job.running then
       return response({success = false, error = 'No job is running'})
     end
-    local group = process_group(job.pid)
-    if group and group == job.pid then
-      os.execute('kill -TERM -- -' .. math.floor(job.pid))
+    local pid = math.floor(job.pid)
+    local group = process_group(pid)
+    local command
+    if group and group == pid then
+      command = '/bin/kill -TERM -' .. pid
     else
-      os.execute('kill -TERM ' .. math.floor(job.pid))
+      command = '/bin/kill -TERM ' .. pid
     end
-    return response({success = true, cancelled = true, pid = job.pid})
+    local ok = os.execute(command)
+    -- os.execute returns true/0 on success depending on the Lua version;
+    -- anything else means the signal was not delivered.
+    local delivered = ok == true or ok == 0
+    if not delivered then
+      return response({success = false, code = 'signal',
+        error = 'Could not signal the running pass (pid ' .. pid .. ')'})
+    end
+    return response({success = true, cancelled = true, pid = pid})
   end
 end
 

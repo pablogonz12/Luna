@@ -3,6 +3,24 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.6 - 2026-10-21
+
+- **Fix: Steam no longer reopens the artwork picker on launch.** Right-click
+  requests are now one-shot (claimed on first read) and expire after five
+  minutes, so a stale Fortnite request cannot replay after a restart.
+- **Updater integrity.** `release` refuses a dirty tree, `update` verifies the
+  bundle against its own manifest before running its installer, remote
+  downloads require the checksum sidecar, and concurrent updates are locked.
+- **Update modes corrected.** Notify reports while Steam runs, queued updates
+  ensure the timer worker exists, the menu never auto-checks while Off, and a
+  full uninstall disables the timer and clears the queue.
+- **Health and status.** `status` degrades on a missing installed file, and the
+  Health page flags half-installed add-ons by expected file, not just version.
+- **Compressor cancel portability.** Cancel uses `/bin/kill` and verifies
+  delivery (the old dash builtin form failed on Ubuntu CI).
+- **Artwork safety.** The SteamGridDB key file is owner-only (0600) and the
+  picker escapes game names instead of injecting them as HTML.
+
 ## 0.14.5 - 2026-10-15
 
 - **Fix: the unattended-update timer could not set itself up** when it ran from

@@ -451,6 +451,10 @@ def cmd_status(options):
             degraded = True
         if state == 'missing-source':
             degraded = True
+        if state == 'new' and addon in installed:
+            # The directory claims the add-on is present but an expected
+            # file is missing: that is corruption, not a fresh install.
+            degraded = True
     for name in targets:
         if name not in installed:
             print('note       : %s is not installed' % name)
@@ -468,10 +472,22 @@ def cmd_status(options):
 def write_install_snapshot():
     """Record what this installer put on disk, for the Health page.
 
-    The payload hashes stay in vendor/MANIFEST.json (and in `luna verify`);
-    this is the small machine-local copy the running add-ons can read.
+    Versions and sources identify the release; file hashes let the Health
+    page report drift without a checkout. The full pins stay in
+    vendor/MANIFEST.json (and in `luna verify`).
     """
     manifest = load_manifest()
+    files = {}
+    for name in ADDONS:
+        entry = (manifest.get('addons', {}).get(name) or {}).get('files', {})
+        hashes = {}
+        for rel, meta in entry.items():
+            path = payload_path(name, meta.get('source_path', ''))
+            try:
+                hashes[rel] = sha256(path) if path.is_file() else ''
+            except OSError:
+                hashes[rel] = ''
+        files[name] = hashes
     snapshot = {
         'generated': manifest.get('generated', ''),
         'installedAt': int(time.time()),
@@ -479,6 +495,7 @@ def write_install_snapshot():
         'versions': {name: addon_version(name) for name in ADDONS},
         'sources': {name: str((manifest.get('addons', {}).get(name) or {})
                               .get('source_commit', ''))[:12] for name in ADDONS},
+        'files': files,
     }
     path = addons_dir() / 'luna-manifest.json'
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -497,9 +514,40 @@ def repo_revision():
     return ''
 
 
+def _manifest_problems(manifest, root):
+    """Payload bytes vs manifest pins, for a checkout or an extracted bundle."""
+    problems = []
+    for name in ADDONS:
+        entry = manifest.get('addons', {}).get(name)
+        if not entry:
+            problems.append('manifest has no entry for %s' % name)
+            continue
+        for rel, meta in entry.get('files', {}).items():
+            path = root / 'addons' / name / meta['source_path']
+            if not path.is_file():
+                problems.append('missing payload %s/%s' % (name, rel))
+                continue
+            if sha256(path) != meta['sha256']:
+                problems.append('payload %s/%s does not match the manifest' % (name, rel))
+    for rel, meta in manifest.get('shared', {}).items():
+        path = root / rel
+        if not path.is_file():
+            problems.append('missing shared file %s' % rel)
+        elif sha256(path) != meta['sha256']:
+            problems.append('shared file %s does not match the manifest' % rel)
+    return problems
+
+
 def cmd_release(options):
     """Build a bundle another machine can install with `luna update`."""
-    load_manifest()  # fail early when the pins are missing
+    manifest = load_manifest()  # fail early when the pins are missing
+    problems = _manifest_problems(manifest, ROOT)
+    if problems:
+        print('REFUSING to release: the working tree does not match the manifest:')
+        for problem in problems:
+            print('  - %s' % problem)
+        print('Run scripts/vendor-update.sh, then verify, before releasing.', file=sys.stderr)
+        return 1
     version = addon_version('luna')
     out_dir = Path(options.out).expanduser() if options.out else ROOT / 'dist'
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -552,13 +600,26 @@ def cmd_release(options):
 
 def cmd_update(options):
     """Verify a released bundle and install it with the bundled script."""
+    lock_path = _update_lock()
+    try:
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(lock_fd)
+    except FileExistsError:
+        print('REFUSING: another update is already running (%s)' % lock_path, file=sys.stderr)
+        return 1
+    except OSError:
+        pass
     temp_dir = Path(tempfile.mkdtemp(prefix='luna-update-'))
     try:
         bundle = None
         if options.bundle:
             bundle = Path(options.bundle).expanduser()
         elif options.latest:
-            bundle, error = download_release(latest_release()[0], temp_dir)
+            tag, tag_error = latest_release()
+            if not tag:
+                print('gh release lookup failed: %s' % tag_error, file=sys.stderr)
+                return 1
+            bundle, error = download_release(tag, temp_dir)
             if bundle is None:
                 print('gh release download failed: %s' % error, file=sys.stderr)
                 return 1
@@ -571,14 +632,21 @@ def cmd_update(options):
                 return 1
             try:
                 urllib.request.urlretrieve(options.url + '.sha256', str(bundle) + '.sha256')
-            except Exception:  # noqa: BLE001 - the sidecar is optional
+            except Exception:  # noqa: BLE001 - the sidecar is optional for --url
                 pass
+            if not Path(str(bundle) + '.sha256').is_file():
+                print('warning: no .sha256 beside the URL; the bundled manifest is still verified, '
+                      'but prefer --latest or a checksum-signed source', file=sys.stderr)
         else:
             print('Point at a bundle: --bundle FILE, --url URL or --latest', file=sys.stderr)
             return 2
         return install_bundle(bundle, only=options.only, dry_run=options.dry_run)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
 
 
 LUNA_REPO = 'pgm1207/Luna'
@@ -628,6 +696,20 @@ def check_updates(force=False):
     return report
 
 
+def _safe_extract(bundle, extract_dir):
+    """Unpack without allowing absolute paths or parent-directory escapes."""
+    with tarfile.open(bundle) as tar:
+        members = tar.getmembers()
+        for member in members:
+            name = member.name
+            if not name or name.startswith('/') or '..' in Path(name).parts:
+                raise ValueError('REFUSING: unsafe path in bundle: %r' % name)
+        try:
+            tar.extractall(extract_dir, filter='data')
+        except TypeError:  # Python < 3.12 has no extraction filter
+            tar.extractall(extract_dir)
+
+
 def install_bundle(bundle, only=None, dry_run=False):
     """Verify a bundle and run the installer inside it."""
     bundle = Path(bundle)
@@ -649,11 +731,11 @@ def install_bundle(bundle, only=None, dry_run=False):
     with tempfile.TemporaryDirectory(prefix='luna-bundle-') as work:
         extract_dir = Path(work) / 'unpacked'
         extract_dir.mkdir()
-        with tarfile.open(bundle) as tar:
-            try:
-                tar.extractall(extract_dir, filter='data')
-            except TypeError:  # Python < 3.12 has no extraction filter
-                tar.extractall(extract_dir)
+        try:
+            _safe_extract(bundle, extract_dir)
+        except (tarfile.TarError, ValueError, OSError) as error:
+            print('REFUSING: cannot safely unpack the bundle: %s' % error, file=sys.stderr)
+            return 1
         roots = [entry for entry in extract_dir.iterdir() if entry.is_dir()]
         root = roots[0] if len(roots) == 1 else extract_dir
         script = root / 'scripts' / 'luna.py'
@@ -662,14 +744,23 @@ def install_bundle(bundle, only=None, dry_run=False):
             return 1
         version = '?'
         bundled_manifest = root / 'vendor' / 'MANIFEST.json'
-        if bundled_manifest.is_file():
-            try:
-                manifest = json.loads(bundled_manifest.read_text())
-                version = str((manifest.get('addons', {}).get('luna') or {})
-                              .get('plugin_version', '?'))
-            except ValueError:
-                version = '?'
-        print('bundle : %s (Luna %s)' % (bundle.name, version))
+        if not bundled_manifest.is_file():
+            print('REFUSING: the bundle does not contain vendor/MANIFEST.json', file=sys.stderr)
+            return 1
+        try:
+            manifest = json.loads(bundled_manifest.read_text())
+            version = str((manifest.get('addons', {}).get('luna') or {})
+                          .get('plugin_version', '?'))
+        except ValueError:
+            print('REFUSING: the bundled manifest is not valid JSON', file=sys.stderr)
+            return 1
+        problems = _manifest_problems(manifest, root)
+        if problems:
+            print('REFUSING: the bundle contents do not match its own manifest:')
+            for problem in problems:
+                print('  - %s' % problem, file=sys.stderr)
+            return 1
+        print('bundle : %s (Luna %s, manifest verified)' % (bundle.name, version))
         command = [sys.executable, str(script), 'install', '--force']
         for name in only or []:
             command += ['--only', name]
@@ -684,6 +775,8 @@ def download_release(tag, work):
     gh = find_gh()
     if not gh:
         return None, 'the gh CLI is not installed'
+    if not tag:
+        return None, 'no release tag to download'
     result = subprocess.run([gh, 'release', 'download', tag,
                              '--pattern', 'luna-*.tar.gz',
                              '--pattern', 'luna-*.tar.gz.sha256',
@@ -694,7 +787,20 @@ def download_release(tag, work):
     found = sorted(work.glob('luna-*.tar.gz'))
     if not found:
         return None, 'the release has no bundle asset'
-    return found[-1], ''
+    bundle = found[-1]
+    if not Path(str(bundle) + '.sha256').is_file():
+        return None, 'the release has no checksum sidecar; refusing an unauthenticated bundle'
+    return bundle, ''
+
+
+def _update_lock():
+    """Single-writer lock so timer, menu and shell never update concurrently."""
+    tools = luna_tools_dir()
+    try:
+        tools.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return tools / 'update.lock'
 
 
 def write_tooling():
@@ -785,12 +891,14 @@ def cmd_autoupdate(options):
     """Timer entry point: check quietly and apply when Steam is closed.
 
     Modes come from the Health page switch (data/luna.json -> auto_update):
-    "off" does nothing, "notify" only records what it found, "install" applies a
-    newer release. A queued update (pending.json) always applies.
+    "off" does nothing unless a manual update was queued, "notify" only
+    records what it found, "install" applies a newer release. A queued update
+    (pending.json) is honoured in any mode but still needs Steam closed.
     """
     tools = luna_tools_dir()
     pending_path = tools / 'pending.json'
     result_path = tools / 'autoupdate.json'
+    lock_path = _update_lock()
     prefs = read_json_file(data_dir() / 'luna.json') or {}
     mode = str(prefs.get('auto_update') or 'off')
     pending = read_json_file(pending_path) or {}
@@ -806,31 +914,49 @@ def cmd_autoupdate(options):
 
     if mode not in ('notify', 'install') and not pending:
         return EXIT_OK
-    reasons = refuse_reasons(for_install=True)
-    if reasons:
-        return record({'result': 'deferred', 'reason': reasons[0]})
-    report = check_updates(force=True)
-    installed = report.get('installed') or '?'
-    latest = report.get('latest') or ''
-    if not latest:
-        return record({'result': 'error', 'reason': report.get('checkError') or 'no release found'})
-    if not pending and version_key(latest) <= version_key(installed):
-        return record({'result': 'current', 'version': installed})
-    if mode == 'notify' and not pending:
-        return record({'result': 'available', 'version': latest, 'installed': installed})
-
-    work = Path(tempfile.mkdtemp(prefix='luna-autoupdate-'))
     try:
-        bundle, error = download_release(latest, work)
-        if bundle is None:
-            return record({'result': 'error', 'reason': error, 'version': latest})
-        code = install_bundle(bundle)
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(lock_fd)
+    except FileExistsError:
+        return record({'result': 'deferred', 'reason': 'another update is already running'})
+    except OSError:
+        pass
+    try:
+        # A check is read-only (gh only): notify mode must report even while
+        # Steam runs. Only an actual install needs Steam and the sidecar gone.
+        report = check_updates(force=True)
+        installed = report.get('installed') or '?'
+        latest = report.get('latest') or ''
+        if not latest:
+            return record({'result': 'error', 'reason': report.get('checkError') or 'no release found'})
+        target = str(pending.get('tag') or '') if pending else ''
+        if not target:
+            target = latest
+        if not pending and version_key(target) <= version_key(installed):
+            return record({'result': 'current', 'version': installed})
+        if mode == 'notify' and not pending:
+            return record({'result': 'available', 'version': target, 'installed': installed})
+        reasons = refuse_reasons(for_install=True)
+        if reasons:
+            return record({'result': 'deferred', 'reason': reasons[0]})
+
+        work = Path(tempfile.mkdtemp(prefix='luna-autoupdate-'))
+        try:
+            bundle, error = download_release(target, work)
+            if bundle is None:
+                return record({'result': 'error', 'reason': error, 'version': target})
+            code = install_bundle(bundle)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if code == 0 and pending_path.exists():
+            pending_path.unlink()
+        return record({'result': 'applied' if code == 0 else 'failed',
+                       'version': target, 'installedBefore': installed, 'exit': code})
     finally:
-        shutil.rmtree(work, ignore_errors=True)
-    if code == 0 and pending_path.exists():
-        pending_path.unlink()
-    return record({'result': 'applied' if code == 0 else 'failed',
-                   'version': latest, 'installedBefore': installed, 'exit': code})
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
 
 
 def cmd_install(options):
@@ -927,6 +1053,29 @@ def cmd_uninstall(options):
     snapshot = addons_dir() / 'luna-manifest.json'
     if snapshot.is_file():
         snapshot.unlink()
+    # A full uninstall must not leave the unattended worker behind: without
+    # the payloads it would only fail, and with them gone a timer could
+    # reinstall after the user asked for removal.
+    try:
+        unit_dir, service, timer = unit_paths()
+        subprocess.run(['systemctl', '--user', 'disable', '--now', 'luna-autoupdate.timer'],
+                       capture_output=True)
+        for path in (timer, service):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        pending = luna_tools_dir() / 'pending.json'
+        try:
+            if pending.exists():
+                pending.unlink()
+        except OSError:
+            pass
+        print('unattended updates: disabled and queued updates cleared')
+    except Exception:  # noqa: BLE001 - uninstall must succeed even if systemd is absent
+        pass
     print('Local playtime and presence data were left untouched.')
     return EXIT_OK
 

@@ -57,7 +57,8 @@
   function publishArtworkRequest(w, app) {
     const appid = Number(app && app.appid);
     if (!valid(appid)) return false;
-    const payload = JSON.stringify({ appid, name: nameOf(app), at: Date.now() });
+    const payload = JSON.stringify({ appid, name: nameOf(app), at: Date.now(),
+      nonce: Math.floor(Math.random() * 1e9) });
     try {
       const storage = storageOf(w);
       if (!storage) return false;
@@ -71,6 +72,9 @@
   // Apply the already-written artwork through Steam's own API so the library
   // updates without a restart: the backend hands over the file's bytes, and
   // SetCustomArtworkForApp (confirmed live for types 0..3) does the rest.
+  // One-shot: the live key is claimed (removed) on first read so a restart
+  // never replays it; stale requests past the TTL are ignored.
+  const ARTWORK_LIVE_TTL_MS = 5 * 60 * 1000;
   async function handleArtworkLive(w) {
     const storage = storageOf(w);
     if (!storage) return false;
@@ -78,8 +82,11 @@
     try { raw = storage.getItem(ARTWORK_LIVE_KEY); } catch (_) { return false; }
     if (!raw || raw === lastArtworkLive) return false;
     lastArtworkLive = raw;
+    try { storage.removeItem(ARTWORK_LIVE_KEY); } catch (_) {}
     let request = null;
     try { request = JSON.parse(raw); } catch (_) { return false; }
+    if (request && typeof request.at === 'number' && Number.isFinite(request.at)
+      && Date.now() - request.at > ARTWORK_LIVE_TTL_MS) return false;
     const appid = Number(request && request.appid);
     const kinds = Array.isArray(request && request.kinds) ? request.kinds : [];
     if (!valid(appid) || !kinds.length) return false;

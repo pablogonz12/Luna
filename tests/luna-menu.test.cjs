@@ -523,11 +523,11 @@ test('live artwork requests are applied through Steam own API',async()=>{
         type:payload.kind==='grid'?0:3}));
     }},
   };
-  store.set(ARTWORK_LIVE_KEY,JSON.stringify({appid:1145360,kinds:['grid','wide','icon'],at:1234}));
+  store.set(ARTWORK_LIVE_KEY,JSON.stringify({appid:1145360,kinds:['grid','wide','icon'],at:Date.now()}));
   assert.equal(await handleArtworkLive(w),true,'the request must be consumed');
   assert.deepEqual(applied,[[1145360,'AAA','png',0],[1145360,'AAA','png',3]]);
   const result=JSON.parse(store.get(ARTWORK_LIVE_RESULT_KEY));
-  assert.equal(result.at,1234);
+  assert.ok(Math.abs(Date.now()-result.at)<5*60*1000);
   assert.deepEqual(result.results.map(entry=>[entry.kind,entry.ok]),
     [['grid',true],['wide',true],['icon',false]]);
   assert.equal(await handleArtworkLive(w),false,'an unchanged request is not replayed');
