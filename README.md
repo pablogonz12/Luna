@@ -71,6 +71,27 @@ On the source machine, `luna release --publish` builds the bundle, writes its
 with the bundled installer, so no checkout is needed. A tampered bundle is
 refused and nothing is installed.
 
+## Two machines, one library
+
+Playtime hours, preferences, artwork and Steam's own `localconfig.vdf`
+(recents, collections) sync between machines, so both feel the same even with
+different games installed. Two Steam instances writing that file at once
+produce `localconfig.sync-conflict-*` copies and last-writer-wins amnesia
+("gaming mode forgot what desktop mode played"). The fix is merge, not picking
+a side:
+
+```bash
+python3 scripts/luna.py reconcile --dry-run   # what would merge
+python3 scripts/luna.py reconcile             # merge (Steam must be closed)
+```
+
+Reconcile keeps every non-recency key from the newest copy and takes the
+newest timestamp per game for `LastPlayed`, the recent-played list and the
+Deck seen-state; consumed conflicts are archived next to the file. Workflow:
+fully exit Steam (check no `lumen`/`steamwebhelper` lingers), let the sync
+settle, reconcile, then start Steam on the other machine. The Health page
+reports waiting conflicts so the menu tells you when this is needed.
+
 ## Health
 
 The **Health** page in the Luna menu reports what a bug report needs: installed

@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.14.6'
+local VERSION = '0.14.7'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local lumen_root = home .. '/.local/share/Lumen'
@@ -560,6 +560,39 @@ local function update_state()
   }
 end
 
+local function count_steam_conflicts()
+  -- Syncthing sync-conflict copies of Steam's localconfig.vdf: each one is a
+  -- machine that wrote recents while another copy was in flight. `luna
+  -- reconcile` (Steam closed) merges them so neither machine's play history
+  -- is lost to last-writer-wins.
+  local users_dir = home .. '/.local/share/Steam/userdata'
+  local count = 0
+  local ok_users, users = pcall(fs.list, users_dir)
+  if not ok_users or type(users) ~= 'table' then return 0 end
+  for _, user in ipairs(users) do
+    if type(user) == 'table' and user.is_directory then
+      local config_dir = users_dir .. '/' .. tostring(user.name) .. '/config'
+      local ok_conf, entries = pcall(fs.list, config_dir)
+      if ok_conf and type(entries) == 'table' then
+        for _, entry in ipairs(entries) do
+          local name = tostring((type(entry) == 'table' and entry.name) or '')
+          if name:match('^localconfig%.sync%-conflict%-') then count = count + 1 end
+        end
+      end
+    elseif type(user) == 'string' then
+      local config_dir = users_dir .. '/' .. user .. '/config'
+      local ok_conf, entries = pcall(fs.list, config_dir)
+      if ok_conf and type(entries) == 'table' then
+        for _, entry in ipairs(entries) do
+          local name = tostring((type(entry) == 'table' and entry.name) or entry or '')
+          if name:match('^localconfig%.sync%-conflict%-') then count = count + 1 end
+        end
+      end
+    end
+  end
+  return count
+end
+
 local function build_health()
   local lumen_root = home .. '/.local/share/Lumen'
   local boot_path = lumen_root .. '/lua/boot.lua'
@@ -618,6 +651,7 @@ local function build_health()
     steam = {
       root = steam_root,
       exists = path_exists(steam_root .. '/steam.sh'),
+      localconfigConflicts = count_steam_conflicts(),
     },
     data = {
       dir = data_dir,

@@ -3,6 +3,16 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.7 - 2026-10-21
+
+- **Two machines, one library.** Steam's synced `localconfig.vdf` no longer
+  loses recents to last-writer-wins: `luna reconcile` merges Syncthing
+  conflict copies (newest `LastPlayed` per game, union of the recent-played
+  list and Deck seen-state) and archives what it consumed. The Health page
+  reports waiting conflicts so the menu tells you when to run it. This keeps
+  full-file sync: same hours, recents, collections and saves on both machines
+  even with different games installed.
+
 ## 0.14.6 - 2026-10-21
 
 - **Fix: Steam no longer reopens the artwork picker on launch.** Right-click
