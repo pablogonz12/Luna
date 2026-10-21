@@ -12,7 +12,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.2.2'
+local VERSION = '0.2.3'
 local home = os.getenv('HOME') or ''
 local data_dir = home .. '/.local/share/slssteam-integrations'
 local config_path = data_dir .. '/sgdb.json'
@@ -495,10 +495,16 @@ function M.register(registry)
   registry.SlsSgdbGet = function()
     local config = load_config()
     local directory, why = grid_dir()
+    local masked = ''
+    if config.apiKey ~= '' then
+      local tail = config.apiKey:sub(-4)
+      masked = '••••' .. tail
+    end
     return reply({
       success = true,
       version = VERSION,
-      apiKey = config.apiKey,
+      hasKey = config.apiKey ~= '',
+      keyMasked = masked,
       gridDir = directory or '',
       gridError = directory and '' or tostring(why),
     })
