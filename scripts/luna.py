@@ -1634,19 +1634,32 @@ def steam_tools_files():
 
 
 def steam_client_build():
-    """Newest 'Client version: N' reported in the Steam console log."""
+    """Newest 'Client version: N' reported in the Steam console log.
+
+    Falls back to the installed package manifest (ground truth of what is on
+    disk, and available with Steam closed or after a log rotation).
+    """
     log = steam_home() / 'logs' / 'console_log.txt'
     try:
         size = log.stat().st_size
     except OSError:
-        return ''
+        size = 0
+    if size:
+        try:
+            with open(log, 'rb') as handle:
+                handle.seek(max(0, size - 65536))
+                tail = handle.read().decode('utf-8', errors='replace')
+            found = re.findall(r'Client version:\s*(\d+)', tail)
+            if found:
+                return found[-1]
+        except OSError:
+            pass
     try:
-        with open(log, 'rb') as handle:
-            handle.seek(max(0, size - 65536))
-            tail = handle.read().decode('utf-8', errors='replace')
+        manifest = (steam_home() / 'package' / 'steam_client_ubuntu12.manifest').read_text(
+            encoding='utf-8', errors='replace')
     except OSError:
         return ''
-    found = re.findall(r'Client version:\s*(\d+)', tail)
+    found = re.findall(r'"version"\s+"(\d+)"', manifest)
     return found[-1] if found else ''
 
 

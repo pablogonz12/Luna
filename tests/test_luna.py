@@ -895,6 +895,17 @@ class LunaTestCase(unittest.TestCase):
         last = json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
         self.assertEqual(last['steamBuild'], '333')
 
+    def test_steam_pin_falls_back_to_package_manifest(self):
+        steam = self.home / '.local/share/Steam'
+        package = steam / 'package'
+        package.mkdir(parents=True)
+        (package / 'bins.dat').write_text('x')
+        (package / 'steam_client_ubuntu12.manifest').write_text('"x"\n{\n"version"\t\t"424242"\n}\n')
+        self.assertEqual(self.luna('steam', 'pin').returncode, 0)
+        status = self.luna('steam', 'status')
+        self.assertIn('424242', status.stdout)
+        self.assertIn('match the pin', status.stdout)
+
     def test_the_standalone_copy_can_manage_its_own_units(self):
         """The timer entry point runs the copy, which must not copy itself from
         a repository that is not there (the live bug found on 2026-10-15)."""
