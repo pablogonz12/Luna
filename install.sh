@@ -23,10 +23,14 @@ is found, it runs the pinned LuaTools-Moon installer with --nolaunch, then insta
 the sha256-verified SLS Luna add-ons. LuaTools is currently required by Luna's
 backend contract; --noplugin is therefore intentionally unsupported.
 
+By default Luna installs and verifies Steam client build 1791918634, caches and
+pins it, and blocks Steam self-updates. Steam/Lumen must be fully closed.
+
 Options:
   --only NAME             Install one Luna add-on (repeatable)
   --force                 Replace installed add-on files that differ
   --dry-run               Show Luna changes without writing them
+  --keep-steam-client     Skip the default Steam compatibility downgrade
   --slsteam-channel NAME  Pass stable or beta to the base installer
   --plugin-channel NAME   Pass stable or beta to the base installer
   --lumen-channel NAME   Pass stable or beta to the base installer
@@ -48,7 +52,7 @@ while (($#)); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --noplugin) die "--noplugin is not supported: current Luna features require the LuaTools backend." ;;
-    --force|--dry-run) luna_args+=("$1"); shift ;;
+    --force|--dry-run|--keep-steam-client) luna_args+=("$1"); shift ;;
     --only)
       (($# >= 2)) || die "--only requires an add-on name."
       luna_args+=("$1" "$2"); shift 2 ;;

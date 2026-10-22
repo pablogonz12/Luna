@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -110,10 +111,15 @@ class LunaTestCase(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp, ignore_errors=True)
 
-    def luna(self, *args, running='', env=None):
+    def luna(self, *args, running='', env=None, keep_steam_client=True):
         stub_bin(self.home, running)
         environment = dict(env or self.env)
-        return subprocess.run([sys.executable, str(LUNA)] + list(args),
+        command = [sys.executable, str(LUNA)] + list(args)
+        # These are add-on fixtures without Valve payloads. The default client
+        # installation has its own synthetic-package integration tests.
+        if args and args[0] == 'install' and keep_steam_client:
+            command.append('--keep-steam-client')
+        return subprocess.run(command,
                               capture_output=True, text=True, env=environment)
 
     # -- helpers ---------------------------------------------------------
@@ -123,6 +129,20 @@ class LunaTestCase(unittest.TestCase):
     def data_snapshot(self):
         return {str(path.relative_to(self.data)): path.read_bytes()
                 for path in sorted(self.data.rglob('*')) if path.is_file()}
+
+    def steam_fixture(self, build):
+        steam = self.home / '.local/share/Steam'
+        package = steam / 'package'
+        package.mkdir(parents=True, exist_ok=True)
+        archive = package / 'test-client.zip'
+        with zipfile.ZipFile(archive, 'w') as out:
+            for name in ('ubuntu12_32/steam', 'ubuntu12_32/steamclient.so', 'ubuntu12_64/steamwebhelper'):
+                out.writestr(name, b'\x7fELFsynthetic-build-' + build.encode())
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        (package / 'steam_client_ubuntu12.manifest').write_text(
+            '"ubuntu12" { "version" "%s" "client" { "file" "test-client.zip" "sha2" "%s" } }'
+            % (build, digest))
+        return package
 
     # -- install ---------------------------------------------------------
     def test_install_both_addons_patches_once(self):
@@ -745,9 +765,8 @@ class LunaTestCase(unittest.TestCase):
         steam = self.home / '.local/share/Steam'
         (steam / 'logs').mkdir(parents=True)
         (steam / 'logs/console_log.txt').write_text('[x] Client version: 111\n[x] Client version: 222\n')
-        package = steam / 'package'
-        package.mkdir(parents=True)
-        (package / 'bins_steam.zip').write_text('build-222-bytes')
+        package = self.steam_fixture('222')
+        good = (package / 'test-client.zip').read_bytes()
         sls = self.home / '.local/share/SLSsteam'
         sls.mkdir(parents=True)
         (sls / 'SLSsteam.so').write_text('so-bytes')
@@ -760,14 +779,17 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(self.luna('steam', 'cache').returncode, 0)
         # An unwanted update lands: new build, changed packages.
         (steam / 'logs/console_log.txt').write_text('[x] Client version: 999\n')
-        (package / 'bins_steam.zip').write_text('build-999-bytes')
+        (package / 'test-client.zip').write_text('build-999-bytes')
+        (steam / 'ubuntu12_32').mkdir()
+        (steam / 'ubuntu12_32/steam').write_text('new executable')
         drifted = self.luna('steam', 'status')
         self.assertIn('pinned : 222', drifted.stdout)
         self.assertIn('DIFFER', drifted.stdout)
         result = self.luna('steam', 'recover')
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual((package / 'bins_steam.zip').read_text(), 'build-222-bytes',
-                         'recover must put the cached packages back')
+        self.assertEqual((package / 'test-client.zip').read_bytes(), good,
+                          'recover must put the cached packages back')
+        self.assertEqual((steam / 'ubuntu12_32/steam').read_bytes(), b'\x7fELFsynthetic-build-222')
         self.assertIn('BootStrapperInhibitAll', (steam / 'steam.cfg').read_text())
         fixed = self.luna('steam', 'status')
         self.assertIn('222', fixed.stdout)
@@ -789,19 +811,18 @@ class LunaTestCase(unittest.TestCase):
         steam = self.home / '.local/share/Steam'
         (steam / 'logs').mkdir(parents=True)
         (steam / 'logs/console_log.txt').write_text('Client version: 222\n')
-        package = steam / 'package'
-        package.mkdir(parents=True)
-        (package / 'bins.dat').write_text('good')
+        package = self.steam_fixture('222')
+        good = (package / 'test-client.zip').read_bytes()
         self.assertEqual(self.luna('steam', 'pin').returncode, 0)
         self.assertEqual(self.luna('steam', 'cache').returncode, 0)
         (steam / 'logs/console_log.txt').write_text('Client version: 999\n')
-        (package / 'bins.dat').write_text('bad')
+        (package / 'test-client.zip').write_text('bad')
         (self.data / 'luna.json').write_text(_json.dumps({'version': 1, 'auto_update': 'install'}))
         _, env = self.bundle_and_env()
         result = self.luna('autoupdate', '--verbose', env=env)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual((package / 'bins.dat').read_text(), 'good',
-                         'install mode must restore the pinned client first')
+        self.assertEqual((package / 'test-client.zip').read_bytes(), good,
+                          'install mode must restore the pinned client first')
         last = _json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
         self.assertEqual(last['steamPinned'], '222')
         self.assertEqual(last['steamDrift'], '')

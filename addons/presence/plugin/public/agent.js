@@ -35,6 +35,32 @@
     if (typeof value?.data === 'string') return JSON.parse(value.data);
     return value;
   }
+  function makeGameSelectionRestorer(w, {delay = sleep, attempts = 30} = {}) {
+    const available = typeof w?.SteamUIStore?.SetRunningApp === 'function';
+    return {
+      available,
+      async restore(original, helper, stillRunning = () => true) {
+        if (!available) return false;
+        // This is Steam's own "select running game" action. It reorders the
+        // composition queue without raising windows, navigating, or closing the
+        // Steam/QAM menus. Never install a perpetual focus-forcing timer.
+        for (let attempt = 0; attempt < attempts; attempt++) {
+          if (!stillRunning()) return false;
+          const store = w.SteamUIStore;
+          const selected = validId(store.MainRunningAppID);
+          const running = Array.from(store.RunningApps || []).map(app => validId(app?.appid));
+          if (selected === helper && running.includes(original)) {
+            store.SetRunningApp(original);
+            return validId(store.MainRunningAppID) === original;
+          }
+          // Do not override another game the user selected/launched meanwhile.
+          if (selected && selected !== original && selected !== helper) return false;
+          await delay(100);
+        }
+        return false;
+      },
+    };
+  }
   function validId(value) {
     const n = Number(value);
     return Number.isSafeInteger(n) && n > 0 && n <= MAX_APPID ? n : null;
@@ -249,6 +275,8 @@
   }
   class PresenceController {
     constructor({apps, storage, overview, hideShortcut, delay = sleep, accountKey = null, accountSource = null,
+                 helpersAllowed = true, helperPauseReason = '',
+                 restoreGameSelection = null,
                  now = () => Date.now()}) {
       this.apps = apps;
       this.storage = storage;
@@ -268,6 +296,11 @@
       this.stopFailures = new Map();
       this.accountMismatch = false;
       this.error = null;
+      this.helpersAllowed = helpersAllowed !== false;
+      this.helperPauseReason = this.helpersAllowed ? '' : String(helperPauseReason);
+      this.restoreGameSelection = restoreGameSelection;
+      this.selectionRestores = new Map();
+      this.restoredSelections = 0;
       // Shortcut enrichment: while a game runs, its hidden placeholder's name
       // gains a session-time suffix like "(42m)". The backend owns the toggle;
       // sync() applies it. startedAt/nameApplied limit Steam calls to actual
@@ -293,6 +326,33 @@
     setEnabled(enabled) {
       this.state.enabled = enabled === true;
       this.persist();
+    }
+    async setHelperPolicy(session) {
+      const missingSelection = session?.requiresGameSelection === true && typeof this.restoreGameSelection !== 'function';
+      this.helpersAllowed = session?.helpersAllowed !== false && !missingSelection;
+      this.helperPauseReason = this.helpersAllowed ? '' : String(session?.reason || (missingSelection
+        ? 'Presence helper paused: Steam game-selection control is unavailable in this Gamescope session.'
+        : 'Presence helpers paused for this session.'));
+      // Includes recorded helpers from an old context, not only new starts.
+      // end() targets the owned helper GameID, never the original game.
+      if (!this.helpersAllowed) await this.stopAll();
+    }
+    async restoreSelection(appid, helper) {
+      if (typeof this.restoreGameSelection !== 'function') return false;
+      if (this.selectionRestores.has(appid)) return this.selectionRestores.get(appid);
+      const pending = Promise.resolve().then(() => this.restoreGameSelection(appid, helper,
+        () => this.helpersAllowed && this.active.has(appid) && this.state.enabled && this.state.running[appid] === helper));
+      this.selectionRestores.set(appid, pending);
+      try {
+        const restored = await pending;
+        if (restored) this.restoredSelections++;
+        return restored;
+      } catch (error) {
+        this.error = 'Could not restore the real game selection: ' + String(error?.message || error);
+        return false;
+      } finally {
+        if (this.selectionRestores.get(appid) === pending) this.selectionRestores.delete(appid);
+      }
     }
     isManagedShortcut(id) {
       return Object.values(this.state.owned).some(v => validId(v) === validId(id));
@@ -344,7 +404,15 @@
     }
     async onLifetime(notification) {
       const appid = validId(notification?.unAppID);
-      if (!appid || this.isManagedShortcut(appid)) return;
+      if (!appid) return;
+      if (this.isManagedShortcut(appid)) {
+        if (notification.bRunning === true) {
+          const original = Object.keys(this.state.running).map(validId)
+            .find(id => this.state.running[id] === appid);
+          if (original) await this.restoreSelection(original, appid);
+        }
+        return;
+      }
       // Stop events are authoritative even after the manifest disappears.
       // The previous filter silently ignored those stops, leaving helpers alive.
       if (notification.bRunning === true) {
@@ -398,7 +466,7 @@
         + '" (it reports "' + String(cleanName(this.titleOf(id))) + '")');
     }
     async begin(appid) {
-      if (this.inflight.has(appid) || this.started.has(appid) || !this.injected.has(appid)) return;
+      if (!this.helpersAllowed || this.inflight.has(appid) || this.started.has(appid) || !this.injected.has(appid)) return;
       if (!this.guardAccount()) return;
       // Publish the pending launch so a concurrent stop cannot run before RunGame.
       const pending = this._begin(appid);
@@ -455,18 +523,27 @@
           this.stopRequested.delete(appid);
           return;
         }
-        if (!this.active.has(appid) || !this.state.enabled) return;
+        if (!this.helpersAllowed || !this.active.has(appid) || !this.state.enabled) return;
         // Ensure the ownership record is durable before any helper launch.
         if (this.storage.flush) await this.storage.flush();
+        // A policy change can arrive during the storage/configuration awaits.
+        if (!this.helpersAllowed || !this.active.has(appid) || !this.state.enabled) return;
         // The real app was started by Steam already. Never start it again.
         this.started.add(appid);
         this.state.running[appid] = id;
         this.persist();
         try {
           if (this.storage.flush) await this.storage.flush();
+          if (!this.helpersAllowed || !this.active.has(appid) || !this.state.enabled) {
+            this.started.delete(appid);
+            delete this.state.running[appid];
+            this.persist();
+            return;
+          }
           await this.apps.RunGame(shortcutGameId(id), '', -1, 100);
           this.startedAt.set(appid, this.now());
           this.nameApplied.delete(appid);
+          await this.restoreSelection(appid, id);
         } catch (e) {
           this.started.delete(appid);
           delete this.state.running[appid];
@@ -589,6 +666,9 @@
       return {
         active: this.active.size,
         healthy: !this.error,
+        helpersPaused: !this.helpersAllowed,
+        helperPauseReason: this.helperPauseReason,
+        restoredSelections: this.restoredSelections,
         error: this.error || '',
         activeIds: [...this.active].slice(0, 12),
         accountMismatch: this.accountMismatch,
@@ -617,6 +697,7 @@
     w.__SlsPresenceAgent = true;
     const contracts = probeContracts(w);
     const hiding = makeHidingStrategy(w);
+    const selection = makeGameSelectionRestorer(w);
     const identity = readAccountIdentity(w);
     const rpc = async (method, params = {}) => {
       if (!w.Millennium?.callServerMethod) throw new Error('Lumen RPC unavailable in SharedJSContext');
@@ -651,7 +732,14 @@
       },
       flush() { return pending; }
     };
-    async function sync() {
+    let syncing = null;
+    function sync() {
+      // Boot and the interval can overlap while RPCs/cleanup are pending.
+      // Share one sync so the same recorded helper is never stopped twice.
+      if (!syncing) syncing = syncOnce().finally(() => { syncing = null; });
+      return syncing;
+    }
+    async function syncOnce() {
       try {
         const status = await rpc('SlsPresenceGet');
         for (const [id, name] of Object.entries(status.titles || {})) titles.set(id, name);
@@ -670,9 +758,14 @@
             hideShortcut: hiding.hide,
             accountKey: account ? account.key : null,
             accountSource: account ? account.source : null,
+            helpersAllowed: status.session?.helpersAllowed !== false,
+            helperPauseReason: status.session?.reason || '',
+            restoreGameSelection: selection.available ? selection.restore : null,
           });
           controller.updateInjected(status.apps);
+          controller.identityAmbiguous = status.identity?.ambiguous === true;
           controller.sessionTime = status.state?.sessionTime !== false;
+          await controller.setHelperPolicy(status.session);
           // Recover what the destroyed context could not carry over: a game that
           // is still running (its presence is re-established through the existing
           // hidden placeholder) and a helper whose game is already gone. Without
@@ -705,6 +798,7 @@
             controller.accountSource = account.source;
           }
           controller.identityAmbiguous = status.identity?.ambiguous === true;
+          await controller.setHelperPolicy(status.session);
           const removed = controller.updateInjected(status.apps);
           for (const id of removed) await controller.end(id);
           if (controller.state.enabled !== status.state.enabled) {
@@ -730,6 +824,8 @@
         // reported immediately; the 5 s cadence only bounds the steady-state
         // heartbeat.
         const signature = (report.error ? 'e' : '') + (report.accountMismatch ? 'a' : '')
+          + (report.helpersPaused ? 'p' : '')
+          + ':' + report.active + ':' + report.running
           + ':' + report.reconciledActivate + ':' + report.reconciledOrphaned;
         if (Date.now() - lastReport > 5000 || signature !== lastSignature) {
           lastReport = Date.now();
@@ -766,7 +862,7 @@
     }, 60000);
   }
   return {
-    PresenceController, validId, shortcutGameId, cleanName, parseRpc,
+    PresenceController, validId, shortcutGameId, cleanName, parseRpc, makeGameSelectionRestorer,
     probeCapabilities, probeContracts, makeHidingStrategy, readAccountKey,
     readAccountIdentity, planReconciliation, fnv1a, sessionLabel, HELPER, HIDE_STRATEGIES, bootAgent,
   };
