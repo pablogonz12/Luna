@@ -5,6 +5,7 @@
 | Suite | Command | Covers |
 | --- | --- | --- |
 | Installer | `python3 -m unittest discover -s tests -p 'test_*.py'` | install all or one add-on, idempotence, dry run, refusals (Steam, Lumen sidecar, drifted `boot.lua`, divergent payload), uninstall one / last, backup-missing refusal, user data untouched, status reporting, manifest verification |
+| Steam downgrade | Same Python suite (`test_steam_client.py`) | synthetic ZIP/VZip packages; automatic executable replacement, cache/pin/block, stale-log detection, offline/fresh downloads, rollback, CRC/SHA checks, path/symlink safety, account/game data preservation, running-client refusals and write-free dry runs |
 | Bootstrap installer | `bash -n install.sh`; `./install.sh --help`; `./install.sh --dry-run` on a ready host | syntax/help; existing stack is reused; dry run performs no writes; upstream bootstrap is checksum-verified and uses `--nolaunch` |
 | Composition | `bash scripts/test-backend.sh` | the shipped bridge and add-on backends register in one registry, expected assets are injected in order, and a deliberately broken add-on is skipped instead of stopping healthy add-ons |
 | Payload pinning | `python3 scripts/luna.py verify` | every payload and shared file matches `vendor/MANIFEST.json`, and no file exists that the manifest does not list |
@@ -29,7 +30,12 @@ open or closed.
 5. User data: playtime, presence and compressor state are preserved across
    install, upgrade and uninstall.
 6. A second add-on version (re-run `vendor-update.sh`, then install) replaces the
-   payload and `status` returns to `same` everywhere.
+    payload and `status` returns to `same` everywhere.
+7. On a disposable installation, the default installer produces build
+   `1791918634` executables (not just metadata), retains a rollback backup, and
+   leaves accounts/games/saves untouched. On launch, **new** runtime log lines
+   must show `Client version: 1791918634` and `Suppressing Steam update`.
+   Do not claim a runtime validation from an old log or a package manifest.
 
 ## Evidence requirements
 

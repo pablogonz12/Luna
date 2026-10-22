@@ -62,6 +62,20 @@ local function save_file(state)
   return true
 end
 local function response(o) return json.encode(o) end
+-- A windowless RunGame shortcut still becomes Big Picture's active game. In
+-- Gamescope this leaves its loading screen selected instead of the real game.
+-- Require a verified selection-restoration capability in this process. The
+-- agent keeps the helper but puts the real game first; only unsupported builds
+-- pause helpers, without overwriting the user's setting.
+local function helper_policy(getenv)
+  getenv = getenv or os.getenv
+  local display = getenv('GAMESCOPE_WAYLAND_DISPLAY') or ''
+  local limiter = getenv('GAMESCOPE_LIMITER_FILE') or ''
+  local desktop = (getenv('XDG_CURRENT_DESKTOP') or ''):lower()
+  local gamescope = display ~= '' or limiter ~= '' or desktop:find('gamescope', 1, true) ~= nil
+  return {helpersAllowed=true, requiresGameSelection=gamescope,
+    mode=gamescope and 'gamescope' or 'desktop', reason=''}
+end
 -- Which Steam-launched processes are alive right now.
 --
 -- Steam's reaper tags every process it starts with `AppId=<id>`, so a scan of
@@ -206,10 +220,12 @@ function M.register(registry)
   local state=read_file()
   local runtime={active=0,healthy=false,error='',activeIds={},reportedAt=0,
     owned=0,running=0,accountMismatch=false,identityAmbiguous=false,accountSource='',
-    reconciledActivate=0,reconciledOrphaned=0,hideStrategy='',hideVerified=false,contracts={}}
+    reconciledActivate=0,reconciledOrphaned=0,hideStrategy='',hideVerified=false,contracts={},
+    helpersPaused=false,helperPauseReason='',restoredSelections=0}
   local titles={}
   registry.SlsPresenceGet=function()
-    return response({success=true, state=state, apps=manifests(), runtime=runtime, titles=titles, identity=identity()})
+    return response({success=true, state=state, apps=manifests(), runtime=runtime,
+      titles=titles, identity=identity(), session=helper_policy()})
   end
   -- Read-only contract probe: proves the wire shape Lumen actually delivers
   -- (alphabetical-key positional args, one serialized string) without changing
@@ -319,6 +335,9 @@ function M.register(registry)
         accountSource=tostring(obj.accountSource or ''):sub(1,16),
         hideStrategy=tostring(obj.hideStrategy or ''):sub(1,32),
         hideVerified=obj.hideVerified==true,
+        helpersPaused=obj.helpersPaused==true,
+        helperPauseReason=tostring(obj.helperPauseReason or ''):sub(1,250),
+        restoredSelections=math.max(0,tonumber(obj.restoredSelections) or 0),
         contracts={}}
       if type(obj.contracts)=='table' then
         for name,arity in pairs(obj.contracts) do
@@ -339,4 +358,5 @@ end
 M.collect_running = collect_running
 M.login_users = login_users
 M.fnv1a = fnv1a
+M.helper_policy = helper_policy
 return M

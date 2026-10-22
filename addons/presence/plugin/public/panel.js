@@ -56,6 +56,7 @@
         lines.push('Unavailable APIs: ' + (missing.length ? missing.join(', ') : 'none'));
       }
       if (health.error) lines.push('Last error: ' + health.error);
+      if (extras.helperPauseReason) lines.push(extras.helperPauseReason);
       detail.textContent = lines.join('\n');
     }
     async function refresh() {
@@ -81,6 +82,7 @@
           hideStrategy: health.hideStrategy, hideVerified: health.hideVerified,
           accountMismatch: health.accountMismatch, owned: health.owned, running: health.running,
           accountSource: health.accountSource, identityAmbiguous: health.identityAmbiguous,
+          helperPauseReason: result.session?.helpersAllowed === false ? result.session.reason : '',
         });
       } catch (e) { status.textContent = String(e); }
     }

@@ -36,10 +36,13 @@ Commands:
 """
 import argparse
 import hashlib
+import io
 import json
+import lzma
 import os
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -47,7 +50,9 @@ import tarfile
 import tempfile
 import time
 import urllib.request
-from pathlib import Path
+import zipfile
+import zlib
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / 'vendor' / 'MANIFEST.json'
@@ -1176,12 +1181,13 @@ def install_bundle(bundle, only=None, dry_run=False):
                 print('  - %s' % problem, file=sys.stderr)
             return 1
         print('bundle : %s (Luna %s, manifest verified)' % (bundle.name, version))
+        # Add-on updates must not undo a deliberate client update from Health.
         command = [sys.executable, str(script), 'install', '--force']
         for name in only or []:
             command += ['--only', name]
         if dry_run:
             command.append('--dry-run')
-        result = subprocess.run(command)
+        result = subprocess.run(command, env=dict(os.environ, LUNA_KEEP_STEAM_CLIENT='1'))
         return result.returncode
 
 
@@ -1404,7 +1410,8 @@ def cmd_autoupdate(options):
         # consent via pin + mode) a drifted client is recovered from the local
         # cache before anything else; every mode reports the drift.
         snapshot = steam_state()
-        if (snapshot['pinned'] and snapshot['cacheReady'] and snapshot['packagesMatch'] is False
+        if (snapshot['pinned'] and snapshot['cacheReady']
+                and (snapshot['packagesMatch'] is False or snapshot.get('binariesMatch') is False)
                 and (mode == 'install' or pending)):
             ok, message = _recover_steam_client(snapshot['pinned'])
             if ok:
@@ -1623,7 +1630,9 @@ def cmd_restore(options):
 # each machine pins the build it actually validated.
 
 def steam_home():
-    return home() / '.local/share/Steam'
+    native = home() / '.local/share/Steam'
+    alternate = home() / '.steam/steam'
+    return alternate.resolve() if not native.exists() and alternate.is_dir() else native
 
 
 def steam_tools_files():
@@ -1634,11 +1643,20 @@ def steam_tools_files():
 
 
 def steam_client_build():
-    """Newest 'Client version: N' reported in the Steam console log.
+    """Verified installed binaries, then the last runtime report/metadata.
 
-    Falls back to the installed package manifest (ground truth of what is on
-    disk, and available with Steam closed or after a log rotation).
+    A package manifest alone does NOT prove that its client was extracted.
+    The install receipt is preferred only while the core executable hashes match.
     """
+    receipt = read_json_file(luna_tools_dir() / 'steam-client-installed.json') or {}
+    core = receipt.get('core') or {}
+    if core:
+        try:
+            if all(sha256(steam_home() / _steam_payload_path(name)) == digest
+                   for name, digest in core.items()):
+                return str(receipt.get('build') or '')
+        except (OSError, ValueError):
+            pass
     log = steam_home() / 'logs' / 'console_log.txt'
     try:
         size = log.stat().st_size
@@ -1676,13 +1694,19 @@ def steam_updates_blocked():
         content = steam_cfg_path().read_text()
     except OSError:
         return False
-    return 'BootStrapperInhibitAll' in content
+    return bool(re.search(r'^\s*BootStrapperInhibitAll\s*=\s*enable\s*$', content, re.M | re.I))
 
 
 def ensure_steam_cfg_block():
     """Write the bootstrapper inhibit block; Steam honors it on next launch."""
     steam_cfg_path().parent.mkdir(parents=True, exist_ok=True)
-    steam_cfg_path().write_text(STEAM_CFG_BLOCK)
+    try:
+        previous = steam_cfg_path().read_text()
+    except FileNotFoundError:
+        previous = ''
+    lines = [line for line in previous.splitlines()
+             if not re.match(r'\s*BootStrapper(?:InhibitAll|ForceSelfUpdate)\s*=', line, re.I)]
+    steam_cfg_path().write_text('\n'.join(lines + STEAM_CFG_BLOCK.splitlines()) + '\n')
     return steam_cfg_path()
 
 
@@ -1780,7 +1804,7 @@ def _cache_manifest():
 
 def _stats_match(left, right):
     """Size+mtime comparison (hashes, when present, are ignored: fast path)."""
-    if set(left) != set(right):
+    if not set(left).issubset(right):
         return False
     return all(left[key][:2] == right[key][:2] for key in left)
 
@@ -1812,8 +1836,16 @@ def steam_state():
         cached = ''
     cache_ready = bool(cached) and (steam_cache_dir() / 'package').is_dir()
     packages_match = packages_match_cache() if cache_ready else None
+    receipt = read_json_file(luna_tools_dir() / 'steam-client-installed.json') or {}
+    binaries_match = None
+    if receipt.get('core'):
+        try:
+            binaries_match = all(sha256(steam_home() / _steam_payload_path(name)) == digest
+                                 for name, digest in receipt['core'].items())
+        except (OSError, ValueError):
+            binaries_match = False
     if cache_ready:
-        match = packages_match is True
+        match = packages_match is True and binaries_match is not False and build == pinned
     else:
         match = bool(build and pinned and build == pinned)
     current_hashes = slssteam_hashes()
@@ -1826,6 +1858,7 @@ def steam_state():
         'pinned': pinned,
         'match': match,
         'packagesMatch': packages_match,
+        'binariesMatch': binaries_match,
         'updatesBlocked': steam_updates_blocked(),
         'slssteam': current_hashes,
         'slssteamDrift': tools_drift,
@@ -1865,6 +1898,10 @@ def _steam_force_update():
     Called only with Steam closed. Returns (ok, message). The update block
     is lifted for the run and re-applied afterwards either way.
     """
+    try:
+        _steam_client_closed()
+    except ValueError as error:
+        return False, str(error)
     had_block = steam_updates_blocked()
     try:
         steam_cfg_path().unlink()
@@ -1902,12 +1939,294 @@ def _cache_client_packages(build):
     return cache
 
 
-def _recover_steam_client(want):
-    """Restore the cached Steam client packages for build `want`.
+STEAM_COMPAT_BUILD = '1791918634'
+STEAM_COMPAT_MANIFEST_SHA256 = 'a87699c36d28721af5ca6ade7276f506d22a11f9829747167d96845fc080afa5'
+STEAM_ARCHIVE_BASE = ('https://web.archive.org/web/20261014104109if_/'
+                      'http://media.steampowered.com/client/')
+STEAM_MANIFEST_NAME = 'steam_client_ubuntu12.manifest'
+STEAM_CORE_FILES = ('ubuntu12_32/steam', 'ubuntu12_32/steamclient.so',
+                    'ubuntu12_64/steamwebhelper')
 
-    Returns (ok, message). The caller guarantees Steam and the sidecar are
-    closed: package/ is swapped atomically with a backup that is only
-    deleted after the copy verifies, and steam.cfg is (re)applied.
+
+def _steam_payload_path(name):
+    """Valve ZIPs use both slash styles. Never accept account/game/cache paths."""
+    path = PurePosixPath(name.replace('\\', '/'))
+    protected = {'config', 'userdata', 'steamapps', 'appcache', 'logs', 'depotcache', 'package'}
+    if (path.is_absolute() or not path.parts or '..' in path.parts
+            or ':' in str(path) or path.parts[0].startswith('.')
+            or path.parts[0].lower() in protected):
+        raise ValueError('unsafe/protected Steam payload path: %s' % name)
+    return path
+
+
+def _steam_package_entries(data, want):
+    manifest = parse_vdf(data.decode('utf-8'))
+    body = manifest.get('ubuntu12') or {}
+    if body.get('version') != want:
+        raise ValueError('Steam manifest is not build %s' % want)
+    entries = []
+    for values in body.values():
+        if not isinstance(values, dict) or 'file' not in values:
+            continue
+        compressed = 'zipvz' in values
+        name = values.get('zipvz') if compressed else values['file']
+        digest = values.get('sha2vz' if compressed else 'sha2', '')
+        if (not re.fullmatch(r'[A-Za-z0-9_.-]+', name or '')
+                or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+            raise ValueError('unsafe package name or missing SHA256 in Steam manifest')
+        entries.append((name, digest, compressed))
+    if not entries:
+        raise ValueError('Steam manifest has no verified packages')
+    return entries
+
+
+def _download_steam_file(url, destination, expected, limit=512 * 1024 * 1024):
+    request = urllib.request.Request(url, headers={'User-Agent': 'Luna-Steam-Installer'})
+    with urllib.request.urlopen(request, timeout=60) as source, open(destination, 'wb') as out:
+        size = 0
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                raise ValueError('Steam download exceeds size limit')
+            out.write(chunk)
+    if sha256(destination) != expected:
+        raise ValueError('Steam download SHA256 mismatch: %s' % url)
+
+
+def _stage_steam_payload(packages, data, want, destination):
+    """Verify each package, decode VZip and extract ONLY official client files."""
+    entries = {}
+    total = 0
+    destination.mkdir()
+    for name, expected, compressed in _steam_package_entries(data, want):
+        source = packages / name
+        if source.is_symlink() or sha256(source) != expected:
+            raise ValueError('Steam package SHA256 mismatch: %s' % name)
+        raw = source.read_bytes()
+        if compressed:
+            if raw[:3] != b'VZa' or raw[-2:] != b'zv' or len(raw) < 22:
+                raise ValueError('invalid Steam VZip header: %s' % name)
+            prop = raw[7]
+            dictionary = struct.unpack('<I', raw[8:12])[0]
+            if prop >= 225 or dictionary > 128 * 1024 * 1024:
+                raise ValueError('invalid Steam LZMA properties')
+            filters = [{'id': lzma.FILTER_LZMA1, 'dict_size': dictionary,
+                        'lc': prop % 9, 'lp': (prop // 9) % 5, 'pb': prop // 45}]
+            crc, size = struct.unpack('<II', raw[-10:-2])
+            if size > 1024 * 1024 * 1024:
+                raise ValueError('Steam archive exceeds size limit')
+            decoder = lzma.LZMADecompressor(format=lzma.FORMAT_RAW, filters=filters)
+            raw = decoder.decompress(raw[12:-10], max_length=size + 1)
+            if not decoder.eof or len(raw) != size or zlib.crc32(raw) != crc:
+                raise ValueError('Steam VZip integrity check failed: %s' % name)
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            for item in archive.infolist():
+                relative = _steam_payload_path(item.filename)
+                target = destination / relative
+                if not target.parent.resolve().is_relative_to(destination.resolve()):
+                    raise ValueError('Steam archive traverses a symlink: %s' % relative)
+                if item.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                total += item.file_size
+                if item.file_size > 512 * 1024 * 1024 or total > 4 * 1024 * 1024 * 1024:
+                    raise ValueError('Steam payload exceeds size limit')
+                content = archive.read(item)  # also verifies ZIP CRC
+                link = stat.S_ISLNK(item.external_attr >> 16)
+                if link:
+                    link_target = content.decode('utf-8')
+                    if not (target.parent / link_target).resolve().is_relative_to(destination.resolve()):
+                        raise ValueError('Steam symlink escapes payload: %s' % relative)
+                info = {'sha256': hashlib.sha256(content).hexdigest(), 'link': link}
+                key = str(relative)
+                if key in entries:
+                    if entries[key] != info:
+                        raise ValueError('conflicting Steam archive entry: %s' % key)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if link:
+                    target.symlink_to(link_target)
+                else:
+                    target.write_bytes(content)
+                    # Valve's ZIPs mark Linux executables as 0666, even ELF files.
+                    target.chmod(0o755 if content.startswith((b'\x7fELF', b'#!')) else 0o644)
+                    stamp = time.mktime((*item.date_time, 0, 0, -1))
+                    os.utime(target, (stamp, stamp))
+                entries[key] = info
+    if not set(STEAM_CORE_FILES).issubset(entries):
+        raise ValueError('Steam payload is missing core client executables')
+    return entries
+
+
+def _steam_client_closed():
+    if any(process_running(name) for name in ('steam', 'steamwebhelper', 'lumen')):
+        raise ValueError('Steam or the Lumen sidecar is running; close it completely first')
+
+
+def _install_steam_payload(payload, entries, want, packages):
+    """Install extracted binaries transactionally; retain a machine-local backup."""
+    _steam_client_closed()
+    root = steam_home().resolve()
+    backup = luna_tools_dir() / 'steam-client-backups' / str(time.time_ns())
+    backup.mkdir(parents=True)
+    changed = []
+    targets = []
+    for name, info in entries.items():
+        target = root / _steam_payload_path(name)
+        try:
+            if target.is_symlink() != info['link']:
+                raise OSError('different file type')
+            content = os.readlink(target).encode() if info['link'] else target.read_bytes()
+            same = hashlib.sha256(content).hexdigest() == info['sha256']
+            source = payload / name
+            if same and (info['link'] or stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(source.stat().st_mode)):
+                continue
+        except OSError:
+            pass
+        targets.append((target, payload / name))
+    data = (packages / STEAM_MANIFEST_NAME).read_bytes()
+    for name in [STEAM_MANIFEST_NAME] + [entry[0] for entry in _steam_package_entries(data, want)]:
+        source, target = packages / name, root / 'package' / name
+        # Preserve package stats so Health can cheaply compare the installed cache.
+        if (not target.is_file() or target.is_symlink()
+                or source.stat().st_size != target.stat().st_size
+                or source.stat().st_mtime_ns != target.stat().st_mtime_ns
+                or sha256(source) != sha256(target)):
+            targets.append((target, source))
+    # Save/update the receipt and cfg in the same transaction as the binaries.
+    receipt = luna_tools_dir() / 'steam-client-installed.json'
+    marker = root / '.steam-enable-steamrt64-client'
+    saved = []
+    try:
+        for index, (target, _) in enumerate(targets + [(receipt, None), (steam_cfg_path(), None), (marker, None)]):
+            if not target.parent.resolve().is_relative_to(root) and target != receipt:
+                raise ValueError('Steam destination escapes its root: %s' % target)
+            if target.exists() and not target.is_symlink() and not target.is_file():
+                raise ValueError('Steam destination is not a regular file: %s' % target)
+            previous = backup / str(index)
+            exists = target.exists() or target.is_symlink()
+            if exists:
+                shutil.copy2(target, previous, follow_symlinks=False)
+            saved.append((target, previous if exists else None))
+        write_json_file(backup / 'restore.json', {
+            'build': want, 'files': [{'path': str(path), 'backup': old.name if old else None}
+                                    for path, old in saved]})
+        _steam_client_closed()  # recheck after slow backup/extraction
+        for target, source in targets:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp = target.with_name(target.name + '.luna-new')
+            if temp.exists() or temp.is_symlink():
+                raise ValueError('Steam temporary destination already exists: %s' % temp)
+            try:
+                shutil.copy2(source, temp, follow_symlinks=False)
+                os.replace(temp, target)
+            finally:
+                if temp.exists() or temp.is_symlink():
+                    temp.unlink()
+            changed.append(target)
+        for name, info in entries.items():
+            target = root / name
+            content = os.readlink(target).encode() if info['link'] else target.read_bytes()
+            if hashlib.sha256(content).hexdigest() != info['sha256']:
+                raise ValueError('installed Steam client verification failed: %s' % name)
+        for target in (receipt, steam_cfg_path(), marker):
+            changed.append(target)
+        if marker.exists() or marker.is_symlink():
+            marker.unlink()
+        ensure_steam_cfg_block()
+        write_json_file(receipt, {'build': want, 'at': int(time.time()), 'backup': str(backup),
+                                 'core': {name: entries[name]['sha256'] for name in STEAM_CORE_FILES}})
+    except Exception:
+        for target, previous in reversed(saved):
+            if target not in changed:
+                continue
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            if previous is not None:
+                shutil.copy2(previous, target, follow_symlinks=False)
+        raise
+    return backup
+
+
+def ensure_compatible_steam():
+    """Default install policy: fetch/verify the pinned Valve build, then extract it."""
+    try:
+        _steam_client_closed()
+        if read_steam_pending():
+            raise ValueError('a Steam task is queued; run: luna steam cancel before installing')
+        if not (steam_home() / 'steam.sh').is_file():
+            raise ValueError('Steam must be installed and opened once before installing Luna')
+        tools = luna_tools_dir()
+        tools.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='steam-client-stage-', dir=tools) as temporary:
+            work = Path(temporary)
+            packages = work / 'package'
+            packages.mkdir()
+            manifest = packages / STEAM_MANIFEST_NAME
+            sources = (steam_home() / 'package', steam_cache_dir() / 'package')
+            for source in sources:
+                candidate = source / STEAM_MANIFEST_NAME
+                if candidate.is_file() and sha256(candidate) == STEAM_COMPAT_MANIFEST_SHA256:
+                    shutil.copy2(candidate, manifest)
+                    break
+            else:
+                _download_steam_file(STEAM_ARCHIVE_BASE + 'steam_client_ubuntu12', manifest,
+                                     STEAM_COMPAT_MANIFEST_SHA256, limit=1024 * 1024)
+            data = manifest.read_bytes()
+            for name, digest, _ in _steam_package_entries(data, STEAM_COMPAT_BUILD):
+                destination = packages / name
+                for source in sources:
+                    candidate = source / name
+                    if candidate.is_file() and not candidate.is_symlink() and sha256(candidate) == digest:
+                        shutil.copy2(candidate, destination)
+                        break
+                else:
+                    print('steam     : downloading %s' % name, flush=True)
+                    try:
+                        _download_steam_file('https://client-update.steamstatic.com/' + name, destination, digest)
+                    except (OSError, ValueError):
+                        _download_steam_file(STEAM_ARCHIVE_BASE + name, destination, digest)
+            entries = _stage_steam_payload(packages, data, STEAM_COMPAT_BUILD, work / 'payload')
+            # Keep a complete verified cache, not a copy of stale installed metadata.
+            cache = steam_cache_dir()
+            replacement = work / 'cache'
+            prepared_stats = _package_stats(packages, with_hash=True)
+            reuse_cache = (cached_client_build() == STEAM_COMPAT_BUILD
+                           and _package_stats(cache / 'package', with_hash=True) == prepared_stats)
+            if not reuse_cache:
+                shutil.copytree(packages, replacement / 'package')
+                (replacement / 'build.txt').write_text(STEAM_COMPAT_BUILD + '\n')
+                write_json_file(replacement / 'manifest.json', prepared_stats)
+            backup = _install_steam_payload(work / 'payload', entries, STEAM_COMPAT_BUILD, packages)
+            if reuse_cache:
+                write_json_file(cache / 'manifest.json', prepared_stats)
+            else:
+                if cache.exists():
+                    os.replace(cache, backup / 'previous-cache')
+                try:
+                    os.replace(replacement, cache)
+                except OSError:
+                    if (backup / 'previous-cache').exists():
+                        os.replace(backup / 'previous-cache', cache)
+                    raise
+            write_json_file(steam_pin_path(), {'clientBuild': STEAM_COMPAT_BUILD,
+                                             'slssteam': slssteam_hashes(), 'at': int(time.time()),
+                                             'by': installed_version()})
+        return True, ('installed and verified Steam client %s executables; updates blocked; backup: %s. '
+                      'Runtime version will be confirmed on the next Steam launch.' % (STEAM_COMPAT_BUILD, backup))
+    except (OSError, ValueError, lzma.LZMAError, zipfile.BadZipFile) as error:
+        return False, 'Steam client installation failed (not reported as a downgrade): %s' % error
+
+
+def _recover_steam_client(want):
+    """Restore and verify actual cached Steam client executables for `want`.
+
+    Returns (ok, message). Rechecks that Steam/Lumen are closed internally,
+    verifies and extracts the packages, retains a rollback backup, and blocks
+    self-updates. Copying package metadata alone can never report success.
     """
     if cached_client_build() != want or not (steam_cache_dir() / 'package').is_dir():
         return False, 'no cache for build %s; run: luna steam cache (Steam closed)' % want
@@ -1931,19 +2250,22 @@ def _recover_steam_client(want):
                                      're-run: luna steam cache (Steam closed)' % rel)
             except OSError as error:
                 return False, 'cannot read the cache: %s' % error
-    target = steam_home() / 'package'
-    if not target.is_dir():
-        return False, 'no Steam package directory at %s' % target
-    backup = steam_home() / ('package.pre-luna-recover-%d' % int(time.time()))
-    os.replace(target, backup)
+    # A package-only swap is not a recovery. Extract and verify the executables
+    # first; never report success solely from build.txt or a copied manifest.
     try:
-        shutil.copytree(steam_cache_dir() / 'package', target, symlinks=False)
-    except OSError as error:
-        os.replace(backup, target)
-        return False, 'could not restore the cached client, previous packages put back: %s' % error
-    shutil.rmtree(backup, ignore_errors=True)
-    ensure_steam_cfg_block()
-    return True, 'recovered Steam client %s from local cache; updates blocked via steam.cfg' % want
+        _steam_client_closed()
+        packages = steam_cache_dir() / 'package'
+        data = (packages / STEAM_MANIFEST_NAME).read_bytes()
+        if want == STEAM_COMPAT_BUILD and hashlib.sha256(data).hexdigest() != STEAM_COMPAT_MANIFEST_SHA256:
+            raise ValueError('cached compatibility manifest SHA256 mismatch')
+        with tempfile.TemporaryDirectory(prefix='steam-recover-', dir=luna_tools_dir()) as work:
+            payload = Path(work) / 'payload'
+            entries = _stage_steam_payload(packages, data, want, payload)
+            backup = _install_steam_payload(payload, entries, want, packages)
+    except (OSError, ValueError, lzma.LZMAError, zipfile.BadZipFile) as error:
+        return False, 'could not recover Steam client executables: %s' % error
+    return True, ('recovered and verified Steam client %s executables; updates blocked; backup: %s'
+                  % (want, backup))
 
 
 def _apply_steam_update():
@@ -2100,6 +2422,8 @@ def cmd_steam(options):
 def steam_drift_note():
     """One-line summary for preflight/Health, or '' when nothing is wrong."""
     state = steam_state()
+    if state.get('binariesMatch') is False:
+        return 'Steam client executables changed; close Steam and run: luna steam recover'
     if state['pinned'] and state['cacheReady'] and state['packagesMatch'] is False:
         return ('Steam client packages changed since the pin; close Steam and run: luna steam recover')
     if state['slssteamDrift']:
@@ -2135,12 +2459,10 @@ def cmd_install(options):
     for addon, label, source, dest, state in rows:
         print('  %-9s %-22s %s' % (addon, label, state))
     if options.dry_run:
+        if not getattr(options, 'keep_steam_client', False):
+            print('steam     : would install/verify build %s executables, cache, pin and block updates'
+                  % STEAM_COMPAT_BUILD)
         print('\nDRY RUN: %d file(s) would change, nothing was written.' % len(to_write))
-        return EXIT_OK
-    if not to_write:
-        write_install_snapshot()
-        write_tooling()
-        print('\nAlready installed and identical to the pinned payloads. Nothing to do.')
         return EXIT_OK
     differing = [row for row in to_write if row[4] == 'differs']
     if differing and not options.force:
@@ -2149,6 +2471,19 @@ def cmd_install(options):
             print('  %s/%s (installed %s)' % (addon, label, dest))
         print('Re-run with --force if you really want to replace them.')
         return EXIT_NEEDS_FORCE
+
+    if not getattr(options, 'keep_steam_client', False):
+        ok, message = ensure_compatible_steam()
+        print('steam     : %s' % message, file=sys.stdout if ok else sys.stderr)
+        if not ok:
+            return 1
+    if not to_write:
+        write_install_snapshot()
+        write_tooling()
+        if read_steam_pin():
+            ensure_steam_cfg_block()
+        print('\nAlready installed and identical to the pinned payloads. Nothing to do.')
+        return EXIT_OK
 
     apply = Apply()
     try:
@@ -2163,7 +2498,10 @@ def cmd_install(options):
     except Exception as error:  # noqa: BLE001 - report and undo whatever was done
         apply.rollback()
         print('FAILED: %s' % error, file=sys.stderr)
-        print('Every change made by this run was rolled back.', file=sys.stderr)
+        print('Every add-on change made by this run was rolled back.', file=sys.stderr)
+        if not getattr(options, 'keep_steam_client', False):
+            print('The separately verified Steam client installation remains in place; '
+                  'its rollback backup was retained.', file=sys.stderr)
         return 1
 
     write_install_snapshot()
@@ -2422,6 +2760,9 @@ def build_parser():
             child.add_argument('--force', action='store_true',
                                help='replace installed files that differ from the pinned payloads')
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+            child.add_argument('--keep-steam-client', action='store_true',
+                               default=os.environ.get('LUNA_KEEP_STEAM_CLIENT') == '1',
+                               help='skip the default verified Steam compatibility downgrade')
         if name == 'reconcile':
             child.add_argument('--dry-run', action='store_true',
                                help='report what would merge without writing')
