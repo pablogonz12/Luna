@@ -439,5 +439,21 @@ assert(out.health.steam.localconfigConflicts == 0,
 assert(type(out.health.data) == 'table' and type(out.health.data.prefs) == 'table',
   'the data block is missing')
 assert(out.health.data.prefs.beta == true, 'the health report does not carry the preferences')
+assert(type(out.health.steam.client) == 'table', 'the Steam client block is missing')
+
+-- Steam client queue: status, queue, cancel round-trip in disposable HOME.
+out = call('SlsLunaSteam', { raw = json.encode({ action = 'status' }) })
+assert(out.success == true and type(out.steam) == 'table', 'the Steam status was not returned')
+assert(out.steam.pending == '', 'nothing may be queued in a fresh harness')
+out = call('SlsLunaSteam', { raw = json.encode({ action = 'queue-update' }) })
+assert(out.success == true and out.queued == 'update', 'queueing must report the job')
+out = call('SlsLunaSteam', { raw = json.encode({ action = 'status' }) })
+assert(out.steam.pending == 'update', 'the queued job must be visible')
+out = call('SlsLunaSteam', { raw = json.encode({ action = 'queue-cache' }) })
+assert(out.success == false, 'a second queue must be refused while one stands')
+out = call('SlsLunaSteam', { raw = json.encode({ action = 'cancel' }) })
+assert(out.success == true and out.steam.pending == '', 'cancel must clear the queue')
+out = call('SlsLunaSteam', { raw = json.encode({ action = 'pin' }) })
+assert(out.success == false, 'pin with no updater copy and no Steam log must fail closed')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs, health')

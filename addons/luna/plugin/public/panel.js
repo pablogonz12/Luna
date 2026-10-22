@@ -482,6 +482,7 @@
     let lunaInfo = null;
     let lunaHealth = null;
     let lunaUpdate = null;
+    let lunaSteam = null;
     let lunaCheckedAt = 0;
     let healthNotice = null;
     let compressorTab = 'status';
@@ -2947,6 +2948,48 @@
           : 'This machine is not set up yet: pick the mode again to enable its timer.');
       }
 
+      /* Steam client, updated only from here. The bootstrapper is blocked
+         everywhere else, so these are the only sanctioned paths: pin the
+         working build now, queue an update or a fresh cache for the next
+         closed-Steam window, or cancel the queue. */
+      section('Steam client (update only from here)');
+      const steamCtl = lunaSteam || (health.steam && health.steam.client) || {};
+      line('Client: ' + (steamCtl.build || '?')
+        + (steamCtl.pinned ? (steamCtl.match ? ' \u00b7 pinned ' + steamCtl.pinned + ' \u2713' : ' \u00b7 PINNED ' + steamCtl.pinned + ' \u2014 drifted') : ' \u00b7 not pinned')
+        + ' \u00b7 updates ' + (steamCtl.updatesBlocked ? 'blocked everywhere else' : 'ALLOWED elsewhere - pin to block')
+        + (steamCtl.cacheReady ? ' \u00b7 cache ready' : ''));
+      if (steamCtl.pending) {
+        line('Queued Steam task: ' + steamCtl.pending
+          + ' - applies the next time Steam is closed (timer), then updates are blocked again.');
+      }
+      if (update.last && update.last.steamDrift) {
+        line('Last unattended run noticed: ' + update.last.steamDrift);
+      }
+      const steamActions = document.createElement('div');
+      steamActions.className = 'sls-luna-row';
+      const pinButton = document.createElement('button');
+      pinButton.className = 'sls-luna-btn secondary';
+      pinButton.textContent = 'Pin current build';
+      pinButton.onclick = () => runSteamAction({ action: 'pin' });
+      const steamUpdateButton = document.createElement('button');
+      steamUpdateButton.className = 'sls-luna-btn';
+      steamUpdateButton.textContent = steamCtl.pending ? 'Queued' : 'Update Steam client';
+      steamUpdateButton.disabled = Boolean(steamCtl.pending);
+      steamUpdateButton.onclick = () => runSteamAction({ action: 'queue-update' });
+      const steamCacheButton = document.createElement('button');
+      steamCacheButton.className = 'sls-luna-btn secondary';
+      steamCacheButton.textContent = 'Cache client now';
+      steamCacheButton.title = 'Queues a package snapshot for the next closed-Steam window';
+      steamCacheButton.disabled = Boolean(steamCtl.pending);
+      steamCacheButton.onclick = () => runSteamAction({ action: 'queue-cache' });
+      const steamCancelButton = document.createElement('button');
+      steamCancelButton.className = 'sls-luna-btn secondary';
+      steamCancelButton.textContent = 'Cancel Steam task';
+      steamCancelButton.disabled = !steamCtl.pending;
+      steamCancelButton.onclick = () => runSteamAction({ action: 'cancel' });
+      steamActions.append(pinButton, steamUpdateButton, steamCacheButton, steamCancelButton);
+      body.appendChild(steamActions);
+
       const copy = document.createElement('button');
       copy.className = 'sls-luna-btn secondary';
       copy.textContent = 'Copy diagnostics';
@@ -2991,6 +3034,27 @@
         repaintIfOpen();
       } catch (error) {
         healthNotice = 'Update action failed: '
+          + String(error && error.message ? error.message : error);
+        repaintIfOpen();
+      }
+    }
+
+    /* Steam client actions. Pinning is immediate and safe while Steam runs;
+       update/cache only queue here - the timer applies them with Steam closed,
+       then re-blocks the bootstrapper. */
+    async function runSteamAction(payload) {
+      try {
+        const out = await rpc(w, 'SlsLunaSteam', { raw: JSON.stringify(payload) });
+        if (out && out.steam) lunaSteam = out.steam;
+        await refresh();
+        if (payload.action === 'pin') {
+          healthNotice = (out && out.message) ? String(out.message).slice(0, 200) : 'Pinned.';
+        } else {
+          healthNotice = null;
+        }
+        repaintIfOpen();
+      } catch (error) {
+        healthNotice = 'Steam action failed: '
           + String(error && error.message ? error.message : error);
         repaintIfOpen();
       }
@@ -3230,6 +3294,12 @@
         lunaUpdate = (out && out.update) || lunaUpdate || {};
       } catch (error) {
         lunaUpdate = lunaUpdate || {};
+      }
+      try {
+        const steamOut = await rpc(w, 'SlsLunaSteam', { raw: JSON.stringify({ action: 'status' }) });
+        lunaSteam = (steamOut && steamOut.steam) || lunaSteam || {};
+      } catch (error) {
+        lunaSteam = lunaSteam || {};
       }
       // A real check talks to GitHub through the updater; the Python side caches
       // it for six hours, and opening the menu throttles the call anyway.
