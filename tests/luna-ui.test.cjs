@@ -143,6 +143,8 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
     checkedAt:Math.floor(Date.now()/1000)-120,checkError:'',pending:false,pendingTag:'',
     autoUpdate:'notify',last:{result:'current',version:'0.14.3',at:Math.floor(Date.now()/1000)-3600}};
   const sgdbState={apiKey:sgdbKey||'',gridDir:'/home/tester/.local/share/Steam/userdata/1/config/grid',gridError:''};
+  const sgdbSteamState={build:'1791918634',pinned:'',match:false,updatesBlocked:true,
+    cachedBuild:'',cacheReady:false,pacmanManaged:false,pacmanIgnored:false,pending:''};
   const w={
     document,
     localStorage:{getItem:key=>storage.has(key)?storage.get(key):null,
@@ -244,6 +246,16 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
       if(fn==='SlsSgdbGet')return JSON.stringify({success:true,hasKey:sgdbState.apiKey!=='',
         keyMasked:sgdbState.apiKey?('••••'+sgdbState.apiKey.slice(-4)):'',
         gridDir:sgdbState.gridDir,gridError:sgdbState.gridError});
+      if(fn==='SlsLunaSteam'){
+        const action=(payload&&payload.action)||'status';
+        if(action==='pin')return JSON.stringify({success:true,message:'pinned Steam client 1791918634',
+          steam:Object.assign({},sgdbSteamState,{pinned:'1791918634',match:true})});
+        if(action==='queue-update'||action==='queue-cache'){
+          sgdbSteamState.pending=action==='queue-update'?'update':'cache';
+          return JSON.stringify({success:true,queued:sgdbSteamState.pending,steam:sgdbSteamState});}
+        if(action==='cancel'){sgdbSteamState.pending='';return JSON.stringify({success:true,steam:sgdbSteamState});}
+        return JSON.stringify({success:true,steam:sgdbSteamState});
+      }
       if(fn==='SlsSgdbSetKey'){sgdbState.apiKey=(payload.key||'').trim();
         return JSON.stringify({success:true,hasKey:sgdbState.apiKey!==''});}
       if(fn==='SlsSgdbTest')return JSON.stringify(sgdbState.apiKey
@@ -979,6 +991,41 @@ test('the Health page explains a drifted Steam client in plain words',async()=>{
   assert.match(text,/Needs attention/,'the attention section must lead');
   assert.match(text,/luna steam recover/,'the drift must name the exact recovery command');
   assert.match(text,/IgnorePkg = steam/,'the pacman gap must name the exact conf line');
+});
+
+test('the Health page manages Steam updates only from here',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  let tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Health'));
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  let overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/update only from here/,'the Steam section must claim the update path');
+  const pin=findNode(overlay,node=>node.textContent==='Pin current build'&&typeof node.onclick==='function');
+  assert.ok(pin,'the pin button must exist');
+  pin.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.ok(calls.some(entry=>entry.fn==='SlsLunaSteam'
+    &&entry.payload.action==='pin'),'pinning must go through the Steam RPC');
+  const queue=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Update Steam client'&&typeof node.onclick==='function');
+  queue.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const queued=calls.filter(entry=>entry.fn==='SlsLunaSteam'&&entry.payload.action==='queue-update').pop();
+  assert.ok(queued,'queueing must go through the Steam RPC');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Queued Steam task: update/,
+    'the queued task must be visible');
+  const cancel=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Cancel Steam task'&&typeof node.onclick==='function');
+  cancel.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.ok(calls.some(entry=>entry.fn==='SlsLunaSteam'&&entry.payload.action==='cancel'),
+    'cancel must go through the Steam RPC');
 });
 
 test('the auto picker fills every slot and asks the agent for a live refresh',async()=>{

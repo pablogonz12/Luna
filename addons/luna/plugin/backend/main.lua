@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.14.10'
+local VERSION = '0.14.11'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local lumen_root = home .. '/.local/share/Lumen'
@@ -623,6 +623,17 @@ local function steam_client_state()
       and path_exists(tools .. '/steam-client-cache/package')
   end
   state.match = state.build ~= '' and state.pinned ~= '' and state.build == state.pinned
+  -- Queued Health-menu work (update/cache while Steam is closed).
+  state.pending = ''
+  do
+    local pending_raw = read_file(home .. '/.local/share/Lumen/sls-luna/pending-steam.json')
+    if pending_raw then
+      local ok_pending, pending = pcall(json.decode, pending_raw)
+      if ok_pending and type(pending) == 'table' then
+        state.pending = tostring(pending.action or '')
+      end
+    end
+  end
   -- Pacman vector (Arch/CachyOS): a system update can replace /usr/bin/steam.
   -- No root needed to detect: the local db lists the package, and IgnorePkg
   -- lives in a world-readable conf file.
@@ -803,6 +814,39 @@ function M.register(registry)
       return reply({ success = true, timer = (out:gsub('%s+$', '')), update = update_state() })
     end
     return reply({ success = false, error = 'Unknown update action.' })
+  end
+
+  -- Steam client management for the Health page. `status` is read-only;
+  -- `pin` runs the standalone updater (safe while Steam is open: it only
+  -- reads); queue/cancel write the pending file the timer consumes while
+  -- Steam is closed. Nothing here touches a running Steam.
+  registry.SlsLunaSteam = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
+    if action == '' or action == 'status' then
+      return reply({ success = true, steam = steam_client_state() })
+    end
+    if action == 'pin' then
+      local out, err = run_updater('steam pin')
+      if not out then return reply({ success = false, error = err }) end
+      return reply({ success = true, message = (out:gsub('%s+$', '')),
+        steam = steam_client_state() })
+    end
+    local pending_path = home .. '/.local/share/Lumen/sls-luna/pending-steam.json'
+    if action == 'cancel' then
+      os.remove(pending_path)
+      return reply({ success = true, steam = steam_client_state() })
+    end
+    if action == 'queue-update' or action == 'queue-cache' then
+      if path_exists(pending_path) then
+        return reply({ success = false, error = 'A Steam task is already queued.' })
+      end
+      local job = action == 'queue-update' and 'update' or 'cache'
+      local queued = write_json(pending_path, { action = job, at = os.time() })
+      if not queued then return reply({ success = false, error = 'could not queue the task' }) end
+      return reply({ success = true, queued = job, steam = steam_client_state() })
+    end
+    return reply({ success = false, error = 'Unknown Steam action.' })
   end
 
   -- Whole local cache: appid -> record, plus the game list the agent reported.
