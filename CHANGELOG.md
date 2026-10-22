@@ -3,6 +3,18 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.10 - 2026-10-22
+
+- **Steam update lockdown.** Pinning now also writes the bootstrapper block, so
+  the pinned build cannot self-update; `unpin` removes exactly that block.
+  `luna install` re-applies the block when a pin is active (base installers
+  delete `steam.cfg`), and pacman-managed Steam without `IgnorePkg = steam`
+  is reported by `preflight`, the Health page and `luna steam status` with the
+  exact conf line to add.
+- **Health you can read.** The Health page leads with a Needs attention list:
+  every item says what is wrong and the exact command to run; a Steam client
+  card shows build, pin and cache state next to the rest.
+
 ## 0.14.9 - 2026-10-22
 
 - **Steam client version management.** A Steam update can move the interfaces

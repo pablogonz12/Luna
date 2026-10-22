@@ -2772,11 +2772,64 @@
       const steam = health.steam || {};
       const data = health.data || {};
       const install = health.install || {};
+      const steamClient = steam.client || {};
+      const upd = lunaUpdate || {};
+      // Plain-language attention list first: every entry says what is wrong
+      // and the exact next step. The details below stay for bug reports.
+      const issues = [];
+      if (upd.available && !upd.pending) {
+        issues.push('Luna update available: ' + (upd.latest || '?') + ' (you have '
+          + (upd.installed || '?') + '). Press Install update below, then restart Steam.');
+      }
+      if (upd.pending) {
+        issues.push('Luna update queued (' + (upd.pendingTag || 'latest')
+          + '): it lands the next time Steam is closed.');
+      }
+      if (steamClient.pinned && !steamClient.match) {
+        issues.push('Steam updated itself past the pin (' + (steamClient.build || '?') + ' vs pinned '
+          + steamClient.pinned + '). Close Steam and run: luna steam recover');
+      }
+      if (steamClient.pinned && steamClient.pacmanManaged && !steamClient.pacmanIgnored) {
+        issues.push('Steam comes from pacman and is NOT ignored: a system update can replace the '
+          + 'launcher. Add "IgnorePkg = steam" under [options] in /etc/pacman.conf (needs sudo).');
+      }
+      if (steamClient.pinned && !steamClient.updatesBlocked) {
+        issues.push('A Steam build is pinned but updates are NOT blocked. Close Steam and run: '
+          + 'luna steam recover (it re-applies steam.cfg).');
+      }
+      if (Number(steam.localconfigConflicts || 0) > 0) {
+        issues.push('Steam sync conflicts: ' + steam.localconfigConflicts + ' localconfig cop'
+          + (Number(steam.localconfigConflicts) === 1 ? 'y' : 'ies')
+          + ' waiting - close Steam on both machines, let Syncthing settle, then run: luna reconcile');
+      }
+      if ((lumen.addons || []).length && !boot.patched) {
+        issues.push('Add-ons are installed but boot.lua is not patched. Run: scripts/install-local.sh');
+      }
+      if ((install.drift || []).length) {
+        issues.push('Installed files differ from the pinned bundle: '
+          + install.drift.slice(0, 2).join('; ')
+          + (install.drift.length > 2 ? ' (+' + (install.drift.length - 2) + ' more)' : '')
+          + '. Run: python3 scripts/luna.py verify');
+      }
+      if ((upd.autoUpdate || 'off') !== 'off' && !upd.timerUnits && !upd.pending) {
+        issues.push('Unattended updates are on but this machine has no timer. Pick the mode again to enable it.');
+      }
+      section(issues.length ? 'Needs attention (' + issues.length + ')' : 'Status');
+      if (!issues.length) line('Everything looks good.');
+      issues.forEach(item => {
+        const node = document.createElement('p');
+        node.className = 'sls-luna-error';
+        node.textContent = item;
+        body.appendChild(node);
+      });
       const cards = document.createElement('div');
       cards.className = 'sls-luna-stat';
       [['Add-ons', (lumen.addons || []).length, 'under sls-addons'],
        ['Boot patch', boot.patched ? 'yes' : 'no', (boot.markers || 0) + ' marker(s)'],
        ['Backup', boot.backup ? 'kept' : 'absent', 'boot.lua original'],
+       ['Steam client', (steamClient.build || '?'), (steamClient.pinned
+         ? (steamClient.match ? 'pinned ' + steamClient.pinned + ' \u2713' : 'PINNED ' + steamClient.pinned + ' \u2014 drifted')
+         : 'not pinned')],
        ['HLTB cache', (data.hltb && data.hltb.cached) || 0, 'cached games']]
         .forEach(pair => {
           const cell = document.createElement('div');
@@ -2805,15 +2858,12 @@
         + (lumen.bridge ? ' \u00b7 bridge present' : ' \u00b7 bridge missing'));
       line('Boot: ' + (boot.path || '?'));
       line('Steam: ' + (steam.root || '?') + (steam.exists ? '' : ' (steam.sh missing)'));
-      const client = steam.client || {};
-      if (client.build || client.pinned) {
-        line('Steam client: ' + (client.build || '?')
-          + (client.pinned ? (client.match ? ' \u00b7 pinned ' + client.pinned + ' \u2713' : ' \u00b7 PINNED ' + client.pinned + ' \u2014 drifted') : ' \u00b7 not pinned')
-          + ' \u00b7 updates ' + (client.updatesBlocked ? 'blocked' : 'allowed')
-          + (client.cacheReady ? ' \u00b7 cache ready (' + (client.cachedBuild || '?') + ')' : ''));
-        if (client.pinned && !client.match) {
-          line('Steam drift: close Steam on this machine, then run: luna steam recover');
-        }
+      if (steamClient.build || steamClient.pinned) {
+        line('Steam client: ' + (steamClient.build || '?')
+          + (steamClient.pinned ? (steamClient.match ? ' \u00b7 pinned ' + steamClient.pinned + ' \u2713' : ' \u00b7 PINNED ' + steamClient.pinned + ' \u2014 drifted') : ' \u00b7 not pinned')
+          + ' \u00b7 updates ' + (steamClient.updatesBlocked ? 'blocked' : 'allowed')
+          + (steamClient.cacheReady ? ' \u00b7 cache ready (' + (steamClient.cachedBuild || '?') + ')' : '')
+          + (steamClient.pacmanManaged ? ' \u00b7 pacman-managed' + (steamClient.pacmanIgnored ? ' (ignored)' : ' (NOT ignored)') : ''));
       }
       if (Number(steam.localconfigConflicts || 0) > 0) {
         line('Steam sync conflicts: ' + steam.localconfigConflicts + ' localconfig cop'

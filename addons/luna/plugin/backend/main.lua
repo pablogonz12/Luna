@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.14.9'
+local VERSION = '0.14.10'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local lumen_root = home .. '/.local/share/Lumen'
@@ -623,6 +623,33 @@ local function steam_client_state()
       and path_exists(tools .. '/steam-client-cache/package')
   end
   state.match = state.build ~= '' and state.pinned ~= '' and state.build == state.pinned
+  -- Pacman vector (Arch/CachyOS): a system update can replace /usr/bin/steam.
+  -- No root needed to detect: the local db lists the package, and IgnorePkg
+  -- lives in a world-readable conf file.
+  state.pacmanManaged, state.pacmanIgnored = false, false
+  do
+    local ok_users, entries = pcall(fs.list, '/var/lib/pacman/local')
+    if ok_users and type(entries) == 'table' then
+      for _, entry in ipairs(entries) do
+        local name = tostring(type(entry) == 'table' and entry.name or entry or '')
+        if name:match('^steam%-%d') then state.pacmanManaged = true break end
+      end
+    end
+    if state.pacmanManaged then
+      local conf = read_file('/etc/pacman.conf')
+      if conf then
+        for line in conf:gmatch('[^\r\n]+') do
+          local stripped = line:gsub('#.*$', ''):gsub('^%s+', ''):gsub('%s+$', '')
+          local key, value = stripped:match('^([^=]+)=(.+)$')
+          if key and key:lower():gsub('%s+', '') == 'ignorepkg' then
+            for pkg in value:gmatch('%S+') do
+              if pkg == 'steam' then state.pacmanIgnored = true end
+            end
+          end
+        end
+      end
+    end
+  end
   return state
 end
 
