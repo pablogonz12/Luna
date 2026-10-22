@@ -94,9 +94,18 @@ reports waiting conflicts so the menu tells you when this is needed.
 
 ## Steam client versions
 
-A Steam client update can move the interfaces SLSsteam hooks, breaking game
-installs and launches until the integration catches up. Luna cannot stop
-Valve's updater by itself, but it tracks the working build per machine:
+A Steam client update can move the interfaces used by the native integration.
+**New installations and explicit reinstalls default to client build `1791918634`.**
+Luna verifies a SHA256-pinned historical Valve manifest, obtains its hash-named
+packages from the local installation/cache or Valve's CDN (archive fallback),
+extracts the actual executables, and verifies every installed client file. It
+then caches and pins that build and blocks the Steam bootstrapper's self-updates.
+It never copies another machine's accounts, games, saves or settings.
+
+An older client does not include newer security/compatibility fixes. To retain
+your chosen Steam client instead, use `bash install.sh --keep-steam-client` or
+`python3 scripts/luna.py install --keep-steam-client`. Ordinary Luna bundle
+updates preserve the client choice; they do not silently undo a Health update.
 
 ```bash
 python3 scripts/luna.py steam status    # running build, pin, cache, drift
@@ -107,8 +116,17 @@ python3 scripts/luna.py steam recover   # put the pinned build back (Steam close
 
 `pin` records the client build plus the SLSsteam hashes; `cache` copies the
 `package/` tree beside it with a hash manifest; `recover` verifies the cache,
-swaps it in atomically (the previous tree is only deleted after the copy
-verifies) and re-applies the update block. `preflight`, the Health page and
+extracts and verifies the actual client files, and re-applies the update block.
+A package manifest or `build.txt` alone is never proof of a downgrade. Old or
+incomplete caches without verifiable Valve packages are refused. The install
+receipt identifies the on-disk build using core executable hashes; the next
+Steam launch is still the runtime check. Before replacing files, Luna keeps
+machine-local backups and a `restore.json` index under
+`~/.local/share/Lumen/sls-luna/steam-client-backups/`; a failed file transaction
+restores the prior client files. These backups are retained, not auto-deleted.
+`steam.cfg` settings unrelated to update blocking are preserved. This controls
+Steam's bootstrapper, not Fedora/DNF or other system package managers.
+`preflight`, the Health page and
 every unattended run report drift; with the update mode on Install, the timer
 recovers a drifted client from the cache by itself while Steam is closed.
 
@@ -150,6 +168,9 @@ The repository is currently **private**, so you install it from a checkout (the
   SHA256 and runs it with auto-launch disabled; a **partial** base is a stop
   condition, because Luna never removes or replaces base components itself.
 - `python3` and `bash` (`curl` only for the bootstrap path).
+- Network access to the pinned historical manifest and client packages, unless
+  the complete verified build is already available locally; free space for
+  staging, a package cache, and a rollback copy of replaced client files.
 - **Steam fully closed** - the installer patches Lumen's `boot.lua` and the
   add-ons live inside its runtime.
 - Do not run as root.
@@ -162,13 +183,18 @@ cd Luna
 
 bash scripts/preflight.sh                 # read-only: what is here, what is missing
 bash scripts/install-local.sh --dry-run   # the exact plan; writes nothing
-bash scripts/install-local.sh             # install the Luna add-ons
+bash scripts/install-local.sh             # verified Steam downgrade + Luna add-ons
 ```
 
 `install.sh` is the one-shot version: the same checks, plus it bootstraps the
 base when it is missing (pinned commit, SHA256-verified, `--nolaunch`).
 `bash install.sh --help` lists its options (`--only NAME`, `--force`,
-`--dry-run`, and the upstream release-channel flags).
+`--dry-run`, `--keep-steam-client`, and the upstream release-channel flags).
+Both installation entry points include the compatibility downgrade by default,
+even when the add-on payloads are already identical. Steam/Lumen must be fully
+closed. Downloads or checks that fail stop installation without claiming success;
+`--dry-run` neither downloads nor changes the client. Queued Steam tasks must be
+cancelled explicitly before installing, so they cannot immediately undo the pin.
 
 Then **restart Steam** (Steam → Exit, then launch it again): the Luna button
 appears next to Lumen's in the menu bar and holds every page.
