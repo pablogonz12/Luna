@@ -737,6 +737,71 @@ class LunaTestCase(unittest.TestCase):
         entry = json.loads(beats[0].read_text())
         self.assertIn('at', entry)
 
+    def test_steam_pin_cache_recover_round_trip(self):
+        steam = self.home / '.local/share/Steam'
+        (steam / 'logs').mkdir(parents=True)
+        (steam / 'logs/console_log.txt').write_text('[x] Client version: 111\n[x] Client version: 222\n')
+        package = steam / 'package'
+        package.mkdir(parents=True)
+        (package / 'bins_steam.zip').write_text('build-222-bytes')
+        sls = self.home / '.local/share/SLSsteam'
+        sls.mkdir(parents=True)
+        (sls / 'SLSsteam.so').write_text('so-bytes')
+        status = self.luna('steam', 'status')
+        self.assertEqual(status.returncode, 0)
+        self.assertIn('222', status.stdout)
+        self.assertIn('none (run: luna steam pin)', status.stdout)
+        self.assertEqual(self.luna('steam', 'pin').returncode, 0)
+        self.assertIn('pinned', self.luna('steam', 'status').stdout)
+        self.assertEqual(self.luna('steam', 'cache').returncode, 0)
+        # An unwanted update lands: new build, changed packages.
+        (steam / 'logs/console_log.txt').write_text('[x] Client version: 999\n')
+        (package / 'bins_steam.zip').write_text('build-999-bytes')
+        drifted = self.luna('steam', 'status')
+        self.assertIn('pinned : 222', drifted.stdout)
+        self.assertIn('DIFFER', drifted.stdout)
+        result = self.luna('steam', 'recover')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((package / 'bins_steam.zip').read_text(), 'build-222-bytes',
+                         'recover must put the cached packages back')
+        self.assertIn('BootStrapperInhibitAll', (steam / 'steam.cfg').read_text())
+        fixed = self.luna('steam', 'status')
+        self.assertIn('222', fixed.stdout)
+        self.assertIn('match the pin', fixed.stdout)
+
+    def test_steam_recover_refuses_while_steam_runs(self):
+        steam = self.home / '.local/share/Steam'
+        (steam / 'logs').mkdir(parents=True)
+        (steam / 'logs/console_log.txt').write_text('Client version: 222\n')
+        (steam / 'package').mkdir(parents=True)
+        self.assertEqual(self.luna('steam', 'pin').returncode, 0)
+        result = self.luna('steam', 'recover', running='steam,')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('running', result.stdout + result.stderr)
+
+    def test_autoupdate_recovers_a_drifted_client_in_install_mode(self):
+        import json as _json
+        self.assertEqual(self.luna('install').returncode, 0)
+        steam = self.home / '.local/share/Steam'
+        (steam / 'logs').mkdir(parents=True)
+        (steam / 'logs/console_log.txt').write_text('Client version: 222\n')
+        package = steam / 'package'
+        package.mkdir(parents=True)
+        (package / 'bins.dat').write_text('good')
+        self.assertEqual(self.luna('steam', 'pin').returncode, 0)
+        self.assertEqual(self.luna('steam', 'cache').returncode, 0)
+        (steam / 'logs/console_log.txt').write_text('Client version: 999\n')
+        (package / 'bins.dat').write_text('bad')
+        (self.data / 'luna.json').write_text(_json.dumps({'version': 1, 'auto_update': 'install'}))
+        _, env = self.bundle_and_env()
+        result = self.luna('autoupdate', '--verbose', env=env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((package / 'bins.dat').read_text(), 'good',
+                         'install mode must restore the pinned client first')
+        last = _json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
+        self.assertEqual(last['steamPinned'], '222')
+        self.assertEqual(last['steamDrift'], '')
+
     def test_the_standalone_copy_can_manage_its_own_units(self):
         """The timer entry point runs the copy, which must not copy itself from
         a repository that is not there (the live bug found on 2026-10-15)."""
