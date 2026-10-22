@@ -3,6 +3,17 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.9 - 2026-10-22
+
+- **Steam client version management.** A Steam update can move the interfaces
+  SLSsteam hooks, breaking installs and launches until the integration catches
+  up. Luna now pins the working build (`luna steam pin`), caches its packages
+  locally (`luna steam cache`, Steam closed), and puts it back after an
+  unwanted update (`luna steam recover`). Drift is reported by `preflight`,
+  the Health page and every unattended run; Install mode recovers
+  automatically from the cache while Steam is closed. `preflight` also warns
+  when SLSsteam itself changed since the pin.
+
 ## 0.14.8 - 2026-10-21
 
 - **Update reliability.** Stale update locks expire instead of wedging every

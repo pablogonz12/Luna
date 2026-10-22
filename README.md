@@ -92,6 +92,26 @@ fully exit Steam (check no `lumen`/`steamwebhelper` lingers), let the sync
 settle, reconcile, then start Steam on the other machine. The Health page
 reports waiting conflicts so the menu tells you when this is needed.
 
+## Steam client versions
+
+A Steam client update can move the interfaces SLSsteam hooks, breaking game
+installs and launches until the integration catches up. Luna cannot stop
+Valve's updater by itself, but it tracks the working build per machine:
+
+```bash
+python3 scripts/luna.py steam status    # running build, pin, cache, drift
+python3 scripts/luna.py steam pin       # pin the currently working build
+python3 scripts/luna.py steam cache     # copy its packages aside (Steam closed)
+python3 scripts/luna.py steam recover   # put the pinned build back (Steam closed)
+```
+
+`pin` records the client build plus the SLSsteam hashes; `cache` copies the
+`package/` tree beside it with a hash manifest; `recover` verifies the cache,
+swaps it in atomically (the previous tree is only deleted after the copy
+verifies) and re-applies the update block. `preflight`, the Health page and
+every unattended run report drift; with the update mode on Install, the timer
+recovers a drifted client from the cache by itself while Steam is closed.
+
 ## Health
 
 The **Health** page in the Luna menu reports what a bug report needs: installed

@@ -30,6 +30,9 @@ Commands:
                                         presence, HLTB, prefs, artwork key, settings)
     luna restore ARCHIVE [--force]      restore a backup (never overwrites newer
                                         files without --force)
+    luna steam status|pin|cache|recover manage the Steam client build: pin the
+                                        working build, cache its packages, recover
+                                        it after an unwanted update
 """
 import argparse
 import hashlib
@@ -829,6 +832,15 @@ def cmd_preflight(options):
                  if peer.get('steamRunning') else 'closed',
                  peer.get('luna', '?'),
                  '' if peer.get('steamRunning') else ''))
+    drift = steam_drift_note()
+    if drift:
+        print('steam      : %s' % drift)
+    else:
+        state = steam_state()
+        print('steam      : client %s%s, updates %s'
+              % (state['build'] or '?',
+                 (', pinned %s' % state['pinned']) if state['pinned'] else ', not pinned',
+                 'blocked' if state['updatesBlocked'] else 'allowed'))
     reasons = refuse_reasons(for_install=True)
     if reasons:
         print('\nREFUSALS (install/uninstall would stop):')
@@ -1370,6 +1382,10 @@ def cmd_autoupdate(options):
     def record(payload):
         payload['mode'] = mode
         payload['at'] = int(time.time())
+        snapshot = steam_state()
+        payload['steamBuild'] = snapshot['build']
+        payload['steamPinned'] = snapshot['pinned']
+        payload['steamDrift'] = steam_drift_note()
         write_json_file(result_path, payload)
         if verbose:
             print(json.dumps(payload, sort_keys=True))
@@ -1381,6 +1397,18 @@ def cmd_autoupdate(options):
     if not acquired:
         return record({'result': 'deferred', 'reason': reason})
     try:
+        # The timer only runs while Steam is closed, which is exactly when a
+        # pinned client can be restored safely. In install mode (explicit
+        # consent via pin + mode) a drifted client is recovered from the local
+        # cache before anything else; every mode reports the drift.
+        snapshot = steam_state()
+        if (snapshot['pinned'] and snapshot['cacheReady'] and snapshot['packagesMatch'] is False
+                and (mode == 'install' or pending)):
+            ok, message = _recover_steam_client(snapshot['pinned'])
+            if ok:
+                snapshot = steam_state()
+            else:
+                return record({'result': 'error', 'reason': message})
         # A check is read-only (gh only): notify mode must report even while
         # Steam runs. Only an actual install needs Steam and the sidecar gone.
         report = check_updates(force=True)
@@ -1545,6 +1573,315 @@ def cmd_restore(options):
             return 1
     print('restored %d file(s), skipped %d newer file(s)' % (restored, skipped))
     return EXIT_OK
+
+
+    print('restored %d file(s), skipped %d newer file(s)' % (restored, skipped))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Steam client version management.
+#
+# A Steam client update can move the interfaces SLSsteam hooks, breaking
+# installs and launches until the integration catches up. Luna cannot stop
+# Valve's updater on its own, but it can pin the working build, keep a local
+# cache of its packages, and put that build back with Steam closed.
+# Everything here is machine-local (luna_tools_dir is excluded from sync):
+# each machine pins the build it actually validated.
+
+def steam_home():
+    return home() / '.local/share/Steam'
+
+
+def steam_tools_files():
+    """SLSsteam binaries whose unexpected change invalidates a pin."""
+    base = home() / '.local/share/SLSsteam'
+    return {'SLSsteam.so': base / 'SLSsteam.so',
+            'library-inject.so': base / 'library-inject.so'}
+
+
+def steam_client_build():
+    """Newest 'Client version: N' reported in the Steam console log."""
+    log = steam_home() / 'logs' / 'console_log.txt'
+    try:
+        size = log.stat().st_size
+    except OSError:
+        return ''
+    try:
+        with open(log, 'rb') as handle:
+            handle.seek(max(0, size - 65536))
+            tail = handle.read().decode('utf-8', errors='replace')
+    except OSError:
+        return ''
+    found = re.findall(r'Client version:\s*(\d+)', tail)
+    return found[-1] if found else ''
+
+
+def steam_cfg_path():
+    return steam_home() / 'steam.cfg'
+
+
+def steam_updates_blocked():
+    try:
+        content = steam_cfg_path().read_text()
+    except OSError:
+        return False
+    return 'BootStrapperInhibitAll' in content
+
+
+def ensure_steam_cfg_block():
+    """Write the bootstrapper inhibit block; Steam honors it on next launch."""
+    steam_cfg_path().write_text('BootStrapperInhibitAll=enable\n'
+                                'BootStrapperForceSelfUpdate=disable\n')
+    return steam_cfg_path()
+
+
+def steam_pin_path():
+    return luna_tools_dir() / 'steam-pin.json'
+
+
+def steam_cache_dir():
+    return luna_tools_dir() / 'steam-client-cache'
+
+
+def read_steam_pin():
+    pin = read_json_file(steam_pin_path())
+    return pin if isinstance(pin, dict) else {}
+
+
+def slssteam_hashes():
+    """Current hashes of the SLSsteam binaries (missing -> '')."""
+    hashes = {}
+    for name, path in steam_tools_files().items():
+        try:
+            hashes[name] = sha256(path) if path.is_file() else ''
+        except OSError:
+            hashes[name] = ''
+    return hashes
+
+
+def _package_stats(root, with_hash=False):
+    """Fingerprint of a package tree: {rel: [size, mtime_ns]} (+ sha256)."""
+    stats = {}
+    for path in sorted(root.rglob('*')):
+        if path.is_file():
+            try:
+                st = path.stat()
+                entry = [st.st_size, st.st_mtime_ns]
+                if with_hash:
+                    entry.append(sha256(path))
+                stats[str(path.relative_to(root))] = entry
+            except OSError:
+                pass
+    return stats
+
+
+def _cache_manifest():
+    manifest = read_json_file(steam_cache_dir() / 'manifest.json')
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def _stats_match(left, right):
+    """Size+mtime comparison (hashes, when present, are ignored: fast path)."""
+    if set(left) != set(right):
+        return False
+    return all(left[key][:2] == right[key][:2] for key in left)
+
+
+def packages_match_cache():
+    """Do the installed packages still match the cached build?
+
+    None when there is no usable cache; otherwise a size+mtime comparison,
+    which is instant and catches any client update or partial download.
+    """
+    manifest = _cache_manifest()
+    if not manifest or not (steam_cache_dir() / 'package').is_dir():
+        return None
+    target = steam_home() / 'package'
+    if not target.is_dir():
+        return False
+    return _stats_match(manifest, _package_stats(target))
+
+
+def steam_state():
+    """Everything the menu and preflight report about the Steam client."""
+    build = steam_client_build()
+    pin = read_steam_pin()
+    pinned = str(pin.get('clientBuild') or '')
+    cache_marker = steam_cache_dir() / 'build.txt'
+    try:
+        cached = cache_marker.read_text().strip()
+    except OSError:
+        cached = ''
+    cache_ready = bool(cached) and (steam_cache_dir() / 'package').is_dir()
+    packages_match = packages_match_cache() if cache_ready else None
+    if cache_ready:
+        match = packages_match is True
+    else:
+        match = bool(build and pinned and build == pinned)
+    current_hashes = slssteam_hashes()
+    pinned_hashes = pin.get('slssteam') or {}
+    tools_drift = [name for name, digest in current_hashes.items()
+                   if digest and pinned_hashes.get(name) and digest != pinned_hashes[name]]
+    return {
+        'build': build,
+        'pinned': pinned,
+        'match': match,
+        'packagesMatch': packages_match,
+        'updatesBlocked': steam_updates_blocked(),
+        'slssteam': current_hashes,
+        'slssteamDrift': tools_drift,
+        'cachedBuild': cached,
+        'cacheReady': cache_ready,
+    }
+
+
+def cached_client_build():
+    try:
+        return (steam_cache_dir() / 'build.txt').read_text().strip()
+    except OSError:
+        return ''
+
+
+def _recover_steam_client(want):
+    """Restore the cached Steam client packages for build `want`.
+
+    Returns (ok, message). The caller guarantees Steam and the sidecar are
+    closed: package/ is swapped atomically with a backup that is only
+    deleted after the copy verifies, and steam.cfg is (re)applied.
+    """
+    if cached_client_build() != want or not (steam_cache_dir() / 'package').is_dir():
+        return False, 'no cache for build %s; run: luna steam cache (Steam closed)' % want
+    manifest = _cache_manifest()
+    if manifest:
+        cached_stats = {}
+        for path in sorted((steam_cache_dir() / 'package').rglob('*')):
+            if path.is_file():
+                try:
+                    cached_stats[str(path.relative_to(steam_cache_dir() / 'package'))] = True
+                except OSError:
+                    pass
+        problems = [rel for rel, entry in manifest.items()
+                    if not isinstance(entry, list) or len(entry) < 3]
+        if problems or set(cached_stats) != set(manifest):
+            return False, 'the cache is incomplete; re-run: luna steam cache (Steam closed)'
+        for rel, entry in manifest.items():
+            try:
+                if sha256(steam_cache_dir() / 'package' / rel) != entry[2]:
+                    return False, ('the cache failed its own integrity check (%s changed); '
+                                     're-run: luna steam cache (Steam closed)' % rel)
+            except OSError as error:
+                return False, 'cannot read the cache: %s' % error
+    target = steam_home() / 'package'
+    if not target.is_dir():
+        return False, 'no Steam package directory at %s' % target
+    backup = steam_home() / ('package.pre-luna-recover-%d' % int(time.time()))
+    os.replace(target, backup)
+    try:
+        shutil.copytree(steam_cache_dir() / 'package', target, symlinks=False)
+    except OSError as error:
+        os.replace(backup, target)
+        return False, 'could not restore the cached client, previous packages put back: %s' % error
+    shutil.rmtree(backup, ignore_errors=True)
+    ensure_steam_cfg_block()
+    return True, 'recovered Steam client %s from local cache; updates blocked via steam.cfg' % want
+
+
+def cmd_steam(options):
+    """Pin, cache and recover the Steam client build (see `luna steam --help`)."""
+    action = getattr(options, 'steam_action', '') or 'status'
+    if action == 'status':
+        state = steam_state()
+        print('client : %s' % (state['build'] or 'unknown (Steam never logged a version here)'))
+        print('pinned : %s' % (state['pinned'] or 'none (run: luna steam pin)'))
+        print('packages: %s' % ('match the pin' if state['match']
+                                 else 'DIFFER from the pin - run: luna steam recover (Steam closed)'
+                                 if state['pinned'] and state['cacheReady']
+                                 else 'unknown (no cache)'))
+        print('updates: %s' % ('blocked (steam.cfg)' if state['updatesBlocked'] else 'NOT blocked'))
+        for name, digest in sorted(state['slssteam'].items()):
+            print('%-16s %s' % (name + ':', digest[:12] if digest else '(missing)'))
+        if state['slssteamDrift']:
+            print('WARN   : SLSsteam changed since the pin: %s' % ', '.join(state['slssteamDrift']))
+        print('cache  : %s' % ('build ' + state['cachedBuild'] if state['cacheReady']
+                                else 'empty (run: luna steam cache with Steam closed)'))
+        return EXIT_OK
+    if action == 'pin':
+        build = options.build or steam_client_build()
+        if not build:
+            print('cannot determine the client build; pass --build N explicitly', file=sys.stderr)
+            return 2
+        pin = {'clientBuild': str(build), 'slssteam': slssteam_hashes(),
+               'at': int(time.time()), 'by': installed_version()}
+        luna_tools_dir().mkdir(parents=True, exist_ok=True)
+        write_json_file(steam_pin_path(), pin)
+        print('pinned Steam client %s with current SLSsteam hashes' % build)
+        return EXIT_OK
+    if action == 'unpin':
+        try:
+            steam_pin_path().unlink()
+            print('pin removed')
+        except OSError:
+            print('no pin to remove')
+        return EXIT_OK
+    if action == 'cache':
+        if process_running('steam') or process_running('steamwebhelper'):
+            print('REFUSING to cache: Steam is running. Close it completely (Steam -> Exit) first.')
+            return EXIT_REFUSED
+        source = steam_home() / 'package'
+        if not source.is_dir():
+            print('no Steam package directory to cache at %s' % source, file=sys.stderr)
+            return 1
+        build = steam_client_build()
+        if not build:
+            print('cannot determine the client build; launch Steam once, then retry', file=sys.stderr)
+            return 1
+        cache = steam_cache_dir()
+        if cache.exists():
+            shutil.rmtree(cache, ignore_errors=True)
+        shutil.copytree(source, cache / 'package', symlinks=False)
+        (cache / 'build.txt').write_text(build + '\n')
+        write_json_file(cache / 'manifest.json', _package_stats(cache / 'package', with_hash=True))
+        print('cached Steam client %s (%s)' % (build, cache))
+        return EXIT_OK
+    if action == 'recover':
+        if process_running('steam') or process_running('steamwebhelper') or process_running('lumen'):
+            print('REFUSING to recover: Steam or the Lumen sidecar is running. '
+                  'Close it completely (Steam -> Exit) first.')
+            return EXIT_REFUSED
+        want = str(options.build or '')
+        pin = read_steam_pin()
+        if not want:
+            want = str(pin.get('clientBuild') or '')
+        if not want:
+            print('nothing pinned; run: luna steam pin [--build N]', file=sys.stderr)
+            return 2
+        ok, message = _recover_steam_client(want)
+        if not ok:
+            print(message, file=sys.stderr)
+            return 1
+        print(message)
+        print('launch Steam and verify, then run: luna steam pin')
+        return EXIT_OK
+    print('unknown steam action: %s (status|pin|unpin|cache|recover)' % action, file=sys.stderr)
+    return 2
+
+
+def steam_drift_note():
+    """One-line summary for preflight/Health, or '' when nothing is wrong."""
+    state = steam_state()
+    if state['pinned'] and state['cacheReady'] and state['packagesMatch'] is False:
+        return ('Steam client packages changed since the pin; close Steam and run: luna steam recover')
+    if state['slssteamDrift']:
+        return ('SLSsteam changed since the pin (%s); re-pin after verifying: luna steam pin'
+                % ', '.join(state['slssteamDrift']))
+    if state['pinned'] and not state['updatesBlocked']:
+        return 'a Steam build is pinned but updates are not blocked; run: luna steam recover or re-add steam.cfg'
+    if state['pinned'] and not state['cacheReady'] and state['build'] and state['build'] != state['pinned']:
+        return ('Steam client %s does not match the pin %s and no cache exists; '
+                'cache a known-good build: luna steam cache (Steam closed)'
+                % (state['build'], state['pinned']))
+    return ''
 
 
 def cmd_install(options):
@@ -1837,6 +2174,7 @@ def build_parser():
                           ('check', cmd_check), ('autoupdate', cmd_autoupdate),
                           ('reconcile', cmd_reconcile),
                           ('backup', cmd_backup), ('restore', cmd_restore),
+                          ('steam', cmd_steam),
                           ('timer', cmd_timer)):
         child = sub.add_parser(name)
         child.set_defaults(handler=handler)
@@ -1855,6 +2193,11 @@ def build_parser():
             child.add_argument('archive', help='backup archive to restore')
             child.add_argument('--force', action='store_true',
                                help='overwrite files that are newer than the backup')
+        if name == 'steam':
+            child.add_argument('steam_action', nargs='?', default='status',
+                               choices=['status', 'pin', 'unpin', 'cache', 'recover'],
+                               help='what to do (default: status)')
+            child.add_argument('--build', help='client build for pin/recover (default: detected/pinned)')
         if name == 'check':
             child.add_argument('--force', action='store_true', help='ignore the 6h cache')
         if name == 'autoupdate':
