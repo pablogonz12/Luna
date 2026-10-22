@@ -3,6 +3,15 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.14 - 2026-10-22
+
+- **HowLongToBeat sorting refreshes automatically.** Home-library shelves now
+  redraw when cached completion times arrive after the initial render, when
+  times change, or when the sort direction changes. Shortest-first remains the
+  default, longest-first is respected, and games without times stay last.
+  No developer-console refresh or manual live fix is needed. Only HLTB shelves
+  are refreshed; scroll state and upstream component cleanup are preserved.
+
 ## 0.14.13 - 2026-10-22
 
 - **Presence keeps the real game first in Steam Machine mode.** After starting
