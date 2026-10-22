@@ -53,6 +53,10 @@ def stub_bin(home, running=''):
     # Mirrors pgrep: exit 0 and a pid when the name matches, exit 1 otherwise.
     script.write_text('#!/bin/sh\nname="$4"\ncase ",%s," in *",$name,"*) echo 4242; exit 0;; esac\nexit 1\n' % running)
     script.chmod(0o755)
+    # pacman: tests must not see the developer's real system packages.
+    pacman = directory / 'pacman'
+    pacman.write_text('#!/bin/sh\nexit 1\n')
+    pacman.chmod(0o755)
     # gh: what the updater uses. `release view` reports $LUNA_TEST_TAG and
     # `release download` copies $LUNA_TEST_BUNDLE to the requested --dir.
     gh = directory / 'gh'
@@ -801,6 +805,40 @@ class LunaTestCase(unittest.TestCase):
         last = _json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
         self.assertEqual(last['steamPinned'], '222')
         self.assertEqual(last['steamDrift'], '')
+
+    def test_steam_pin_blocks_updates_and_unpin_restores(self):
+        self.assertEqual(self.luna('steam', 'pin', '--build', '111').returncode, 0)
+        cfg = self.home / '.local/share/Steam/steam.cfg'
+        self.assertIn('BootStrapperInhibitAll', cfg.read_text())
+        self.assertEqual(self.luna('steam', 'unpin').returncode, 0)
+        self.assertFalse(cfg.exists(), 'unpin removes exactly the block Luna wrote')
+        cfg.write_text('BootStrapperInhibitAll=enable\nCustom=1\n')
+        self.assertEqual(self.luna('steam', 'unpin').returncode, 0)
+        self.assertTrue(cfg.is_file(), 'unpin must not touch a customized steam.cfg')
+
+    def test_install_reapplies_update_block_when_pinned(self):
+        self.assertEqual(self.luna('steam', 'pin', '--build', '111').returncode, 0)
+        (self.home / '.local/share/Steam/steam.cfg').unlink()
+        self.assertEqual(self.luna('install').returncode, 0)
+        self.assertIn('BootStrapperInhibitAll',
+                      (self.home / '.local/share/Steam/steam.cfg').read_text())
+
+    def test_preflight_warns_about_pacman_managed_steam(self):
+        pbin = self.temp / 'pbin'
+        pbin.mkdir(parents=True)
+        pacman = pbin / 'pacman'
+        pacman.write_text('#!/bin/sh\n[ "$2" = "steam" ] && exit 0\nexit 1\n')
+        pacman.chmod(0o755)
+        conf = self.home / 'pacman.conf'
+        conf.write_text('[options]\n')
+        env = dict(self.env, PATH=str(pbin) + os.pathsep + self.env['PATH'],
+                   LUNA_PACMAN_CONF=str(conf))
+        self.assertEqual(self.luna('steam', 'pin', '--build', '111').returncode, 0)
+        out = self.luna('preflight', env=env)
+        self.assertIn('IgnorePkg = steam', out.stdout)
+        conf.write_text('[options]\nIgnorePkg = steam\n')
+        out = self.luna('preflight', env=env)
+        self.assertNotIn('IgnorePkg = steam', out.stdout)
 
     def test_the_standalone_copy_can_manage_its_own_units(self):
         """The timer entry point runs the copy, which must not copy itself from
