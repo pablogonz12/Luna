@@ -840,6 +840,61 @@ class LunaTestCase(unittest.TestCase):
         out = self.luna('preflight', env=env)
         self.assertNotIn('IgnorePkg = steam', out.stdout)
 
+    def test_steam_update_queues_and_cancel_clears(self):
+        self.assertEqual(self.luna('steam', 'update').returncode, 0)
+        pending = json.loads((self.home / '.local/share/Lumen/sls-luna/pending-steam.json').read_text())
+        self.assertEqual(pending['action'], 'update')
+        result = self.luna('steam', 'update')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('already queued', result.stdout + result.stderr)
+        self.assertEqual(self.luna('steam', 'cancel').returncode, 0)
+        self.assertFalse((self.home / '.local/share/Lumen/sls-luna/pending-steam.json').exists())
+        self.assertEqual(self.luna('steam', 'status').returncode, 0)
+
+    def test_steam_update_now_applies_with_stub_updater(self):
+        steam = self.home / '.local/share/Steam'
+        (steam / 'logs').mkdir(parents=True)
+        (steam / 'logs/console_log.txt').write_text('Client version: 222\n')
+        package = steam / 'package'
+        package.mkdir(parents=True)
+        (package / 'bins.dat').write_text('old-bytes')
+        (steam / 'steam.cfg').write_text('BootStrapperInhibitAll=enable\nBootStrapperForceSelfUpdate=disable\n')
+        updater = self.home / 'fake-steam.sh'
+        updater.write_text('#!/bin/sh\n'
+                           'echo "[x] Client version: 999" >> "%s"\n'
+                           'echo new-bytes > "%s"\n' % (steam / 'logs/console_log.txt',
+                                                        package / 'bins.dat'))
+        updater.chmod(0o755)
+        env = dict(self.env, LUNA_STEAM_SH=str(updater))
+        result = self.luna('steam', 'update', '--now', env=env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((package / 'bins.dat').read_text().strip(), 'new-bytes')
+        self.assertIn('BootStrapperInhibitAll', (steam / 'steam.cfg').read_text())
+        status = self.luna('steam', 'status', env=env)
+        self.assertIn('999', status.stdout)
+
+    def test_autoupdate_applies_queued_steam_update(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        steam = self.home / '.local/share/Steam'
+        (steam / 'logs').mkdir(parents=True)
+        (steam / 'logs/console_log.txt').write_text('Client version: 222\n')
+        (steam / 'package').mkdir(parents=True)
+        updater = self.home / 'fake-steam-auto.sh'
+        updater.write_text('#!/bin/sh\necho "[x] Client version: 333" >> "%s"\n'
+                           % (steam / 'logs/console_log.txt'))
+        updater.chmod(0o755)
+        env = dict(self.env, LUNA_STEAM_SH=str(updater))
+        self.assertEqual(self.luna('steam', 'update', env=env).returncode, 0)
+        (self.data / 'luna.json').write_text(json.dumps({'version': 1, 'auto_update': 'notify'}))
+        _, benv = self.bundle_and_env()
+        benv = dict(benv, LUNA_STEAM_SH=str(updater))
+        result = self.luna('autoupdate', '--verbose', env=benv)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse((self.home / '.local/share/Lumen/sls-luna/pending-steam.json').exists(),
+                         'a consumed queue must be cleared')
+        last = json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
+        self.assertEqual(last['steamBuild'], '333')
+
     def test_the_standalone_copy_can_manage_its_own_units(self):
         """The timer entry point runs the copy, which must not copy itself from
         a repository that is not there (the live bug found on 2026-10-15)."""

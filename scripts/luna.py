@@ -1386,6 +1386,8 @@ def cmd_autoupdate(options):
         payload['steamBuild'] = snapshot['build']
         payload['steamPinned'] = snapshot['pinned']
         payload['steamDrift'] = steam_drift_note()
+        queued = read_steam_pending()
+        payload['steamPending'] = str(queued.get('action') or '') if queued else ''
         write_json_file(result_path, payload)
         if verbose:
             print(json.dumps(payload, sort_keys=True))
@@ -1409,6 +1411,37 @@ def cmd_autoupdate(options):
                 snapshot = steam_state()
             else:
                 return record({'result': 'error', 'reason': message})
+        # Queued Steam work (Health menu or `luna steam update|cache`) runs here:
+        # the timer only fires while Steam is closed, which both need.
+        pending_steam = read_steam_pending()
+        if pending_steam:
+            steam_job = pending_steam.get('action')
+            if steam_job == 'update':
+                ok, message = _apply_steam_update()
+            elif steam_job == 'cache':
+                build = steam_client_build()
+                if not build:
+                    return record({'result': 'error',
+                                    'reason': 'cannot determine the client build for caching'})
+                try:
+                    _cache_client_packages(build)
+                    ok, message = True, 'cached Steam client %s' % build
+                except OSError as error:
+                    ok, message = False, 'could not cache the client: %s' % error
+                if ok:
+                    try:
+                        steam_pending_path().unlink()
+                    except OSError:
+                        pass
+            else:
+                try:
+                    steam_pending_path().unlink()
+                except OSError:
+                    pass
+                ok, message = True, 'dropped unknown queued Steam task'
+            if not ok:
+                return record({'result': 'error', 'reason': message})
+            # Fall through: a Steam change may come with owed Luna updates.
         # A check is read-only (gh only): notify mode must report even while
         # Steam runs. Only an actual install needs Steam and the sidecar gone.
         report = check_updates(force=True)
@@ -1797,6 +1830,65 @@ def cached_client_build():
         return ''
 
 
+def steam_pending_path():
+    return luna_tools_dir() / 'pending-steam.json'
+
+
+def read_steam_pending():
+    pending = read_json_file(steam_pending_path())
+    return pending if isinstance(pending, dict) else {}
+
+
+def steam_sh_path():
+    override = os.environ.get('LUNA_STEAM_SH')
+    if override:
+        return Path(override)
+    return steam_home() / 'steam.sh'
+
+
+def _steam_force_update():
+    """Run the Steam bootstrapper's forced update and exit.
+
+    Called only with Steam closed. Returns (ok, message). The update block
+    is lifted for the run and re-applied afterwards either way.
+    """
+    had_block = steam_updates_blocked()
+    try:
+        steam_cfg_path().unlink()
+    except OSError:
+        pass
+    try:
+        result = subprocess.run([str(steam_sh_path()), '-forcesteamupdate',
+                                 '-forcepackagedownload', '-exitsteam'],
+                                capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired) as error:
+        result = None
+        failure = str(error)
+    if had_block:
+        try:
+            ensure_steam_cfg_block()
+        except OSError:
+            pass
+    if result is None:
+        return False, 'could not run the Steam updater: %s' % failure
+    if result.returncode != 0:
+        tail = (result.stderr.strip() or result.stdout.strip())[-500:]
+        return False, 'Steam updater exited %d: %s' % (result.returncode, tail)
+    return True, 'Steam client updated by Valve; block re-applied'
+
+
+def _cache_client_packages(build):
+    """Snapshot the installed package tree into the local cache."""
+    source = steam_home() / 'package'
+    cache = steam_cache_dir()
+    if cache.exists():
+        shutil.rmtree(cache, ignore_errors=True)
+    shutil.copytree(source, cache / 'package', symlinks=False)
+    (cache / 'build.txt').write_text(build + '\n')
+    write_json_file(cache / 'manifest.json', _package_stats(cache / 'package', with_hash=True))
+    return cache
+
+
 def _recover_steam_client(want):
     """Restore the cached Steam client packages for build `want`.
 
@@ -1841,6 +1933,30 @@ def _recover_steam_client(want):
     return True, 'recovered Steam client %s from local cache; updates blocked via steam.cfg' % want
 
 
+def _apply_steam_update():
+    """Valve-driven client update with the block lifted, then re-blocked.
+
+    Called only with Steam closed (timer or --now). On success the local
+    package cache is stale by definition and is dropped, so a later recover
+    can never restore the pre-update build by accident.
+    """
+    ok, message = _steam_force_update()
+    if not ok:
+        return False, message
+    try:
+        shutil.rmtree(steam_cache_dir(), ignore_errors=True)
+    except OSError:
+        pass
+    try:
+        steam_pending_path().unlink()
+    except OSError:
+        pass
+    build = steam_client_build()
+    note = ('; cache is now stale and was dropped - re-pin after verifying, then re-cache'
+            if not build else '; re-pin the new build %s after verifying, then re-cache' % build)
+    return True, message + note
+
+
 def cmd_steam(options):
     """Pin, cache and recover the Steam client build (see `luna steam --help`)."""
     action = getattr(options, 'steam_action', '') or 'status'
@@ -1863,6 +1979,11 @@ def cmd_steam(options):
             print('WARN   : SLSsteam changed since the pin: %s' % ', '.join(state['slssteamDrift']))
         print('cache  : %s' % ('build ' + state['cachedBuild'] if state['cacheReady']
                                 else 'empty (run: luna steam cache with Steam closed)'))
+        pending = read_steam_pending()
+        if pending:
+            print('queued : %s (requested %s; timer applies it while Steam is closed, or: luna steam cancel)'
+                  % (pending.get('action', '?'),
+                     time.strftime('%Y-%m-%d %H:%M', time.localtime(int(pending.get('at') or 0)))))
         return EXIT_OK
     if action == 'pin':
         build = options.build or steam_client_build()
@@ -1889,8 +2010,15 @@ def cmd_steam(options):
         return EXIT_OK
     if action == 'cache':
         if process_running('steam') or process_running('steamwebhelper'):
-            print('REFUSING to cache: Steam is running. Close it completely (Steam -> Exit) first.')
-            return EXIT_REFUSED
+            # Queue it: the timer runs while Steam is closed and caches then.
+            existing = read_steam_pending()
+            if existing:
+                print('a Steam task is already queued (%s); run: luna steam cancel first'
+                      % existing.get('action', '?'), file=sys.stderr)
+                return 1
+            write_json_file(steam_pending_path(), {'action': 'cache', 'at': int(time.time())})
+            print('Steam is running: caching queued for the next closed-Steam window')
+            return EXIT_OK
         source = steam_home() / 'package'
         if not source.is_dir():
             print('no Steam package directory to cache at %s' % source, file=sys.stderr)
@@ -1899,13 +2027,39 @@ def cmd_steam(options):
         if not build:
             print('cannot determine the client build; launch Steam once, then retry', file=sys.stderr)
             return 1
-        cache = steam_cache_dir()
-        if cache.exists():
-            shutil.rmtree(cache, ignore_errors=True)
-        shutil.copytree(source, cache / 'package', symlinks=False)
-        (cache / 'build.txt').write_text(build + '\n')
-        write_json_file(cache / 'manifest.json', _package_stats(cache / 'package', with_hash=True))
+        cache = _cache_client_packages(build)
         print('cached Steam client %s (%s)' % (build, cache))
+        return EXIT_OK
+    if action == 'update':
+        # The blessed path for a Steam client update: queue it here (menu or
+        # shell); the timer applies it while Steam is closed, then re-blocks.
+        # --now applies it right away instead (Steam must already be closed).
+        if getattr(options, 'now', False):
+            if process_running('steam') or process_running('steamwebhelper') or process_running('lumen'):
+                print('REFUSING: Steam or the Lumen sidecar is running. '
+                      'Close it completely (Steam -> Exit) first.')
+                return EXIT_REFUSED
+            ok, message = _apply_steam_update()
+            print(message, file=sys.stderr if not ok else sys.stdout)
+            return EXIT_OK if ok else 1
+        existing = read_steam_pending()
+        if existing:
+            print('a Steam task is already queued (%s); run: luna steam cancel first'
+                  % existing.get('action', '?'), file=sys.stderr)
+            return 1
+        write_json_file(steam_pending_path(), {'action': 'update', 'at': int(time.time())})
+        if process_running('steam') or process_running('steamwebhelper'):
+            print('Steam update queued: it applies the next time Steam is closed '
+                  '(timer), then updates are blocked again')
+        else:
+            print('Steam update queued: enable the timer or run: luna steam update --now')
+        return EXIT_OK
+    if action == 'cancel':
+        try:
+            steam_pending_path().unlink()
+            print('queued Steam task cancelled')
+        except OSError:
+            print('nothing queued')
         return EXIT_OK
     if action == 'recover':
         if process_running('steam') or process_running('steamwebhelper') or process_running('lumen'):
@@ -1926,7 +2080,7 @@ def cmd_steam(options):
         print(message)
         print('launch Steam and verify, then run: luna steam pin')
         return EXIT_OK
-    print('unknown steam action: %s (status|pin|unpin|cache|recover)' % action, file=sys.stderr)
+    print('unknown steam action: %s (status|pin|unpin|cache|recover|update|cancel)' % action, file=sys.stderr)
     return 2
 
 
@@ -2266,9 +2420,12 @@ def build_parser():
                                help='overwrite files that are newer than the backup')
         if name == 'steam':
             child.add_argument('steam_action', nargs='?', default='status',
-                               choices=['status', 'pin', 'unpin', 'cache', 'recover'],
+                               choices=['status', 'pin', 'unpin', 'cache', 'recover',
+                                        'update', 'cancel'],
                                help='what to do (default: status)')
             child.add_argument('--build', help='client build for pin/recover (default: detected/pinned)')
+            child.add_argument('--now', action='store_true',
+                               help='with update: apply right away instead of queueing (Steam must be closed)')
         if name == 'check':
             child.add_argument('--force', action='store_true', help='ignore the 6h cache')
         if name == 'autoupdate':

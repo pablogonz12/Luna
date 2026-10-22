@@ -3,6 +3,15 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.11 - 2026-10-22
+
+- **Steam updates only from the Health menu.** The bootstrapper stays blocked
+  everywhere else; the Health page is the sanctioned path: Pin current build
+  (immediate), Update Steam client or Cache client (queued, applied by the
+  timer with Steam closed, block re-applied after). `luna steam` offers the
+  same actions plus `--now` from the shell. Unattended runs report Steam drift
+  and apply queued Steam work before checking Luna updates.
+
 ## 0.14.10 - 2026-10-22
 
 - **Steam update lockdown.** Pinning now also writes the bootstrapper block, so
