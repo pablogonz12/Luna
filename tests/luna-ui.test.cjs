@@ -6,7 +6,7 @@
 // their real RPC names.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {mount,buildRows,buildHltbRows,enforceSortLabel,findMenubar}=require('../addons/luna/plugin/public/panel.js');
+const {mount,buildRows,buildHltbRows,findMenubar}=require('../addons/luna/plugin/public/panel.js');
 
 function fakeDom(){
   const registry={};
@@ -1156,22 +1156,27 @@ test('the Graphics beta page reports the detection read-only',async()=>{
   assert.match(text,/Nothing here installs/,'the read-only promise must be stated');
 });
 
-test('the SORT BY label is restored only while the HLTB sort is stored',()=>{
+test('stale global HLTB preferences never relabel an alphabetical Steam dropdown',async()=>{
   const document=fakeDom();
   const header=document.createElement('div');
   const sortLabel=document.createElement('div');
   sortLabel.textContent='Sort By';
   const button=document.createElement('div');
   const buttonText=document.createElement('div');
+  buttonText.textContent='Alphabetical';
   button.appendChild(buttonText);
   header.append(sortLabel,button);
   document.body.appendChild(header);
-  assert.equal(enforceSortLabel(document,4),false,'other sorts keep Steam labels');
-  assert.equal(enforceSortLabel(document,12),true,'the stored HLTB choice must label itself');
-  assert.equal(buttonText.textContent,'HowLongToBeat');
-  assert.equal(enforceSortLabel(document,12),false,'already correct labels are left alone');
-  buttonText.textContent='';
-  assert.equal(enforceSortLabel(document,1),false,'leaving the sort lets Steam own the label');
+  menubarFixture(document,true);
+  const {w}=fakeWindow(document);
+  w.localStorage.setItem('AppGridDisplaySettings','{"eSortBy":12}');
+  w.localStorage.setItem('slsLunaSortLive','12');
+  const intervals=[];
+  w.setInterval=fn=>intervals.push(fn);
+  mount(w);
+  await new Promise(resolve=>setTimeout(resolve,30));
+  intervals.forEach(fn=>fn());
+  assert.equal(buttonText.textContent,'Alphabetical','only the agent\'s own view-local dropdown knows its selection');
 });
 
 test('Forget removes a cached record and the game becomes fetchable again',async()=>{
