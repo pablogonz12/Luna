@@ -300,8 +300,8 @@
    * comparator, which compares each game's `sort_as` field - and that field is
    * a plain writable property. Luna therefore appends its own option (value
    * 12) to the rendered dropdown and, while that option is active, rewrites
-   * `sort_as` to a zero-padded inverted-time key; alphabetical comparison then
-   * yields longest-main-story first, games without times last. Originals are
+    * `sort_as` to a zero-padded time key; alphabetical comparison then yields
+    * the selected completion-time order, games without times last. Originals are
    * restored the moment another sort is chosen. If anything fails, Steam keeps
    * working with its normal sorts. */
   const SORT_VALUE = 12;
@@ -413,7 +413,10 @@
       sortAsPatched.push([overview, original]);
       changed = true;
     }
-    if (changed) keysVersion += 1;
+    if (changed) {
+      keysVersion += 1;
+      refreshHltbShelves(w);
+    }
     noteSortDiag(w, 'apply');
     return sortAsPatched.length > 0;
   }
@@ -543,6 +546,50 @@
   let keysVersion = 0;
   let slicedVersion = 0;
   let slicedArrays = new WeakSet();
+
+  // Home shelves do not receive appOverviews: their class render reads the
+  // collection directly. sort_as is not observable, so loading cached times
+  // after the first render leaves an alphabetical shelf until another UI event.
+  // Track mounted shelf instances and invalidate only HLTB shelves when keys
+  // change. Schedule outside render; never remount shelves or lose scroll state.
+  const hltbShelves = new Map();
+  const hookedShelfPrototypes = new WeakSet();
+  let shelfRefreshPending = false;
+
+  function refreshHltbShelves(w) {
+    if (shelfRefreshPending || !hltbShelves.size) return;
+    shelfRefreshPending = true;
+    const schedule = (w && w.setTimeout) || setTimeout;
+    schedule(() => {
+      shelfRefreshPending = false;
+      for (const [instance, version] of hltbShelves) {
+        if (instance.props?.showcase?.eSortBy !== SORT_VALUE || version === keysVersion) continue;
+        hltbShelves.set(instance, keysVersion);
+        try { instance.forceUpdate(); } catch (_) { /* view is closing */ }
+      }
+    }, 0);
+  }
+
+  function hookHltbShelf(type, props, w) {
+    const proto = type && type.prototype;
+    if (!props || !props.showcase || props.collectionId === undefined
+        || !proto || typeof proto.render !== 'function'
+        || typeof proto.ComputeChildSizes !== 'function') return false;
+    if (props.showcase.eSortBy === SORT_VALUE) applyHltbSortAs(w);
+    if (hookedShelfPrototypes.has(proto)) return true;
+    const render = proto.render;
+    const unmount = proto.componentWillUnmount;
+    proto.render = function (...args) {
+      if (typeof this.forceUpdate === 'function') hltbShelves.set(this, keysVersion);
+      return render.apply(this, args);
+    };
+    proto.componentWillUnmount = function (...args) {
+      hltbShelves.delete(this);
+      if (typeof unmount === 'function') return unmount.apply(this, args);
+    };
+    hookedShelfPrototypes.add(proto);
+    return true;
+  }
 
   function withFreshOverviews(props) {
     if (!props || !Array.isArray(props.appOverviews) || props.eSortBy === undefined) return null;
@@ -767,6 +814,7 @@
         const next = inRender && base[key] ? base[key] : originals[key];
         if (!inRender) {
           const props = args[0];
+          hookHltbShelf(type, props, w);
           // The library's SORT BY dropdown gains the cached-times option, and
           // the grid gets a fresh overviews array (so it re-sorts with the
           // current keys).
@@ -902,5 +950,5 @@
     searchUrlFor, nameOf, betaEnabled, defaultActions, publishArtworkRequest, handleArtworkLive,
     collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor, hltbSortKey,
     readHltbOrder, applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption,
-    withFreshOverviews, withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
+    withFreshOverviews, hookHltbShelf, withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
 });
