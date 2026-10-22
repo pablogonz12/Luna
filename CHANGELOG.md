@@ -3,6 +3,34 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.13 - 2026-10-22
+
+- **Presence keeps the real game first in Steam Machine mode.** After starting
+  its windowless activity helper, Presence restores Steam's selection to the
+  actual game. Both remain running: the game is first, the helper second.
+  Restoration is bounded and does not close Steam/QAM menus or override another
+  selected game. Unsupported Gamescope clients without selection controls pause
+  only the helper. The user's Presence preference and playtime are preserved.
+
+- **Automatic real Steam downgrade on installation.** The one-shot installer
+  and `luna install` default to build `1791918634`: SHA256-pinned historical
+  manifest, verified Valve packages, safe ZIP/VZip extraction, executable and
+  payload verification, retained rollback backups, a verified local cache, pin,
+  and Steam self-update block. No account, game or save files are imported.
+- **Recovery now restores executables**, not merely `package/` metadata. Core
+  executable receipts distinguish the installed build from stale logs/manifests;
+  a missing/incomplete archive cache can no longer claim a successful recovery.
+- Preserve custom `steam.cfg` settings, refuse running Steam/Lumen even on
+  internal recovery/update paths, and keep dry runs download/write-free.
+  `--keep-steam-client` opts out; add-on bundle updates preserve explicit Steam
+  version choices instead of silently repeating the compatibility downgrade.
+
+## 0.14.12 - 2026-10-22
+
+- Detect the Steam client build from package metadata when runtime logs are
+  unavailable. Version 0.14.13 adds executable verification so metadata alone
+  cannot be mistaken for a completed downgrade or recovery.
+
 ## 0.14.11 - 2026-10-22
 
 - **Steam updates only from the Health menu.** The bootstrapper stays blocked
