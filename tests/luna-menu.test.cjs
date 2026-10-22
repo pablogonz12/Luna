@@ -10,12 +10,11 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf,
   collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,ARTWORK_REQUEST_KEY,ARTWORK_LIVE_KEY,
-  ARTWORK_LIVE_RESULT_KEY,setHltbRecords,hltbSortKey,applyHltbSortAs,restoreHltbSortAs,syncSortAs,
-  isSortDropdown,withSortOption,withFreshOverviews,hookHltbShelf,withHltbOverlay,hltbMinutesFor,
+  ARTWORK_LIVE_RESULT_KEY,setHltbRecords,compareHltb,syncSortAs,
+  isSortDropdown,withSortOption,withHltbSections,hltbGridType,hookHltbShelf,withHltbOverlay,hltbMinutesFor,
   handleArtworkLive,refreshHltbData}=require('../addons/luna/plugin/public/agent.js');
 
 test('home HLTB shelves redraw after asynchronous times load, without remounting',()=>{
-  restoreHltbSortAs();
   setHltbRecords({});
   const tasks=[];
   const apps=[{appid:1,display_name:'Alpha',sort_as:'alpha'},
@@ -24,9 +23,10 @@ test('home HLTB shelves redraw after asynchronous times load, without remounting
   const w={appStore:{allApps:apps},setTimeout:fn=>tasks.push(fn)};
   let unmounted=0;
   class Shelf {
-    constructor(sort){this.props={showcase:{eSortBy:sort},collectionId:'games'};this.updates=0;}
+    constructor(sort){this.props={showcase:{eSortBy:sort},collectionId:'games'};this.updates=0;
+      this.m_fnSort=collection=>collection.visibleApps.slice().sort((a,b)=>a.sort_as.localeCompare(b.sort_as));}
     ComputeChildSizes(){}
-    render(){this.order=apps.slice().sort((a,b)=>a.sort_as.localeCompare(b.sort_as)).map(a=>a.appid);}
+    render(){this.order=this.m_fnSort({visibleApps:apps}).map(a=>a.appid);}
     forceUpdate(){this.updates++;this.render();}
     componentWillUnmount(){unmounted++;}
   }
@@ -34,23 +34,23 @@ test('home HLTB shelves redraw after asynchronous times load, without remounting
   assert.equal(hookHltbShelf(Shelf,shelf.props,w),true);
   shelf.render();other.render();
   assert.deepEqual(shelf.order,[1,3,2],'no times initially: alphabetical');
-  setHltbRecords({'1':{main:3600},'2':{main:180}});
-  applyHltbSortAs(w);
-  applyHltbSortAs(w);
+  setHltbRecords({'1':{main:3600},'2':{main:180}},w);
+  setHltbRecords({'1':{main:3600},'2':{main:180}},w);
   assert.equal(tasks.length,1,'coalesce refreshes outside render');
   tasks.shift()();
   assert.deepEqual(shelf.order,[2,1,3],'shortest first, missing last');
   assert.equal(shelf.updates,1);
   assert.equal(other.updates,0,'normal shelves must not be refreshed');
   const long={...w,localStorage:{getItem:k=>k==='slsLunaHltbOrder'?'long':null}};
-  applyHltbSortAs(long);tasks.shift()();
+  w.localStorage=long.localStorage;
+  syncSortAs(w);tasks.shift()();
   assert.deepEqual(shelf.order,[1,2,3],'longest-first preference keeps missing last');
   shelf.componentWillUnmount();other.componentWillUnmount();
   assert.equal(unmounted,2,'preserve upstream cleanup');
-  applyHltbSortAs(w);
+  delete w.localStorage;syncSortAs(w);
   assert.equal(tasks.length,0,'unmounted instances are not retained');
   assert.equal(hookHltbShelf(function Other(){},{showcase:{eSortBy:12},collectionId:'x'},w),false);
-  restoreHltbSortAs();
+  assert.deepEqual(apps.map(a=>a.sort_as),['alpha','zebra','missing'],'never mutate shared app names');
 });
 
 test('search URL trims and encodes the game name',()=>{
@@ -99,7 +99,7 @@ function fixture(){
 }
 
 test('normal agent installation automatically hooks shelves before cached HLTB data arrives',async()=>{
-  restoreHltbSortAs();setHltbRecords({});
+  setHltbRecords({});
   const tools=fixture(),tasks=[];
   const apps=[{appid:1,display_name:'Alpha',sort_as:'alpha'},
     {appid:2,display_name:'Zebra',sort_as:'zebra'}];
@@ -107,9 +107,10 @@ test('normal agent installation automatically hooks shelves before cached HLTB d
     localStorage:{getItem:k=>k==='AppGridDisplaySettings'?'{"eSortBy":12}':null,setItem(){}},
     Millennium:{callServerMethod:()=>Promise.resolve({games:{'1':{main:7200},'2':{main:120}}})}};
   class Shelf {
-    constructor(){this.props={showcase:{eSortBy:SORT_VALUE},collectionId:'games'};}
+    constructor(){this.props={showcase:{eSortBy:SORT_VALUE},collectionId:'games'};
+      this.m_fnSort=collection=>collection.visibleApps.slice().sort((a,b)=>a.sort_as.localeCompare(b.sort_as));}
     ComputeChildSizes(){}
-    render(){this.order=apps.slice().sort((a,b)=>a.sort_as.localeCompare(b.sort_as)).map(a=>a.appid);}
+    render(){this.order=this.m_fnSort({visibleApps:apps}).map(a=>a.appid);}
     forceUpdate(){this.render();}
   }
   const menu=installLunaMenu(w,tools),shelf=new Shelf();
@@ -118,7 +119,7 @@ test('normal agent installation automatically hooks shelves before cached HLTB d
   await refreshHltbData(w);syncSortAs(w); // The agent's normal async startup/beat.
   tasks.splice(0).forEach(fn=>fn());
   assert.deepEqual(shelf.order,[2,1]);
-  shelf.componentWillUnmount();menu.dispose();restoreHltbSortAs();
+  shelf.componentWillUnmount();menu.dispose();
 });
 
 function webpackFixture(requireName){
@@ -474,16 +475,13 @@ test('pushLibrary sends the inventory once and skips identical payloads',async()
   assert.equal(quiet,false,'a failed push must not throw');
 });
 
-test('the sort key orders shortest first by default, longest games last, and no-data games at the very end',()=>{
+test('the numeric comparator orders known times first in both directions',()=>{
   setHltbRecords({'1':{main:3600},'2':{main:7200},'3':{main:1800}});
-  const long=hltbSortKey(2,'B');
-  const short=hltbSortKey(1,'A');
-  const shortest=hltbSortKey(3,'C');
-  assert.ok(shortest<short && short<long,'shortest main story must compare first by default');
-  assert.ok(hltbSortKey(99,'Z')>long,'games without times must compare last');
-  assert.equal(hltbSortKey(2,'B').length,12,'ten digits, a colon and the name');
+  const apps=[{appid:1},{appid:2},{appid:3},{appid:99}];
+  assert.deepEqual(apps.slice().sort((a,b)=>compareHltb(a,b,'short')).map(a=>a.appid),[3,1,2,99]);
+  assert.deepEqual(apps.slice().sort((a,b)=>compareHltb(a,b,'long')).map(a=>a.appid),[2,1,3,99]);
   setHltbRecords({'4':{match:'none'}});
-  assert.ok(hltbSortKey(4,'D')>long,'a refused match counts as no data');
+  assert.equal(compareHltb({appid:4,name:'A'},{appid:99,name:'B'}),-1);
   setHltbRecords({});
 });
 
@@ -504,19 +502,17 @@ function sortableWindow(stored,order){
   };
 }
 
-test('sorting rewrites sort_as while active and restores every original after',()=>{
+test('view-local sections sort without mutating shared overviews or input arrays',()=>{
   setHltbRecords({'1':{main:3600},'2':{main:7200}});
   const w=sortableWindow();
-  const [one,two,three]=w.appStore.allApps;
-  assert.equal(applyHltbSortAs(w),true);
-  assert.ok(one.sort_as<two.sort_as,'the shorter game must compare first');
-  assert.ok(two.sort_as<three.sort_as,'a game without times must compare last');
-  assert.equal(applyHltbSortAs(w),true,'re-applying is safe');
-  assert.equal(restoreHltbSortAs(),true);
-  assert.equal(one.sort_as,'alpha','custom sort names must come back');
-  assert.equal(two.sort_as,undefined,'a game without one must lose the property');
-  assert.equal(three.sort_as,'gamma');
-  assert.equal(restoreHltbSortAs(),false,'nothing left to restore');
+  const apps=w.appStore.allApps.map(Object.freeze);
+  const children=Object.freeze([apps[2],apps[1],apps[0]].map(app=>Object.freeze({m_overview:app})));
+  const props={eSortBy:SORT_VALUE,childSections:[{children}],strCollectionId:'c'};
+  const sorted=withHltbSections(props,w);
+  assert.deepEqual(sorted.childSections[0].children.map(c=>c.m_overview.appid),[1,2,3]);
+  assert.deepEqual(children.map(c=>c.m_overview.appid),[3,2,1]);
+  assert.deepEqual(apps.map(a=>a.sort_as),['alpha',undefined,'gamma']);
+  assert.equal(withHltbSections({...props,eSortBy:1},w),null);
   setHltbRecords({});
 });
 
@@ -542,7 +538,7 @@ test('the Change artwork action hands the game to the Luna picker',async()=>{
   menu.dispose();
 });
 
-test('the stored HLTB sort is restored when Steam state drifts',()=>{
+test('a stale global sort preference must not override another view selection',()=>{
   const scheduled=[];
   const store=new Map();
   store.set('AppGridDisplaySettings',JSON.stringify({eSortBy:SORT_VALUE}));
@@ -553,12 +549,11 @@ test('the stored HLTB sort is restored when Steam state drifts',()=>{
   setHltbRecords({'1':{main:3600}});
   const changes=[];
   withSortOption({rgOptions:SORT_ENUM.slice(),selectedOption:4,onChange:value=>changes.push(value)},w);
-  assert.equal(scheduled.length,1,'a drifted live sort must schedule a heal');
-  scheduled.shift()();
-  assert.deepEqual(changes,[SORT_VALUE],'the stored choice must be restored');
+  assert.equal(scheduled.length,0,'never force a global sort onto a local view');
+  assert.deepEqual(changes,[]);
   assert.equal(store.get('slsLunaSortLive'),'4','the live value must be published for the panel');
   withSortOption({rgOptions:SORT_ENUM.slice(),selectedOption:4,onChange:value=>changes.push(value)},w);
-  assert.equal(scheduled.length,0,'the heal must be throttled');
+  assert.equal(scheduled.length,0);
   store.set('AppGridDisplaySettings',JSON.stringify({eSortBy:4}));
   withSortOption({rgOptions:SORT_ENUM.slice(),selectedOption:1,onChange:value=>changes.push(value)},w);
   assert.equal(scheduled.length,0,'another stored choice must never be fought');
@@ -596,17 +591,7 @@ test('live artwork requests are applied through Steam own API',async()=>{
   assert.equal(await handleArtworkLive({localStorage:{getItem:()=>null}}),false,'no storage, no crash');
 });
 
-test('the grid gets a fresh overviews array so its memo re-sorts with the current keys',()=>{
-  const original=[{appid:1},{appid:2}];
-  const result=withFreshOverviews({appOverviews:original,eSortBy:SORT_VALUE,strCollectionId:'c'});
-  assert.ok(result,'the grid must be recognized');
-  assert.notEqual(result.appOverviews,original,'a fresh identity forces the memo to recompute');
-  assert.deepEqual(result.appOverviews,original,'the same games in the same order');
-  assert.equal(withFreshOverviews({appOverviews:'nope'}),null);
-  assert.equal(withFreshOverviews({appOverviews:original}),null,'other components are untouched');
-});
-
-test('the dropdown selection drives the keys, and other choices clear them',()=>{
+test('the dropdown only adds an option and delegates selection without shared mutations',()=>{
   setHltbRecords({'1':{main:3600}});
   const w=sortableWindow();
   const changes=[];
@@ -617,21 +602,19 @@ test('the dropdown selection drives the keys, and other choices clear them',()=>
   assert.equal(w.appStore.allApps[0].sort_as,'alpha','no keys before the option is chosen');
   result.onChange(SORT_VALUE);
   assert.deepEqual(changes,[SORT_VALUE],'the original onChange must still run');
-  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha','the choice must apply the keys');
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha','the view sorts itself, not the app store');
   result.onChange(1);
   assert.equal(w.appStore.allApps[0].sort_as,'alpha','another choice must restore them');
   // The persisted choice applies as soon as the dropdown reports it.
   const selected={rgOptions:SORT_ENUM.slice(),selectedOption:SORT_VALUE};
   withSortOption(selected,w);
-  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha');
-  restoreHltbSortAs();
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha');
   setHltbRecords({});
 });
 
-test('foreign sort lists never touch the keys; only an explicit pick does',()=>{
+test('other dropdowns cannot reset HLTB sorting in an independent view',()=>{
   setHltbRecords({'1':{main:3600}});
   const w=sortableWindow(SORT_VALUE);
-  assert.equal(applyHltbSortAs(w),true);
   const before=w.appStore.allApps[0].sort_as;
   // The same option list renders as a right-click/context menu without a
   // selectedOption, and other views render it with their own local selection.
@@ -641,38 +624,37 @@ test('foreign sort lists never touch the keys; only an explicit pick does',()=>{
   assert.equal(w.appStore.allApps[0].sort_as,before,'the keys must survive the menu rendering');
   withSortOption({rgOptions:SORT_ENUM.slice(),selectedOption:4},w);
   assert.equal(w.appStore.allApps[0].sort_as,before,'a foreign selection must not restore either');
-  // A real pick through the wrapped onChange does change them.
+  // Even an explicit pick affects only Steam's view-local selection.
   const picked=withSortOption({rgOptions:SORT_ENUM.slice(),selectedOption:SORT_VALUE,onChange:()=>{}},w);
   picked.onChange(4);
   assert.equal(w.appStore.allApps[0].sort_as,'alpha','an explicit pick restores');
   picked.onChange(SORT_VALUE);
-  restoreHltbSortAs();
   setHltbRecords({});
 });
 
-test('syncSortAs follows the stored sort choice',()=>{
+test('periodic sync ignores stored sort selection and only watches direction',()=>{
   setHltbRecords({'1':{main:3600}});
   const w=sortableWindow(SORT_VALUE);
-  assert.equal(syncSortAs(w),true,'a stored HLTB choice must apply the keys');
-  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha');
+  assert.equal(syncSortAs(w),false);
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha');
   w.storage.set('AppGridDisplaySettings',JSON.stringify({eSortBy:4}));
-  assert.equal(syncSortAs(w),true,'another choice must restore');
+  assert.equal(syncSortAs(w),false);
   assert.equal(w.appStore.allApps[0].sort_as,'alpha');
   assert.equal(syncSortAs(w),false,'nothing left to do when no keys are active');
   setHltbRecords({});
 });
 
-test('with no stored sort choice the keys follow the live dropdown, never a blind restore',()=>{
+test('missing persisted sort and interleaved dropdown renders do not affect shared games',()=>{
   setHltbRecords({'1':{main:3600}});
   const w=sortableWindow();  // no AppGridDisplaySettings at all, as after the client update
   // Picking Luna's option in a view applies the keys and publishes the live value.
   const picked=withSortOption({rgOptions:SORT_ENUM.slice(),onChange(){},selectedOption:SORT_VALUE},w);
   assert.ok(picked,'the sort dropdown must be wrapped');
-  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha','picking the option applies the keys');
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha');
   // The periodic sync must not undo a live Luna choice just because this client
   // stopped persisting the setting.
-  assert.equal(syncSortAs(w),true,'a live HLTB choice must keep the keys applied');
-  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha','the order must survive the sync');
+  assert.equal(syncSortAs(w),false);
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha');
   // An explicit switch away still restores the originals through onChange.
   const other=withSortOption({rgOptions:SORT_ENUM.slice(),onChange(){},selectedOption:4},w);
   other.onChange(4);
@@ -680,7 +662,7 @@ test('with no stored sort choice the keys follow the live dropdown, never a blin
   setHltbRecords({});
 });
 
-test('a grid rendering as Luna-sorted keeps the keys without a stored choice',()=>{
+test('collection grids sort their rendered sections without a persisted choice',()=>{
   setHltbRecords({'1':{main:3600}});
   const tools=fixture();
   const w=sortableWindow();                 // no AppGridDisplaySettings at all
@@ -688,13 +670,84 @@ test('a grid rendering as Luna-sorted keeps the keys without a stored choice',()
   assert.ok(api,'the menu must install');
   // A section's dropdown only renders while its header is hovered, but its grid
   // renders as Luna-sorted - that is the signal the sync must trust.
-  tools.jsx.jsx({name:'Grid'},{sortByType:SORT_VALUE,appOverviews:[{appid:1},{appid:2}]});
-  assert.equal(syncSortAs(w),true,'a grid on Luna\'s sort must apply the keys');
-  assert.notEqual(w.appStore.allApps[0].sort_as,'alpha','the order must be Luna\'s');
+  const result=tools.jsx.jsx(function Grid(){},{eSortBy:SORT_VALUE,
+    childSections:[{children:[{m_overview:{appid:2}},{m_overview:{appid:1}}]}]});
+  assert.deepEqual(result.props.childSections[0].children.map(c=>c.m_overview.appid),[1,2]);
+  assert.equal(syncSortAs(w),false);
+  assert.equal(w.appStore.allApps[0].sort_as,'alpha');
   const diag=JSON.parse(w.storage.get('slsLunaSortDiag')||'{}');
-  assert.equal(diag.event,'apply','the diagnostic must record the decision');
-  assert.ok(diag.patched>0,'the diagnostic must count the patched keys');
+  assert.equal(diag.event,'collection');
+  assert.equal(diag.engine,'view-local');
+  api.dispose();
   setHltbRecords({});
+});
+
+test('mounted functional grids refresh on cache changes, direction changes and clear subscriptions',()=>{
+  setHltbRecords({});
+  const w=sortableWindow(),tasks=[];
+  w.setTimeout=fn=>tasks.push(fn);
+  let updates=0,effect,cleanup;
+  const ref={};
+  const React={
+    useReducer:()=>[0,()=>updates++],useRef:()=>ref,
+    useEffect:fn=>{effect=fn;},createElement:(type,props)=>({type,props}),
+  };
+  const Original=()=>{};
+  const props={eSortBy:SORT_VALUE,childSections:[{children:[
+    {m_overview:{appid:1,name:'Alpha'}},{m_overview:{appid:2,name:'Zebra'}}]}]};
+  const Grid=hltbGridType(Original,props,w,React);
+  assert.notEqual(Grid,Original);
+  assert.equal(hltbGridType(Original,{...props,eSortBy:1},w,React),Grid,'stable type across sorts');
+  Grid(props);cleanup=effect();updates=0;
+  setHltbRecords({'1':{main:3600},'2':{main:60}},w);
+  tasks.splice(0).forEach(fn=>fn());
+  assert.equal(updates,1);
+  const rendered=Grid(props);
+  assert.equal(rendered.type,Original);
+  assert.deepEqual(rendered.props.childSections[0].children.map(c=>c.m_overview.appid),[2,1]);
+  setHltbRecords({'1':{main:3600},'2':{main:60}},w);
+  assert.equal(tasks.length,0,'identical poll results must not redraw');
+  w.storage.set('slsLunaHltbOrder','long');syncSortAs(w);
+  tasks.splice(0).forEach(fn=>fn());
+  assert.deepEqual(Grid(props).props.childSections[0].children.map(c=>c.m_overview.appid),[1,2]);
+  Grid({...props,eSortBy:1});updates=0;
+  setHltbRecords({'2':{main:90}},w);tasks.splice(0).forEach(fn=>fn());
+  assert.equal(updates,0,'do not redraw another sort');
+  cleanup();
+  w.storage.delete('slsLunaHltbOrder');syncSortAs(w);
+  assert.equal(tasks.length,0,'unmount removes subscriptions');
+});
+
+test('home sort stays view-local across several shelves and restores Steam sorter after errors',()=>{
+  setHltbRecords({'1':{main:7200},'2':{main:120}});
+  const w=sortableWindow(),apps=[{appid:1,sort_as:'a'},{appid:2,sort_as:'z'}];
+  const alphabetic=c=>c.visibleApps.slice().sort((a,b)=>a.sort_as.localeCompare(b.sort_as));
+  class Shelf {
+    constructor(sort){this.props={showcase:{eSortBy:sort},collectionId:'x'};this.m_fnSort=alphabetic;}
+    ComputeChildSizes(){}
+    render(){const result=this.m_fnSort({visibleApps:apps});if(this.fail)throw Error('test');return result;}
+    forceUpdate(){}
+  }
+  const hltb=new Shelf(12),normal=new Shelf(1);
+  hookHltbShelf(Shelf,hltb.props,w);
+  assert.deepEqual(hltb.render().map(a=>a.appid),[2,1]);
+  assert.deepEqual(normal.render().map(a=>a.appid),[1,2]);
+  withSortOption({rgOptions:SORT_ENUM,selectedOption:1,onChange(){}},w).onChange(1);
+  w.storage.set('AppGridDisplaySettings','{"eSortBy":1}');syncSortAs(w);
+  assert.deepEqual(hltb.render().map(a=>a.appid),[2,1],'foreign sort cannot undo HLTB');
+  assert.equal(hltb.m_fnSort,alphabetic);
+  hltb.fail=true;assert.throws(()=>hltb.render(),/test/);
+  assert.equal(hltb.m_fnSort,alphabetic,'restore even on render failure');
+  hltb.componentWillUnmount();normal.componentWillUnmount();
+});
+
+test('invalid and removed times stay last and merged sections keep every game once',()=>{
+  setHltbRecords({'1':{main:Infinity},'2':{main:0,all:120},'3':{main:60,match:'none'}});
+  const props={eSortBy:12,childSections:[{children:[{appid:1,name:'A'},{appid:2,name:'Z'}]},
+    {children:[{appid:3,name:'B'}]}]};
+  assert.deepEqual(withHltbSections(props,sortableWindow()).childSections[0].children.map(c=>c.appid),[2,1,3]);
+  assert.deepEqual(withHltbSections(props,sortableWindow(undefined,'long')).childSections[0].children.map(c=>c.appid),[2,1,3]);
+  assert.equal(withHltbSections({...props,childSections:[{children:[{}]}]}),null,'unknown shape fails closed');
 });
 
 test('only the real sort dropdown gains the HowLongToBeat option',()=>{

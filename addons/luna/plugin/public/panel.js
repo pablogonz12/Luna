@@ -1787,35 +1787,12 @@
       if (document.getElementById(OVERLAY_ID)) paint();
     };
 
-    // The DOM-level pieces (game-page stat cell, SORT BY label) are refreshed
-    // on a debounce: data changes, navigation and Steam re-renders all funnel
-    // through here without touching React.
-    let overlayTimer = null;
-    function refreshDomOverlays() {
-      let stored = null;
-      let live = null;
-      try {
-        stored = JSON.parse((w.localStorage && w.localStorage.getItem('AppGridDisplaySettings')) || '{}').eSortBy;
-        live = w.localStorage && w.localStorage.getItem('slsLunaSortLive');
-      } catch (_) { /* storage unavailable */ }
-      // The stored choice is the fallback truth; once the agent has seen the
-      // live dropdown, only the live value may claim the label.
-      const liveValue = (live === null || live === undefined || live === '') ? stored : Number(live);
-      enforceSortLabel(document, liveValue);
-    }
-    function scheduleOverlayRefresh(delay) {
-      if (overlayTimer) return;
-      const schedule = w.setTimeout || setTimeout;
-      overlayTimer = schedule(() => { overlayTimer = null; refreshDomOverlays(); }, delay || 800);
-    }
-
     async function refreshHltb() {
       try {
         hltb = await rpc(w, 'SlsHltbGet');
       } catch (error) {
         hltb = hltb || {};
       }
-      scheduleOverlayRefresh(150);
       repaintIfOpen();
     }
 
@@ -3354,15 +3331,6 @@
       });
     }
     (w.setTimeout || setTimeout)(() => { consumeArtworkRequest(); }, 2500);
-    // Keep the game-page HLTB cell and the SORT BY label in step with Steam's
-    // own rendering; a MutationObserver where available, a slow beat otherwise.
-    if (typeof w.MutationObserver === 'function') {
-      const observer = new w.MutationObserver(() => scheduleOverlayRefresh());
-      observer.observe(document.body, { childList: true, subtree: true });
-    } else {
-      w.setInterval(refreshDomOverlays, 3000);
-    }
-    scheduleOverlayRefresh(1500);
     // Resume a background fetch pass after a Steam restart without making the
     // user open the menu: load the local times and continue where it left off.
     (w.setTimeout || setTimeout)(async () => {
@@ -3370,45 +3338,7 @@
         hltb = await rpc(w, 'SlsHltbGet');
       } catch (_) { /* the backend may still be starting */ }
       maybeAutoFetch();
-      scheduleOverlayRefresh(150);
     }, 6000);
-  }
-
-  /* The library sort label. It is DOM-level because Steam's own label lookup
-     has no case for the Luna sort value, so a rehydrated choice
-     (localStorage) would otherwise render an empty SORT BY label. */
-
-  function firstTextLeaf(node) {
-    if (!node || !node.children) return null;
-    for (const child of node.children) {
-      if (!child.children || child.children.length === 0) {
-        const tag = String(child.tagName || '').toUpperCase();
-        if (tag === 'DIV' || tag === 'SPAN' || tag === '') return child;
-      } else {
-        const found = firstTextLeaf(child);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-
-  // Steam's own sort-label lookup has no case for the Luna value, so a
-  // rehydrated choice (localStorage) renders an empty SORT BY label. While the
-  // Luna value is the stored choice, put the label back - and only then.
-  function enforceSortLabel(document, storedValue) {
-    if (storedValue !== 12) return false;
-    const nodes = document.querySelectorAll ? document.querySelectorAll('div,span') : [];
-    for (const node of nodes || []) {
-      const text = (node.textContent || '').trim();
-      if (!/^sort by$/i.test(text) || !node.children || node.children.length !== 2) continue;
-      const leaf = firstTextLeaf(node.children[1]);
-      if (leaf && (leaf.textContent || '').trim() !== 'HowLongToBeat') {
-        leaf.textContent = 'HowLongToBeat';
-        return true;
-      }
-      return false;
-    }
-    return false;
   }
 
   /* Merged view of the agent-reported game list and the cached HowLongToBeat
@@ -3458,5 +3388,5 @@
         || (b.record.lastPlayed || 0) - (a.record.lastPlayed || 0) || a.name.localeCompare(b.name));
   }
 
-  return { mount, buildRows, buildHltbRows, enforceSortLabel, findMenubar, hours };
+  return { mount, buildRows, buildHltbRows, findMenubar, hours };
 });

@@ -3,6 +3,20 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.15 - 2026-10-23
+
+- **HLTB sorting is view-local, not a shared app-store rewrite.** Sort home
+  shelves and collection grids directly by numeric completion times. Different
+  shelves/dropdowns cannot undo one another; no global sort healing, five-minute
+  activity timeout or writable `sort_as` field is needed. Cache and direction
+  changes refresh both layouts without remounting or mutating Steam app objects.
+- Remove the global DOM label override that could display "HowLongToBeat" on
+  an actually alphabetical view. Each dropdown now gets its label from its own
+  selection and options, not another shelf's last reported state.
+- Regression tests cover simultaneous independent views, late/changed/missing
+  times, both directions, immutable shared objects, functional-grid lifecycle,
+  sorter restoration on render failure and misleading stale global preferences.
+
 ## 0.14.14 - 2026-10-22
 
 - **HowLongToBeat sorting refreshes automatically.** Home-library shelves now
