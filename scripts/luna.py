@@ -1617,6 +1617,10 @@ def steam_client_build():
     return found[-1] if found else ''
 
 
+STEAM_CFG_BLOCK = ('BootStrapperInhibitAll=enable\n'
+                     'BootStrapperForceSelfUpdate=disable\n')
+
+
 def steam_cfg_path():
     return steam_home() / 'steam.cfg'
 
@@ -1631,9 +1635,56 @@ def steam_updates_blocked():
 
 def ensure_steam_cfg_block():
     """Write the bootstrapper inhibit block; Steam honors it on next launch."""
-    steam_cfg_path().write_text('BootStrapperInhibitAll=enable\n'
-                                'BootStrapperForceSelfUpdate=disable\n')
+    steam_cfg_path().parent.mkdir(parents=True, exist_ok=True)
+    steam_cfg_path().write_text(STEAM_CFG_BLOCK)
     return steam_cfg_path()
+
+
+def remove_steam_cfg_block():
+    """Remove the block only if the file holds exactly what Luna wrote."""
+    try:
+        content = steam_cfg_path().read_text()
+    except OSError:
+        return False
+    if content == STEAM_CFG_BLOCK:
+        try:
+            steam_cfg_path().unlink()
+        except OSError:
+            return False
+        return True
+    return False
+
+
+def pacman_conf_path():
+    return Path(os.environ.get('LUNA_PACMAN_CONF', '/etc/pacman.conf'))
+
+
+def pacman_steam_state():
+    """Is the Steam client pacman-managed, and is it ignored on updates?
+
+    No root needed: `pacman -Q` answers the first, the conf file the second.
+    """
+    managed, ignored = False, False
+    try:
+        result = subprocess.run(['pacman', '-Q', 'steam'],
+                                capture_output=True, text=True, timeout=15)
+        managed = result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return managed, ignored
+    if not managed:
+        return managed, ignored
+    try:
+        content = pacman_conf_path().read_text()
+    except OSError:
+        return managed, ignored
+    for line in content.splitlines():
+        stripped = line.split('#', 1)[0].strip()
+        if not stripped or '=' not in stripped:
+            continue
+        key, _, value = stripped.partition('=')
+        if key.strip().lower() == 'ignorepkg' and 'steam' in value.split():
+            ignored = True
+    return managed, ignored
 
 
 def steam_pin_path():
@@ -1723,6 +1774,7 @@ def steam_state():
     pinned_hashes = pin.get('slssteam') or {}
     tools_drift = [name for name, digest in current_hashes.items()
                    if digest and pinned_hashes.get(name) and digest != pinned_hashes[name]]
+    pacman_managed, pacman_ignored = pacman_steam_state()
     return {
         'build': build,
         'pinned': pinned,
@@ -1733,6 +1785,8 @@ def steam_state():
         'slssteamDrift': tools_drift,
         'cachedBuild': cached,
         'cacheReady': cache_ready,
+        'pacmanManaged': pacman_managed,
+        'pacmanIgnored': pacman_ignored,
     }
 
 
@@ -1799,6 +1853,10 @@ def cmd_steam(options):
                                  if state['pinned'] and state['cacheReady']
                                  else 'unknown (no cache)'))
         print('updates: %s' % ('blocked (steam.cfg)' if state['updatesBlocked'] else 'NOT blocked'))
+        if state['pacmanManaged']:
+            print('pacman : Steam is system-managed%s'
+                  % (', ignored on updates' if state['pacmanIgnored']
+                     else ' and NOT ignored - add "IgnorePkg = steam" to /etc/pacman.conf (needs sudo)'))
         for name, digest in sorted(state['slssteam'].items()):
             print('%-16s %s' % (name + ':', digest[:12] if digest else '(missing)'))
         if state['slssteamDrift']:
@@ -1815,7 +1873,8 @@ def cmd_steam(options):
                'at': int(time.time()), 'by': installed_version()}
         luna_tools_dir().mkdir(parents=True, exist_ok=True)
         write_json_file(steam_pin_path(), pin)
-        print('pinned Steam client %s with current SLSsteam hashes' % build)
+        ensure_steam_cfg_block()
+        print('pinned Steam client %s with current SLSsteam hashes; updates blocked via steam.cfg' % build)
         return EXIT_OK
     if action == 'unpin':
         try:
@@ -1823,6 +1882,10 @@ def cmd_steam(options):
             print('pin removed')
         except OSError:
             print('no pin to remove')
+        if remove_steam_cfg_block():
+            print('update block removed: Steam may update itself again')
+        else:
+            print('note: steam.cfg left untouched (it holds more than the Luna block)')
         return EXIT_OK
     if action == 'cache':
         if process_running('steam') or process_running('steamwebhelper'):
@@ -1875,6 +1938,9 @@ def steam_drift_note():
     if state['slssteamDrift']:
         return ('SLSsteam changed since the pin (%s); re-pin after verifying: luna steam pin'
                 % ', '.join(state['slssteamDrift']))
+    if state['pinned'] and state['pacmanManaged'] and not state['pacmanIgnored']:
+        return ('Steam is pacman-managed and not ignored: a system update can replace the launcher; '
+                'add "IgnorePkg = steam" under [options] in /etc/pacman.conf (needs sudo)')
     if state['pinned'] and not state['updatesBlocked']:
         return 'a Steam build is pinned but updates are not blocked; run: luna steam recover or re-add steam.cfg'
     if state['pinned'] and not state['cacheReady'] and state['build'] and state['build'] != state['pinned']:
@@ -1935,6 +2001,11 @@ def cmd_install(options):
 
     write_install_snapshot()
     write_tooling()
+    if read_steam_pin():
+        # Base installers drop steam.cfg; a pin means updates must stay
+        # blocked, so re-apply Luna's block right away (Steam is closed here).
+        ensure_steam_cfg_block()
+        print('steam.cfg : update block re-applied (a Steam build is pinned)')
     print('\ninstalled: %s' % ', '.join('%s %s' % (name, addon_version(name)) for name in targets))
     print('bridge   : %s' % (addons_dir() / 'bridge.lua'))
     print('boot.lua : %s' % patcher('check').stdout.strip())

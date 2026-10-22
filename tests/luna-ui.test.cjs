@@ -131,7 +131,7 @@ function compressorFixture(overrides){
   return Object.assign(base,overrides||{});
 }
 
-function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,sgdbKey,edit,setEnabled,prefs}={}){
+function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient}={}){
   const calls=[];
   const hltbState=Object.assign({success:true,count:0,games:{},library:[]},hltb||{});
   hltbState.count=Object.keys(hltbState.games||{}).length;
@@ -232,8 +232,8 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
           addons:[{name:'luna',title:'sls-luna',version:'0.14.0',files:3},
             {name:'sgdb',title:'sls-sgdb',version:'0.2.0',files:2}]},
         steam:{root:'/home/tester/.local/share/Steam',exists:true,localconfigConflicts:2,
-          client:{build:'1791918634',pinned:'1791918634',match:true,updatesBlocked:true,
-            cachedBuild:'1791918634',cacheReady:true}},
+          client:Object.assign({build:'1791918634',pinned:'1791918634',match:true,updatesBlocked:true,
+            cachedBuild:'1791918634',cacheReady:true},(steamClient||{}))},
         data:{dir:'/home/tester/.local/share/slssteam-integrations',
           prefs:{version:1,store_hide_followed:false,beta:false,hltb_order:'short'},
           hltb:{cached:3533},sgdb:{hasKey:true},
@@ -960,6 +960,25 @@ test('a right-click artwork request opens the picker and applying calls the back
   const resetCall=calls.filter(entry=>entry.fn==='SlsSgdbReset').pop();
   assert.deepEqual(resetCall.payload,{appid:1145360,kind:'hero'});
   assert.match(textOf(document.getElementById('sls-luna-overlay')),/its own again/);
+});
+
+test('the Health page explains a drifted Steam client in plain words',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w}=fakeWindow(document,{steamClient:{build:'1799999999',pinned:'1791918634',match:false,
+    updatesBlocked:true,cachedBuild:'1791918634',cacheReady:true,
+    pacmanManaged:true,pacmanIgnored:false}});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Health'));
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/Needs attention/,'the attention section must lead');
+  assert.match(text,/luna steam recover/,'the drift must name the exact recovery command');
+  assert.match(text,/IgnorePkg = steam/,'the pacman gap must name the exact conf line');
 });
 
 test('the auto picker fills every slot and asks the agent for a live refresh',async()=>{
