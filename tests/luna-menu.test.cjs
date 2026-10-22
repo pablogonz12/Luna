@@ -11,8 +11,47 @@ const assert=require('node:assert/strict');
 const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlFor,nameOf,
   collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,ARTWORK_REQUEST_KEY,ARTWORK_LIVE_KEY,
   ARTWORK_LIVE_RESULT_KEY,setHltbRecords,hltbSortKey,applyHltbSortAs,restoreHltbSortAs,syncSortAs,
-  isSortDropdown,withSortOption,withFreshOverviews,withHltbOverlay,hltbMinutesFor,
-  handleArtworkLive}=require('../addons/luna/plugin/public/agent.js');
+  isSortDropdown,withSortOption,withFreshOverviews,hookHltbShelf,withHltbOverlay,hltbMinutesFor,
+  handleArtworkLive,refreshHltbData}=require('../addons/luna/plugin/public/agent.js');
+
+test('home HLTB shelves redraw after asynchronous times load, without remounting',()=>{
+  restoreHltbSortAs();
+  setHltbRecords({});
+  const tasks=[];
+  const apps=[{appid:1,display_name:'Alpha',sort_as:'alpha'},
+    {appid:2,display_name:'Zebra',sort_as:'zebra'},
+    {appid:3,display_name:'Missing',sort_as:'missing'}];
+  const w={appStore:{allApps:apps},setTimeout:fn=>tasks.push(fn)};
+  let unmounted=0;
+  class Shelf {
+    constructor(sort){this.props={showcase:{eSortBy:sort},collectionId:'games'};this.updates=0;}
+    ComputeChildSizes(){}
+    render(){this.order=apps.slice().sort((a,b)=>a.sort_as.localeCompare(b.sort_as)).map(a=>a.appid);}
+    forceUpdate(){this.updates++;this.render();}
+    componentWillUnmount(){unmounted++;}
+  }
+  const shelf=new Shelf(SORT_VALUE),other=new Shelf(1);
+  assert.equal(hookHltbShelf(Shelf,shelf.props,w),true);
+  shelf.render();other.render();
+  assert.deepEqual(shelf.order,[1,3,2],'no times initially: alphabetical');
+  setHltbRecords({'1':{main:3600},'2':{main:180}});
+  applyHltbSortAs(w);
+  applyHltbSortAs(w);
+  assert.equal(tasks.length,1,'coalesce refreshes outside render');
+  tasks.shift()();
+  assert.deepEqual(shelf.order,[2,1,3],'shortest first, missing last');
+  assert.equal(shelf.updates,1);
+  assert.equal(other.updates,0,'normal shelves must not be refreshed');
+  const long={...w,localStorage:{getItem:k=>k==='slsLunaHltbOrder'?'long':null}};
+  applyHltbSortAs(long);tasks.shift()();
+  assert.deepEqual(shelf.order,[1,2,3],'longest-first preference keeps missing last');
+  shelf.componentWillUnmount();other.componentWillUnmount();
+  assert.equal(unmounted,2,'preserve upstream cleanup');
+  applyHltbSortAs(w);
+  assert.equal(tasks.length,0,'unmounted instances are not retained');
+  assert.equal(hookHltbShelf(function Other(){},{showcase:{eSortBy:12},collectionId:'x'},w),false);
+  restoreHltbSortAs();
+});
 
 test('search URL trims and encodes the game name',()=>{
   assert.equal(searchUrlFor('  Hades  '),'https://howlongtobeat.com/?q=Hades');
@@ -58,6 +97,29 @@ function fixture(){
   class Inner{HideIfSubmenu(){} HideMenu(){} render(){}}
   return {React,jsx,item:MenuItem,Outer,Inner,originalJsx:jsx.jsx,originalJsxs:jsx.jsxs};
 }
+
+test('normal agent installation automatically hooks shelves before cached HLTB data arrives',async()=>{
+  restoreHltbSortAs();setHltbRecords({});
+  const tools=fixture(),tasks=[];
+  const apps=[{appid:1,display_name:'Alpha',sort_as:'alpha'},
+    {appid:2,display_name:'Zebra',sort_as:'zebra'}];
+  const w={appStore:{allApps:apps},setTimeout:fn=>tasks.push(fn),
+    localStorage:{getItem:k=>k==='AppGridDisplaySettings'?'{"eSortBy":12}':null,setItem(){}},
+    Millennium:{callServerMethod:()=>Promise.resolve({games:{'1':{main:7200},'2':{main:120}}})}};
+  class Shelf {
+    constructor(){this.props={showcase:{eSortBy:SORT_VALUE},collectionId:'games'};}
+    ComputeChildSizes(){}
+    render(){this.order=apps.slice().sort((a,b)=>a.sort_as.localeCompare(b.sort_as)).map(a=>a.appid);}
+    forceUpdate(){this.render();}
+  }
+  const menu=installLunaMenu(w,tools),shelf=new Shelf();
+  tools.jsx.jsx(Shelf,shelf.props); // Steam's normal JSX path, no manual hook.
+  shelf.render();assert.deepEqual(shelf.order,[1,2]);
+  await refreshHltbData(w);syncSortAs(w); // The agent's normal async startup/beat.
+  tasks.splice(0).forEach(fn=>fn());
+  assert.deepEqual(shelf.order,[2,1]);
+  shelf.componentWillUnmount();menu.dispose();restoreHltbSortAs();
+});
 
 function webpackFixture(requireName){
   const React={createElement:(type,props,...children)=>{
