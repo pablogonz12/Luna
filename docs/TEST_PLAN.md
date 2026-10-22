@@ -42,3 +42,16 @@ open or closed.
 Record the environment, the commands, the observed output and any screenshot.
 State which gates were **not** run and why. Never commit Steam credentials, tokens
 or account identifiers.
+# HLTB view-local sorting regression checks (0.14.15)
+
+- Home: select HowLongToBeat on All Games and leave another shelf alphabetical
+  or Hours Played. Check ascending numeric times, unknown times last, then
+  navigate away/back and leave the view untouched for more than five minutes.
+- Collections: repeat with installed games, a user collection, filtering and
+  both short/long preferences. No other dropdown may reset this view's order.
+- Start Steam with HLTB selected before cache loading completes. Both home and
+  collection layouts must refresh automatically when the cache arrives/changes.
+- Alphabetical and Hours Played views must keep Steam's own sort and label;
+  stale `AppGridDisplaySettings`/`slsLunaSortLive` must not relabel them HLTB.
+- Shared app objects and collection arrays must remain unmodified. Mount/unmount
+  a collection repeatedly; only mounted HLTB views subscribe to refreshes.
