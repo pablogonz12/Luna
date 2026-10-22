@@ -2805,6 +2805,16 @@
         + (lumen.bridge ? ' \u00b7 bridge present' : ' \u00b7 bridge missing'));
       line('Boot: ' + (boot.path || '?'));
       line('Steam: ' + (steam.root || '?') + (steam.exists ? '' : ' (steam.sh missing)'));
+      const client = steam.client || {};
+      if (client.build || client.pinned) {
+        line('Steam client: ' + (client.build || '?')
+          + (client.pinned ? (client.match ? ' \u00b7 pinned ' + client.pinned + ' \u2713' : ' \u00b7 PINNED ' + client.pinned + ' \u2014 drifted') : ' \u00b7 not pinned')
+          + ' \u00b7 updates ' + (client.updatesBlocked ? 'blocked' : 'allowed')
+          + (client.cacheReady ? ' \u00b7 cache ready (' + (client.cachedBuild || '?') + ')' : ''));
+        if (client.pinned && !client.match) {
+          line('Steam drift: close Steam on this machine, then run: luna steam recover');
+        }
+      }
       if (Number(steam.localconfigConflicts || 0) > 0) {
         line('Steam sync conflicts: ' + steam.localconfigConflicts + ' localconfig cop'
           + (Number(steam.localconfigConflicts) === 1 ? 'y' : 'ies')

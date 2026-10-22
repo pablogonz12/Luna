@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.14.8'
+local VERSION = '0.14.9'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local lumen_root = home .. '/.local/share/Lumen'
@@ -593,6 +593,39 @@ local function count_steam_conflicts()
   return count
 end
 
+local function steam_client_state()
+  -- What `luna steam status` reports on the shell, read-only for the menu:
+  -- running build, pin, match, update block and local package cache.
+  local state = { build = '', pinned = '', match = false, updatesBlocked = false,
+    cachedBuild = '', cacheReady = false }
+  local steam_root = home .. '/.local/share/Steam'
+  local log_path = steam_root .. '/logs/console_log.txt'
+  local handle = io.open(log_path, 'rb')
+  if handle then
+    local size = handle:seek('end') or 0
+    handle:seek('set', math.max(0, size - 65536))
+    local tail = handle:read('*a') or ''
+    handle:close()
+    for build in tail:gmatch('Client version:%s*(%d+)') do state.build = build end
+  end
+  local tools = home .. '/.local/share/Lumen/sls-luna'
+  local pin_raw = read_file(tools .. '/steam-pin.json')
+  if pin_raw then
+    local ok, pin = pcall(json.decode, pin_raw)
+    if ok and type(pin) == 'table' then state.pinned = tostring(pin.clientBuild or '') end
+  end
+  local cfg = read_file(steam_root .. '/steam.cfg')
+  state.updatesBlocked = cfg ~= nil and cfg:find('BootStrapperInhibitAll', 1, true) ~= nil
+  local cache_build = read_file(tools .. '/steam-client-cache/build.txt')
+  if cache_build then
+    state.cachedBuild = cache_build:gsub('%s+', '')
+    state.cacheReady = state.cachedBuild ~= ''
+      and path_exists(tools .. '/steam-client-cache/package')
+  end
+  state.match = state.build ~= '' and state.pinned ~= '' and state.build == state.pinned
+  return state
+end
+
 local function build_health()
   local lumen_root = home .. '/.local/share/Lumen'
   local boot_path = lumen_root .. '/lua/boot.lua'
@@ -652,6 +685,7 @@ local function build_health()
       root = steam_root,
       exists = path_exists(steam_root .. '/steam.sh'),
       localconfigConflicts = count_steam_conflicts(),
+      client = steam_client_state(),
     },
     data = {
       dir = data_dir,
