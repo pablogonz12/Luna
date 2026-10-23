@@ -427,6 +427,12 @@ out = call('SlsLunaInfo')
 assert(out.prefs.beta == true and out.prefs.hltb_order == 'long', 'the client settings did not persist')
 out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'beta', value = 'yes' }) })
 assert(out.success == false, 'a wrongly typed beta value was accepted')
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'lang', value = 'es' }) })
+assert(out.success == true and out.prefs.lang == 'es', 'the language preference was not saved')
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'lang', value = 'fr' }) })
+assert(out.success == false, 'an unknown language was accepted')
+out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'lang', value = 'en' }) })
+assert(out.success == true and out.prefs.lang == 'en', 'the language preference did not switch back')
 
 -- Health: read-only diagnostics, tolerant of a bare environment.
 out = call('SlsLunaHealth')
@@ -441,6 +447,28 @@ assert(type(out.health.data) == 'table' and type(out.health.data.prefs) == 'tabl
 assert(out.health.data.prefs.beta == true, 'the health report does not carry the preferences')
 assert(type(out.health.steam.client) == 'table', 'the Steam client block is missing')
 
+-- Steam client detection: a zero report carries no information, and the
+-- installed package manifest wins when runtime logs are stale or missing.
+local fake_steam = os.getenv('HOME') .. '/.local/share/Steam'
+assert(os.execute('mkdir -p ' .. string.format('%q', fake_steam .. '/package')))
+assert(os.execute('mkdir -p ' .. string.format('%q', fake_steam .. '/logs')))
+local function steam_build()
+  return call('SlsLunaHealth').health.steam.client.build
+end
+assert(steam_build() == '', 'no logs or manifest must mean no reported build')
+local manifest = io.open(fake_steam .. '/package/steam_client_ubuntu12.manifest', 'wb')
+manifest:write('"ubuntu12"\n{\n\t"version"\t\t"1792618285"\n}\n')
+manifest:close()
+assert(steam_build() == '1792618285', 'the installed manifest is ground truth without logs')
+local clog = io.open(fake_steam .. '/logs/console_log.txt', 'wb')
+clog:write('[x] Client version: 0\n')
+clog:close()
+assert(steam_build() == '1792618285', 'a zero report must not override the manifest')
+clog = io.open(fake_steam .. '/logs/console_log.txt', 'wb')
+clog:write('[x] Client version: 111\n[x] Client version: 222\n')
+clog:close()
+assert(steam_build() == '222', 'the newest nonzero runtime report still wins')
+
 -- Steam client queue: status, queue, cancel round-trip in disposable HOME.
 out = call('SlsLunaSteam', { raw = json.encode({ action = 'status' }) })
 assert(out.success == true and type(out.steam) == 'table', 'the Steam status was not returned')
@@ -453,7 +481,19 @@ out = call('SlsLunaSteam', { raw = json.encode({ action = 'queue-cache' }) })
 assert(out.success == false, 'a second queue must be refused while one stands')
 out = call('SlsLunaSteam', { raw = json.encode({ action = 'cancel' }) })
 assert(out.success == true and out.steam.pending == '', 'cancel must clear the queue')
+out = call('SlsLunaRefresh')
+assert(out.success == true and out.refreshPending == false, 'a fresh harness has no refresh queued')
+out = call('SlsLunaRefresh', { raw = json.encode({ action = 'queue' }) })
+assert(out.success == true and out.refreshPending == true, 'queueing must report the refresh')
+out = call('SlsLunaRefresh', { raw = json.encode({ action = 'queue' }) })
+assert(out.success == false, 'a second refresh queue must be refused while one stands')
+out = call('SlsLunaRefresh', { raw = json.encode({ action = 'cancel' }) })
+assert(out.success == true and out.refreshPending == false, 'cancel must clear the refresh')
+out = call('SlsLunaRefresh', { raw = json.encode({ action = 'nonsense' }) })
+assert(out.success == false, 'an unknown refresh action must be refused')
 out = call('SlsLunaSteam', { raw = json.encode({ action = 'pin' }) })
 assert(out.success == false, 'pin with no updater copy and no Steam log must fail closed')
+out = call('SlsLunaRepair')
+assert(out.success == false, 'repair with no updater copy must fail closed, not shell out')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs, health')

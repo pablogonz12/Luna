@@ -85,6 +85,9 @@ esac
     systemctl = directory / 'systemctl'
     systemctl.write_text('#!/bin/sh\ncase "$2" in is-enabled) echo enabled;; is-active) echo active;; esac\nexit 0\n')
     systemctl.chmod(0o755)
+    niri = directory / 'niri'
+    niri.write_text('#!/bin/sh\nexit 1\n')
+    niri.chmod(0o755)
     return directory
 
 
@@ -106,6 +109,8 @@ class LunaTestCase(unittest.TestCase):
         (self.data / 'playtime/76561190000000000.json').write_text('{"version":2,"games":{}}')
         self.bin = stub_bin(self.home)
         self.env = dict(os.environ, HOME=str(self.home),
+                        XDG_DATA_HOME=str(self.home / '.local/share'),
+                        XDG_RUNTIME_DIR=str(self.home / 'run'),
                         PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', ''))
 
     def tearDown(self):
@@ -168,12 +173,52 @@ class LunaTestCase(unittest.TestCase):
         self.assertIn('Nothing to do', result.stdout)
         self.assertEqual(self.boot.read_bytes(), before)
 
+    def test_install_reinstalls_bridge_after_a_base_update(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        # A Lumen/Moon update replaces boot.lua and wipes the bridge while the
+        # payloads stay current. Install must repair that, not claim idleness.
+        self.boot.write_text(UPSTREAM)
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('reinstall', result.stdout)
+        self.assertEqual(self.boot.read_text().count('SLS-ADDONS-INTEGRATION'), 1)
+        again = self.luna('install')
+        self.assertIn('Nothing to do', again.stdout)
+
     def test_dry_run_writes_nothing(self):
         result = self.luna('install', '--dry-run')
         self.assertEqual(result.returncode, 0)
         self.assertIn('DRY RUN', result.stdout)
         self.assertFalse(self.addons.exists())
+        self.assertFalse((self.home / '.local/share/applications').exists())
         self.assertEqual(self.boot.read_text(), UPSTREAM)
+
+    def test_install_generates_steam_machine_shortcuts_automatically(self):
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        entry = self.home / '.local/share/applications/luna-steam-machine-1920x1080-60.desktop'
+        self.assertIn('Actions=FreePointer;', entry.read_text())
+        self.assertTrue((self.home / '.local/bin/luna-steam-machine').is_file())
+        self.assertTrue((self.home / '.local/share/Lumen/sls-luna/steam-machine.py').is_file())
+
+    def test_install_can_explicitly_skip_shortcuts(self):
+        self.assertEqual(self.luna('install', '--no-steam-machine').returncode, 0)
+        self.assertFalse((self.home / '.local/bin/luna-steam-machine').exists())
+
+    def test_identical_reinstall_repairs_missing_shortcut(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        entry = self.home / '.local/share/applications/luna-steam-machine-1920x1080-60.desktop'
+        entry.unlink()
+        self.assertEqual(self.luna('install').returncode, 0)
+        self.assertTrue(entry.is_file())
+
+    def test_full_uninstall_removes_owned_shortcuts_but_not_custom_ones(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        custom = self.home / '.local/share/applications/my-steam-machine.desktop'
+        custom.write_text('custom user launcher')
+        self.assertEqual(self.luna('uninstall').returncode, 0)
+        self.assertFalse((self.home / '.local/bin/luna-steam-machine').exists())
+        self.assertEqual(custom.read_text(), 'custom user launcher')
 
     def test_install_only_one_addon(self):
         result = self.luna('install', '--only', 'playtime')
@@ -372,7 +417,7 @@ class LunaTestCase(unittest.TestCase):
         with tarfile.open(bundles[0]) as tar:
             names = tar.getnames()
         prefix = 'luna-%s/' % self.bundle_version()
-        for expected in ('vendor/MANIFEST.json', 'scripts/luna.py', 'scripts/patch-lumen.py',
+        for expected in ('vendor/MANIFEST.json', 'scripts/luna.py', 'scripts/steam-machine.py', 'scripts/patch-lumen.py',
                          'bridge/bridge.lua', 'addons/luna/plugin/plugin.json',
                          'addons/playtime/plugin/backend/main.lua'):
             self.assertIn(prefix + expected, names)
@@ -915,6 +960,37 @@ class LunaTestCase(unittest.TestCase):
                          'a consumed queue must be cleared')
         last = json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
         self.assertEqual(last['steamBuild'], '333')
+
+    def test_autoupdate_applies_a_queued_refresh_with_steam_closed(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        steam = self.home / '.local/share/Steam'
+        (steam / 'logs').mkdir(parents=True)
+        (steam / 'logs/console_log.txt').write_text('Client version: 222\n')
+        package = steam / 'package'
+        package.mkdir(parents=True)
+        (package / 'bins.dat').write_text('refresh-bytes')
+        (package / 'steam_client_ubuntu12.manifest').write_text('"ubuntu12"\n{\n"version"\t\t"222"\n}\n')
+        updater = self.home / 'fake-steam-refresh.sh'
+        updater.write_text('#!/bin/sh\n'
+                          'if [ "$1" = "-shutdown" ]; then exit 0; fi\n'
+                          'sed -i \'s/"version"[[:space:]]*"[0-9]*"/"version" "999"/\' "%s"\n'
+                          'echo "[x] Client version: 999" >> "%s"\n'
+                          % (package / 'steam_client_ubuntu12.manifest',
+                             steam / 'logs/console_log.txt'))
+        updater.chmod(0o755)
+        tools = self.home / '.local/share/Lumen/sls-luna'
+        (tools / 'pending-refresh.json').write_text(json.dumps({'at': 1}))
+        (self.data / 'luna.json').write_text(json.dumps({'version': 1, 'auto_update': 'off'}))
+        _, benv = self.bundle_and_env()
+        benv = dict(benv, LUNA_STEAM_SH=str(updater))
+        result = self.luna('autoupdate', '--verbose', env=benv)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        last = json.loads((tools / 'autoupdate.json').read_text())
+        self.assertIn('999', last.get('refresh', ''), 'the timer must report the refresh')
+        self.assertEqual(last['steamPinned'], '999')
+        self.assertEqual((tools / 'steam-client-cache/build.txt').read_text().strip(), '999')
+        self.assertFalse((tools / 'pending-refresh.json').exists(),
+                         'a consumed refresh must be cleared')
 
     def test_steam_pin_falls_back_to_package_manifest(self):
         steam = self.home / '.local/share/Steam'
