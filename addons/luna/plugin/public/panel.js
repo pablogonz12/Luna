@@ -1788,36 +1788,109 @@
       if (document.getElementById(OVERLAY_ID)) paint();
     };
 
-    // The DOM-level pieces (game-page stat cell, SORT BY label) are refreshed
-    // on a debounce: data changes, navigation and Steam re-renders all funnel
-    // through here without touching React.
-    let overlayTimer = null;
-    function refreshDomOverlays() {
-      let stored = null;
-      let live = null;
-      try {
-        stored = JSON.parse((w.localStorage && w.localStorage.getItem('AppGridDisplaySettings')) || '{}').eSortBy;
-        live = w.localStorage && w.localStorage.getItem('slsLunaSortLive');
-      } catch (_) { /* storage unavailable */ }
-      // The stored choice is the fallback truth; once the agent has seen the
-      // live dropdown, only the live value may claim the label.
-      const liveValue = (live === null || live === undefined || live === '') ? stored : Number(live);
-      enforceSortLabel(document, liveValue);
-    }
-    function scheduleOverlayRefresh(delay) {
-      if (overlayTimer) return;
-      const schedule = w.setTimeout || setTimeout;
-      overlayTimer = schedule(() => { overlayTimer = null; refreshDomOverlays(); }, delay || 800);
-    }
-
     async function refreshHltb() {
       try {
         hltb = await rpc(w, 'SlsHltbGet');
       } catch (error) {
         hltb = hltb || {};
       }
-      scheduleOverlayRefresh(150);
+      try { refreshLibraryShelves(); } catch (_) { /* shelves render later */ }
       repaintIfOpen();
+      refreshLibraryShelves();
+    }
+
+    /* View-local HLTB sorting for this library window. Home shelves are class
+       instances with their own m_fnSort(collection, comparator); patching the
+       instance keeps every shelf independent: an HLTB shelf sorts numerically
+       by cached times (unknown last, either direction), any other shelf keeps
+       Steam's own sorter. Shared app objects are never mutated. */
+    function hltbSecondsHere(appid) {
+      const games = (hltb && hltb.games) || {};
+      const record = games[String(appid)];
+      if (!record || record.match === 'none') return null;
+      const value = Number(record.main) || Number(record.all) || Number(record.extra) || 0;
+      return value > 0 ? value : null;
+    }
+    function compareHltbHere(a, b) {
+      const order = hltbOrder();
+      const left = hltbSecondsHere(a && a.appid), right = hltbSecondsHere(b && b.appid);
+      if (left == null && right != null) return 1;
+      if (right == null && left != null) return -1;
+      if (left != null && right != null && left !== right) {
+        return order === 'long' ? right - left : left - right;
+      }
+      const an = (a && (a.display_name || a.name)) || '', bn = (b && (b.display_name || b.name)) || '';
+      return String(an).localeCompare(String(bn)) || Number(a && a.appid) - Number(b && b.appid);
+    }
+    function eachFiber(root, visit) {
+      const stack = [root];
+      while (stack.length) {
+        const node = stack.pop();
+        if (!node) continue;
+        try { visit(node); } catch (_) { /* keep scanning */ }
+        try { if (node.sibling) stack.push(node.sibling); } catch (_) {}
+        try { if (node.child) stack.push(node.child); } catch (_) {}
+      }
+    }
+    function libraryRootFiber() {
+      const divs = (document.querySelectorAll ? [...document.querySelectorAll('div')] : []);
+      const el = divs.find(candidate =>
+        Object.keys(candidate).some(key => key.indexOf('__reactFiber') === 0));
+      if (!el) return null;
+      let fiber = el[Object.keys(el).find(key => key.indexOf('__reactFiber') === 0)];
+      let depth = 0;
+      while (fiber && fiber.return && depth < 500) { fiber = fiber.return; depth += 1; }
+      return fiber;
+    }
+    function patchShelfInstance(instance) {
+      if (!instance || instance.__slsHltbShelf) return false;
+      if (typeof instance.m_fnSort !== 'function') return false;
+      const original = instance.m_fnSort;
+      instance.__slsHltbShelf = true;
+      instance.__slsOrigSort = original;
+      instance.m_fnSort = function (collection, comparator) {
+        try {
+          if (this.props && this.props.showcase && this.props.showcase.eSortBy === 12
+            && collection && Array.isArray(collection.visibleApps)) {
+            return collection.visibleApps.slice().sort(compareHltbHere);
+          }
+        } catch (_) { /* fall through to Steam's sorter */ }
+        return original.call(this, collection, comparator);
+      };
+      return true;
+    }
+    function refreshLibraryShelves() {
+      let root = null;
+      try { root = libraryRootFiber(); } catch (_) { root = null; }
+      if (!root) return 0;
+      let refreshed = 0;
+      eachFiber(root, node => {
+        const instance = node.stateNode;
+        const props = node.memoizedProps;
+        if (!instance || !props || !props.showcase) return;
+        if (props.showcase.eSortBy !== 12) {
+          if (instance.__slsHltbShelf && instance.__slsOrigSort) {
+            try { instance.m_fnSort = instance.__slsOrigSort; } catch (_) {}
+            instance.__slsHltbShelf = false;
+          }
+          return;
+        }
+        if (patchShelfInstance(instance) && typeof instance.forceUpdate === 'function') {
+          try { instance.forceUpdate(); refreshed += 1; } catch (_) {}
+        } else if (instance.__slsHltbShelf && typeof instance.forceUpdate === 'function') {
+          try { instance.forceUpdate(); refreshed += 1; } catch (_) {}
+        }
+      });
+      return refreshed;
+    }
+    let shelfTimer = null;
+    function scheduleShelfRefresh(delay) {
+      if (shelfTimer) return;
+      const schedule = w.setTimeout || setTimeout;
+      shelfTimer = schedule(() => {
+        shelfTimer = null;
+        refreshLibraryShelves();
+      }, delay == null ? 0 : delay);
     }
 
     async function forgetHltb(row) {
@@ -3470,6 +3543,7 @@
       } catch (error) {
         hltb = hltb || {};
       }
+      try { refreshLibraryShelves(); } catch (_) { /* shelves render later */ }
       try {
         sgdb = await rpc(w, 'SlsSgdbGet');
       } catch (error) {
@@ -3556,68 +3630,36 @@
     if (typeof w.addEventListener === 'function') {
       w.addEventListener('storage', event => {
         try {
-          if (event && typeof event.key === 'string'
-            && event.key !== 'slsLunaArtworkRequest') return;
+          if (event && typeof event.key === 'string') {
+            if (event.key === 'slsLunaArtworkRequest') { consumeArtworkRequest(); return; }
+            if (event.key === 'slsLunaHltbOrder') { scheduleShelfRefresh(0); return; }
+            return;
+          }
         } catch (_) { /* a bare emitter without a key still consumes */ }
         consumeArtworkRequest();
       });
     }
     (w.setTimeout || setTimeout)(() => { consumeArtworkRequest(); }, 2500);
-    // Keep the game-page HLTB cell and the SORT BY label in step with Steam's
-    // own rendering; a MutationObserver where available, a slow beat otherwise.
+    // Home-shelf HLTB order lives in this window: re-scan after navigation and
+    // re-apply after the cache or direction changes. No shared objects change.
+    (w.setTimeout || setTimeout)(() => { refreshLibraryShelves(); }, 3000);
+    (w.setTimeout || setTimeout)(() => { refreshLibraryShelves(); }, 9000);
+    w.setInterval(() => { refreshLibraryShelves(); }, 15000);
     if (typeof w.MutationObserver === 'function') {
-      const observer = new w.MutationObserver(() => scheduleOverlayRefresh());
-      observer.observe(document.body, { childList: true, subtree: true });
-    } else {
-      w.setInterval(refreshDomOverlays, 3000);
+      try {
+        const seen = new w.MutationObserver(() => { scheduleShelfRefresh(800); });
+        seen.observe(document.body || document, { childList: true, subtree: true });
+      } catch (_) { /* a static view simply keeps its current order */ }
     }
-    scheduleOverlayRefresh(1500);
     // Resume a background fetch pass after a Steam restart without making the
     // user open the menu: load the local times and continue where it left off.
     (w.setTimeout || setTimeout)(async () => {
       try {
         hltb = await rpc(w, 'SlsHltbGet');
       } catch (_) { /* the backend may still be starting */ }
+      refreshLibraryShelves();
       maybeAutoFetch();
-      scheduleOverlayRefresh(150);
     }, 6000);
-  }
-
-  /* The library sort label. It is DOM-level because Steam's own label lookup
-     has no case for the Luna sort value, so a rehydrated choice
-     (localStorage) would otherwise render an empty SORT BY label. */
-
-  function firstTextLeaf(node) {
-    if (!node || !node.children) return null;
-    for (const child of node.children) {
-      if (!child.children || child.children.length === 0) {
-        const tag = String(child.tagName || '').toUpperCase();
-        if (tag === 'DIV' || tag === 'SPAN' || tag === '') return child;
-      } else {
-        const found = firstTextLeaf(child);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-
-  // Steam's own sort-label lookup has no case for the Luna value, so a
-  // rehydrated choice (localStorage) renders an empty SORT BY label. While the
-  // Luna value is the stored choice, put the label back - and only then.
-  function enforceSortLabel(document, storedValue) {
-    if (storedValue !== 12) return false;
-    const nodes = document.querySelectorAll ? document.querySelectorAll('div,span') : [];
-    for (const node of nodes || []) {
-      const text = (node.textContent || '').trim();
-      if (!/^sort by$/i.test(text) || !node.children || node.children.length !== 2) continue;
-      const leaf = firstTextLeaf(node.children[1]);
-      if (leaf && (leaf.textContent || '').trim() !== 'HowLongToBeat') {
-        leaf.textContent = 'HowLongToBeat';
-        return true;
-      }
-      return false;
-    }
-    return false;
   }
 
   /* Merged view of the agent-reported game list and the cached HowLongToBeat
@@ -3667,5 +3709,5 @@
         || (b.record.lastPlayed || 0) - (a.record.lastPlayed || 0) || a.name.localeCompare(b.name));
   }
 
-  return { mount, buildRows, buildHltbRows, enforceSortLabel, findMenubar, hours };
+  return { mount, buildRows, buildHltbRows, findMenubar, hours };
 });

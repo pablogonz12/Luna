@@ -37,24 +37,24 @@
     "luna": {
       "files": {
         "backend/main.lua": {
-          "sha256": "829ce1305d9d101112d585bef30cbb7ea5d4c020a23cde6ced1a83607cde9139",
+          "sha256": "63f8292c4011962b054036c65ff3eb7b13e13037110b25d47c8eec808c991c23",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
-          "sha256": "a85428e7317c34a7e2778b6e40cd61c13f24bc98683701afbff4023e4106bf31",
+          "sha256": "14d1c83ee3bcf2d5d3f2fbc55048df02cde3e8b38dbeef36638a705dc23d7700",
           "source_path": "plugin/plugin.json"
         },
         "public/agent.js": {
-          "sha256": "d03ae0d4c29ce322f1598acfd5ca8ff14db045d5c6ef3efe6d931c2eedfe765f",
+          "sha256": "3523c93d4053497e84b5a4a13409a14f483f343603341e48a7e0f290a177937e",
           "source_path": "plugin/public/agent.js"
         },
         "public/panel.js": {
-          "sha256": "c904845c6b8237e0e95dbadbbcc9922c93306e982543aeef7ad7a389f15662a8",
+          "sha256": "c2e28104025e65da7f39374e78f3a674ef8c4915e8e8fe89a163cfd2c40ceffe",
           "source_path": "plugin/public/panel.js"
         }
       },
-      "plugin_version": "0.14.14",
-      "source_commit": "0239100dac8a311935ede2bac3befabede4f4236",
+      "plugin_version": "0.14.16",
+      "source_commit": "unreleased",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -135,7 +135,7 @@
     },
     "scripts/steam-machine.py": {
       "sha256": "cb53a0d20c9a2770049501eed6ae2036428a38513abd21551fe0ac3f976bce1f",
-      "source_commit": "0239100dac8a311935ede2bac3befabede4f4236",
+      "source_commit": "unreleased",
       "source_path": "scripts/steam-machine.py",
       "source_repo": "https://github.com/pgm1207/Luna"
     }

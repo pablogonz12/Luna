@@ -3,7 +3,7 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
-## 0.14.14 - 2026-10-23
+## 0.14.16 - 2026-10-23
 
 - **One-command Steam+Luna refresh.** `luna refresh` (and a Health button)
   updates Steam to Valve's latest, pins and caches the new build, reinstalls
@@ -39,8 +39,29 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
   names/render profiles and backing up originals. Preserve custom edits; restore
   migrated originals on uninstall. Remove forced `killall -9` startup behaviour
   in favour of safe running-client refusals and a single-session lock.
-- HLTB home shelves invalidate only while sorted by Luna and only on key
-  changes, without remounting shelves or losing scroll state.
+
+## 0.14.15 - 2026-10-23
+
+- **HLTB sorting is view-local, not a shared app-store rewrite.** Sort home
+  shelves and collection grids directly by numeric completion times. Different
+  shelves/dropdowns cannot undo one another; no global sort healing, five-minute
+  activity timeout or writable `sort_as` field is needed. Cache and direction
+  changes refresh both layouts without remounting or mutating Steam app objects.
+- Remove the global DOM label override that could display "HowLongToBeat" on
+  an actually alphabetical view. Each dropdown now gets its label from its own
+  selection and options, not another shelf's last reported state.
+- Regression tests cover simultaneous independent views, late/changed/missing
+  times, both directions, immutable shared objects, functional-grid lifecycle,
+  sorter restoration on render failure and misleading stale global preferences.
+
+## 0.14.14 - 2026-10-22
+
+- **HowLongToBeat sorting refreshes automatically.** Home-library shelves now
+  redraw when cached completion times arrive after the initial render, when
+  times change, or when the sort direction changes. Shortest-first remains the
+  default, longest-first is respected, and games without times stay last.
+  No developer-console refresh or manual live fix is needed. Only HLTB shelves
+  are refreshed; scroll state and upstream component cleanup are preserved.
 
 ## 0.14.13 - 2026-10-22
 
