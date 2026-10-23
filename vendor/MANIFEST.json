@@ -54,7 +54,7 @@
         }
       },
       "plugin_version": "0.14.16",
-      "source_commit": "unreleased",
+      "source_commit": "176d0b80cb124a79df6d5e80d88b31ae4c52705a",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -119,7 +119,7 @@
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-10-23T13:31:01+02:00",
+  "generated": "2026-10-23T13:47:50+02:00",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "fa3e18871c8a4ca4f0da432f5de0242c741e3299e3d35ba8af143b25b088b101",
@@ -135,7 +135,7 @@
     },
     "scripts/steam-machine.py": {
       "sha256": "cb53a0d20c9a2770049501eed6ae2036428a38513abd21551fe0ac3f976bce1f",
-      "source_commit": "unreleased",
+      "source_commit": "176d0b80cb124a79df6d5e80d88b31ae4c52705a",
       "source_path": "scripts/steam-machine.py",
       "source_repo": "https://github.com/pgm1207/Luna"
     }
