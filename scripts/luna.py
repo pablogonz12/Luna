@@ -2709,7 +2709,7 @@ def cmd_install(options):
     if not getattr(options, 'no_steam_machine', False):
         code = steam_machine_action('install', migrate=getattr(options, 'migrate_steam_machine', False))
         if code:
-            print('Add-ons installed, but Steam Machine shortcuts need attention; no custom launchers were overwritten.', file=sys.stderr)
+            print('Add-ons installed, but SteamOS Mode shortcuts need attention; no custom launchers were overwritten.', file=sys.stderr)
             return code
     if read_steam_pin():
         # Base installers drop steam.cfg; a pin means updates must stay
@@ -2786,7 +2786,7 @@ def cmd_uninstall(options):
         pass
     print('Local playtime and presence data were left untouched.')
     if steam_machine_action('uninstall'):
-        print('Some Steam Machine shortcuts could not be removed; custom edits were preserved.', file=sys.stderr)
+        print('Some SteamOS Mode shortcuts could not be removed; custom edits were preserved.', file=sys.stderr)
     return EXIT_OK
 
 
@@ -2999,9 +2999,9 @@ def build_parser():
                                default=os.environ.get('LUNA_KEEP_STEAM_CLIENT') == '1',
                                help='skip the default verified Steam compatibility downgrade')
             child.add_argument('--no-steam-machine', action='store_true',
-                               help='do not generate Steam Machine application shortcuts')
+                               help='do not generate SteamOS Mode application shortcuts')
             child.add_argument('--migrate-steam-machine', action='store_true',
-                               help='back up and upgrade recognized legacy Steam Machine shortcuts')
+                               help='back up, rename and upgrade recognized legacy launchers to SteamOS Mode')
         if name == 'refresh':
             child.add_argument('--dry-run', action='store_true',
                                help='print the plan without updating or writing')

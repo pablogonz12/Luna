@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.14.16'
+local VERSION = '0.14.17'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local lumen_root = home .. '/.local/share/Lumen'
@@ -898,6 +898,24 @@ function M.register(registry)
       return reply({ success = true, refreshPending = false })
     end
     return reply({ success = false, error = 'Unknown refresh action.' })
+  end
+
+  -- SteamOS Mode shortcuts for the Settings page. Creating them only writes
+  -- .desktop entries (one per detected screen) plus the managed helper, so it
+  -- is safe while Steam runs; refreshing the menu picks them up.
+  registry.SlsLunaLaunchers = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
+    local tools = home .. '/.local/share/Lumen/sls-luna'
+    if action == '' or action == 'status' then
+      return reply({ success = true, helper = path_exists(tools .. '/steam-machine.py') })
+    end
+    if action == 'create' then
+      local out, err = run_updater('launchers')
+      if not out then return reply({ success = false, error = err }) end
+      return reply({ success = true, message = (out:gsub('%s+$', '')) })
+    end
+    return reply({ success = false, error = 'Unknown launchers action.' })
   end
 
   -- Whole local cache: appid -> record, plus the game list the agent reported.

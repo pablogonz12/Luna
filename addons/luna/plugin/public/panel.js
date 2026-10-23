@@ -1682,6 +1682,7 @@
     const HLTB_ORDER_KEY = 'slsLunaHltbOrder';
     const BETA_KEY = 'slsLunaBeta';
     let betaNotice = null;
+    let steamosNotice = null;
     function localItem(key) {
       try { return w.localStorage ? w.localStorage.getItem(key) : null; } catch (_) { return null; }
     }
@@ -2876,6 +2877,11 @@
         lastNoticed: drift => 'Last unattended run noticed: ' + drift,
         refreshExplainer: 'Refresh is the whole flow in one button: it never downgrades, never touches games or '
           + 'accounts, and refuses while Steam runs instead of closing anything.',
+        steamosMode: 'SteamOS Mode',
+        steamosDesc: 'Big-Picture shortcuts, one per detected screen (SteamOS (1080p 60), SteamOS (4K 60), ...), '
+          + 'with the SDL mouse compatibility this machine uses. Creating them again is safe: unchanged '
+          + 'Luna shortcuts are deduplicated, custom launchers are never touched.',
+        createShortcuts: 'Create shortcuts',
       },
       es: {
         intro: 'Solo diagnósticos locales: rutas, versiones, recuentos y tamaños. '
@@ -2941,6 +2947,11 @@
         lastNoticed: drift => 'La última ejecución desatendida detectó: ' + drift,
         refreshExplainer: 'Actualizar es todo el flujo en un botón: nunca baja de versión, nunca toca juegos ni '
           + 'cuentas, y se niega con Steam abierto en lugar de cerrar nada.',
+        steamosMode: 'SteamOS Mode',
+        steamosDesc: 'Accesos directos Big Picture, uno por pantalla detectada (SteamOS (1080p 60), SteamOS (4K 60), ...), '
+          + 'con la compatibilidad de ratón SDL que usa esta máquina. Volver a crearlos es seguro: los accesos '
+          + 'de Luna sin cambios se deduplican y los personalizados nunca se tocan.',
+        createShortcuts: 'Crear accesos directos',
       },
     };
     function healthBody() {
@@ -3309,6 +3320,7 @@
 
     function settingsBody() {
       const body = document.createElement('div');
+      const settingsT = HEALTH_TEXT[((lunaInfo && lunaInfo.prefs) || {}).lang] || HEALTH_TEXT.en;
       const note = document.createElement('p');
       note.className = 'sls-luna-note';
       note.innerHTML = 'Luna hides in-development pages behind the switch below. Everything else in the '
@@ -3319,6 +3331,12 @@
         const notice = document.createElement('p');
         notice.className = 'sls-luna-note';
         notice.textContent = betaNotice;
+        body.appendChild(notice);
+      }
+      if (steamosNotice) {
+        const notice = document.createElement('p');
+        notice.className = 'sls-luna-note';
+        notice.textContent = steamosNotice;
         body.appendChild(notice);
       }
 
@@ -3384,7 +3402,37 @@
         langRow.appendChild(button);
       });
       body.appendChild(langRow);
+      const steamosHeader = document.createElement('p');
+      steamosHeader.className = 'sls-luna-note';
+      steamosHeader.innerHTML = '<strong>' + settingsT.steamosMode + '</strong>';
+      body.appendChild(steamosHeader);
+      const steamosDesc = document.createElement('p');
+      steamosDesc.className = 'sls-luna-note';
+      steamosDesc.textContent = settingsT.steamosDesc;
+      body.appendChild(steamosDesc);
+      const steamosRow = document.createElement('div');
+      steamosRow.className = 'sls-luna-row';
+      const steamosButton = document.createElement('button');
+      steamosButton.className = 'sls-luna-btn';
+      steamosButton.textContent = settingsT.createShortcuts;
+      steamosButton.onclick = () => createSteamosShortcuts();
+      steamosRow.appendChild(steamosButton);
+      body.appendChild(steamosRow);
       return body;
+    }
+
+    // SteamOS Mode shortcuts, one per detected screen. Creation only writes
+    // .desktop entries and the managed helper, so it never needs Steam closed.
+    async function createSteamosShortcuts() {
+      try {
+        const out = await rpc(w, 'SlsLunaLaunchers', { raw: JSON.stringify({ action: 'create' }) });
+        steamosNotice = (out && out.message) ? String(out.message).slice(-200)
+          : 'SteamOS Mode shortcuts created.';
+      } catch (error) {
+        steamosNotice = 'Could not create SteamOS Mode shortcuts: '
+          + String(error && error.message ? error.message : error);
+      }
+      repaintIfOpen();
     }
 
     // The Health page language lives with the other prefs in the backend so
