@@ -51,7 +51,9 @@ class SteamClientTestCase(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(luna, 'home', return_value=self.home).start()
         mock.patch.object(luna, 'process_running', return_value=False).start()
-        mock.patch.dict(os.environ, {'HOME': str(self.home)}).start()
+        mock.patch.dict(os.environ, {'HOME': str(self.home),
+                                    'XDG_DATA_HOME': str(self.home / '.local/share'),
+                                    'XDG_RUNTIME_DIR': str(self.home / 'run')}).start()
         self.network = mock.patch.object(luna.urllib.request, 'urlopen', side_effect=AssertionError('unexpected network')).start()
         self.make_packages()
 
@@ -95,6 +97,48 @@ class SteamClientTestCase(unittest.TestCase):
     def snapshot(self):
         return {str(path.relative_to(self.home)): path.read_bytes()
                 for path in self.home.rglob('*') if path.is_file() and not path.is_symlink()}
+
+    def bump_updater(self):
+        updater = self.home / 'fake-refresh-update.sh'
+        updater.write_text(
+            '#!/bin/sh\nif [ "$1" = "-shutdown" ]; then exit 0; fi\n'
+            'sed -i \'s/"version"[[:space:]]*"[0-9]*"/"version" "999"/\' "%s"\n'
+            'echo "[x] Client version: 999" >> "%s"\nexit 0\n'
+            % (self.manifest, self.root / 'logs/console_log.txt'))
+        updater.chmod(0o755)
+        return updater
+
+    def test_refresh_updates_pins_caches_and_reinstalls(self):
+        updater = self.bump_updater()
+        with mock.patch.dict(os.environ, {'LUNA_STEAM_SH': str(updater)}):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(luna.cmd_refresh(argparse.Namespace(dry_run=False)), 0)
+        self.assertIn('999', out.getvalue())
+        self.assertEqual(luna.read_steam_pin()['clientBuild'], '999')
+        self.assertEqual((luna.steam_cache_dir() / 'build.txt').read_text().strip(), '999')
+        self.assertIn('BootStrapperInhibitAll=enable', (self.root / 'steam.cfg').read_text())
+        self.assertTrue((self.home / '.local/share/Lumen/sls-addons/luna/backend/main.lua').is_file())
+        boot = (self.home / '.local/share/Lumen/lua/boot.lua').read_text()
+        self.assertEqual(boot.count('SLS-ADDONS-INTEGRATION'), 1)
+        self.assertTrue(luna.steam_state()['match'])
+
+    def test_refresh_dry_run_writes_nothing(self):
+        before = self.snapshot()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(luna.cmd_refresh(argparse.Namespace(dry_run=True)), 0)
+        self.assertIn('DRY RUN', out.getvalue())
+        self.assertEqual(before, self.snapshot())
+
+    def test_refresh_refuses_while_steam_runs(self):
+        before = self.snapshot()
+        luna.process_running.side_effect = lambda name: name == 'steam'
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(luna.cmd_refresh(argparse.Namespace(dry_run=False)), 2)
+        finally:
+            luna.process_running.side_effect = None
+        self.assertEqual(before, self.snapshot())
+        self.network.assert_not_called()
 
     def test_default_install_extracts_binaries_and_installs_luna(self):
         marker = self.root / '.steam-enable-steamrt64-client'
@@ -186,9 +230,59 @@ class SteamClientTestCase(unittest.TestCase):
     def test_tampered_receipt_core_is_not_reported_as_verified(self):
         self.assertTrue(luna.ensure_compatible_steam()[0])
         (self.root / luna.STEAM_CORE_FILES[0]).write_bytes(b'not-the-installed-client')
-        self.assertEqual(luna.steam_client_build(), '999')
+        # The on-disk manifest (ground truth) wins over the stale runtime log.
+        self.assertEqual(luna.steam_client_build(), luna.STEAM_COMPAT_BUILD)
         self.assertFalse(luna.steam_state()['match'])
         self.assertIn('executables changed', luna.steam_drift_note())
+
+    def test_zero_version_reports_carry_no_information(self):
+        (self.root / 'logs/console_log.txt').write_text('Client version: 0\n')
+        (luna.luna_tools_dir() / 'steam-client-installed.json').unlink(missing_ok=True)
+        self.assertEqual(luna.steam_client_build(), luna.STEAM_COMPAT_BUILD)
+        (self.root / 'package/steam_client_ubuntu12.manifest').unlink()
+        (self.root / 'logs/console_log.txt').write_text('Client version: 999\nClient version: 0\n')
+        self.assertEqual(luna.steam_client_build(), '999')
+        (self.root / 'logs/console_log.txt').write_text('Client version: 0\n')
+        self.assertEqual(luna.steam_client_build(), '')
+
+    def test_cache_refuses_a_build_the_manifest_does_not_describe(self):
+        with self.assertRaisesRegex(ValueError, 'not 1791918635'):
+            luna._cache_client_packages('1791918635')
+        self.assertFalse((luna.steam_cache_dir() / 'package').exists())
+
+    def test_cache_accepts_an_explicit_build_matching_the_manifest(self):
+        options = argparse.Namespace(steam_action='cache', build=luna.STEAM_COMPAT_BUILD, now=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(luna.cmd_steam(options), 0)
+        self.assertEqual((luna.steam_cache_dir() / 'build.txt').read_text().strip(), luna.STEAM_COMPAT_BUILD)
+
+    def test_client_backups_are_pruned_to_the_newest_five(self):
+        backups = luna.luna_tools_dir() / 'steam-client-backups'
+        backups.mkdir(parents=True)
+        (backups / 'notes.txt').write_text('operator file, never touched')
+        for index in range(7):
+            (backups / str(1000 + index)).mkdir()
+        self.assertEqual(luna.prune_steam_client_backups(), 2)
+        remaining = sorted(p.name for p in backups.iterdir() if p.is_dir())
+        self.assertEqual(remaining, [str(1002 + index) for index in range(5)])
+        self.assertTrue((backups / 'notes.txt').is_file())
+
+    def test_updater_shuts_steam_back_down_after_a_relaunch(self):
+        shutdowns = self.home / 'shutdowns.log'
+        updater = self.home / 'fake-steam-update.sh'
+        updater.write_text('#!/bin/sh\necho "$@" >> "%s"\nexit 0\n' % shutdowns)
+        updater.chmod(0o755)
+        state = {'calls': 0}
+        def relaunched_once(name):
+            state['calls'] += 1
+            return state['calls'] == 4
+        luna.process_running.side_effect = relaunched_once
+        with mock.patch.dict(os.environ, {'LUNA_STEAM_SH': str(updater)}):
+            ok, message = luna._steam_force_update()
+        self.assertTrue(ok, message)
+        self.assertIn('updated by Valve', message)
+        self.assertIn('-shutdown', shutdowns.read_text())
+        self.assertGreaterEqual(state['calls'], 7)
 
     def test_protected_and_traversal_archive_paths_are_rejected(self):
         for name in ('../escape', '/absolute', 'userdata/credentials', 'steamapps/game', 'config/loginusers.vdf',

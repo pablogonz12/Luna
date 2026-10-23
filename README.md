@@ -112,23 +112,83 @@ python3 scripts/luna.py steam status    # running build, pin, cache, drift
 python3 scripts/luna.py steam pin       # pin the currently working build
 python3 scripts/luna.py steam cache     # copy its packages aside (Steam closed)
 python3 scripts/luna.py steam recover   # put the pinned build back (Steam closed)
+python3 scripts/luna.py refresh         # update Steam, pin, cache, reinstall Luna (Steam closed)
 ```
 
+**Refresh Steam + Luna** is the whole flow in one command (and one Health
+button): with Steam closed, it updates Steam to Valve's latest, pins and
+caches the new build, reinstalls the Luna add-ons keeping that client, and
+verifies. Every step fails closed with the exact next action; nothing is
+killed, no account/game/save data is touched, and `--dry-run` previews it.
+A queued refresh is applied by the user timer while Steam is closed, even
+with unattended updates off. The post-update shutdown is requested
+gracefully because Valve's bootstrapper relaunches Steam after updating;
+if it stays up, Luna reports it instead of proceeding.
+
 `pin` records the client build plus the SLSsteam hashes; `cache` copies the
-`package/` tree beside it with a hash manifest; `recover` verifies the cache,
+`package/` tree beside it with a hash manifest (an explicit `--build N` must
+match the installed manifest, so a stale log can never mislabel the cache);
+`recover` verifies the cache,
 extracts and verifies the actual client files, and re-applies the update block.
 A package manifest or `build.txt` alone is never proof of a downgrade. Old or
 incomplete caches without verifiable Valve packages are refused. The install
 receipt identifies the on-disk build using core executable hashes; the next
-Steam launch is still the runtime check. Before replacing files, Luna keeps
+Steam launch is still the runtime check. Build detection ignores
+`Client version: 0` reports (newer clients log that at startup) and prefers
+the installed manifest over stale log lines. Before replacing files, Luna keeps
 machine-local backups and a `restore.json` index under
-`~/.local/share/Lumen/sls-luna/steam-client-backups/`; a failed file transaction
-restores the prior client files. These backups are retained, not auto-deleted.
+`~/.local/share/Lumen/sls-luna/steam-client-backups/`; only the newest five are
+kept, the rest are pruned automatically. A failed file transaction
+restores the prior client files.
 `steam.cfg` settings unrelated to update blocking are preserved. This controls
 Steam's bootstrapper, not Fedora/DNF or other system package managers.
 `preflight`, the Health page and
 every unattended run report drift; with the update mode on Install, the timer
 recovers a drifted client from the cache by itself while Steam is closed.
+
+## Steam Machine shortcuts and mouse compatibility
+
+Installing or updating Luna generates application-menu shortcuts automatically:
+a portable **1080p60** target plus profiles detected from local displays. No
+machine's display settings, accounts or games are imported. Gamescope must be
+installed separately using the system package manager; entries remain hidden
+via `TryExec` until it is available.
+
+- The launcher uses the **SDL backend**. On Niri it also enables relative mouse
+  capture (`--force-grab-cursor`), following the
+  [Niri application-issues guidance](https://github.com/niri-wm/niri/wiki/Application-Issues#fullscreen-games).
+  This avoids the default nested Wayland backend's mouse-lock failures in games.
+- Right-click the shortcut and select **Launch with free mouse pointer** to keep
+  SDL but disable forced capture. The command-line equivalent is
+  `~/.local/bin/luna-steam-machine --mouse-mode free`.
+- Steam and games run on Gamescope's Xwayland display instead of inheriting
+  desktop-wide Wayland-only SDL/GTK/Qt settings. An existing executable
+  `~/.local/bin/ccd-launch` CPU-policy helper is retained when available.
+- Launching while Steam/Lumen is already running shows an error. It **never
+  kills games or Steam**, and a lock prevents duplicate console sessions.
+- Profiles specify the nested rendering resolution and frame-rate target.
+  They do **not** enable/disable monitors, change the desktop refresh rate or
+  claim to route a nested window using Gamescope's embedded-only `-O` option.
+
+Existing custom launchers are preserved. To upgrade recognized old
+`steam-machine*.desktop` entries (including the old forced-kill wrappers), use:
+
+```bash
+python3 scripts/luna.py launchers --dry-run --migrate-legacy
+python3 scripts/luna.py launchers --migrate-legacy
+```
+
+Recognized resolution/refresh/name profiles are retained, originals are backed
+up under `~/.local/share/Lumen/sls-luna/steam-machine-backups/`, and unchanged
+Luna-owned duplicates are removed. Unknown custom commands or flags are never
+silently replaced. Full uninstall removes only unchanged Luna-owned shortcuts
+and restores migrated originals; edited entries are left alone.
+
+`bash install.sh --no-steam-machine` skips shortcut generation for that install;
+`--migrate-steam-machine` explicitly upgrades recognized old entries during
+installation. `--dry-run` writes nothing. Launcher errors are logged locally in
+`~/.local/state/Luna/steam-machine.log`; the desktop version, games and input
+behaviour still require an on-device check after changing the backend.
 
 ## Health
 
@@ -136,6 +196,13 @@ The **Health** page in the Luna menu reports what a bug report needs: installed
 add-on versions against the pinned bundle, `boot.lua` patch markers and backup,
 Lumen/Steam paths, the current settings, and the data files with sizes. *Copy
 diagnostics* puts the whole report on the clipboard.
+
+If a base update wipes the bridge, Health names it and offers **Repair
+bridge** (Steam must be closed); the shell equivalent is
+`python3 scripts/luna.py install --keep-steam-client`, which reinstalls the
+bridge even when every payload is already current. The attention list, headers
+and action buttons switch to Spanish when Settings → Language is Español;
+paths and bug-report dumps stay in English in both languages.
 
 ## How Luna fits into the stack
 
@@ -260,6 +327,10 @@ source.
 bash scripts/test-all.sh                   # everything CI runs: UI, backends, installer
 python3 scripts/luna.py verify --sources   # also compares against local checkouts
 ```
+
+Hosted GitHub Actions is currently blocked by account billing limits, so no
+hosted run is claimed as a release gate: the local `test-all.sh` run above is
+the gate, and its result is recorded on the release PR.
 
 Luna is a private preview. Versions, supported distributions, optional installs,
 and feature availability will be documented here as they are implemented and

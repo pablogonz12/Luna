@@ -33,6 +33,9 @@ Commands:
     luna steam status|pin|cache|recover manage the Steam client build: pin the
                                         working build, cache its packages, recover
                                         it after an unwanted update
+    luna refresh [--dry-run]            update Steam to Valve's latest, pin and
+                                        cache it, then reinstall Luna on top
+                                        (Steam closed; never kills anything)
 """
 import argparse
 import hashlib
@@ -983,7 +986,8 @@ def cmd_release(options):
     entries = [
         ('addons', ROOT / 'addons'),
         ('vendor/MANIFEST.json', MANIFEST_PATH),
-        ('scripts/luna.py', ROOT / 'scripts' / 'luna.py'),
+         ('scripts/luna.py', ROOT / 'scripts' / 'luna.py'),
+        ('scripts/steam-machine.py', ROOT / 'scripts' / 'steam-machine.py'),
         ('scripts/patch-lumen.py', PATCHER),
         ('bridge/bridge.lua', BRIDGE_SOURCE),
     ]
@@ -1382,10 +1386,13 @@ def cmd_autoupdate(options):
     prefs = read_json_file(data_dir() / 'luna.json') or {}
     mode = str(prefs.get('auto_update') or 'off')
     pending = read_json_file(pending_path) or {}
+    pending_refresh = read_refresh_pending()
     verbose = bool(getattr(options, 'verbose', False))
     write_heartbeat()
+    extra_result = {}
 
     def record(payload):
+        payload.update(extra_result)
         payload['mode'] = mode
         payload['at'] = int(time.time())
         snapshot = steam_state()
@@ -1399,12 +1406,35 @@ def cmd_autoupdate(options):
             print(json.dumps(payload, sort_keys=True))
         return EXIT_OK
 
-    if mode not in ('notify', 'install') and not pending:
+    if mode not in ('notify', 'install') and not pending and not pending_refresh:
         return EXIT_OK
     acquired, reason = _acquire_lock(lock_path)
     if not acquired:
         return record({'result': 'deferred', 'reason': reason})
+    refresh_message = ''
     try:
+        # An explicit refresh request (Health page or `luna refresh --dry-run`
+        # planned it, the timer applies it): Steam to Valve's latest, then pin
+        # and cache, then hand the Luna add-ons to the normal bundle path
+        # below so the bridge and payloads land verified. Needs Steam closed
+        # like every other mutation; otherwise it waits for the next run.
+        if read_refresh_pending():
+            reasons = refuse_reasons(for_install=True)
+            if reasons:
+                return record({'result': 'deferred', 'reason': reasons[0],
+                               'refreshPending': True})
+            ok, message, build = _refresh_steam_side()
+            if not ok:
+                return record({'result': 'error', 'reason': message,
+                               'refreshPending': True})
+            refresh_message = message
+            extra_result['refresh'] = message
+            try:
+                refresh_pending_path().unlink()
+            except OSError:
+                pass
+            pending = {'tag': '', 'requestedAt': int(time.time())}
+            write_json_file(pending_path, pending)
         # The timer only runs while Steam is closed, which is exactly when a
         # pinned client can be restored safely. In install mode (explicit
         # consent via pin + mode) a drifted client is recovered from the local
@@ -1643,10 +1673,12 @@ def steam_tools_files():
 
 
 def steam_client_build():
-    """Verified installed binaries, then the last runtime report/metadata.
+    """Verified installed binaries, then the on-disk manifest, then runtime logs.
 
     A package manifest alone does NOT prove that its client was extracted.
     The install receipt is preferred only while the core executable hashes match.
+    Newer clients log "Client version: 0" at startup, so a zero report is
+    treated as "no information" rather than a build number.
     """
     receipt = read_json_file(luna_tools_dir() / 'steam-client-installed.json') or {}
     core = receipt.get('core') or {}
@@ -1657,6 +1689,15 @@ def steam_client_build():
                 return str(receipt.get('build') or '')
         except (OSError, ValueError):
             pass
+    try:
+        manifest = (steam_home() / 'package' / 'steam_client_ubuntu12.manifest').read_text(
+            encoding='utf-8', errors='replace')
+        found = re.findall(r'"version"\s+"(\d+)"', manifest)
+        manifest_build = next((build for build in reversed(found) if build != '0'), '')
+        if manifest_build:
+            return manifest_build
+    except OSError:
+        pass
     log = steam_home() / 'logs' / 'console_log.txt'
     try:
         size = log.stat().st_size
@@ -1667,18 +1708,13 @@ def steam_client_build():
             with open(log, 'rb') as handle:
                 handle.seek(max(0, size - 65536))
                 tail = handle.read().decode('utf-8', errors='replace')
-            found = re.findall(r'Client version:\s*(\d+)', tail)
+            found = [build for build in re.findall(r'Client version:\s*(\d+)', tail)
+                     if build != '0']
             if found:
                 return found[-1]
         except OSError:
             pass
-    try:
-        manifest = (steam_home() / 'package' / 'steam_client_ubuntu12.manifest').read_text(
-            encoding='utf-8', errors='replace')
-    except OSError:
-        return ''
-    found = re.findall(r'"version"\s+"(\d+)"', manifest)
-    return found[-1] if found else ''
+    return ''
 
 
 STEAM_CFG_BLOCK = ('BootStrapperInhibitAll=enable\n'
@@ -1924,13 +1960,71 @@ def _steam_force_update():
     if result.returncode != 0:
         tail = (result.stderr.strip() or result.stdout.strip())[-500:]
         return False, 'Steam updater exited %d: %s' % (result.returncode, tail)
-    return True, 'Steam client updated by Valve; block re-applied'
+    # The bootstrapper relaunches Steam after a successful update even with
+    # -exitsteam. Shut it back down gracefully: the caller asked for Steam to
+    # stay closed. Never kill processes; report if it is still up.
+    note = ('; block re-applied' if had_block
+            else '; updates currently allowed - pin the new build to block them')
+    if process_running('steam') or process_running('steamwebhelper'):
+        try:
+            subprocess.run([str(steam_sh_path()), '-shutdown'],
+                           capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            pass
+        deadline = time.monotonic() + 60
+        while deadline > time.monotonic():
+            if not (process_running('steam') or process_running('steamwebhelper')):
+                break
+            time.sleep(2)
+        if process_running('steam') or process_running('steamwebhelper'):
+            return False, ('Steam updated but is still running after a shutdown request; '
+                           'close it completely (Steam -> Exit) before pinning or installing' + note)
+    return True, 'Steam client updated by Valve' + note
+
+
+def prune_steam_client_backups(keep=5):
+    """Keep only the newest `keep` client rollback backups.
+
+    Each successful client install/recovery retains a full rollback copy, so
+    without pruning this directory grows without bound. Only directories whose
+    names are nanosecond timestamps (written by this installer) are touched;
+    anything else is left alone.
+    """
+    backups = luna_tools_dir() / 'steam-client-backups'
+    try:
+        entries = [entry for entry in backups.iterdir()
+                   if entry.is_dir() and entry.name.isdigit()]
+    except OSError:
+        return 0
+    entries.sort(key=lambda entry: int(entry.name))
+    removed = 0
+    for entry in entries[:-keep] if len(entries) > keep else []:
+        try:
+            shutil.rmtree(entry, ignore_errors=False)
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def _cache_client_packages(build):
-    """Snapshot the installed package tree into the local cache."""
+    """Snapshot the installed package tree into the local cache.
+
+    The cached manifest must describe `build`; a stale on-disk manifest (or a
+    mislabeled earlier cache) is refused instead of silently relabeled.
+    """
     source = steam_home() / 'package'
     cache = steam_cache_dir()
+    try:
+        installed_manifest = (source / STEAM_MANIFEST_NAME).read_text(
+            encoding='utf-8', errors='replace')
+    except OSError:
+        raise ValueError('no Steam package manifest at %s' % (source / STEAM_MANIFEST_NAME))
+    found = re.findall(r'"version"\s+"(\d+)"', installed_manifest)
+    installed_build = next((item for item in reversed(found) if item != '0'), '')
+    if installed_build != build:
+        raise ValueError('installed packages describe build %s, not %s; refusing to mislabel the cache'
+                         % (installed_build or 'unknown', build))
     if cache.exists():
         shutil.rmtree(cache, ignore_errors=True)
     shutil.copytree(source, cache / 'package', symlinks=False)
@@ -2215,8 +2309,11 @@ def ensure_compatible_steam():
             write_json_file(steam_pin_path(), {'clientBuild': STEAM_COMPAT_BUILD,
                                              'slssteam': slssteam_hashes(), 'at': int(time.time()),
                                              'by': installed_version()})
-        return True, ('installed and verified Steam client %s executables; updates blocked; backup: %s. '
-                      'Runtime version will be confirmed on the next Steam launch.' % (STEAM_COMPAT_BUILD, backup))
+            pruned = prune_steam_client_backups()
+        return True, ('installed and verified Steam client %s executables; updates blocked; backup: %s%s. '
+                      'Runtime version will be confirmed on the next Steam launch.'
+                      % (STEAM_COMPAT_BUILD, backup,
+                         '; pruned %d old backup(s)' % pruned if pruned else ''))
     except (OSError, ValueError, lzma.LZMAError, zipfile.BadZipFile) as error:
         return False, 'Steam client installation failed (not reported as a downgrade): %s' % error
 
@@ -2264,8 +2361,9 @@ def _recover_steam_client(want):
             backup = _install_steam_payload(payload, entries, want, packages)
     except (OSError, ValueError, lzma.LZMAError, zipfile.BadZipFile) as error:
         return False, 'could not recover Steam client executables: %s' % error
-    return True, ('recovered and verified Steam client %s executables; updates blocked; backup: %s'
-                  % (want, backup))
+    pruned = prune_steam_client_backups()
+    return True, ('recovered and verified Steam client %s executables; updates blocked; backup: %s%s'
+                  % (want, backup, '; pruned %d old backup(s)' % pruned if pruned else ''))
 
 
 def _apply_steam_update():
@@ -2290,6 +2388,87 @@ def _apply_steam_update():
     note = ('; cache is now stale and was dropped - re-pin after verifying, then re-cache'
             if not build else '; re-pin the new build %s after verifying, then re-cache' % build)
     return True, message + note
+
+
+def refresh_pending_path():
+    return luna_tools_dir() / 'pending-refresh.json'
+
+
+def read_refresh_pending():
+    pending = read_json_file(refresh_pending_path())
+    return pending if isinstance(pending, dict) else {}
+
+
+def _refresh_steam_side():
+    """Update Steam to Valve's latest, then pin and cache the new build.
+
+    Caller guarantees Steam and the sidecar are closed. Fails closed at each
+    step with the exact next action; never kills processes and never mislabels
+    the cache. Returns (ok, message, build).
+    """
+    try:
+        _steam_client_closed()
+    except ValueError as error:
+        return False, str(error), ''
+    if read_steam_pending():
+        return False, 'a Steam task is already queued; run: luna steam cancel first', ''
+    ok, message = _steam_force_update()
+    if not ok:
+        return False, message, ''
+    build = steam_client_build()
+    if not build:
+        return False, ('Steam updated, but the new build cannot be determined; '
+                       'launch Steam once, then run: luna steam pin [--build N]'), ''
+    pin = {'clientBuild': str(build), 'slssteam': slssteam_hashes(),
+           'at': int(time.time()), 'by': installed_version()}
+    try:
+        luna_tools_dir().mkdir(parents=True, exist_ok=True)
+        write_json_file(steam_pin_path(), pin)
+        ensure_steam_cfg_block()
+        _cache_client_packages(build)
+    except (OSError, ValueError) as error:
+        return False, 'Steam updated to %s, but pin/cache failed: %s' % (build, error), build
+    return True, 'Steam client %s updated, pinned, cached and blocked' % build, build
+
+
+def cmd_refresh(options):
+    """Wizard: bring Steam to Valve's latest and reinstall Luna on top.
+
+    Steam and Lumen must already be closed (this command never kills
+    anything). Steps: update, pin, cache, install add-ons keeping the new
+    client, verify. Any failure stops the wizard with the exact next action.
+    """
+    if options.dry_run:
+        print('refresh : would update Steam (closed), pin, cache, install Luna --keep-steam-client, verify')
+        print('\nDRY RUN: Steam stays untouched, nothing was written.')
+        return EXIT_OK
+    reasons = refuse_reasons(for_install=True)
+    if reasons:
+        print('REFUSING to refresh:')
+        for reason in reasons:
+            print('  - %s' % reason)
+        return EXIT_REFUSED
+    if read_refresh_pending() and False:
+        pass
+    ok, message, build = _refresh_steam_side()
+    print('refresh : %s' % message, file=sys.stdout if ok else sys.stderr)
+    if not ok:
+        return 1
+    install_options = argparse.Namespace(only=[], force=False, dry_run=False,
+                                         keep_steam_client=True, no_steam_machine=False,
+                                         migrate_steam_machine=False)
+    code = cmd_install(install_options)
+    if code != EXIT_OK:
+        print('refresh : Steam is on %s, but the Luna install needs attention (exit %d)'
+              % (build, code), file=sys.stderr)
+        return code
+    verify_options = argparse.Namespace(sources=False, source_dir=None)
+    code = cmd_verify(verify_options)
+    if code != EXIT_OK:
+        print('refresh : installed, but verification failed (exit %d)' % code, file=sys.stderr)
+        return code
+    print('\nrefresh : Steam %s + Luna installed and verified. Restart Steam to load the add-ons.' % build)
+    return EXIT_OK
 
 
 def cmd_steam(options):
@@ -2358,11 +2537,15 @@ def cmd_steam(options):
         if not source.is_dir():
             print('no Steam package directory to cache at %s' % source, file=sys.stderr)
             return 1
-        build = steam_client_build()
-        if not build:
+        build = str(options.build or '') or steam_client_build()
+        if not build or build == '0':
             print('cannot determine the client build; launch Steam once, then retry', file=sys.stderr)
             return 1
-        cache = _cache_client_packages(build)
+        try:
+            cache = _cache_client_packages(build)
+        except (OSError, ValueError) as error:
+            print('cannot cache the Steam client: %s' % error, file=sys.stderr)
+            return 1
         print('cached Steam client %s (%s)' % (build, cache))
         return EXIT_OK
     if action == 'update':
@@ -2455,14 +2638,26 @@ def cmd_install(options):
         return EXIT_PATCH
     rows = plan(targets)
     to_write = [row for row in rows if row[4] in ('new', 'differs')]
+    # A base (Lumen/Moon) update replaces boot.lua and wipes the bridge while
+    # the payloads stay current. That is not "nothing to do": reinstalling the
+    # bridge is part of every install, or Luna silently leaves the menu.
+    needs_bridge = 'bridge compatible, not installed' in check.stdout
     print('plan for %s:' % ', '.join(targets))
     for addon, label, source, dest, state in rows:
         print('  %-9s %-22s %s' % (addon, label, state))
+    if needs_bridge:
+        print('  bridge    boot.lua               reinstall (a base update wiped it)')
     if options.dry_run:
+        if not getattr(options, 'no_steam_machine', False):
+            code = steam_machine_action('install', dry_run=True,
+                                        migrate=getattr(options, 'migrate_steam_machine', False))
+            if code:
+                return code
         if not getattr(options, 'keep_steam_client', False):
             print('steam     : would install/verify build %s executables, cache, pin and block updates'
                   % STEAM_COMPAT_BUILD)
-        print('\nDRY RUN: %d file(s) would change, nothing was written.' % len(to_write))
+        print('\nDRY RUN: %d file(s) would change%s.' % (len(to_write),
+              ' + bridge reinstall' if needs_bridge else ', nothing was written'))
         return EXIT_OK
     differing = [row for row in to_write if row[4] == 'differs']
     if differing and not options.force:
@@ -2477,13 +2672,18 @@ def cmd_install(options):
         print('steam     : %s' % message, file=sys.stdout if ok else sys.stderr)
         if not ok:
             return 1
-    if not to_write:
+    if not to_write and not needs_bridge:
+        if not getattr(options, 'no_steam_machine', False):
+            code = steam_machine_action('install', migrate=getattr(options, 'migrate_steam_machine', False))
+            if code:
+                return code
         write_install_snapshot()
         write_tooling()
         if read_steam_pin():
             ensure_steam_cfg_block()
         print('\nAlready installed and identical to the pinned payloads. Nothing to do.')
         return EXIT_OK
+    only_bridge = needs_bridge and not to_write
 
     apply = Apply()
     try:
@@ -2506,12 +2706,19 @@ def cmd_install(options):
 
     write_install_snapshot()
     write_tooling()
+    if not getattr(options, 'no_steam_machine', False):
+        code = steam_machine_action('install', migrate=getattr(options, 'migrate_steam_machine', False))
+        if code:
+            print('Add-ons installed, but Steam Machine shortcuts need attention; no custom launchers were overwritten.', file=sys.stderr)
+            return code
     if read_steam_pin():
         # Base installers drop steam.cfg; a pin means updates must stay
         # blocked, so re-apply Luna's block right away (Steam is closed here).
         ensure_steam_cfg_block()
         print('steam.cfg : update block re-applied (a Steam build is pinned)')
     print('\ninstalled: %s' % ', '.join('%s %s' % (name, addon_version(name)) for name in targets))
+    if only_bridge:
+        print('bridge   : reinstalled into boot.lua (payloads were already current)')
     print('bridge   : %s' % (addons_dir() / 'bridge.lua'))
     print('boot.lua : %s' % patcher('check').stdout.strip())
     print('\nRestart Steam (Steam -> Exit, then launch it again) to load the add-ons.')
@@ -2578,6 +2785,8 @@ def cmd_uninstall(options):
     except Exception:  # noqa: BLE001 - uninstall must succeed even if systemd is absent
         pass
     print('Local playtime and presence data were left untouched.')
+    if steam_machine_action('uninstall'):
+        print('Some Steam Machine shortcuts could not be removed; custom edits were preserved.', file=sys.stderr)
     return EXIT_OK
 
 
@@ -2702,6 +2911,9 @@ def cmd_vendor(options):
     # checkout rather than fetched from another project.
     repo_commit = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
                                  capture_output=True, text=True).stdout.strip()
+    manifest['shared']['scripts/steam-machine.py'] = {
+        'source_repo': 'https://github.com/pgm1207/Luna', 'source_commit': repo_commit,
+        'source_path': 'scripts/steam-machine.py', 'sha256': sha256(ROOT / 'scripts/steam-machine.py')}
     for name in FIRST_PARTY:
         files = {}
         for source_rel, dest_rel in ADDON_FILES[name]:
@@ -2739,6 +2951,27 @@ def cmd_vendor(options):
     return EXIT_OK
 
 
+def steam_machine_action(action, dry_run=False, migrate=False):
+    script = ROOT / 'scripts/steam-machine.py'
+    if not script.is_file():
+        script = luna_tools_dir() / 'steam-machine.py'
+    if not script.is_file():
+        if action == 'uninstall':
+            return EXIT_OK
+        print('Steam Machine helper missing; reinstall Luna from a complete bundle.', file=sys.stderr)
+        return 1
+    command = [sys.executable, str(script), action]
+    if dry_run:
+        command.append('--dry-run')
+    if migrate:
+        command.append('--migrate-legacy')
+    return subprocess.run(command).returncode
+
+
+def cmd_launchers(options):
+    return steam_machine_action('install', options.dry_run, options.migrate_legacy)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog='luna', description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2751,6 +2984,8 @@ def build_parser():
                           ('reconcile', cmd_reconcile),
                           ('backup', cmd_backup), ('restore', cmd_restore),
                           ('steam', cmd_steam),
+                          ('refresh', cmd_refresh),
+                          ('launchers', cmd_launchers),
                           ('timer', cmd_timer)):
         child = sub.add_parser(name)
         child.set_defaults(handler=handler)
@@ -2763,6 +2998,17 @@ def build_parser():
             child.add_argument('--keep-steam-client', action='store_true',
                                default=os.environ.get('LUNA_KEEP_STEAM_CLIENT') == '1',
                                help='skip the default verified Steam compatibility downgrade')
+            child.add_argument('--no-steam-machine', action='store_true',
+                               help='do not generate Steam Machine application shortcuts')
+            child.add_argument('--migrate-steam-machine', action='store_true',
+                               help='back up and upgrade recognized legacy Steam Machine shortcuts')
+        if name == 'refresh':
+            child.add_argument('--dry-run', action='store_true',
+                               help='print the plan without updating or writing')
+        if name == 'launchers':
+            child.add_argument('--dry-run', action='store_true', help='show launcher changes without writing')
+            child.add_argument('--migrate-legacy', action='store_true',
+                               help='back up and replace recognized legacy Gamescope+Steam launchers')
         if name == 'reconcile':
             child.add_argument('--dry-run', action='store_true',
                                help='report what would merge without writing')
@@ -2777,7 +3023,7 @@ def build_parser():
                                choices=['status', 'pin', 'unpin', 'cache', 'recover',
                                         'update', 'cancel'],
                                help='what to do (default: status)')
-            child.add_argument('--build', help='client build for pin/recover (default: detected/pinned)')
+            child.add_argument('--build', help='client build for pin/cache/recover (default: detected/pinned)')
             child.add_argument('--now', action='store_true',
                                help='with update: apply right away instead of queueing (Steam must be closed)')
         if name == 'check':
