@@ -6,7 +6,7 @@
 // their real RPC names.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {mount,buildRows,buildHltbRows,enforceSortLabel,findMenubar}=require('../addons/luna/plugin/public/panel.js');
+const {mount,buildRows,buildHltbRows,findMenubar}=require('../addons/luna/plugin/public/panel.js');
 
 function fakeDom(){
   const registry={};
@@ -1267,22 +1267,69 @@ test('the Graphics beta page reports the detection read-only',async()=>{
   assert.match(text,/Nothing here installs/,'the read-only promise must be stated');
 });
 
-test('the SORT BY label is restored only while the HLTB sort is stored',()=>{
+test('stale global HLTB preferences never relabel an alphabetical Steam dropdown',async()=>{
   const document=fakeDom();
   const header=document.createElement('div');
   const sortLabel=document.createElement('div');
   sortLabel.textContent='Sort By';
   const button=document.createElement('div');
   const buttonText=document.createElement('div');
+  buttonText.textContent='Alphabetical';
   button.appendChild(buttonText);
   header.append(sortLabel,button);
   document.body.appendChild(header);
-  assert.equal(enforceSortLabel(document,4),false,'other sorts keep Steam labels');
-  assert.equal(enforceSortLabel(document,12),true,'the stored HLTB choice must label itself');
-  assert.equal(buttonText.textContent,'HowLongToBeat');
-  assert.equal(enforceSortLabel(document,12),false,'already correct labels are left alone');
-  buttonText.textContent='';
-  assert.equal(enforceSortLabel(document,1),false,'leaving the sort lets Steam own the label');
+  menubarFixture(document,true);
+  const {w}=fakeWindow(document);
+  w.localStorage.setItem('AppGridDisplaySettings','{"eSortBy":12}');
+  w.localStorage.setItem('slsLunaSortLive','12');
+  const intervals=[];
+  w.setInterval=fn=>intervals.push(fn);
+  mount(w);
+  await new Promise(resolve=>setTimeout(resolve,30));
+  intervals.forEach(fn=>fn());
+  assert.equal(buttonText.textContent,'Alphabetical','only the agent\'s own view-local dropdown knows its selection');
+});
+
+test('library home shelves sort view-locally by cached HLTB times',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const apps=[
+    {appid:1,display_name:'Zebra'},
+    {appid:2,display_name:'Alpha'},
+    {appid:3,display_name:'Missing'},
+  ];
+  const alpha = collection => collection.visibleApps.slice()
+    .sort((a,b)=>String(a.display_name).localeCompare(String(b.display_name)));
+  function shelf(sort) {
+    const instance = {
+      props:{showcase:{eSortBy:sort},collectionId:'games'},
+      m_fnSort:alpha, updates:0,
+      forceUpdate(){ this.updates++; this.order=this.m_fnSort({visibleApps:apps}).map(a=>a.appid); },
+    };
+    return instance;
+  }
+  const hltbShelf=shelf(12), normalShelf=shelf(1);
+  const hltbFiber={stateNode:hltbShelf,
+    memoizedProps:{showcase:{eSortBy:12}},child:null,sibling:null};
+  const normalFiber={stateNode:normalShelf,
+    memoizedProps:{showcase:{eSortBy:1}},child:null,sibling:null};
+  hltbFiber.sibling=normalFiber;
+  const root={child:hltbFiber,sibling:null};
+  hltbFiber.return=root; normalFiber.return=root;
+  const anchor=document.createElement('div');
+  anchor['__reactFiber$test']=root;
+  document.body.appendChild(anchor);
+  const {w}=fakeWindow(document,{hltb:{success:true,count:2,
+    games:{'1':{main:3600},'2':{main:120}}}});
+  mount(w);
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.deepEqual(hltbShelf.order,[2,1,3],'shortest first, unknown last');
+  assert.ok(hltbShelf.updates>0,'the HLTB shelf must refresh in this window');
+  assert.equal(normalShelf.updates||0,0,'other shelves keep Steam order');
+  assert.deepEqual(normalShelf.m_fnSort({visibleApps:apps}).map(a=>a.appid),[2,3,1],
+    'alphabetical shelf untouched');
+  assert.deepEqual(apps.map(a=>a.display_name),['Zebra','Alpha','Missing'],
+    'shared app objects are never mutated');
 });
 
 test('Forget removes a cached record and the game becomes fetchable again',async()=>{

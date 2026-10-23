@@ -56,10 +56,25 @@ Hosted GitHub Actions is currently blocked by account billing limits, so the
 local `bash scripts/test-all.sh` run is the release gate; record its result on
 the release PR instead of claiming a hosted run.
 
-### Steam Machine launcher work (2026-10-22, unreleased)
+# HLTB view-local sorting regression checks (0.14.15)
 
-- Full local gate passed: 111 Python tests, 82 UI tests, all Lua/backend suites,
-  payload/helper verification, Python compilation, and shell/JavaScript syntax.
+- Home: select HowLongToBeat on All Games and leave another shelf alphabetical
+  or Hours Played. Check ascending numeric times, unknown times last, then
+  navigate away/back and leave the view untouched for more than five minutes.
+- Collections: repeat with installed games, a user collection, filtering and
+  both short/long preferences. No other dropdown may reset this view's order.
+- Start Steam with HLTB selected before cache loading completes. Both home and
+  collection layouts must refresh automatically when the cache arrives/changes.
+- Alphabetical and Hours Played views must keep Steam's own sort and label;
+  stale `AppGridDisplaySettings`/`slsLunaSortLive` must not relabel them HLTB.
+- Shared app objects and collection arrays must remain unmodified. Mount/unmount
+  a collection repeatedly; only mounted HLTB views subscribe to refreshes.
+
+### Steam Machine launcher work (0.14.16)
+
+- Full local gate passed (see the release PR for exact counts): Python suites,
+  UI tests, all Lua/backend suites, payload/helper verification, Python
+  compilation, and shell/JavaScript syntax.
 - On the desktop, generated shortcuts and migrated 2K/3K/4K entries passed
   `desktop-file-validate`. Three exact original launcher backups were retained.
   `--print-command` confirmed SDL plus Niri relative capture and a separate

@@ -294,36 +294,32 @@
   }
 
   /* ---- HowLongToBeat as a library sort option --------------------------
-   * Steam builds "SORT BY" from a fixed enum and sorts through a comparator
-   * factory whose exports are non-configurable webpack getters, so it cannot
-   * be replaced. Unknown sort values fall back to Steam's alphabetical
-   * comparator, which compares each game's `sort_as` field - and that field is
-   * a plain writable property. Luna therefore appends its own option (value
-   * 12) to the rendered dropdown and, while that option is active, rewrites
-    * `sort_as` to a zero-padded time key; alphabetical comparison then yields
-    * the selected completion-time order, games without times last. Originals are
-   * restored the moment another sort is chosen. If anything fails, Steam keeps
-   * working with its normal sorts. */
+   * Steam's unknown enum fallback is alphabetical. Sort each HLTB view's own
+   * collection/sections instead: never rewrite appStore.sort_as, infer a view's
+   * selection from another dropdown, or fight Steam with a global stored sort.
+   * Both home shelves and collection grids subscribe to cache/order changes. */
   const SORT_VALUE = 12;
   const SORT_LABEL = 'HowLongToBeat';
   const SORT_ENUM_FINGERPRINT = [1, 4, 9, 11]; // alphabetical, hours, metacritic, review
   const HLTB_ORDER_KEY = 'slsLunaHltbOrder';   // 'short' (default) or 'long'
   let hltbRecords = {};
-  let sortAsPatched = null; // [overview, originalSortAs] pairs while active
-  let sortAsSeen = null;    // overviews already captured in this patch session
   let currentOrder = 'short';
   let sortSeen = 0;
   let liveSortValue;
-  let hltbGridSeenAt = 0;   // last time a grid rendered as HLTB-sorted
-  let lastHealAt = 0;
+  let hltbRevision = 0;
+  const hltbViews = new Set();
+  let refreshPending = false;
 
-  function readStoredSort(w) {
-    const storage = storageOf(w);
-    try {
-      return storage ? JSON.parse(storage.getItem('AppGridDisplaySettings') || '{}').eSortBy : null;
-    } catch (_) {
-      return null;
-    }
+  function notifyHltbViews(w) {
+    if (refreshPending || !hltbViews.size) return;
+    refreshPending = true;
+    const schedule = (w && w.setTimeout) || setTimeout;
+    schedule(() => {
+      refreshPending = false;
+      for (const refresh of [...hltbViews]) {
+        try { refresh(); } catch (_) { /* closing view */ }
+      }
+    }, 0);
   }
 
   // One small record of the last decision, published for the Health page and
@@ -338,14 +334,22 @@
         at: Math.round(Date.now() / 1000),
         seen: sortSeen,
         live: liveSortValue === undefined ? null : liveSortValue,
-        gridAge: hltbGridSeenAt ? Math.round((Date.now() - hltbGridSeenAt) / 1000) : null,
-        patched: Array.isArray(sortAsPatched) ? sortAsPatched.length : 0,
+        engine: 'view-local',
+        revision: hltbRevision,
+        views: hltbViews.size,
+        order: currentOrder,
       }));
     } catch (_) { /* diagnostics only */ }
   }
 
-  function setHltbRecords(records) {
+  function setHltbRecords(records, w) {
+    const before = Object.keys(hltbRecords).sort().map(id => [id, hltbSecondsFor(id)]);
     hltbRecords = records || {};
+    const after = Object.keys(hltbRecords).sort().map(id => [id, hltbSecondsFor(id)]);
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      hltbRevision += 1;
+      notifyHltbViews(w);
+    }
   }
 
   function hltbSecondsFor(appid) {
@@ -354,7 +358,7 @@
     const main = Number(record.main) || 0;
     const fallback = Number(record.all) || Number(record.extra) || 0;
     const value = main || fallback;
-    return value > 0 ? value : null;
+    return Number.isFinite(value) && value > 0 ? value : null;
   }
 
   function hltbMinutesFor(appid) {
@@ -362,77 +366,15 @@
     return seconds ? Math.round(seconds / 60) : 0;
   }
 
-  // Main-story seconds first, or longest first when the user prefers it;
-  // games without times always sit at the end of either order.
-  function hltbSortKey(appid, name) {
-    const seconds = hltbSecondsFor(appid);
-    const value = seconds == null ? 9999999999
-      : (currentOrder === 'long' ? 9999999999 - seconds : seconds);
-    return String(value).padStart(10, '0') + ':' + String(name || '');
-  }
-
-  function overviewsOf(w) {
-    const store = w && (w.appStore || (w.SteamUIStore && w.SteamUIStore.AppStore));
-    try {
-      if (store && Array.isArray(store.allApps)) return store.allApps;
-      if (store && store.m_mapApps && typeof store.m_mapApps.values === 'function') {
-        return [...store.m_mapApps.values()];
-      }
-    } catch (_) { /* no store yet */ }
-    return [];
-  }
-
-  function applyHltbSortAs(w) {
-    currentOrder = readHltbOrder(w);
-    const overviews = overviewsOf(w);
-    if (!overviews.length) return false;
-    if (!sortAsPatched) {
-      sortAsPatched = [];
-      sortAsSeen = new WeakSet();
+  function compareHltb(a, b, order = currentOrder) {
+    const left = hltbSecondsFor(a.appid), right = hltbSecondsFor(b.appid);
+    if (left == null && right != null) return 1;
+    if (right == null && left != null) return -1;
+    if (left != null && right != null && left !== right) {
+      return order === 'long' ? right - left : left - right;
     }
-    let changed = false;
-    for (const overview of overviews) {
-      if (!overview || overview.appid == null) continue;
-      const appid = Number(overview.appid);
-      if (!valid(appid)) continue;
-      const key = hltbSortKey(appid, overview.display_name || overview.name || '');
-      // A second pass must update the key without capturing the patched value
-      // as if it were the original.
-      if (sortAsSeen.has(overview)) {
-        if (overview.sort_as !== key) {
-          try { overview.sort_as = key; changed = true; } catch (_) { /* fine */ }
-        }
-        continue;
-      }
-      let original;
-      try {
-        original = overview.sort_as;
-        overview.sort_as = key;
-      } catch (_) { continue; }
-      sortAsSeen.add(overview);
-      sortAsPatched.push([overview, original]);
-      changed = true;
-    }
-    if (changed) {
-      keysVersion += 1;
-      refreshHltbShelves(w);
-    }
-    noteSortDiag(w, 'apply');
-    return sortAsPatched.length > 0;
-  }
-
-  function restoreHltbSortAs() {
-    if (!sortAsPatched) return false;
-    for (const [overview, original] of sortAsPatched) {
-      try {
-        if (original === undefined) delete overview.sort_as;
-        else overview.sort_as = original;
-      } catch (_) { /* the overview moved on; leave it */ }
-    }
-    sortAsPatched = null;
-    sortAsSeen = null;
-    keysVersion += 1;
-    return true;
+    return String(a.display_name || a.name || '').localeCompare(String(b.display_name || b.name || ''))
+      || Number(a.appid) - Number(b.appid);
   }
 
   function storageOf(w) {
@@ -452,34 +394,16 @@
     }
   }
 
-  // Keep the keys in step with the persisted sort choice: applied while
-  // how-long-to-beat is selected, removed otherwise. Runs at boot, on every
-  // beat (to catch newly loaded games) and when the dropdown reports a change.
+  // Only direction is global. Each view's eSortBy is authoritative; another
+  // shelf's dropdown/localStorage must never reset it or change its comparator.
   function syncSortAs(w) {
-    const storage = storageOf(w);
-    let current = null;
-    try {
-      current = storage ? JSON.parse(storage.getItem('AppGridDisplaySettings') || '{}').eSortBy : null;
-    } catch (_) { current = null; }
-    if (current === SORT_VALUE) return applyHltbSortAs(w);
-    if (current === null || current === undefined) {
-      // A 2026-10 Steam client update stopped persisting AppGridDisplaySettings
-      // in localStorage, so "nothing stored" now means "no opinion", not "not
-      // Luna". Re-apply while a view is still actually sorted by cached times
-      // (the dropdown value the wrapper saw, or a grid rendering with Luna's
-      // sort - the grid is the reliable signal, since a section's dropdown is
-      // only rendered while its header is hovered) and otherwise leave the keys
-      // exactly as they are: restoring them under a view that is still sorted by
-      // cached times is what silently dropped the order. An explicit change
-      // still restores them through the dropdown's onChange wrapper.
-      const live = liveSortValue === SORT_VALUE
-        || (hltbGridSeenAt > 0 && Date.now() - hltbGridSeenAt < 300000);
-      if (live) return applyHltbSortAs(w);
-      noteSortDiag(w, 'sync-keep');
-      return false;
-    }
-    noteSortDiag(w, 'sync-restore');
-    return restoreHltbSortAs();
+    const order = readHltbOrder(w);
+    if (order === currentOrder) return false;
+    currentOrder = order;
+    hltbRevision += 1;
+    notifyHltbViews(w);
+    noteSortDiag(w, 'direction');
+    return true;
   }
 
   // The sort dropdown is recognized by its option values, not its labels, so
@@ -508,98 +432,91 @@
         if (storage) storage.setItem(SORT_LIVE_KEY, String(liveSortValue));
       } catch (_) { /* diagnostics only */ }
     }
-    // Steam's state can drift from the stored choice (a view with its own sort
-    // state, or a reset). When the stored setting is Luna's but the live value
-    // is not, put the stored choice back - a throttled single call, never a
-    // fight: if the user picks another sort, the stored setting changes with it
-    // and this stops firing.
-    if (props.selectedOption !== undefined && props.selectedOption !== SORT_VALUE
-        && readStoredSort(w) === SORT_VALUE && typeof props.onChange === 'function'
-        && Date.now() - lastHealAt > 10000) {
-      lastHealAt = Date.now();
-      const change = props.onChange;
-      const schedule = (w && w.setTimeout) || setTimeout;
-      schedule(() => { try { change(SORT_VALUE); } catch (_) { /* the next render retries */ } }, 400);
-    }
-    // Only the explicit paths may change the keys: the stored choice (kept in
-    // step by syncSortAs on beats and storage events) and a pick through
-    // onChange below.
-    if (props.selectedOption === SORT_VALUE && !sortAsPatched) applyHltbSortAs(w);
     const appended = props.rgOptions.some(option => option && option.data === SORT_VALUE)
       ? props.rgOptions
       : props.rgOptions.concat([{ data: SORT_VALUE, label: SORT_LABEL }]);
-    const onChange = typeof props.onChange === 'function'
-      ? value => {
-        if (value === SORT_VALUE) { noteSortDiag(w, 'change-apply'); applyHltbSortAs(w); }
-        else { noteSortDiag(w, 'change-restore'); restoreHltbSortAs(); }
-        return props.onChange(value);
-      }
-      : props.onChange;
-    if (appended === props.rgOptions && onChange === props.onChange) return null;
-    return { ...props, rgOptions: appended, onChange };
+    if (appended === props.rgOptions && props.selectedOption !== SORT_VALUE) return null;
+    return { ...props, rgOptions: appended,
+      ...(props.selectedOption === SORT_VALUE ? { strDefaultLabel: SORT_LABEL } : {}) };
   }
 
-  // Steam's grid memoizes the sorted order and `sort_as` is not observable.
-  // Handing the grid a fresh array makes its memo recompute; each input array
-  // is sliced once per key change (not once per render), so the order follows
-  // the current keys without rebuilding the grid on every paint.
-  let keysVersion = 0;
-  let slicedVersion = 0;
-  let slicedArrays = new WeakSet();
-
-  // Home shelves do not receive appOverviews: their class render reads the
-  // collection directly. sort_as is not observable, so loading cached times
-  // after the first render leaves an alphabetical shelf until another UI event.
-  // Track mounted shelf instances and invalidate only HLTB shelves when keys
-  // change. Schedule outside render; never remount shelves or lose scroll state.
-  const hltbShelves = new Map();
+  // Home uses a class with a memoized collection sorter; collections use a
+  // functional section grid. Handle both at their actual rendering boundaries.
+  const shelfRefreshers = new WeakMap();
   const hookedShelfPrototypes = new WeakSet();
-  let shelfRefreshPending = false;
-
-  function refreshHltbShelves(w) {
-    if (shelfRefreshPending || !hltbShelves.size) return;
-    shelfRefreshPending = true;
-    const schedule = (w && w.setTimeout) || setTimeout;
-    schedule(() => {
-      shelfRefreshPending = false;
-      for (const [instance, version] of hltbShelves) {
-        if (instance.props?.showcase?.eSortBy !== SORT_VALUE || version === keysVersion) continue;
-        hltbShelves.set(instance, keysVersion);
-        try { instance.forceUpdate(); } catch (_) { /* view is closing */ }
-      }
-    }, 0);
-  }
 
   function hookHltbShelf(type, props, w) {
     const proto = type && type.prototype;
     if (!props || !props.showcase || props.collectionId === undefined
         || !proto || typeof proto.render !== 'function'
         || typeof proto.ComputeChildSizes !== 'function') return false;
-    if (props.showcase.eSortBy === SORT_VALUE) applyHltbSortAs(w);
     if (hookedShelfPrototypes.has(proto)) return true;
     const render = proto.render;
     const unmount = proto.componentWillUnmount;
     proto.render = function (...args) {
-      if (typeof this.forceUpdate === 'function') hltbShelves.set(this, keysVersion);
-      return render.apply(this, args);
+      if (!shelfRefreshers.has(this) && typeof this.forceUpdate === 'function') {
+        const refresh = () => {
+          if (this.props?.showcase?.eSortBy === SORT_VALUE) this.forceUpdate();
+        };
+        shelfRefreshers.set(this, refresh);
+        hltbViews.add(refresh);
+      }
+      if (this.props?.showcase?.eSortBy !== SORT_VALUE || typeof this.m_fnSort !== 'function') {
+        return render.apply(this, args);
+      }
+      // Do not use Steam's memoized alphabetical fallback or write shared app
+      // objects. Replace only this instance's sorter for this render.
+      const original = this.m_fnSort;
+      const order = readHltbOrder(w);
+      this.m_fnSort = collection => collection.visibleApps.slice().sort((a, b) => compareHltb(a, b, order));
+      noteSortDiag(w, 'home');
+      try { return render.apply(this, args); }
+      finally { this.m_fnSort = original; }
     };
     proto.componentWillUnmount = function (...args) {
-      hltbShelves.delete(this);
+      hltbViews.delete(shelfRefreshers.get(this));
+      shelfRefreshers.delete(this);
       if (typeof unmount === 'function') return unmount.apply(this, args);
     };
     hookedShelfPrototypes.add(proto);
     return true;
   }
 
-  function withFreshOverviews(props) {
-    if (!props || !Array.isArray(props.appOverviews) || props.eSortBy === undefined) return null;
-    if (slicedVersion !== keysVersion) {
-      slicedVersion = keysVersion;
-      slicedArrays = new WeakSet();
+  function withHltbSections(props, w) {
+    if (!props || props.eSortBy !== SORT_VALUE || !Array.isArray(props.childSections)
+        || !props.childSections.length) return null;
+    const sections = props.childSections;
+    if (sections.some(section => !Array.isArray(section.children))) return null;
+    const children = sections.flatMap(section => section.children);
+    const overview = child => child && (child.m_overview || child);
+    if (children.some(child => !valid(overview(child)?.appid))) return null;
+    const order = readHltbOrder(w);
+    children.sort((a, b) => compareHltb(overview(a), overview(b), order));
+    noteSortDiag(w, 'collection');
+    return { ...props, childSections: [{ ...sections[0], subSectionName: '', children }] };
+  }
+
+  const gridTypes = new WeakMap();
+  function hltbGridType(type, props, w, React) {
+    if (!props || !Array.isArray(props.childSections) || props.eSortBy === undefined
+        || !type || (typeof type !== 'function' && typeof type !== 'object')
+        || typeof React.useReducer !== 'function' || typeof React.useEffect !== 'function'
+        || typeof React.useRef !== 'function') return type;
+    if (gridTypes.has(type)) return gridTypes.get(type);
+    function SlsLunaHltbGrid(input) {
+      const [, refresh] = React.useReducer(value => value + 1, 0);
+      const latest = React.useRef(input);
+      latest.current = input;
+      React.useEffect(() => {
+        const update = () => { if (latest.current.eSortBy === SORT_VALUE) refresh(); };
+        hltbViews.add(update);
+        update(); // Catch data that arrived between render and effect registration.
+        return () => hltbViews.delete(update);
+      }, []);
+      return React.createElement(type, withHltbSections(input, w) || input);
     }
-    if (slicedArrays.has(props.appOverviews)) return null;
-    slicedArrays.add(props.appOverviews);
-    return { ...props, appOverviews: props.appOverviews.slice() };
+    gridTypes.set(type, SlsLunaHltbGrid);
+    return SlsLunaHltbGrid;
   }
 
   // Steam's capsule overlay (the little value box on each library game) shows
@@ -654,7 +571,7 @@
 
   function refreshHltbData(w) {
     return rpc(w, 'SlsHltbGet').then(out => {
-      if (out && out.success !== false) setHltbRecords(out.games || {});
+      if (out && out.success !== false) setHltbRecords(out.games || {}, w);
       return true;
     }).catch(() => false);
   }
@@ -815,20 +732,21 @@
         if (!inRender) {
           const props = args[0];
           hookHltbShelf(type, props, w);
-          // The library's SORT BY dropdown gains the cached-times option, and
-          // the grid gets a fresh overviews array (so it re-sorts with the
-          // current keys).
+          // Sort each view independently and subscribe mounted grids to data.
           if (props && Array.isArray(props.rgOptions)) {
             const withSort = withSortOption(props, w);
             if (withSort) args[0] = withSort;
           }
-          if (props && Array.isArray(props.appOverviews)) {
-            const fresh = withFreshOverviews(props);
-            if (fresh) args[0] = fresh;
+          if (props && Array.isArray(props.childSections)) {
+            const grid = hltbGridType(type, props, w, React);
+            if (grid !== type) type = grid;
+            else {
+              const sorted = withHltbSections(props, w);
+              if (sorted) args[0] = sorted;
+            }
           }
           // While that option is active, each capsule shows its cached hours.
           if (args[0] && args[0].sortByType === SORT_VALUE) {
-            hltbGridSeenAt = Date.now();
             const overlay = withHltbOverlay(args[0]);
             if (overlay) args[0] = overlay;
           }
@@ -863,7 +781,7 @@
       list: () => actions.map(entry => ({ id: entry.id, label: entry.label })),
       get sort() {
         return { value: SORT_VALUE, seen: sortSeen, games: Object.keys(hltbRecords).length,
-          applied: Boolean(sortAsPatched), patched: sortAsPatched ? sortAsPatched.length : 0,
+          engine: 'view-local', views: hltbViews.size, revision: hltbRevision,
           order: currentOrder };
       },
       get attached() { return wrappedModule !== null && jsx === wrappedModule; },
@@ -948,7 +866,7 @@
   return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, ARTWORK_REQUEST_KEY, ARTWORK_LIVE_KEY,
     ARTWORK_LIVE_RESULT_KEY, SORT_LIVE_KEY, discoverMenuTools, openExternalUrl,
     searchUrlFor, nameOf, betaEnabled, defaultActions, publishArtworkRequest, handleArtworkLive,
-    collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor, hltbSortKey,
-    readHltbOrder, applyHltbSortAs, restoreHltbSortAs, syncSortAs, isSortDropdown, withSortOption,
-    withFreshOverviews, hookHltbShelf, withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
+    collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor, compareHltb,
+    readHltbOrder, syncSortAs, isSortDropdown, withSortOption,
+    withHltbSections, hltbGridType, hookHltbShelf, withHltbOverlay, refreshHltbData, installLunaMenu, bootLunaMenu };
 });
