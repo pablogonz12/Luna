@@ -25,12 +25,16 @@ backend contract; --noplugin is therefore intentionally unsupported.
 
 By default Luna installs and verifies Steam client build 1791918634, caches and
 pins it, and blocks Steam self-updates. Steam/Lumen must be fully closed.
+Steam Machine application shortcuts are generated automatically, including SDL
+mouse compatibility and a free-pointer action. Gamescope is a system dependency.
 
 Options:
   --only NAME             Install one Luna add-on (repeatable)
   --force                 Replace installed add-on files that differ
   --dry-run               Show Luna changes without writing them
   --keep-steam-client     Skip the default Steam compatibility downgrade
+  --no-steam-machine      Do not generate Steam Machine shortcuts
+  --migrate-steam-machine Back up and upgrade recognized old Steam Machine entries
   --slsteam-channel NAME  Pass stable or beta to the base installer
   --plugin-channel NAME   Pass stable or beta to the base installer
   --lumen-channel NAME   Pass stable or beta to the base installer
@@ -52,7 +56,7 @@ while (($#)); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --noplugin) die "--noplugin is not supported: current Luna features require the LuaTools backend." ;;
-    --force|--dry-run|--keep-steam-client) luna_args+=("$1"); shift ;;
+    --force|--dry-run|--keep-steam-client|--no-steam-machine|--migrate-steam-machine) luna_args+=("$1"); shift ;;
     --only)
       (($# >= 2)) || die "--only requires an add-on name."
       luna_args+=("$1" "$2"); shift 2 ;;

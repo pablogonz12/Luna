@@ -131,7 +131,8 @@ function compressorFixture(overrides){
   return Object.assign(base,overrides||{});
 }
 
-function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient}={}){
+function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient,bootPatched}={}){
+  const bridgePatched = bootPatched !== false;
   const calls=[];
   const hltbState=Object.assign({success:true,count:0,games:{},library:[]},hltb||{});
   hltbState.count=Object.keys(hltbState.games||{}).length;
@@ -145,6 +146,7 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
   const sgdbState={apiKey:sgdbKey||'',gridDir:'/home/tester/.local/share/Steam/userdata/1/config/grid',gridError:''};
   const sgdbSteamState={build:'1791918634',pinned:'',match:false,updatesBlocked:true,
     cachedBuild:'',cacheReady:false,pacmanManaged:false,pacmanIgnored:false,pending:''};
+  const refreshState={pending:false};
   const w={
     document,
     localStorage:{getItem:key=>storage.has(key)?storage.get(key):null,
@@ -225,19 +227,31 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
           update:Object.assign({},updateState)});
         return JSON.stringify({success:true,update:Object.assign({},updateState)});
       }
+      if(fn==='SlsLunaRepair')return JSON.stringify({success:true,
+        message:'bridge   : reinstalled into boot.lua'});
+      if(fn==='SlsLunaRefresh'){
+        const action=(payload&&payload.action)||'status';
+        if(action==='queue'){refreshState.pending=true;
+          return JSON.stringify({success:true,queued:true,refreshPending:true});}
+        if(action==='cancel'){refreshState.pending=false;
+          return JSON.stringify({success:true,refreshPending:false});}
+        return JSON.stringify({success:true,refreshPending:refreshState.pending});
+      }
       if(fn==='SlsLunaHealth')return JSON.stringify({success:true,health:{
         version:'0.14.0',generatedAt:Date.now()/1000,
         install:{generated:'2026-10-15T10:00:00+0200',installedAt:Date.now()/1000-3600,source:'bundle',
           versions:{luna:'0.14.0',sgdb:'0.2.0',playtime:'0.5.5'},drift:['sgdb: installed 0.2.0, pinned 0.3.0']},
         lumen:{root:'/home/tester/.local/share/Lumen',binary:true,luatools:true,bridge:true,
-          boot:{path:'/home/tester/.local/share/Lumen/lua/boot.lua',patched:true,markers:1,backup:true},
+          boot:{path:'/home/tester/.local/share/Lumen/lua/boot.lua',patched:bridgePatched,
+            markers:bridgePatched?1:0,backup:true},
           addons:[{name:'luna',title:'sls-luna',version:'0.14.0',files:3},
             {name:'sgdb',title:'sls-sgdb',version:'0.2.0',files:2}]},
         steam:{root:'/home/tester/.local/share/Steam',exists:true,localconfigConflicts:2,
           client:Object.assign({build:'1791918634',pinned:'1791918634',match:true,updatesBlocked:true,
             cachedBuild:'1791918634',cacheReady:true},(steamClient||{}))},
         data:{dir:'/home/tester/.local/share/slssteam-integrations',
-          prefs:{version:1,store_hide_followed:false,beta:false,hltb_order:'short'},
+          prefs:Object.assign({version:1,store_hide_followed:false,beta:false,hltb_order:'short'},
+            prefs||{}),
           hltb:{cached:3533},sgdb:{hasKey:true},
           files:[{name:'hltb.json',directory:false,size:560000},
             {name:'playtime',directory:true,files:3}]}}});
@@ -1026,6 +1040,103 @@ test('the Health page manages Steam updates only from here',async()=>{
   await new Promise(resolve=>setTimeout(resolve,40));
   assert.ok(calls.some(entry=>entry.fn==='SlsLunaSteam'&&entry.payload.action==='cancel'),
     'cancel must go through the Steam RPC');
+});
+
+test('the Health page queues a full Steam+Luna refresh without killing Steam',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Health'));
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const overlay=document.getElementById('sls-luna-overlay');
+  const refresh=findNode(overlay,node=>node.textContent==='Refresh Steam + Luna'
+    &&typeof node.onclick==='function');
+  assert.ok(refresh,'the refresh button must exist');
+  refresh.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.ok(calls.some(entry=>entry.fn==='SlsLunaRefresh'
+    &&entry.payload.action==='queue'),'refresh must go through its own RPC');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Queued refresh/,
+    'the queued refresh must be visible');
+  const cancel=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Cancel refresh'&&typeof node.onclick==='function');
+  cancel.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.ok(calls.some(entry=>entry.fn==='SlsLunaRefresh'
+    &&entry.payload.action==='cancel'),'cancel must go through the refresh RPC');
+});
+
+test('the Health page offers bridge repair when a base update wiped it',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{bootPatched:false});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Health'));
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/base update wiped the bridge/,'the issue must name the cause');
+  const repair=findNode(overlay,node=>node.textContent==='Repair bridge'
+    &&typeof node.onclick==='function');
+  assert.ok(repair,'the repair button must exist');
+  assert.equal(repair.disabled,false,'repair must be enabled when the bridge is missing');
+  repair.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.ok(calls.some(entry=>entry.fn==='SlsLunaRepair'),
+    'repair must go through its own RPC, never a generic shell');
+});
+
+test('the Health page disables bridge repair when the bridge is present',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Health'));
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const overlay=document.getElementById('sls-luna-overlay');
+  const repair=findNode(overlay,node=>node.textContent==='Repair bridge'
+    &&typeof node.onclick==='function');
+  assert.ok(repair,'the repair button must exist');
+  assert.equal(repair.disabled,true,'repair must stay disabled when nothing is missing');
+});
+
+test('the Health page renders Spanish when the language preference says so',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w}=fakeWindow(document,{prefs:{lang:'es'},
+    steamClient:{build:'1799999999',pinned:'1791918634',match:false,updatesBlocked:true,
+      cachedBuild:'1791918634',cacheReady:true,pacmanManaged:false,pacmanIgnored:false}});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Health'));
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const overlay=document.getElementById('sls-luna-overlay');
+  const text=textOf(overlay);
+  assert.match(text,/Necesita atención/,'the attention header must be Spanish');
+  assert.match(text,/luna steam recover/,'commands stay machine-readable in both languages');
+  assert.match(text,/Actualizar Steam \+ Luna/,'the refresh button must be Spanish');
+  assert.doesNotMatch(text,/Everything looks good/,'no English status line may leak through');
+  const settings=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Settings'));
+  settings.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Español/,
+    'the language switch must be visible');
 });
 
 test('the auto picker fills every slot and asks the agent for a live refresh',async()=>{

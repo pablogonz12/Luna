@@ -13,7 +13,6 @@ const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlF
   ARTWORK_LIVE_RESULT_KEY,setHltbRecords,compareHltb,syncSortAs,
   isSortDropdown,withSortOption,withHltbSections,hltbGridType,hookHltbShelf,withHltbOverlay,hltbMinutesFor,
   handleArtworkLive,refreshHltbData}=require('../addons/luna/plugin/public/agent.js');
-
 test('home HLTB shelves redraw after asynchronous times load, without remounting',()=>{
   setHltbRecords({});
   const tasks=[];

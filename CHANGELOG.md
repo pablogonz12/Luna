@@ -3,6 +3,43 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.16 - 2026-10-23
+
+- **One-command Steam+Luna refresh.** `luna refresh` (and a Health button)
+  updates Steam to Valve's latest, pins and caches the new build, reinstalls
+  the Luna add-ons keeping that client, and verifies - failing closed at each
+  step with the exact next action. A queued refresh is applied by the user
+  timer while Steam is closed, even with unattended updates off. Nothing is
+  ever killed; games, accounts and saves are untouched. The updater's
+  post-update Steam relaunch is shut back down gracefully, and a stuck
+  relaunch is reported instead of silently continuing.
+- **Bridge repair after base updates.** A Lumen/Moon update replaces
+  `boot.lua` and wipes the bridge while payloads stay current; installs used
+  to report "nothing to do" and leave Luna missing from the menu. Installing
+  now reinstalls the bridge in that case, and Health offers one-click
+  **Repair bridge** (Steam must be closed) with the exact shell equivalent.
+- **Honest Steam build detection.** `Client version: 0` reports (what newer
+  clients log at startup) no longer masquerade as a build; the installed
+  package manifest wins over stale log lines, with the verified executable
+  receipt still first. `steam cache` accepts an explicit `--build` and
+  refuses to label a cache its manifest does not describe.
+- **Bounded rollback backups.** Client install/recovery keeps only the newest
+  five `steam-client-backups` entries; anything else in that directory,
+  including operator files, is left alone.
+- **Health in Spanish.** Settings → Language switches the attention list,
+  section headers and action buttons to Spanish; paths and bug-report dumps
+  stay in English in both languages.
+- Automatically generate Steam Machine application shortcuts during installation
+  and updates: portable 1080p60 plus detected local display profiles, with a
+  dedicated verified launcher included in bundles and local tooling.
+- Use Gamescope's SDL backend and Niri relative-mouse capture for in-game mouse
+  compatibility, with a separate free-pointer action. Keep Steam/game clients
+  inside Gamescope's Xwayland instead of leaking desktop Wayland-only settings.
+- Replace recognized legacy launchers only on explicit migration, preserving
+  names/render profiles and backing up originals. Preserve custom edits; restore
+  migrated originals on uninstall. Remove forced `killall -9` startup behaviour
+  in favour of safe running-client refusals and a single-session lock.
+
 ## 0.14.15 - 2026-10-23
 
 - **HLTB sorting is view-local, not a shared app-store rewrite.** Sort home

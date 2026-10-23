@@ -483,6 +483,7 @@
     let lunaHealth = null;
     let lunaUpdate = null;
     let lunaSteam = null;
+    let lunaRefresh = null;
     let lunaCheckedAt = 0;
     let healthNotice = null;
     let compressorTab = 'status';
@@ -2807,9 +2808,146 @@
 
     /* Health page: local diagnostics only. Paths, versions, marker counts and
        file sizes, so a problem can be described without a shell. */
+    /* Health page: local diagnostics only. Paths, versions, marker counts and
+       file sizes, so a problem can be described without a shell. */
+    const HEALTH_TEXT = {
+      en: {
+        intro: 'Local diagnostics only: paths, versions, marker counts and file sizes. '
+          + 'Nothing leaves this machine - use <strong>Copy diagnostics</strong> when reporting a problem.',
+        empty: 'No health report yet - the next Refresh loads it.',
+        needsAttention: n => 'Needs attention (' + n + ')',
+        statusOk: 'Status',
+        allGood: 'Everything looks good.',
+        addons: 'Add-ons',
+        paths: 'Paths',
+        settings: 'Settings',
+        dataFiles: 'Data files',
+        updates: 'Updates',
+        steamClient: 'Steam client (update only from here)',
+        issueUpdateAvailable: (latest, installed) => 'Luna update available: ' + latest + ' (you have '
+          + installed + '). Press Install update below, then restart Steam.',
+        issueUpdateQueued: tag => 'Luna update queued (' + tag + '): it lands the next time Steam is closed.',
+        issueSteamDrifted: (build, pinned) => 'Steam updated itself past the pin (' + build + ' vs pinned '
+          + pinned + '). Close Steam and run: luna steam recover',
+        issuePacman: 'Steam comes from pacman and is NOT ignored: a system update can replace the '
+          + 'launcher. Add "IgnorePkg = steam" under [options] in /etc/pacman.conf (needs sudo).',
+        issueUpdatesAllowed: 'A Steam build is pinned but updates are NOT blocked. Close Steam and run: '
+          + 'luna steam recover (it re-applies steam.cfg).',
+        issueConflicts: n => 'Steam sync conflicts: ' + n + ' localconfig cop'
+          + (Number(n) === 1 ? 'y' : 'ies')
+          + ' waiting - close Steam on both machines, let Syncthing settle, then run: luna reconcile',
+        issueBridgeMissing: 'Add-ons are installed but boot.lua is not patched (a base update wiped the bridge). '
+          + 'Close Steam and press Repair bridge below, or run: python3 scripts/luna.py install --keep-steam-client',
+        issueRefreshQueued: 'Steam+Luna refresh queued: Steam updates, pins and caches, then Luna reinstalls - '
+          + 'applies the next time Steam is closed (timer).',
+        issueDrift: (first, more) => 'Installed files differ from the pinned bundle: ' + first
+          + (more ? ' (+' + more + ' more)' : '') + '. Run: python3 scripts/luna.py verify',
+        issueNoTimer: 'Unattended updates are on but this machine has no timer. Pick the mode again to enable it.',
+        checkNow: 'Check now',
+        installUpdate: 'Install update',
+        queued: 'Queued',
+        cancelQueued: 'Cancel queued',
+        repairBridge: 'Repair bridge',
+        repairTitle: 'Reinstalls the Lumen bridge when a base update wiped it (Steam must be closed)',
+        pinBuild: 'Pin current build',
+        updateClient: 'Update Steam client',
+        cacheNow: 'Cache client now',
+        cacheTitle: 'Queues a package snapshot for the next closed-Steam window',
+        cancelSteamTask: 'Cancel Steam task',
+        refreshBoth: 'Refresh Steam + Luna',
+        refreshTitle: 'Update Steam to Valve\u2019s latest, pin and cache it, then reinstall Luna - applies when Steam is closed',
+        cancelRefresh: 'Cancel refresh',
+        copyDiagnostics: 'Copy diagnostics',
+        applyNeedsClosed: 'Applying an update needs Steam closed, so a queued one waits for the next exit - '
+          + 'or turn on unattended updates and it applies by itself.',
+        noTimerYet: 'An update is queued but this machine has no timer worker yet: '
+          + 'it lands the next time the timer runs, so keep this page open or pick a mode to enable it.',
+        timerReady: 'This machine is set up: the timer checks every 30 minutes and applies while Steam is closed.',
+        timerMissing: 'This machine is not set up yet: pick the mode again to enable its timer.',
+        notPinned: 'not pinned',
+        updatesBlocked: 'blocked everywhere else',
+        updatesAllowed: 'ALLOWED elsewhere - pin to block',
+        cacheReady: 'cache ready',
+        pinnedOk: 'pinned',
+        drifted: 'drifted',
+        queuedTask: task => 'Queued Steam task: ' + task
+          + ' - applies the next time Steam is closed (timer), then updates are blocked again.',
+        queuedRefresh: 'Queued refresh: Steam+Luna - applies the next time Steam is closed (timer).',
+        lastNoticed: drift => 'Last unattended run noticed: ' + drift,
+        refreshExplainer: 'Refresh is the whole flow in one button: it never downgrades, never touches games or '
+          + 'accounts, and refuses while Steam runs instead of closing anything.',
+      },
+      es: {
+        intro: 'Solo diagnósticos locales: rutas, versiones, recuentos y tamaños. '
+          + 'Nada sale de esta máquina; usa <strong>Copiar diagnóstico</strong> para informar de un problema.',
+        empty: 'Aún no hay informe de salud; la próxima actualización lo cargará.',
+        needsAttention: n => 'Necesita atención (' + n + ')',
+        statusOk: 'Estado',
+        allGood: 'Todo está bien.',
+        addons: 'Complementos',
+        paths: 'Rutas',
+        settings: 'Ajustes',
+        dataFiles: 'Archivos de datos',
+        updates: 'Actualizaciones',
+        steamClient: 'Cliente Steam (actualizar solo desde aquí)',
+        issueUpdateAvailable: (latest, installed) => 'Actualización de Luna disponible: ' + latest + ' (tienes '
+          + installed + '). Pulsa Instalar actualización abajo y reinicia Steam.',
+        issueUpdateQueued: tag => 'Actualización de Luna en cola (' + tag + '): se aplicará con Steam cerrado.',
+        issueSteamDrifted: (build, pinned) => 'Steam se actualizó por encima de la versión fijada (' + build
+          + ' frente a fijada ' + pinned + '). Cierra Steam y ejecuta: luna steam recover',
+        issuePacman: 'Steam viene de pacman y NO está ignorado: una actualización del sistema puede reemplazar el '
+          + 'lanzador. Añade "IgnorePkg = steam" bajo [options] en /etc/pacman.conf (necesita sudo).',
+        issueUpdatesAllowed: 'Hay una versión de Steam fijada pero las actualizaciones NO están bloqueadas. Cierra Steam y ejecuta: '
+          + 'luna steam recover (reaplica steam.cfg).',
+        issueConflicts: n => 'Conflictos de sincronización de Steam: ' + n + ' copia(s) de localconfig '
+          + 'en espera; cierra Steam en ambas máquinas, deja que Syncthing se sincronice y ejecuta: luna reconcile',
+        issueBridgeMissing: 'Los complementos están instalados pero boot.lua no tiene el parche (una actualización de la base borró el puente). '
+          + 'Cierra Steam y pulsa Reparar puente abajo, o ejecuta: python3 scripts/luna.py install --keep-steam-client',
+        issueRefreshQueued: 'Actualización de Steam+Luna en cola: Steam se actualiza, fija y guarda en caché, y Luna se reinstala; '
+          + 'se aplica con Steam cerrado (temporizador).',
+        issueDrift: (first, more) => 'Los archivos instalados difieren del paquete fijado: ' + first
+          + (more ? ' (+' + more + ' más)' : '') + '. Ejecuta: python3 scripts/luna.py verify',
+        issueNoTimer: 'Las actualizaciones desatendidas están activadas pero esta máquina no tiene temporizador. Elige el modo de nuevo para activarlo.',
+        checkNow: 'Comprobar ahora',
+        installUpdate: 'Instalar actualización',
+        queued: 'En cola',
+        cancelQueued: 'Cancelar cola',
+        repairBridge: 'Reparar puente',
+        repairTitle: 'Reinstala el puente de Lumen cuando una actualización de la base lo borró (Steam debe estar cerrado)',
+        pinBuild: 'Fijar versión actual',
+        updateClient: 'Actualizar cliente Steam',
+        cacheNow: 'Guardar caché ahora',
+        cacheTitle: 'Pone en cola una instantánea de paquetes para la próxima ventana con Steam cerrado',
+        cancelSteamTask: 'Cancelar tarea Steam',
+        refreshBoth: 'Actualizar Steam + Luna',
+        refreshTitle: 'Actualiza Steam a lo último de Valve, lo fija y lo guarda en caché, y reinstala Luna; se aplica con Steam cerrado',
+        cancelRefresh: 'Cancelar actualización',
+        copyDiagnostics: 'Copiar diagnóstico',
+        applyNeedsClosed: 'Aplicar una actualización necesita Steam cerrado: lo encolado espera a la próxima salida, '
+          + 'o activa las actualizaciones desatendidas y se aplica solo.',
+        noTimerYet: 'Hay una actualización en cola pero esta máquina aún no tiene temporizador: '
+          + 'se aplicará cuando se ejecute el temporizador; deja esta página abierta o elige un modo para activarlo.',
+        timerReady: 'Esta máquina está lista: el temporizador revisa cada 30 minutos y aplica con Steam cerrado.',
+        timerMissing: 'Esta máquina aún no está lista: elige el modo de nuevo para activar su temporizador.',
+        notPinned: 'sin fijar',
+        updatesBlocked: 'bloqueado en el resto',
+        updatesAllowed: 'PERMITIDO en el resto: fija para bloquear',
+        cacheReady: 'caché lista',
+        pinnedOk: 'fijada',
+        drifted: 'cambiada',
+        queuedTask: task => 'Tarea Steam en cola: ' + task
+          + '; se aplica con Steam cerrado (temporizador) y luego se bloquean las actualizaciones.',
+        queuedRefresh: 'Actualización en cola: Steam+Luna; se aplica con Steam cerrado (temporizador).',
+        lastNoticed: drift => 'La última ejecución desatendida detectó: ' + drift,
+        refreshExplainer: 'Actualizar es todo el flujo en un botón: nunca baja de versión, nunca toca juegos ni '
+          + 'cuentas, y se niega con Steam abierto en lugar de cerrar nada.',
+      },
+    };
     function healthBody() {
       const body = document.createElement('div');
       const health = lunaHealth || null;
+      const healthPrefs = ((health && health.data && health.data.prefs) || {});
+      const T = HEALTH_TEXT[healthPrefs.lang] || HEALTH_TEXT.en;
       if (healthNotice) {
         const notice = document.createElement('p');
         notice.className = 'sls-luna-error';
@@ -2819,13 +2957,12 @@
       }
       const note = document.createElement('p');
       note.className = 'sls-luna-note';
-      note.innerHTML = 'Local diagnostics only: paths, versions, marker counts and file sizes. '
-        + 'Nothing leaves this machine - use <strong>Copy diagnostics</strong> when reporting a problem.';
+      note.innerHTML = T.intro;
       body.appendChild(note);
       if (!health) {
         const empty = document.createElement('p');
         empty.className = 'sls-luna-note';
-        empty.textContent = 'No health report yet - the next Refresh loads it.';
+        empty.textContent = T.empty;
         body.appendChild(empty);
         return body;
       }
@@ -2852,44 +2989,38 @@
       // and the exact next step. The details below stay for bug reports.
       const issues = [];
       if (upd.available && !upd.pending) {
-        issues.push('Luna update available: ' + (upd.latest || '?') + ' (you have '
-          + (upd.installed || '?') + '). Press Install update below, then restart Steam.');
+        issues.push(T.issueUpdateAvailable(upd.latest || '?', upd.installed || '?'));
       }
       if (upd.pending) {
-        issues.push('Luna update queued (' + (upd.pendingTag || 'latest')
-          + '): it lands the next time Steam is closed.');
+        issues.push(T.issueUpdateQueued(upd.pendingTag || 'latest'));
       }
       if (steamClient.pinned && !steamClient.match) {
-        issues.push('Steam updated itself past the pin (' + (steamClient.build || '?') + ' vs pinned '
-          + steamClient.pinned + '). Close Steam and run: luna steam recover');
+        issues.push(T.issueSteamDrifted(steamClient.build || '?', steamClient.pinned));
       }
       if (steamClient.pinned && steamClient.pacmanManaged && !steamClient.pacmanIgnored) {
-        issues.push('Steam comes from pacman and is NOT ignored: a system update can replace the '
-          + 'launcher. Add "IgnorePkg = steam" under [options] in /etc/pacman.conf (needs sudo).');
+        issues.push(T.issuePacman);
       }
       if (steamClient.pinned && !steamClient.updatesBlocked) {
-        issues.push('A Steam build is pinned but updates are NOT blocked. Close Steam and run: '
-          + 'luna steam recover (it re-applies steam.cfg).');
+        issues.push(T.issueUpdatesAllowed);
       }
       if (Number(steam.localconfigConflicts || 0) > 0) {
-        issues.push('Steam sync conflicts: ' + steam.localconfigConflicts + ' localconfig cop'
-          + (Number(steam.localconfigConflicts) === 1 ? 'y' : 'ies')
-          + ' waiting - close Steam on both machines, let Syncthing settle, then run: luna reconcile');
+        issues.push(T.issueConflicts(steam.localconfigConflicts));
       }
       if ((lumen.addons || []).length && !boot.patched) {
-        issues.push('Add-ons are installed but boot.lua is not patched. Run: scripts/install-local.sh');
+        issues.push(T.issueBridgeMissing);
+      }
+      if (lunaRefresh && lunaRefresh.refreshPending) {
+        issues.push(T.issueRefreshQueued);
       }
       if ((install.drift || []).length) {
-        issues.push('Installed files differ from the pinned bundle: '
-          + install.drift.slice(0, 2).join('; ')
-          + (install.drift.length > 2 ? ' (+' + (install.drift.length - 2) + ' more)' : '')
-          + '. Run: python3 scripts/luna.py verify');
+        issues.push(T.issueDrift(install.drift.slice(0, 2).join('; '),
+          install.drift.length > 2 ? install.drift.length - 2 : 0));
       }
       if ((upd.autoUpdate || 'off') !== 'off' && !upd.timerUnits && !upd.pending) {
-        issues.push('Unattended updates are on but this machine has no timer. Pick the mode again to enable it.');
+        issues.push(T.issueNoTimer);
       }
-      section(issues.length ? 'Needs attention (' + issues.length + ')' : 'Status');
-      if (!issues.length) line('Everything looks good.');
+      section(issues.length ? T.needsAttention(issues.length) : T.statusOk);
+      if (!issues.length) line(T.allGood);
       issues.forEach(item => {
         const node = document.createElement('p');
         node.className = 'sls-luna-error';
@@ -2916,7 +3047,7 @@
         });
       body.appendChild(cards);
 
-      section('Add-ons');
+      section(T.addons);
       const pinned = install.versions || {};
       (lumen.addons || []).forEach(entry => {
         const want = pinned[entry.name];
@@ -2926,7 +3057,7 @@
       });
       if ((install.drift || []).length) line('Drift: ' + install.drift.join('; '));
 
-      section('Paths');
+      section(T.paths);
       line('Lumen: ' + (lumen.root || '?') + (lumen.binary ? ' (binary present)' : ' (binary missing)')
         + (lumen.luatools ? ' \u00b7 LuaTools present' : ' \u00b7 LuaTools missing')
         + (lumen.bridge ? ' \u00b7 bridge present' : ' \u00b7 bridge missing'));
@@ -2953,21 +3084,21 @@
         line('Last install: not recorded by this installer version (run install --force once).');
       }
 
-      section('Settings');
+      section(T.settings);
       const prefs = data.prefs || {};
       line('Beta features: ' + (prefs.beta ? 'on' : 'off')
         + ' \u00b7 HLTB order: ' + (prefs.hltb_order || 'short')
         + ' \u00b7 Store filter: ' + (prefs.store_hide_followed ? 'on' : 'off')
         + ' \u00b7 SteamGridDB key: ' + (data.sgdb && data.sgdb.hasKey ? 'stored' : 'not set'));
 
-      section('Data files');
+      section(T.dataFiles);
       (data.files || []).forEach(entry => {
         line(entry.name + (entry.directory
           ? '/ (' + (entry.files != null ? entry.files : 0) + ' entries)'
           : ' \u00b7 ' + formatBytes(entry.size || 0)));
       });
 
-      section('Updates');
+      section(T.updates);
       const update = lunaUpdate || {};
       line('Installed: ' + (update.installed || '?') + ' \u00b7 latest: ' + (update.latest || 'unknown')
         + (update.available ? ' \u00b7 update available' : (update.latest ? ' \u00b7 up to date' : ''))
@@ -2985,22 +3116,27 @@
       updateActions.className = 'sls-luna-row';
       const checkButton = document.createElement('button');
       checkButton.className = 'sls-luna-btn secondary';
-      checkButton.textContent = 'Check now';
+      checkButton.textContent = T.checkNow;
       checkButton.onclick = () => runUpdateAction({ action: 'check' });
       const installButton = document.createElement('button');
       installButton.className = 'sls-luna-btn';
-      installButton.textContent = update.pending ? 'Queued' : 'Install update';
+      installButton.textContent = update.pending ? T.queued : T.installUpdate;
       installButton.disabled = !update.available || update.pending;
       installButton.onclick = () => runUpdateAction({ action: 'install', tag: update.latest });
       const cancelButton = document.createElement('button');
       cancelButton.className = 'sls-luna-btn secondary';
-      cancelButton.textContent = 'Cancel queued';
+      cancelButton.textContent = T.cancelQueued;
       cancelButton.disabled = !update.pending;
       cancelButton.onclick = () => runUpdateAction({ action: 'cancel' });
-      updateActions.append(checkButton, installButton, cancelButton);
+      const repairButton = document.createElement('button');
+      repairButton.className = 'sls-luna-btn secondary';
+      repairButton.textContent = T.repairBridge;
+      repairButton.title = T.repairTitle;
+      repairButton.disabled = !((lumen.addons || []).length && !boot.patched);
+      repairButton.onclick = () => runUpdateAction({ action: 'repair' });
+      updateActions.append(checkButton, installButton, cancelButton, repairButton);
       body.appendChild(updateActions);
-      line('Applying an update needs Steam closed, so a queued one waits for the next exit - '
-        + 'or turn on unattended updates and it applies by itself.');
+      line(T.applyNeedsClosed);
       const modeRow = document.createElement('div');
       modeRow.className = 'sls-luna-subtabs';
       [['off', 'Off'], ['notify', 'Notify me'], ['install', 'Install automatically']]
@@ -3013,59 +3149,76 @@
         });
       body.appendChild(modeRow);
       if (update.pending && !update.timerUnits) {
-        line('An update is queued but this machine has no timer worker yet: '
-          + 'it lands the next time the timer runs, so keep this page open or pick a mode to enable it.');
+        line(T.noTimerYet);
       } else if ((update.autoUpdate || 'off') !== 'off') {
-        line(update.timerUnits
-          ? 'This machine is set up: the timer checks every 30 minutes and applies while Steam is closed.'
-          : 'This machine is not set up yet: pick the mode again to enable its timer.');
+        line(update.timerUnits ? T.timerReady : T.timerMissing);
       }
 
       /* Steam client, updated only from here. The bootstrapper is blocked
          everywhere else, so these are the only sanctioned paths: pin the
          working build now, queue an update or a fresh cache for the next
          closed-Steam window, or cancel the queue. */
-      section('Steam client (update only from here)');
+      section(T.steamClient);
       const steamCtl = lunaSteam || (health.steam && health.steam.client) || {};
       line('Client: ' + (steamCtl.build || '?')
-        + (steamCtl.pinned ? (steamCtl.match ? ' \u00b7 pinned ' + steamCtl.pinned + ' \u2713' : ' \u00b7 PINNED ' + steamCtl.pinned + ' \u2014 drifted') : ' \u00b7 not pinned')
-        + ' \u00b7 updates ' + (steamCtl.updatesBlocked ? 'blocked everywhere else' : 'ALLOWED elsewhere - pin to block')
-        + (steamCtl.cacheReady ? ' \u00b7 cache ready' : ''));
+        + (steamCtl.pinned ? (steamCtl.match ? ' \u00b7 ' + T.pinnedOk + ' ' + steamCtl.pinned + ' \u2713' : ' \u00b7 PINNED ' + steamCtl.pinned + ' \u2014 ' + T.drifted) : ' \u00b7 ' + T.notPinned)
+        + ' \u00b7 updates ' + (steamCtl.updatesBlocked ? T.updatesBlocked : T.updatesAllowed)
+        + (steamCtl.cacheReady ? ' \u00b7 ' + T.cacheReady : ''));
       if (steamCtl.pending) {
-        line('Queued Steam task: ' + steamCtl.pending
-          + ' - applies the next time Steam is closed (timer), then updates are blocked again.');
+        line(T.queuedTask(steamCtl.pending));
+      }
+      if (lunaRefresh && lunaRefresh.refreshPending) {
+        line(T.queuedRefresh);
       }
       if (update.last && update.last.steamDrift) {
-        line('Last unattended run noticed: ' + update.last.steamDrift);
+        line(T.lastNoticed(update.last.steamDrift));
       }
       const steamActions = document.createElement('div');
       steamActions.className = 'sls-luna-row';
       const pinButton = document.createElement('button');
       pinButton.className = 'sls-luna-btn secondary';
-      pinButton.textContent = 'Pin current build';
+      pinButton.textContent = T.pinBuild;
       pinButton.onclick = () => runSteamAction({ action: 'pin' });
       const steamUpdateButton = document.createElement('button');
       steamUpdateButton.className = 'sls-luna-btn';
-      steamUpdateButton.textContent = steamCtl.pending ? 'Queued' : 'Update Steam client';
+      steamUpdateButton.textContent = steamCtl.pending ? T.queued : T.updateClient;
       steamUpdateButton.disabled = Boolean(steamCtl.pending);
       steamUpdateButton.onclick = () => runSteamAction({ action: 'queue-update' });
       const steamCacheButton = document.createElement('button');
       steamCacheButton.className = 'sls-luna-btn secondary';
-      steamCacheButton.textContent = 'Cache client now';
-      steamCacheButton.title = 'Queues a package snapshot for the next closed-Steam window';
+      steamCacheButton.textContent = T.cacheNow;
+      steamCacheButton.title = T.cacheTitle;
       steamCacheButton.disabled = Boolean(steamCtl.pending);
       steamCacheButton.onclick = () => runSteamAction({ action: 'queue-cache' });
       const steamCancelButton = document.createElement('button');
       steamCancelButton.className = 'sls-luna-btn secondary';
-      steamCancelButton.textContent = 'Cancel Steam task';
+      steamCancelButton.textContent = T.cancelSteamTask;
       steamCancelButton.disabled = !steamCtl.pending;
       steamCancelButton.onclick = () => runSteamAction({ action: 'cancel' });
       steamActions.append(pinButton, steamUpdateButton, steamCacheButton, steamCancelButton);
       body.appendChild(steamActions);
+      const refreshRow = document.createElement('div');
+      refreshRow.className = 'sls-luna-row';
+      const refreshButton = document.createElement('button');
+      refreshButton.className = 'sls-luna-btn';
+      refreshButton.textContent = (lunaRefresh && lunaRefresh.refreshPending) ? T.queued : T.refreshBoth;
+      refreshButton.title = T.refreshTitle;
+      refreshButton.disabled = Boolean(steamCtl.pending) || Boolean((upd.pending))
+        || Boolean(lunaRefresh && lunaRefresh.refreshPending);
+      refreshButton.onclick = () => runRefreshAction({ action: 'queue' });
+      const refreshCancelButton = document.createElement('button');
+      refreshCancelButton.className = 'sls-luna-btn secondary';
+      refreshCancelButton.textContent = T.cancelRefresh;
+      refreshCancelButton.disabled = !(lunaRefresh && lunaRefresh.refreshPending);
+      refreshCancelButton.onclick = () => runRefreshAction({ action: 'cancel' });
+      refreshRow.append(refreshButton, refreshCancelButton);
+      body.appendChild(refreshRow);
+      line(T.refreshExplainer);
+      body.appendChild(steamActions);
 
       const copy = document.createElement('button');
       copy.className = 'sls-luna-btn secondary';
-      copy.textContent = 'Copy diagnostics';
+      copy.textContent = T.copyDiagnostics;
       copy.onclick = () => {
         const area = document.createElement('textarea');
         area.rows = 10;
@@ -3086,6 +3239,14 @@
        exists (without changing the mode), or the queue would sit forever. */
     async function runUpdateAction(payload) {
       try {
+        if (payload.action === 'repair') {
+          const out = await rpc(w, 'SlsLunaRepair', {});
+          if (out && out.health) lunaHealth = out.health;
+          healthNotice = (out && out.message) ? String(out.message).slice(-200) : 'Bridge repaired.';
+          await refresh();
+          repaintIfOpen();
+          return;
+        }
         if (payload.action === 'mode') {
           await rpc(w, 'SlsLunaPrefsSet',
             { raw: JSON.stringify({ key: 'auto_update', value: payload.value }) });
@@ -3114,7 +3275,20 @@
 
     /* Steam client actions. Pinning is immediate and safe while Steam runs;
        update/cache only queue here - the timer applies them with Steam closed,
-       then re-blocks the bootstrapper. */
+       then re-blocks the bootstrapper. Refresh queues the whole flow. */
+    async function runRefreshAction(payload) {
+      try {
+        const out = await rpc(w, 'SlsLunaRefresh', { raw: JSON.stringify(payload) });
+        if (out) lunaRefresh = out;
+        healthNotice = null;
+        await refresh();
+        repaintIfOpen();
+      } catch (error) {
+        healthNotice = 'Refresh action failed: '
+          + String(error && error.message ? error.message : error);
+        repaintIfOpen();
+      }
+    }
     async function runSteamAction(payload) {
       try {
         const out = await rpc(w, 'SlsLunaSteam', { raw: JSON.stringify(payload) });
@@ -3195,7 +3369,36 @@
         + 'untouched, and the followed list is read from the store session on this machine. Takes effect on '
         + 'the next store page load.',
         storeOn, setStoreHide);
+      const langHeader = document.createElement('p');
+      langHeader.className = 'sls-luna-note';
+      langHeader.innerHTML = '<strong>Language / Idioma</strong>';
+      body.appendChild(langHeader);
+      const langRow = document.createElement('div');
+      langRow.className = 'sls-luna-subtabs';
+      [['en', 'English'], ['es', 'Español']].forEach(pair => {
+        const button = document.createElement('button');
+        button.className = 'sls-luna-subtab'
+          + (((lunaInfo && lunaInfo.prefs && lunaInfo.prefs.lang) || 'en') === pair[0] ? ' active' : '');
+        button.textContent = pair[1];
+        button.onclick = () => setLang(pair[0]);
+        langRow.appendChild(button);
+      });
+      body.appendChild(langRow);
       return body;
+    }
+
+    // The Health page language lives with the other prefs in the backend so
+    // the choice survives cache resets on every machine sharing the data dir.
+    async function setLang(value) {
+      try {
+        const out = await rpc(w, 'SlsLunaPrefsSet',
+          { raw: JSON.stringify({ key: 'lang', value: String(value) }) });
+        lunaInfo = Object.assign({}, lunaInfo || {}, { prefs: out.prefs });
+      } catch (error) {
+        betaNotice = 'Could not save the language preference: '
+          + String(error && error.message ? error.message : error);
+      }
+      repaintIfOpen();
     }
 
     // The store switch is stored in the backend, not localStorage: the store
@@ -3374,6 +3577,12 @@
         lunaSteam = (steamOut && steamOut.steam) || lunaSteam || {};
       } catch (error) {
         lunaSteam = lunaSteam || {};
+      }
+      try {
+        const refreshOut = await rpc(w, 'SlsLunaRefresh', { raw: JSON.stringify({ action: 'status' }) });
+        lunaRefresh = refreshOut || lunaRefresh || {};
+      } catch (error) {
+        lunaRefresh = lunaRefresh || {};
       }
       // A real check talks to GitHub through the updater; the Python side caches
       // it for six hours, and opening the menu throttles the call anyway.
