@@ -86,17 +86,37 @@ def desktop_arg(value):
     return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%') + '"'
 
 
-def desktop_entry(item, name=None):
-    tools, _, wrapper = paths()
+STEAMOS_PREFIX = 'steamos-'
+OLD_SCHEME_PREFIXES = ('steam-machine', 'luna-steam-machine')
+
+
+def entry_name(item):
+    return 'steamos-%dx%d-%d.desktop' % (item['width'], item['height'], item['refresh'])
+
+
+def entry_label(item):
     width, height, refresh = (item[key] for key in ('width', 'height', 'refresh'))
     resolution = {(1920, 1080): '1080p', (2560, 1440): '2K', (2880, 1800): '3K',
                   (3840, 2160): '4K'}.get((width, height), '%dx%d' % (width, height))
-    label = name or 'Steam Machine (%s %d Hz)' % (resolution, refresh)
-    label = label.replace('\n', ' ').replace('\r', ' ')
+    return 'SteamOS (%s %d)' % (resolution, refresh)
+
+
+def is_old_scheme(name):
+    return name.endswith('.desktop') and name.startswith(OLD_SCHEME_PREFIXES)
+
+
+def mode_key(item):
+    return (item['width'], item['height'], item['refresh'])
+
+
+def desktop_entry(item):
+    tools, _, wrapper = paths()
+    width, height, refresh = (item[key] for key in ('width', 'height', 'refresh'))
+    label = entry_label(item).replace('\n', ' ').replace('\r', ' ')
     command = '%s --width %d --height %d --refresh %d' % (desktop_arg(wrapper), width, height, refresh)
     return ('[Desktop Entry]\nName=%s\nComment=Steam Big Picture; SDL mouse compatibility; render target %dx%d at %d fps\n'
             'Exec=%s\nTryExec=gamescope\nIcon=steam\nTerminal=false\nType=Application\nCategories=Game;\n'
-            'X-Luna-SteamMachine=true\nActions=FreePointer;\n\n[Desktop Action FreePointer]\n'
+            'X-Luna-SteamOS=true\nActions=FreePointer;\n\n[Desktop Action FreePointer]\n'
             'Name=Launch with free mouse pointer\nExec=%s --mouse-mode free\n'
             % (label, width, height, refresh, command, command)).encode()
 
@@ -153,9 +173,6 @@ def legacy_profile(path):
     if values.get('inner_width', values['width']) != values['width'] or values.get('inner_height', values['height']) != values['height']:
         return None
     item = profile(values['width'], values['height'], values['refresh'])
-    title = re.search(r'^Name=(.*)$', text, re.M)
-    if title:
-        item['name'] = title.group(1)
     return item
 
 
@@ -177,21 +194,23 @@ def install(dry_run=False, migrate_legacy=False):
     state = read_state()
     source = Path(__file__).read_bytes()
     installed = tools / 'steam-machine.py'
-    wrapper_bytes = ('#!/bin/sh\n# Luna-managed Steam Machine entry point.\nexec %s %s run "$@"\n'
+    wrapper_bytes = ('#!/bin/sh\n# Luna-managed SteamOS Mode entry point.\nexec %s %s run "$@"\n'
                      % (shlex.quote(sys.executable), shlex.quote(str(installed)))).encode()
     desired = {installed: (source, 0o755), wrapper: (wrapper_bytes, 0o755)}
-    profiles = {}
+    modes = {}
     for item in discover_profiles():
-        name = 'luna-steam-machine-%dx%d-%d.desktop' % tuple(item[key] for key in ('width', 'height', 'refresh'))
-        profiles[name] = item
-    # Previously migrated custom resolution profiles remain managed on updates.
+        modes[mode_key(item)] = item
+    # Previously managed profiles stay covered while their display is gone,
+    # whatever shortcut name a previous Luna version used.
+    old_profiles = {}
     for name, item in (state.get('profiles') or {}).items():
-        if re.fullmatch(r'(?:luna-)?steam-machine[A-Za-z0-9_.-]*\.desktop', name):
+        try:
             checked = profile(item['width'], item['height'], item['refresh'])
-            if item.get('name'):
-                checked['name'] = str(item['name'])
-            profiles[name] = checked
-    migrations = set()
+        except (KeyError, TypeError, ValueError):
+            continue
+        old_profiles[name] = checked
+        modes.setdefault(mode_key(checked), checked)
+    adopted = {}
     if migrate_legacy:
         for path in sorted(applications.glob('steam-machine*.desktop')):
             if path.is_symlink():
@@ -201,16 +220,13 @@ def install(dry_run=False, migrate_legacy=False):
             except (OSError, ValueError):
                 item = None
             if item:
-                profiles[path.name] = item
-                migrations.add(str(path))
+                modes.setdefault(mode_key(item), item)
+                if str(path) not in state['files']:
+                    adopted[str(path)] = item
             elif str(path) not in state['files']:
                 print('preserved custom launcher: %s' % path)
-    legacy_modes = {tuple(item[key] for key in ('width', 'height', 'refresh'))
-                    for name, item in profiles.items() if not name.startswith('luna-')}
-    profiles = {name: item for name, item in profiles.items()
-                if not name.startswith('luna-') or tuple(item[key] for key in ('width', 'height', 'refresh')) not in legacy_modes}
-    for name, item in profiles.items():
-        desired[applications / name] = (desktop_entry(item, item.get('name')), 0o644)
+    for key, item in modes.items():
+        desired[applications / entry_name(item)] = (desktop_entry(item), 0o644)
     planned = {}
     for path, (content, mode) in desired.items():
         old = state['files'].get(str(path))
@@ -220,12 +236,35 @@ def install(dry_run=False, migrate_legacy=False):
             current = digest(path.read_bytes())
             if old and current != old.get('sha256'):
                 raise ValueError('Launcher changed outside Luna; preserve/review it first: %s' % path)
-            if not old and str(path) not in migrations and path.read_bytes() != content:
+            if not old and path.read_bytes() != content:
                 raise ValueError('Refusing to overwrite an unmanaged launcher: %s' % path)
         planned[path] = (content, mode)
+    # Adopt-and-rename: recognized legacy launchers move to the SteamOS scheme.
+    # First-time adoptions are backed up; previously managed old-scheme files
+    # carry their backup reference over. Edited files and symlinks are preserved.
+    retire = []
+    for name, item in list(old_profiles.items()) + [(p, i) for p, i in adopted.items()]:
+        path = Path(name)
+        if path.parent == Path('.'):
+            # Profile entries are bare shortcut names; resolve them here.
+            path = applications / path.name
+        if path.parent != applications or not is_old_scheme(path.name):
+            continue
+        info = state['files'].get(str(path), {})
+        if path.is_symlink():
+            print('preserved launcher symlink: %s' % path)
+            continue
+        if path.exists() and info and digest(path.read_bytes()) != info.get('sha256'):
+            print('preserved edited launcher: %s' % path)
+            continue
+        if mode_key(item) not in modes:
+            continue
+        retire.append((path, item, info))
     if dry_run:
         for path in planned:
             print('would manage: %s' % path)
+        for path, item, _ in retire:
+            print('would retire: %s -> %s' % (path, applications / entry_name(item)))
         return 0
     backup_dir = tools / 'steam-machine-backups' / str(time.time_ns())
     previous = {}
@@ -233,26 +272,27 @@ def install(dry_run=False, migrate_legacy=False):
         for path, (content, mode) in planned.items():
             previous[path] = (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None
             old = state['files'].get(str(path), {})
-            if str(path) in migrations and not old:
-                saved = backup_dir / path.name
-                atomic_write(saved, previous[path][0], 0o600)
-                old = {'original': str(saved)}
             if not path.exists() or path.read_bytes() != content or path.stat().st_mode & 0o777 != mode:
                 atomic_write(path, content, mode)
             state['files'][str(path)] = dict(old, sha256=digest(content))
-        # Retire only unchanged Luna-owned duplicates after legacy migration.
-        # Never remove custom entries or a shortcut whose contents were edited.
-        for name, info in list(state['files'].items()):
-            path = Path(name)
-            if path.parent != applications or not path.name.startswith('luna-steam-machine-') or path.name in profiles:
-                continue
-            if path.is_symlink() or info.get('original') or (path.exists() and digest(path.read_bytes()) != info.get('sha256')):
-                print('preserved edited duplicate: %s' % path)
-                continue
+        for path, item, info in retire:
+            new_path = applications / entry_name(item)
             previous[path] = (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None
+            original = info.get('original')
+            if not original and path.exists():
+                saved = backup_dir / path.name
+                atomic_write(saved, path.read_bytes(), 0o600)
+                original = str(saved)
             path.unlink(missing_ok=True)
-            del state['files'][name]
-        state['profiles'] = profiles
+            if str(path) in state['files']:
+                del state['files'][str(path)]
+            if original:
+                current = state['files'].get(str(new_path), {})
+                state['files'][str(new_path)] = dict(current, original=original,
+                                                     migrated_from=str(path))
+            print('retired old shortcut name: %s -> %s' % (path.name, new_path.name))
+        state['profiles'] = {entry_name(item): dict(zip(('width', 'height', 'refresh'), key))
+                             for key, item in modes.items()}
         atomic_write(tools / 'steam-machine-shortcuts.json', (json.dumps(state, indent=2, sort_keys=True) + '\n').encode(), 0o600)
     except Exception:
         for path, old in reversed(list(previous.items())):
@@ -263,7 +303,7 @@ def install(dry_run=False, migrate_legacy=False):
         raise
     if shutil.which('update-desktop-database'):
         subprocess.run(['update-desktop-database', str(applications)], capture_output=True, timeout=15)
-    print('Steam Machine shortcuts: %d; SDL mouse compatibility' % len(profiles))
+    print('SteamOS Mode shortcuts: %d; SDL mouse compatibility' % len(modes))
     if any(info.get('original') for info in state['files'].values()):
         print('Original launcher backups: %s' % (tools / 'steam-machine-backups'))
     return 0
@@ -283,7 +323,12 @@ def uninstall():
             saved = Path(info['original'])
             if not saved.resolve().is_relative_to((tools / 'steam-machine-backups').resolve()):
                 raise ValueError('Unsafe original launcher backup path')
-            atomic_write(path, saved.read_bytes(), 0o644)
+            # Adopt-and-rename entries restore the original bytes to the
+            # pre-migration path and drop the SteamOS file (when unchanged).
+            old_path = Path(info['migrated_from']) if info.get('migrated_from') else path
+            atomic_write(old_path, saved.read_bytes(), 0o644)
+            if old_path != path and (not path.exists() or digest(path.read_bytes()) == info.get('sha256')):
+                path.unlink(missing_ok=True)
         else:
             path.unlink(missing_ok=True)
         del state['files'][name]

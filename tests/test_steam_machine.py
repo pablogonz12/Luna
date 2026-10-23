@@ -48,9 +48,9 @@ class SteamMachineTestCase(unittest.TestCase):
         values.update(kwargs)
         return argparse.Namespace(**values)
 
-    def legacy(self, command=None):
+    def legacy(self, command=None, name='steam-machine-2k.desktop'):
         self.apps.mkdir(parents=True, exist_ok=True)
-        target = self.apps / 'steam-machine-2k.desktop'
+        target = self.apps / name
         if command is None:
             command = ('sh -c "killall steam 2>/dev/null; killall gamescope 2>/dev/null; '
                        'sleep 2; killall -9 steam 2>/dev/null; killall -9 gamescope 2>/dev/null; sleep 1; '
@@ -65,8 +65,10 @@ class SteamMachineTestCase(unittest.TestCase):
 
     def test_generates_portable_shortcut_helper_and_free_pointer_action(self):
         self.assertEqual(self.install(), 0)
-        entry = self.apps / 'luna-steam-machine-1920x1080-60.desktop'
+        entry = self.apps / 'steamos-1920x1080-60.desktop'
         text = entry.read_text()
+        self.assertIn('Name=SteamOS (1080p 60)', text)
+        self.assertIn('X-Luna-SteamOS=true', text)
         self.assertIn('TryExec=gamescope', text)
         self.assertIn('Actions=FreePointer;', text)
         self.assertIn('--mouse-mode free', text)
@@ -74,6 +76,14 @@ class SteamMachineTestCase(unittest.TestCase):
         self.assertTrue(os.access(self.wrapper, os.X_OK))
         self.assertTrue((self.tools / 'steam-machine.py').is_file())
         self.assertNotIn('killall', self.wrapper.read_text() + text)
+
+    def test_shortcut_names_use_the_steamos_scheme(self):
+        self.assertEqual(machine.entry_label(machine.profile(1920, 1080, 60)), 'SteamOS (1080p 60)')
+        self.assertEqual(machine.entry_label(machine.profile(2560, 1440, 200)), 'SteamOS (2K 200)')
+        self.assertEqual(machine.entry_label(machine.profile(2880, 1800, 120)), 'SteamOS (3K 120)')
+        self.assertEqual(machine.entry_label(machine.profile(3840, 2160, 60)), 'SteamOS (4K 60)')
+        self.assertEqual(machine.entry_label(machine.profile(3440, 1440, 100)), 'SteamOS (3440x1440 100)')
+        self.assertEqual(machine.entry_name(machine.profile(2560, 1440, 200)), 'steamos-2560x1440-200.desktop')
 
     def test_niri_profiles_use_current_refresh_and_connected_tv_capability(self):
         outputs = {'DP-2': {'current_mode': 1, 'modes': [
@@ -83,8 +93,9 @@ class SteamMachineTestCase(unittest.TestCase):
                 {'width': 3840, 'height': 2160, 'refresh_rate': 60000}]}}
         self.run_process.return_value = types.SimpleNamespace(returncode=0, stdout=json.dumps(outputs))
         self.install()
-        self.assertTrue((self.apps / 'luna-steam-machine-2560x1440-200.desktop').is_file())
-        self.assertTrue((self.apps / 'luna-steam-machine-3840x2160-60.desktop').is_file())
+        self.assertTrue((self.apps / 'steamos-2560x1440-200.desktop').is_file())
+        self.assertTrue((self.apps / 'steamos-3840x2160-60.desktop').is_file())
+        self.assertIn('Name=SteamOS (4K 60)', (self.apps / 'steamos-3840x2160-60.desktop').read_text())
         self.assertFalse(any('serial' in p.read_text().lower() for p in self.apps.glob('*.desktop')))
 
     def test_sysfs_fallback_does_not_include_disconnected_displays(self):
@@ -108,7 +119,7 @@ class SteamMachineTestCase(unittest.TestCase):
 
     def test_reinstall_is_idempotent_and_preserves_identical_launcher(self):
         self.install()
-        entry = self.apps / 'luna-steam-machine-1920x1080-60.desktop'
+        entry = self.apps / 'steamos-1920x1080-60.desktop'
         inode, stamp = entry.stat().st_ino, entry.stat().st_mtime_ns
         self.install()
         self.assertEqual(entry.stat().st_ino, inode)
@@ -120,19 +131,26 @@ class SteamMachineTestCase(unittest.TestCase):
         self.install()
         self.assertEqual(entry.read_bytes(), original)
 
-    def test_migrates_only_recognized_legacy_launcher_and_keeps_exact_backup(self):
+    def test_migration_adopts_and_renames_keeping_an_exact_backup(self):
         entry = self.legacy()
         original = entry.read_bytes()
         self.install(migrate_legacy=True)
-        self.assertNotIn('killall', entry.read_text())
-        self.assertIn('--width 2560 --height 1440 --refresh 200', entry.read_text())
-        self.assertIn('Name=My 2K profile', entry.read_text())
+        new = self.apps / 'steamos-2560x1440-200.desktop'
+        self.assertTrue(new.is_file(), 'the SteamOS shortcut must be created')
+        self.assertIn('Name=SteamOS (2K 200)', new.read_text())
+        self.assertIn('--width 2560 --height 1440 --refresh 200', new.read_text())
+        # The user's own file is never rewritten: it is backed up, retired,
+        # and the new shortcut takes its place.
+        self.assertFalse(entry.exists(), 'the adopted legacy file must be retired')
         state = machine.read_state()
-        self.assertEqual(Path(state['files'][str(entry)]['original']).read_bytes(), original)
+        info = state['files'][str(new)]
+        self.assertEqual(Path(info['original']).read_bytes(), original)
+        self.assertEqual(info['migrated_from'], str(entry))
         with contextlib.redirect_stdout(io.StringIO()):
             machine.uninstall()
-        self.assertEqual(entry.read_bytes(), original)
-        self.install()  # A restored unmanaged legacy entry must not block reinstall.
+        self.assertEqual(entry.read_bytes(), original, 'uninstall must restore the adopted original')
+        self.assertFalse(new.exists())
+        self.install()  # A restored legacy entry must not block reinstall.
         self.assertEqual(entry.read_bytes(), original)
 
     def test_legacy_custom_commands_or_extra_flags_are_preserved(self):
@@ -144,20 +162,32 @@ class SteamMachineTestCase(unittest.TestCase):
             self.install(migrate_legacy=True)
             self.assertEqual(entry.read_bytes(), original)
 
-    def test_migration_deduplicates_only_unchanged_luna_generated_entries(self):
-        self.run_process.return_value = types.SimpleNamespace(returncode=0, stdout=json.dumps({
-            'DP-2': {'current_mode': 0, 'modes': [{'width': 2560, 'height': 1440, 'refresh_rate': 200000}]}}))
-        entry = self.legacy()
+    def test_retirement_replaces_only_unchanged_luna_generated_names(self):
         self.install()
-        duplicate = self.apps / 'luna-steam-machine-2560x1440-200.desktop'
-        self.assertTrue(duplicate.exists())
-        self.install(migrate_legacy=True)
-        self.assertFalse(duplicate.exists())
-        self.assertTrue(entry.exists())
+        # Simulate a previous Luna version's owned shortcut for the same mode.
+        old = self.apps / 'luna-steam-machine-1920x1080-60.desktop'
+        old.write_text('previous Luna generated content')
+        state = machine.read_state()
+        state['files'][str(old)] = {'sha256': machine.digest(old.read_bytes())}
+        state['profiles'][old.name] = {'width': 1920, 'height': 1080, 'refresh': 60}
+        machine.atomic_write(machine.paths()[0] / 'steam-machine-shortcuts.json',
+                             (json.dumps(state, indent=2, sort_keys=True) + '\n').encode(), 0o600)
+        edited = self.apps / 'steam-machine-old.desktop'
+        edited.write_text('user edited old shortcut')
+        state = machine.read_state()
+        state['files'][str(edited)] = {'sha256': '0' * 64}
+        state['profiles'][edited.name] = {'width': 1920, 'height': 1080, 'refresh': 60}
+        machine.atomic_write(machine.paths()[0] / 'steam-machine-shortcuts.json',
+                             (json.dumps(state, indent=2, sort_keys=True) + '\n').encode(), 0o600)
+        self.install()
+        self.assertFalse(old.exists(), 'unchanged Luna-owned names move to the SteamOS scheme')
+        self.assertTrue((self.apps / 'steamos-1920x1080-60.desktop').is_file())
+        self.assertEqual(edited.read_text(), 'user edited old shortcut',
+                         'edited shortcuts are never silently replaced')
 
     def test_custom_edits_to_managed_entries_are_never_silently_overwritten(self):
         self.install()
-        entry = self.apps / 'luna-steam-machine-1920x1080-60.desktop'
+        entry = self.apps / 'steamos-1920x1080-60.desktop'
         entry.write_text('user custom launcher')
         with self.assertRaisesRegex(ValueError, 'changed outside Luna'):
             self.install()

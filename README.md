@@ -146,13 +146,15 @@ Steam's bootstrapper, not Fedora/DNF or other system package managers.
 every unattended run report drift; with the update mode on Install, the timer
 recovers a drifted client from the cache by itself while Steam is closed.
 
-## Steam Machine shortcuts and mouse compatibility
+## SteamOS Mode shortcuts and mouse compatibility
 
-Installing or updating Luna generates application-menu shortcuts automatically:
-a portable **1080p60** target plus profiles detected from local displays. No
-machine's display settings, accounts or games are imported. Gamescope must be
-installed separately using the system package manager; entries remain hidden
-via `TryExec` until it is available.
+Luna's **SteamOS Mode** is one Big-Picture shortcut per screen: `SteamOS
+(1080p 60)`, `SteamOS (4K 60)` and so on, generated from the detected
+displays (plus a portable 1080p60 target). They are created automatically on
+install/update, and any time from **Settings → SteamOS Mode → Create
+shortcuts**. No machine's display settings, accounts or games are imported.
+Gamescope must be installed separately using the system package manager;
+entries remain hidden via `TryExec` until it is available.
 
 - The launcher uses the **SDL backend**. On Niri it also enables relative mouse
   capture (`--force-grab-cursor`), following the
@@ -170,23 +172,20 @@ via `TryExec` until it is available.
   They do **not** enable/disable monitors, change the desktop refresh rate or
   claim to route a nested window using Gamescope's embedded-only `-O` option.
 
-Existing custom launchers are preserved. To upgrade recognized old
-`steam-machine*.desktop` entries (including the old forced-kill wrappers), use:
+Recognized old launchers are adopted and renamed to the SteamOS scheme:
+originals are backed up under
+`~/.local/share/Lumen/sls-luna/steam-machine-backups/`, and uninstalling
+restores them. To upgrade recognized old `steam-machine*.desktop` entries
+(including the old forced-kill wrappers) explicitly, use:
 
 ```bash
 python3 scripts/luna.py launchers --dry-run --migrate-legacy
 python3 scripts/luna.py launchers --migrate-legacy
 ```
 
-Recognized resolution/refresh/name profiles are retained, originals are backed
-up under `~/.local/share/Lumen/sls-luna/steam-machine-backups/`, and unchanged
-Luna-owned duplicates are removed. Unknown custom commands or flags are never
-silently replaced. Full uninstall removes only unchanged Luna-owned shortcuts
-and restores migrated originals; edited entries are left alone.
-
-`bash install.sh --no-steam-machine` skips shortcut generation for that install;
-`--migrate-steam-machine` explicitly upgrades recognized old entries during
-installation. `--dry-run` writes nothing. Launcher errors are logged locally in
+Unknown custom launchers and hand-edited entries are never silently replaced.
+`bash install.sh --no-steam-machine` skips shortcut generation for that install.
+`--dry-run` writes nothing. Launcher errors are logged locally in
 `~/.local/state/Luna/steam-machine.log`; the desktop version, games and input
 behaviour still require an on-device check after changing the backend.
 

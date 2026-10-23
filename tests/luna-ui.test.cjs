@@ -229,6 +229,12 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
       }
       if(fn==='SlsLunaRepair')return JSON.stringify({success:true,
         message:'bridge   : reinstalled into boot.lua'});
+      if(fn==='SlsLunaLaunchers'){
+        const action=(payload&&payload.action)||'status';
+        if(action==='create')return JSON.stringify({success:true,
+          message:'SteamOS Mode shortcuts: 3; SDL mouse compatibility'});
+        return JSON.stringify({success:true,helper:true});
+      }
       if(fn==='SlsLunaRefresh'){
         const action=(payload&&payload.action)||'status';
         if(action==='queue'){refreshState.pending=true;
@@ -1110,6 +1116,30 @@ test('the Health page disables bridge repair when the bridge is present',async()
     &&typeof node.onclick==='function');
   assert.ok(repair,'the repair button must exist');
   assert.equal(repair.disabled,true,'repair must stay disabled when nothing is missing');
+});
+
+test('Settings offers SteamOS Mode shortcut creation',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='Settings');
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/SteamOS Mode/,'the SteamOS Mode section must exist');
+  const create=findNode(overlay,node=>node.textContent==='Create shortcuts'
+    &&typeof node.onclick==='function');
+  assert.ok(create,'the create button must exist');
+  create.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.ok(calls.some(entry=>entry.fn==='SlsLunaLaunchers'
+    &&entry.payload.action==='create'),'creation must go through its own RPC');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/SteamOS Mode shortcuts: 3/,
+    'the creation result must be shown');
 });
 
 test('the Health page renders Spanish when the language preference says so',async()=>{
