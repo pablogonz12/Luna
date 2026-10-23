@@ -376,6 +376,28 @@ def steam_running():
     return False
 
 
+def terminate_steam_stack(timeout=20):
+    """End a stale Steam session so a new one can start.
+
+    SIGTERMs the exact Steam stack (client, web helper, Lumen sidecar) and
+    waits for it to exit. Game and reaper processes have different names and
+    are never targeted, but killing Steam out from under a running game still
+    orphans it: save and close games first. Raises if anything is still alive
+    after the timeout instead of launching into a half-dead session.
+    """
+    if shutil.which('pkill') is None:
+        raise ValueError('pkill is not available; close Steam completely (Steam -> Exit) first.')
+    for name in ('steam', 'steamwebhelper', 'lumen'):
+        subprocess.run(['pkill', '-x', name], capture_output=True)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not steam_running():
+            return
+        time.sleep(1)
+    raise ValueError('Steam processes did not exit after pkill; '
+                     'close Steam completely (Steam -> Exit) first.')
+
+
 def run(options):
     command = launch_command(options)
     if options.print_command:
@@ -388,8 +410,13 @@ def run(options):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError('A Luna Steam Machine session is already running.')
+        terminated = False
         if steam_running():
-            raise ValueError('Steam or Lumen is already running. Exit Steam fully before opening Steam Machine. No processes were killed.')
+            # The shortcut owns the session switch: end the stale Steam stack
+            # (pkill -x steam and its helpers) instead of refusing to launch.
+            print('Luna SteamOS Mode: ending the running Steam session first.', flush=True)
+            terminate_steam_stack()
+            terminated = True
         # SDL must control the host window; only the child is forced onto the
         # Gamescope Xwayland display. Do not inherit a single-driver Wayland pin.
         env = os.environ.copy()
@@ -398,7 +425,9 @@ def run(options):
         log = Path.home() / '.local/state/Luna/steam-machine.log'
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open('ab') as out:
-            out.write(('\nLuna Steam Machine: SDL backend, mouse=%s\n' % options.mouse_mode).encode())
+            out.write(('\nLuna SteamOS Mode: SDL backend, mouse=%s%s\n'
+                       % (options.mouse_mode,
+                          ', previous Steam session terminated' if terminated else '')).encode())
             out.flush()
             result = subprocess.run(command, env=env, stdout=out, stderr=subprocess.STDOUT)
         if result.returncode:
