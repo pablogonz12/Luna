@@ -37,11 +37,11 @@
     "luna": {
       "files": {
         "backend/main.lua": {
-          "sha256": "3998f6c832253f09b3a44cb3e0f55726063d9aada928af0233d45bfea530416e",
+          "sha256": "b33e187fb1e99042feb83d9663c3b0742c7b81cb4b7f42192b418922574a3c65",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
-          "sha256": "18d8a658abf28cba53d188eb6bc83dbdba478e8b9908f5ce5a118359b05642ff",
+          "sha256": "0991c6d5d8a79a9f4a14a6c54939569073bcbc5d32cbb6962c897afcc8ec4cda",
           "source_path": "plugin/plugin.json"
         },
         "public/agent.js": {
@@ -53,8 +53,8 @@
           "source_path": "plugin/public/panel.js"
         }
       },
-      "plugin_version": "0.14.17",
-      "source_commit": "552b52d491f4911aac2a048ba11a954bcfba5321",
+      "plugin_version": "0.14.18",
+      "source_commit": "unreleased",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -123,19 +123,19 @@
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "fa3e18871c8a4ca4f0da432f5de0242c741e3299e3d35ba8af143b25b088b101",
-      "source_commit": "5b3f0709d007977ae5028469ed2f7e291f9e6adc",
+      "source_commit": "unreleased",
       "source_path": "bridge/bridge.lua",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     },
     "scripts/patch-lumen.py": {
       "sha256": "b9a7d060b818f1ed0ed9c81afd5b51c85ba2144cac89f96888771663794a5335",
-      "source_commit": "5b3f0709d007977ae5028469ed2f7e291f9e6adc",
+      "source_commit": "unreleased",
       "source_path": "scripts/patch-lumen.py",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     },
     "scripts/steam-machine.py": {
-      "sha256": "6cf43b71c8dbef873c8a42bf2281026f198459d11b32e7bed83cc1559f9c3593",
-      "source_commit": "552b52d491f4911aac2a048ba11a954bcfba5321",
+      "sha256": "2b4fe6e43b52576101bea421a1cf4565f3daa5e63a97863e27430362a3324736",
+      "source_commit": "unreleased",
       "source_path": "scripts/steam-machine.py",
       "source_repo": "https://github.com/pgm1207/Luna"
     }
