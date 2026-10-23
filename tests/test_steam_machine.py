@@ -283,11 +283,33 @@ class SteamMachineTestCase(unittest.TestCase):
         self.run_process.assert_not_called()
         self.assertFalse((self.home / 'run').exists())
 
-    def test_running_steam_refuses_instead_of_killing_or_forwarding(self):
+    def test_running_steam_is_terminated_before_launch(self):
+        self.which.side_effect = lambda name: '/usr/bin/' + name
+        self.run_process.return_value = types.SimpleNamespace(returncode=0)
+        seen = {'n': 0}
+
+        def running(name=None):
+            seen['n'] += 1
+            return seen['n'] == 1
+
+        with mock.patch.object(machine, 'steam_running', side_effect=running):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(machine.run(self.options()), 0)
+        commands = [call.args[0] for call in self.run_process.call_args_list]
+        killed = {command[2] for command in commands if command[:2] == ['pkill', '-x']}
+        self.assertEqual(killed, {'steam', 'steamwebhelper', 'lumen'})
+        self.assertIn('/usr/bin/gamescope', commands[-1],
+                      'the new session must launch after the stale one is gone')
+
+    def test_stuck_steam_stack_refuses_instead_of_launching_broken(self):
+        self.which.side_effect = lambda name: '/usr/bin/' + name
         with mock.patch.object(machine, 'steam_running', return_value=True):
-            with self.assertRaisesRegex(ValueError, 'No processes were killed'):
-                machine.run(self.options())
-        self.run_process.assert_not_called()
+            with mock.patch.object(machine.time, 'monotonic', side_effect=[0.0, 100.0]):
+                with self.assertRaisesRegex(ValueError, 'did not exit'):
+                    machine.run(self.options())
+        gamescope_runs = [call for call in self.run_process.call_args_list
+                          if call.args[0] and call.args[0][0] == '/usr/bin/gamescope']
+        self.assertEqual(gamescope_runs, [], 'never launch into a half-dead session')
 
     def test_duplicate_machine_session_is_locked_out(self):
         runtime = self.home / 'run'

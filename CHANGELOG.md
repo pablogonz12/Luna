@@ -3,6 +3,14 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.18 - 2026-10-23
+
+- **SteamOS Mode shortcuts take over the session.** Launching one while Steam
+  runs ends the stale session first (`pkill -x steam`, web helper and Lumen
+  sidecar) instead of refusing, then starts the new one. A session that will
+  not exit still refuses rather than launching broken. Save and close games
+  first: game processes are never targeted, but killing Steam can orphan them.
+
 ## 0.14.17 - 2026-10-23
 
 - **SteamOS Mode.** The console launchers are now `SteamOS (1080p 60)`,

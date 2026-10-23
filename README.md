@@ -166,8 +166,12 @@ entries remain hidden via `TryExec` until it is available.
 - Steam and games run on Gamescope's Xwayland display instead of inheriting
   desktop-wide Wayland-only SDL/GTK/Qt settings. An existing executable
   `~/.local/bin/ccd-launch` CPU-policy helper is retained when available.
-- Launching while Steam/Lumen is already running shows an error. It **never
-  kills games or Steam**, and a lock prevents duplicate console sessions.
+- Launching while a Steam session is already running ends it first (`pkill -x`
+  steam, plus its web helper and Lumen sidecar) and then starts the new one,
+  so the shortcut never lands in a half-dead session. Save and close games
+  first: only the Steam stack is signaled, never game processes, but killing
+  Steam out from under a running game still orphans it. A lock prevents
+  duplicate console sessions.
 - Profiles specify the nested rendering resolution and frame-rate target.
   They do **not** enable/disable monitors, change the desktop refresh rate or
   claim to route a nested window using Gamescope's embedded-only `-O` option.
