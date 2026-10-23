@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.14.13'
+local VERSION = '0.14.14'
 local home = os.getenv('HOME') or ''
 local base = home .. '/.local/share/Lumen/sls-addons/'
 local lumen_root = home .. '/.local/share/Lumen'
@@ -61,12 +61,16 @@ local PREF_KEYS = {
   -- Updates: off (never checks), notify (records what it found) or install
   -- (the user timer applies a newer release whenever Steam is closed).
   auto_update = 'string',
+  -- Health page language. The technical paths and bug-report dumps stay in
+  -- English in both languages; the attention list, headers and actions switch.
+  lang = 'string',
 }
 
 -- Allowed values for the string settings.
 local PREF_VALUES = {
   hltb_order = { short = true, long = true },
   auto_update = { off = true, notify = true, install = true },
+  lang = { en = true, es = true },
 }
 
 local function default_prefs()
@@ -606,7 +610,19 @@ local function steam_client_state()
     handle:seek('set', math.max(0, size - 65536))
     local tail = handle:read('*a') or ''
     handle:close()
-    for build in tail:gmatch('Client version:%s*(%d+)') do state.build = build end
+    -- Newer clients log "Client version: 0" at startup; a zero report carries
+    -- no information and must never override a real version or a pin.
+    for build in tail:gmatch('Client version:%s*(%d+)') do
+      if build ~= '0' then state.build = build end
+    end
+  end
+  if state.build == '' then
+    local manifest = read_file(steam_root .. '/package/steam_client_ubuntu12.manifest')
+    if manifest then
+      for version in manifest:gmatch('"version"%s+"(%d+)"') do
+        if version ~= '0' then state.build = version end
+      end
+    end
   end
   local tools = home .. '/.local/share/Lumen/sls-luna'
   local pin_raw = read_file(tools .. '/steam-pin.json')
@@ -847,6 +863,41 @@ function M.register(registry)
       return reply({ success = true, queued = job, steam = steam_client_state() })
     end
     return reply({ success = false, error = 'Unknown Steam action.' })
+  end
+
+  -- One-click bridge repair for the Health page. A base (Lumen/Moon) update
+  -- replaces boot.lua and wipes the bridge while the payloads stay current;
+  -- this reruns the installer keeping the Steam client untouched. It refuses
+  -- while Steam runs (same guard as the shell), so the panel surfaces the
+  -- refusal instead of changing anything.
+  registry.SlsLunaRepair = function()
+    local out, err = run_updater('install --keep-steam-client')
+    if not out then return reply({ success = false, error = err }) end
+    return reply({ success = true, message = (out:gsub('%s+$', '')),
+      health = build_health() })
+  end
+
+  registry.SlsLunaRefresh = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
+    local pending_path = home .. '/.local/share/Lumen/sls-luna/pending-refresh.json'
+    if action == '' or action == 'status' then
+      return reply({ success = true, refreshPending = path_exists(pending_path) })
+    end
+    if action == 'queue' then
+      if path_exists(pending_path) then
+        return reply({ success = false, error = 'A refresh is already queued.' })
+      end
+      if not write_json(pending_path, { at = os.time() }) then
+        return reply({ success = false, error = 'could not queue the refresh' })
+      end
+      return reply({ success = true, queued = true, refreshPending = true })
+    end
+    if action == 'cancel' then
+      os.remove(pending_path)
+      return reply({ success = true, refreshPending = false })
+    end
+    return reply({ success = false, error = 'Unknown refresh action.' })
   end
 
   -- Whole local cache: appid -> record, plus the game list the agent reported.
