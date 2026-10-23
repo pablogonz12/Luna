@@ -196,7 +196,7 @@ class LunaTestCase(unittest.TestCase):
     def test_install_generates_steam_machine_shortcuts_automatically(self):
         result = self.luna('install')
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        entry = self.home / '.local/share/applications/luna-steam-machine-1920x1080-60.desktop'
+        entry = self.home / '.local/share/applications/steamos-1920x1080-60.desktop'
         self.assertIn('Actions=FreePointer;', entry.read_text())
         self.assertTrue((self.home / '.local/bin/luna-steam-machine').is_file())
         self.assertTrue((self.home / '.local/share/Lumen/sls-luna/steam-machine.py').is_file())
@@ -207,7 +207,7 @@ class LunaTestCase(unittest.TestCase):
 
     def test_identical_reinstall_repairs_missing_shortcut(self):
         self.assertEqual(self.luna('install').returncode, 0)
-        entry = self.home / '.local/share/applications/luna-steam-machine-1920x1080-60.desktop'
+        entry = self.home / '.local/share/applications/steamos-1920x1080-60.desktop'
         entry.unlink()
         self.assertEqual(self.luna('install').returncode, 0)
         self.assertTrue(entry.is_file())

@@ -3,6 +3,14 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## 0.14.17 - 2026-10-23
+
+- **SteamOS Mode.** The console launchers are now `SteamOS (1080p 60)`,
+  `SteamOS (4K 60)` and so on: one shortcut per detected screen, created
+  automatically and any time from **Settings → SteamOS Mode → Create
+  shortcuts**. Recognized legacy launchers are adopted and renamed (backed
+  up first, restored on uninstall); hand-edited entries are never touched.
+
 ## 0.14.16 - 2026-10-23
 
 - **One-command Steam+Luna refresh.** `luna refresh` (and a Health button)
