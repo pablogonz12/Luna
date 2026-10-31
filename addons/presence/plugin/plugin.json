@@ -2,7 +2,7 @@
   "name": "sls-presence",
   "common_name": "SLS Presence",
   "description": "Experimental non-Steam activity bridge for slsteam-moon manifest games",
-  "version": "0.3.1",
+  "version": "0.3.2-dev.2",
   "backendType": "lua",
   "include": ["public"]
 }

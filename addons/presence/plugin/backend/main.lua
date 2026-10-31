@@ -86,33 +86,39 @@ local MAX_PIDS = 8192
 local MAX_CMDLINE = 4096
 local function collect_running(list_dir, read_file)
   local games, helpers = {}, {}
-  local seen = {}
+  local seen_games, seen_helpers, seen_pids = {}, {}, {}
   local ok, entries = pcall(list_dir, '/proc')
-  if not ok or type(entries) ~= 'table' then return games, helpers end
-  local scanned = 0
+  if not ok or type(entries) ~= 'table' then return games, helpers, false end
+  local scanned, complete = 0, true
   for _, entry in ipairs(entries) do
-    if scanned >= MAX_PIDS then break end
-    local name = entry.name or (type(entry) == 'string' and entry or nil)
-    if name and name:match('^%d+$') then
+    local name = type(entry)=='table' and entry.name or (type(entry)=='string' and entry or nil)
+    if type(name)=='string' and name:match('^%d+$') and not seen_pids[name] then
+      if scanned >= MAX_PIDS then return games, helpers, false end
+      seen_pids[name] = true
       scanned = scanned + 1
       local ok_read, raw = pcall(read_file, '/proc/' .. name .. '/cmdline')
+      if not ok_read then complete = false end
       if ok_read and type(raw) == 'string' and #raw > 0 and #raw <= MAX_CMDLINE then
-        local flat = raw:gsub('%z', ' ')
-        local id = flat:match('AppId=(%d+)')
-        if id and not seen[name] then
-          seen[name] = true
+        -- Match a complete argv token, not FakeAppId= or AppId=123suffix.
+        -- Avoid copying every cmdline just to replace its NUL separators.
+        local id = raw:match('^AppId=(%d+)%z') or raw:match('%zAppId=(%d+)%z')
+        if id then
           local value = tonumber(id)
           if value and value >= 1 and value <= MAX then
-            games[#games + 1] = value
-            if flat:find('/usr/bin/sleep', 1, true) then
+            if not seen_games[value] then
+              games[#games + 1] = value
+              seen_games[value] = true
+            end
+            if raw:find('\0/usr/bin/sleep\00086400\0', 1, true) and not seen_helpers[value] then
               helpers[#helpers + 1] = value
+              seen_helpers[value] = true
             end
           end
         end
       end
     end
   end
-  return games, helpers
+  return games, helpers, complete
 end
 -- FNV-1a/32, byte-identical to the JS implementation in plugin/public/agent.js
 -- (verified by tests/probe-roundtrip assertions). Used to reduce a SteamID64 to
@@ -235,16 +241,16 @@ function M.register(registry)
     return response({success=true, argType=type(raw), argLength=type(raw)=='string' and #raw or -1,
       decoded=(ok and type(obj)=='table')==true})
   end
-  -- Read-only process snapshot. Used once per agent boot to recover state that a
+  -- Read-only process snapshot. Used at boot and every five seconds to recover state that a
   -- recreated SharedJSContext lost: which manifest games are actually running and
   -- which of our helpers are still alive.
   registry.SlsPresenceProbeProcesses=function()
-    local games, helpers = collect_running(fs.list, function(path)
+    local games, helpers, complete = collect_running(fs.list, function(path)
       local f = io.open(path, 'rb')
       if not f then return nil end
       local data = f:read('*a'); f:close(); return data
     end)
-    return response({success=true, games=games, helpers=helpers, scannedAt=os.time()})
+    return response({success=complete, complete=complete, games=games, helpers=helpers, scannedAt=os.time()})
   end
   registry.SlsPresencePut=function(raw)
     if type(raw)~='string' or #raw>1000000 then return response({success=false,error='Invalid payload'}) end

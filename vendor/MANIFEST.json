@@ -83,15 +83,15 @@
     "presence": {
       "files": {
         "backend/main.lua": {
-          "sha256": "38cd054404f8bb847350c830e4641291b268be0db47911afe240df425b97c6de",
+          "sha256": "084f7ac373f834de8a770a8f2e3afb4a42dad1c59368ece1573439a633bcfcdc",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
-          "sha256": "87a5043f019a81a8fdf7c9a386f4fcc58af9836f92c176e8af368629516e873a",
+          "sha256": "f2d047a62a02fd88c17334a5e9f0af91e2d921deb022be0c99681ec8901842f2",
           "source_path": "plugin/plugin.json"
         },
         "public/agent.js": {
-          "sha256": "ad1fc9b892e59a1bc95c85f99a7918666226c096da2fc49f821f72ab9d7981a8",
+          "sha256": "f252167e49de41aacb2968a89ba61a7f29f7a175e1b8ad5be6cc827271d4963d",
           "source_path": "plugin/public/agent.js"
         },
         "public/panel.js": {
@@ -99,8 +99,10 @@
           "source_path": "plugin/public/panel.js"
         }
       },
-      "plugin_version": "0.3.1",
-      "source_commit": "0490b34c9430436764602698237b6f8492971f0b",
+      "plugin_version": "0.3.2-dev.2",
+      "source_base_commit": "0490b34c9430436764602698237b6f8492971f0b",
+      "source_branch": "fix/presence-session-cleanup",
+      "source_commit": "uncommitted-worktree",
       "source_repo": "https://github.com/pgm1207/slsteam-presence"
     },
     "sgdb": {
@@ -119,13 +121,20 @@
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-10-23T14:45:01+02:00",
+  "generated": "2026-10-28T10:55:26+00:00",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "fa3e18871c8a4ca4f0da432f5de0242c741e3299e3d35ba8af143b25b088b101",
       "source_commit": "unreleased",
       "source_path": "bridge/bridge.lua",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
+    },
+    "scripts/lumen-hook.py": {
+      "sha256": "fed8ed22b9542e1cf52d05bd712922b09b617bcedf41f7bfa897114a48285c8a",
+      "source_base_commit": "cb1facd0ff0c65555065bbec957d3a3bfb800f7d",
+      "source_commit": "uncommitted-worktree",
+      "source_path": "scripts/lumen-hook.py",
+      "source_repo": "https://github.com/pgm1207/Luna"
     },
     "scripts/patch-lumen.py": {
       "sha256": "b9a7d060b818f1ed0ed9c81afd5b51c85ba2144cac89f96888771663794a5335",
