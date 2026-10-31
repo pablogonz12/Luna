@@ -18,6 +18,7 @@ Commands:
     luna preflight [--only NAME]        read-only environment and state report
     luna status [--only NAME]           what is installed, and whether it matches
     luna install [--only NAME] [--force] [--dry-run]
+    luna hook on|off|status|repair       automatic bridge recovery after Lumen updates
     luna uninstall [--only NAME]
     luna verify [--sources]             manifest, payload and drift checks
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
@@ -987,6 +988,7 @@ def cmd_release(options):
         ('addons', ROOT / 'addons'),
         ('vendor/MANIFEST.json', MANIFEST_PATH),
          ('scripts/luna.py', ROOT / 'scripts' / 'luna.py'),
+        ('scripts/lumen-hook.py', ROOT / 'scripts' / 'lumen-hook.py'),
         ('scripts/steam-machine.py', ROOT / 'scripts' / 'steam-machine.py'),
         ('scripts/patch-lumen.py', PATCHER),
         ('bridge/bridge.lua', BRIDGE_SOURCE),
@@ -1286,6 +1288,20 @@ def _release_lock(lock_path):
         pass
 
 
+CLI_LAUNCHER = '''#!/bin/sh
+# Managed by SLS Luna CLI v1
+# Recovery remains available even if a base update replaces Lumen's tooling.
+if [ "${1:-}" = hook ] && [ -f "$HOME/.local/share/slssteam-luna/lumen-hook.py" ]; then
+    shift
+    action="${1:-status}"
+    case "$action" in on) action=enable;; off) action=disable;; esac
+    [ "$#" -eq 0 ] || shift
+    exec python3 "$HOME/.local/share/slssteam-luna/lumen-hook.py" "$action" "$@"
+fi
+exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
+'''
+
+
 def write_tooling():
     """Keep a standalone updater copy the timer can run without a checkout.
 
@@ -1297,12 +1313,25 @@ def write_tooling():
     target = tools / 'luna.py'
     source = Path(__file__).resolve()
     try:
-        if source.samefile(target):
-            return target
+        same = source.samefile(target)
     except OSError:
-        pass
-    shutil.copy2(source, target)
-    target.chmod(0o755)
+        same = False
+    if not same:
+        shutil.copy2(source, target)
+        target.chmod(0o755)
+    launcher = home() / '.local/bin/luna'
+    if launcher.is_symlink() or (launcher.exists() and
+                                (not launcher.is_file() or launcher.read_bytes() != CLI_LAUNCHER.encode())):
+        print('WARNING: custom luna command preserved; use the installed Python tooling directly.', file=sys.stderr)
+    elif not launcher.exists():
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(launcher, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o755)
+        except FileExistsError:
+            print('WARNING: luna command appeared concurrently; it was left untouched.', file=sys.stderr)
+        else:
+            with os.fdopen(fd, 'wb') as out:
+                out.write(CLI_LAUNCHER.encode())
     return target
 
 
@@ -1369,6 +1398,28 @@ def cmd_timer(options):
         return EXIT_OK
     print('unknown timer action: %s' % options.action, file=sys.stderr)
     return 2
+
+
+def lumen_hook(action):
+    """Use the source worker or the independent installed copy; no full install."""
+    candidates = (ROOT / 'scripts/lumen-hook.py',
+                  home() / '.local/share/slssteam-luna/lumen-hook.py')
+    script = next((path for path in candidates if path.is_file()), None)
+    if script is None:
+        print('Lumen update hook worker missing; install Luna from a complete bundle.', file=sys.stderr)
+        return 1
+    return subprocess.run([sys.executable, str(script), action]).returncode
+
+
+def cmd_hook(options):
+    return lumen_hook({'on': 'enable', 'off': 'disable'}.get(options.action, options.action))
+
+
+def arm_lumen_hook():
+    if (addons_dir() / 'luna/backend/main.lua').is_file():
+        if lumen_hook('enable'):
+            print('WARNING: add-ons installed, but automatic Lumen recovery could not be armed. '
+                  'Inspect: luna hook status', file=sys.stderr)
 
 
 def cmd_autoupdate(options):
@@ -2679,6 +2730,7 @@ def cmd_install(options):
                 return code
         write_install_snapshot()
         write_tooling()
+        arm_lumen_hook()
         if read_steam_pin():
             ensure_steam_cfg_block()
         print('\nAlready installed and identical to the pinned payloads. Nothing to do.')
@@ -2706,6 +2758,7 @@ def cmd_install(options):
 
     write_install_snapshot()
     write_tooling()
+    arm_lumen_hook()
     if not getattr(options, 'no_steam_machine', False):
         code = steam_machine_action('install', migrate=getattr(options, 'migrate_steam_machine', False))
         if code:
@@ -2737,6 +2790,11 @@ def cmd_uninstall(options):
         print('Nothing installed for the selected add-ons.')
         return EXIT_OK
     remaining = tuple(name for name in installed_addons() if name not in targets)
+    hook_config = home() / '.local/share/slssteam-luna/config.json'
+    if 'luna' in targets and hook_config.is_file() and (read_json_file(hook_config) or {}).get('enabled'):
+        if lumen_hook('disable'):
+            print('REFUSING uninstall: could not safely disable automatic Lumen recovery.', file=sys.stderr)
+            return EXIT_PATCH
     if remaining:
         for name in targets:
             shutil.rmtree(addons_dir() / name, ignore_errors=True)
@@ -2785,6 +2843,9 @@ def cmd_uninstall(options):
     except Exception:  # noqa: BLE001 - uninstall must succeed even if systemd is absent
         pass
     print('Local playtime and presence data were left untouched.')
+    launcher = home() / '.local/bin/luna'
+    if launcher.is_file() and not launcher.is_symlink() and launcher.read_bytes() == CLI_LAUNCHER.encode():
+        launcher.unlink()
     if steam_machine_action('uninstall'):
         print('Some SteamOS Mode shortcuts could not be removed; custom edits were preserved.', file=sys.stderr)
     return EXIT_OK
@@ -2914,6 +2975,14 @@ def cmd_vendor(options):
     manifest['shared']['scripts/steam-machine.py'] = {
         'source_repo': 'https://github.com/pgm1207/Luna', 'source_commit': repo_commit,
         'source_path': 'scripts/steam-machine.py', 'sha256': sha256(ROOT / 'scripts/steam-machine.py')}
+    hook_rel = 'scripts/lumen-hook.py'
+    committed_hook = subprocess.run(['git', '-C', str(ROOT), 'show', repo_commit + ':' + hook_rel],
+                                    capture_output=True)
+    hook_clean = committed_hook.returncode == 0 and committed_hook.stdout == (ROOT / hook_rel).read_bytes()
+    manifest['shared'][hook_rel] = {
+        'source_repo': 'https://github.com/pgm1207/Luna',
+        'source_commit': repo_commit if hook_clean else 'uncommitted-worktree',
+        'source_path': hook_rel, 'sha256': sha256(ROOT / hook_rel)}
     for name in FIRST_PARTY:
         files = {}
         for source_rel, dest_rel in ADDON_FILES[name]:
@@ -2986,7 +3055,7 @@ def build_parser():
                           ('steam', cmd_steam),
                           ('refresh', cmd_refresh),
                           ('launchers', cmd_launchers),
-                          ('timer', cmd_timer)):
+                           ('timer', cmd_timer), ('hook', cmd_hook)):
         child = sub.add_parser(name)
         child.set_defaults(handler=handler)
         child.add_argument('--only', action='append', default=[],
@@ -3032,7 +3101,10 @@ def build_parser():
             child.add_argument('--verbose', action='store_true', help='print the decision')
         if name == 'timer':
             child.add_argument('action', choices=['on', 'off', 'status'],
-                               help='enable, disable or report the unattended-update timer')
+                                help='enable, disable or report the unattended-update timer')
+        if name == 'hook':
+            child.add_argument('action', choices=['on', 'off', 'status', 'repair'],
+                               help='manage bridge-only recovery after Lumen updates')
         if name == 'release':
             child.add_argument('--out', help='output directory (default: dist/)')
             child.add_argument('--publish', action='store_true',

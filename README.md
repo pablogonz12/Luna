@@ -204,6 +204,26 @@ If a base update wipes the bridge, Health names it and offers **Repair
 bridge** (Steam must be closed); the shell equivalent is
 `python3 scripts/luna.py install --keep-steam-client`, which reinstalls the
 bridge even when every payload is already current. The attention list, headers
+Development builds also arm automatic recovery after **Lumen → Update All**:
+the updater waits for the base installer, reattaches the **installed** Luna and
+re-arms the next-update hook before Steam is restarted. An independent user
+service watches the completion stamp and checks for missed hooks once a minute.
+No full reinstall, Steam downgrade, update-policy change or add-on replacement
+is involved. Unknown upstream layouts fail closed; running Steam/Lumen is deferred,
+never killed by the repair worker. Details: [`docs/LUMEN_UPDATE_HOOK.md`](docs/LUMEN_UPDATE_HOOK.md).
+
+Bridge-only manual commands (close Steam **and** Lumen for a repair):
+
+```sh
+python3 scripts/luna.py hook on      # arm/enrol the installed Luna
+python3 scripts/luna.py hook status
+python3 scripts/luna.py hook repair  # bridge + next-update hook only
+python3 scripts/luna.py hook off     # disable recovery, retain add-ons/data/backups
+```
+
+Older Health pages offer **Repair bridge** through a full installer invocation;
+prefer the bridge-only command above to preserve local payloads and Steam policy.
+The attention list, headers
 and action buttons switch to Spanish when Settings → Language is Español;
 paths and bug-report dumps stay in English in both languages.
 

@@ -9,6 +9,9 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
 mkdir -p "$tmp/home"
+mkdir -p "$tmp/presence"
+(cd "$root" && SLS_TEST_HOME="$tmp/presence" HOME="$tmp/presence" SLS_KIND=presence \
+  "$lua" tests/presence/backend-smoke.lua)
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/bridge-smoke.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/compressor-smoke.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/hltb-smoke.lua"
