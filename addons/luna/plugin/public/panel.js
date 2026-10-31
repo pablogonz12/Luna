@@ -1936,10 +1936,24 @@
       }
     }
 
+    // The backend answers 'pending' while HowLongToBeat is still responding:
+    // its requests never block Steam's UI thread, so ask again until the
+    // answer is in (the backend's own request timeouts bound the wait).
+    async function fetchHltbRpc(row) {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await rpc(w, 'SlsHltbFetch', { appid: Number(row.id), name: row.name });
+        } catch (error) {
+          if (!error || error.code !== 'pending' || attempt >= 300) throw error;
+          await sleep(250);
+        }
+      }
+    }
+
     async function fetchHltbOne(row) {
       hltbNotice = null;
       try {
-        const out = await rpc(w, 'SlsHltbFetch', { appid: Number(row.id), name: row.name });
+        const out = await fetchHltbRpc(row);
         if (!out || out.success !== true) throw Error((out && out.error) || 'The fetch failed.');
         await refreshHltb();
       } catch (error) {
@@ -1968,7 +1982,7 @@
       let retried = false;
       for (;;) {
         try {
-          const out = await rpc(w, 'SlsHltbFetch', { appid: Number(row.id), name: row.name });
+          const out = await fetchHltbRpc(row);
           if (!out || out.success !== true) {
             const error = Error((out && out.error) || 'The fetch failed.');
             error.code = (out && out.code) || '';
@@ -2873,6 +2887,7 @@
           + (more ? ' (+' + more + ' more)' : '') + '. Run: python3 scripts/luna.py verify',
         issueNoTimer: 'Unattended updates are on but this machine has no timer. Pick the mode again to enable it.',
         checkNow: 'Check now',
+        checking: 'Checking\u2026',
         installUpdate: 'Install update',
         queued: 'Queued',
         cancelQueued: 'Cancel queued',
@@ -2943,6 +2958,7 @@
           + (more ? ' (+' + more + ' más)' : '') + '. Ejecuta: python3 scripts/luna.py verify',
         issueNoTimer: 'Las actualizaciones desatendidas están activadas pero esta máquina no tiene temporizador. Elige el modo de nuevo para activarlo.',
         checkNow: 'Comprobar ahora',
+        checking: 'Comprobando\u2026',
         installUpdate: 'Instalar actualización',
         queued: 'En cola',
         cancelQueued: 'Cancelar cola',
@@ -3142,7 +3158,8 @@
       line('Installed: ' + (update.installed || '?') + ' \u00b7 latest: ' + (update.latest || 'unknown')
         + (update.available ? ' \u00b7 update available' : (update.latest ? ' \u00b7 up to date' : ''))
         + (update.checkedAt ? ' \u00b7 checked ' + age(update.checkedAt) + ' ago' : ''));
-      if (update.checkError) line('Check: ' + update.checkError);
+      if (update.checking) line('Checking GitHub for a newer release\u2026');
+      else if (update.checkError) line('Check: ' + update.checkError);
       if (update.pending) line('Queued: ' + (update.pendingTag || 'latest')
         + ' - it lands the next time Steam is closed.');
       if (update.last) {
@@ -3155,7 +3172,8 @@
       updateActions.className = 'sls-luna-row';
       const checkButton = document.createElement('button');
       checkButton.className = 'sls-luna-btn secondary';
-      checkButton.textContent = T.checkNow;
+      checkButton.textContent = update.checking ? T.checking : T.checkNow;
+      checkButton.disabled = Boolean(update.checking);
       checkButton.onclick = () => runUpdateAction({ action: 'check' });
       const installButton = document.createElement('button');
       installButton.className = 'sls-luna-btn';
@@ -3276,6 +3294,31 @@
        timer on or off, because that is what makes an unattended apply possible
        while Steam is closed. Queuing an update also ensures the timer worker
        exists (without changing the mode), or the queue would sit forever. */
+    /* The backend runs the update check detached so GitHub never stalls
+       Steam's UI thread; follow it while the menu is open so the result
+       appears without reopening. */
+    let followingCheck = false;
+    function followUpdateCheck() {
+      if (followingCheck || !(lunaUpdate && lunaUpdate.checking)) return;
+      followingCheck = true;
+      let tries = 0;
+      const schedule = w.setTimeout || setTimeout;
+      const step = async () => {
+        tries += 1;
+        try {
+          const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'status' }) });
+          if (out && out.update) lunaUpdate = out.update;
+        } catch (_) { /* keep the last known state */ }
+        if (lunaUpdate && lunaUpdate.checking && tries < 45 && document.getElementById(OVERLAY_ID)) {
+          schedule(step, 2000);
+          return;
+        }
+        followingCheck = false;
+        repaintIfOpen();
+      };
+      schedule(step, 2000);
+    }
+
     async function runUpdateAction(payload) {
       try {
         if (payload.action === 'repair') {
@@ -3298,6 +3341,7 @@
         const request = payload.action === 'check' ? { action: 'check', force: true } : payload;
         const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify(request) });
         if (out && out.update) lunaUpdate = out.update;
+        if (payload.action === 'check') followUpdateCheck();
         if (payload.action === 'install' && out && out.queued && !lunaUpdate.timerUnits) {
           try {
             await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'timer', value: 'on' }) });
@@ -3669,6 +3713,7 @@
         try {
           const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'check' }) });
           if (out && out.update) lunaUpdate = out.update;
+          followUpdateCheck();
         } catch (_) { /* offline or gh missing; the status stays */ }
       }
       maybeAutoFetch();

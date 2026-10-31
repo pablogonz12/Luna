@@ -12,6 +12,7 @@ import shutil
 import stat
 import struct
 import tempfile
+import time
 import unittest
 from unittest import mock
 import zipfile
@@ -177,6 +178,22 @@ class SteamClientTestCase(unittest.TestCase):
         self.assertEqual(luna.untraceable_pins(manifest),
                          ['bridge/bridge.lua (unreleased)', 'presence (uncommitted-worktree)', 'sgdb (no commit)'])
         self.assertEqual(luna.untraceable_pins({'addons': {'luna': {'source_commit': commit}}}), [])
+
+    def test_a_hung_gh_is_bounded(self):
+        fake = self.home / 'gh'
+        fake.write_text('#!/bin/sh\nexec sleep 30\n')
+        fake.chmod(0o755)
+        with mock.patch.object(luna, 'find_gh', return_value=str(fake)), \
+                mock.patch.object(luna, 'GH_TIMEOUT', 0.5), \
+                mock.patch.object(luna, 'GH_DOWNLOAD_TIMEOUT', 0.5):
+            started = time.monotonic()
+            value, error = luna.gh_json(['release', 'view'])
+            self.assertIsNone(value)
+            self.assertIn('did not answer', error)
+            bundle, error = luna.download_release('v1', self.home)
+            self.assertIsNone(bundle)
+            self.assertIn('did not finish', error)
+            self.assertLess(time.monotonic() - started, 10)
 
     def test_regular_zip_packages_are_supported(self):
         self.make_packages(compressed=False)

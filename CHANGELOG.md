@@ -3,6 +3,25 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
+## Unreleased
+
+- **Steam's UI no longer stalls on Luna's network calls.** Lumen runs every
+  add-on RPC on its single injector thread. HowLongToBeat lookups now use
+  Lumen's non-blocking HTTP (the panel polls until the answer is in, with the
+  blocking path kept for older Lumen builds), and the Health page's update
+  check runs detached and is followed until its result arrives. Other updater
+  calls from the menu are capped with a timeout.
+- **The library HLTB sort stopped re-rendering in a loop.** Shelves sorted by
+  HowLongToBeat re-render only when their times or direction change; before,
+  each forced re-render triggered the next pass about every 800 ms.
+- **Hardening.** Game names, paths and messages are escaped before they reach
+  the menu's markup; `gh` calls have timeouts (a hung one no longer wedges the
+  update timer); state files are written atomically; a failed update check
+  keeps the last known release.
+- **Tooling.** `luna vendor --only NAME` now re-pins just that add-on (it used
+  to rewrite every pin) and refuses first-party bytes that are not committed;
+  `verify` and `release` name pins that point at no commit.
+
 ## 0.14.18 - 2026-10-23
 
 - **SteamOS Mode shortcuts take over the session.** Launching one while Steam

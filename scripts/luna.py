@@ -39,6 +39,7 @@ Commands:
                                         (Steam closed; never kills anything)
 """
 import argparse
+import contextlib
 import hashlib
 import io
 import json
@@ -537,9 +538,25 @@ def read_json_file(path):
 
 
 def write_json_file(path, data):
+    """Atomic: the Lua backend reads these files while Python writes them."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
+    fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '.', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(json.dumps(data, indent=2, sort_keys=True) + '\n')
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
     return path
+
+
+# A hung gh must not hang its caller: the Health page waits on `check`, and a
+# oneshot timer unit that never exits is never started again.
+GH_TIMEOUT = 30
+GH_DOWNLOAD_TIMEOUT = 600
 
 
 def find_gh():
@@ -1084,7 +1101,10 @@ def gh_json(args):
     gh = find_gh()
     if not gh:
         return None, 'the gh CLI is not installed (update checks use your own GitHub auth)'
-    result = subprocess.run([gh] + args, capture_output=True, text=True)
+    try:
+        result = subprocess.run([gh] + args, capture_output=True, text=True, timeout=GH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, 'gh did not answer within %d seconds' % GH_TIMEOUT
     if result.returncode != 0:
         return None, (result.stderr.strip() or result.stdout.strip() or 'gh failed')
     try:
@@ -1106,12 +1126,16 @@ def check_updates(force=False):
     cached = read_json_file(cache_path) or {}
     now = int(time.time())
     installed = installed_version()
-    if (not force and cached.get('latest') and cached.get('checkedAt')
+    if (not force and cached.get('latest') and cached.get('checkedAt') and not cached.get('checkError')
             and now - int(cached['checkedAt']) < UPDATE_TTL):
         cached['installed'] = installed
         cached['available'] = version_key(cached.get('latest')) > version_key(installed)
         return cached
     latest, error = latest_release()
+    if not latest and error:
+        # A failed lookup keeps the last known release, so an offline check
+        # does not hide an update that was already found.
+        latest = str(cached.get('latest') or '')
     report = {
         'installed': installed,
         'latest': latest,
@@ -1205,11 +1229,14 @@ def download_release(tag, work):
         return None, 'the gh CLI is not installed'
     if not tag:
         return None, 'no release tag to download'
-    result = subprocess.run([gh, 'release', 'download', tag,
-                             '--pattern', 'luna-*.tar.gz',
-                             '--pattern', 'luna-*.tar.gz.sha256',
-                             '--dir', str(work), '--clobber', '-R', LUNA_REPO],
-                            capture_output=True, text=True)
+    try:
+        result = subprocess.run([gh, 'release', 'download', tag,
+                                 '--pattern', 'luna-*.tar.gz',
+                                 '--pattern', 'luna-*.tar.gz.sha256',
+                                 '--dir', str(work), '--clobber', '-R', LUNA_REPO],
+                                capture_output=True, text=True, timeout=GH_DOWNLOAD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, 'the release download did not finish within %d seconds' % GH_DOWNLOAD_TIMEOUT
     if result.returncode != 0:
         return None, (result.stderr.strip() or result.stdout.strip() or 'download failed')
     found = sorted(work.glob('luna-*.tar.gz'))

@@ -131,12 +131,13 @@ function compressorFixture(overrides){
   return Object.assign(base,overrides||{});
 }
 
-function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient,bootPatched}={}){
+function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPending,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient,bootPatched}={}){
   const bridgePatched = bootPatched !== false;
   const calls=[];
   const hltbState=Object.assign({success:true,count:0,games:{},library:[]},hltb||{});
   hltbState.count=Object.keys(hltbState.games||{}).length;
   const rateLimited=new Set();
+  const pendingSeen=new Map();
   const storage=new Map();
   const storageListeners=[];
   const prefsState=Object.assign({version:1,store_hide_followed:false},prefs||{});
@@ -185,6 +186,12 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
       if(fn==='SlsCompressorCancel')return JSON.stringify({success:true,cancelled:true});
       if(fn==='SlsHltbGet')return JSON.stringify(hltbState);
       if(fn==='SlsHltbFetch'){
+        // The non-blocking backend answers 'pending' until the site replies.
+        if(fetchPending&&(pendingSeen.get(payload.appid)||0)<fetchPending){
+          pendingSeen.set(payload.appid,(pendingSeen.get(payload.appid)||0)+1);
+          return JSON.stringify({success:false,pending:true,code:'pending',
+            error:'HowLongToBeat is still answering.'});
+        }
         if(fetchFailure&&Number(payload.appid)===Number(fetchFailure)){
           hltbState.games[String(payload.appid)]={name:payload.name,match:'none',
             source:'hltb-search',fetchedAt:Date.now()/1000};
@@ -225,6 +232,11 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,rateLimi
           return JSON.stringify({success:true,update:Object.assign({},updateState)});}
         if(action==='timer')return JSON.stringify({success:true,timer:'unattended updates: on',
           update:Object.assign({},updateState)});
+        // A forced check runs detached in the real backend: it reports
+        // checking until a few status polls later, then the new release.
+        if(action==='check'&&payload.force===true){updateState.checking=true;updateState.polls=3;}
+        if(action==='status'&&updateState.checking&&--updateState.polls<=0){
+          updateState.checking=false;updateState.latest='0.15.0';}
         return JSON.stringify({success:true,update:Object.assign({},updateState)});
       }
       if(fn==='SlsLunaRepair')return JSON.stringify({success:true,
@@ -806,6 +818,19 @@ test('the HowLongToBeat page lists cached times, missing games and fetches on de
   assert.deepEqual(call.payload,{appid:620,name:'Portal 2'});
   assert.match(textOf(document.getElementById('sls-luna-overlay')),/1\.0 h story/,
     'the fetched row must show its times');
+});
+
+test('a pending HowLongToBeat fetch is polled until the record arrives',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {calls,overlay}=await openHltbPage(document,{hltb:hltbFixture(),fetchPending:3});
+  findNode(rowFor(overlay,'Portal 2'),node=>node.textContent==='Fetch').onclick();
+  await new Promise(resolve=>setTimeout(resolve,80));
+  const fetches=calls.filter(entry=>entry.fn==='SlsHltbFetch');
+  assert.equal(fetches.length,4,'three pending answers, then the record');
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/1\.0 h story/,'the fetched row must show its times');
+  assert.doesNotMatch(text,/still answering/,'pending is not an error for the user');
 });
 
 test('the HowLongToBeat page opens the site search through Lumen',async()=>{
@@ -1631,6 +1656,26 @@ test('the Health page lists versions, drift and copyable diagnostics',async()=>{
   copy.onclick();
   const area=findNode(document.getElementById('sls-luna-overlay'),node=>node.tagName==='TEXTAREA');
   assert.ok(area&&/sls-luna/.test(area.value||''),'the diagnostics text must land in the textarea');
+});
+
+test('Check now follows the detached check until its result arrives',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document);
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Health')).onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.tagName==='BUTTON'&&node.textContent==='Check now').onclick();
+  await new Promise(resolve=>setTimeout(resolve,120));
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/latest: 0\.15\.0/,'the finished check must be shown without reopening');
+  assert.doesNotMatch(text,/Checking GitHub/);
+  const statuses=calls.filter(entry=>entry.fn==='SlsLunaUpdate'&&entry.payload.action==='status');
+  assert.ok(statuses.length>=3,'the panel must poll the status while the check runs');
 });
 
 test('the Health page reports updates and can queue one',async()=>{
