@@ -1020,5 +1020,58 @@ class LunaTestCase(unittest.TestCase):
         self.assertIn('"installed"', check.stdout)
 
 
+
+class VendorTestCase(unittest.TestCase):
+    """`vendor` rewrites the repository it lives in, so it runs on a copy."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='luna-vendor-')
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name) / 'repo'
+        for rel in ('scripts', 'addons', 'vendor', 'bridge'):
+            shutil.copytree(HERE / rel, self.repo / rel, ignore=shutil.ignore_patterns('__pycache__'))
+        self.git('init', '-q')
+        self.git('add', '-A')
+        self.git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'fixture')
+        # No sibling checkouts: a run that needs playtime/presence must say so.
+        self.env = dict(os.environ, HOME=self.temp.name)
+
+    def git(self, *args):
+        subprocess.run(['git', '-C', str(self.repo), *args], check=True, capture_output=True)
+
+    def vendor(self, *args):
+        return subprocess.run([sys.executable, str(self.repo / 'scripts/luna.py'), 'vendor', *args],
+                              env=self.env, capture_output=True, text=True)
+
+    def test_only_repins_the_named_addon_and_keeps_the_rest(self):
+        manifest_path = self.repo / 'vendor/MANIFEST.json'
+        before = json.loads(manifest_path.read_text())
+        panel = self.repo / 'addons/luna/plugin/public/panel.js'
+        panel.write_text(panel.read_text() + '\n// change\n')
+        self.git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qam', 'change')
+        result = self.vendor('--only', 'luna')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = json.loads(manifest_path.read_text())
+        self.assertEqual(after['shared'], before['shared'])
+        for name in before['addons']:
+            if name != 'luna':
+                self.assertEqual(after['addons'][name], before['addons'][name], name)
+        self.assertEqual(after['addons']['luna']['files']['public/panel.js']['sha256'],
+                         hashlib.sha256(panel.read_bytes()).hexdigest())
+        head = subprocess.run(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'],
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(after['addons']['luna']['source_commit'], head)
+
+    def test_refuses_to_pin_bytes_that_are_not_committed(self):
+        manifest_path = self.repo / 'vendor/MANIFEST.json'
+        before = manifest_path.read_bytes()
+        panel = self.repo / 'addons/luna/plugin/public/panel.js'
+        panel.write_text(panel.read_text() + '\n// uncommitted\n')
+        result = self.vendor('--only', 'luna')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('commit it before pinning', result.stderr)
+        self.assertEqual(manifest_path.read_bytes(), before)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

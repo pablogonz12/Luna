@@ -120,6 +120,11 @@
     return (size >= 100 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
   };
   const pctText = value => String(Math.max(0, Math.min(100, Math.round(Number(value) || 0))));
+  // Game names, paths and backend messages come from disk or the network: any
+  // of them placed in innerHTML goes through here, so it stays text.
+  const escapeHtml = text => String(text == null ? '' : text)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   function styled(document) {
     if (document.getElementById(STYLE_ID)) return;
@@ -855,12 +860,13 @@
       const line = document.createElement('p');
       line.className = 'sls-luna-note';
       if (job && job.running) {
-        line.innerHTML = '<strong>Running now:</strong> ' + (ACTION_LABELS[job.action] || job.action)
+        line.innerHTML = '<strong>Running now:</strong> ' + escapeHtml(ACTION_LABELS[job.action] || job.action)
           + ' \u00b7 ' + age(job.startedAt) + '.';
       } else if (pendingAction) {
-        line.innerHTML = '<strong>Starting</strong> ' + (ACTION_LABELS[pendingAction.action] || pendingAction.action) + '\u2026';
+        line.innerHTML = '<strong>Starting</strong> '
+          + escapeHtml(ACTION_LABELS[pendingAction.action] || pendingAction.action) + '\u2026';
       } else if (job) {
-        line.innerHTML = 'Last job: ' + (ACTION_LABELS[job.action] || job.action)
+        line.innerHTML = 'Last job: ' + escapeHtml(ACTION_LABELS[job.action] || job.action)
           + ' (started at ' + clock(job.startedAt) + ').';
       } else {
         line.textContent = 'No job has run from here yet.';
@@ -1093,7 +1099,7 @@
         const line = document.createElement('p');
         line.className = 'sls-luna-note';
         line.innerHTML = 'Game ' + (Number(queue.index) || 0) + ' of ' + total + ': <strong>'
-          + current.name + '</strong> '
+          + escapeHtml(current.name) + '</strong> '
           + (current.phase === 'dedupe'
             ? '\u00b7 deduplicating' + (Number(current.scannedBytes) > 0
               ? ' (' + formatBytes(current.scannedBytes) + ' scanned)' : '')
@@ -1177,9 +1183,9 @@
         const position = progress && progress.total
           ? progress.current + ' of ' + progress.total + ' games'
           : (progress && progress.label) || 'working';
-        line.innerHTML = 'Progress: <strong>' + position + '</strong>'
-          + (progress && progress.pct ? ' \u00b7 ' + progress.pct + '%' : '')
-          + (progress && progress.total && progress.label ? ' \u00b7 ' + progress.label : '');
+        line.innerHTML = 'Progress: <strong>' + escapeHtml(position) + '</strong>'
+          + (progress && progress.pct ? ' \u00b7 ' + pctText(progress.pct) + '%' : '')
+          + (progress && progress.total && progress.label ? ' \u00b7 ' + escapeHtml(progress.label) : '');
         body.appendChild(line);
         body.appendChild(progressBar(progress && progress.pct, !progress || !progress.pct));
       }
@@ -1797,7 +1803,6 @@
       }
       try { refreshLibraryShelves(); } catch (_) { /* shelves render later */ }
       repaintIfOpen();
-      refreshLibraryShelves();
     }
 
     /* View-local HLTB sorting for this library window. Home shelves are class
@@ -1833,15 +1838,26 @@
         try { if (node.child) stack.push(node.child); } catch (_) {}
       }
     }
+    // The anchor div is reused while it stays in the document, so a refresh does
+    // not copy and key-scan every div in the library on each pass.
+    let fiberAnchor = null;
+    const fiberKey = el => Object.keys(el).find(key => key.indexOf('__reactFiber') === 0);
     function libraryRootFiber() {
-      const divs = (document.querySelectorAll ? [...document.querySelectorAll('div')] : []);
-      const el = divs.find(candidate =>
-        Object.keys(candidate).some(key => key.indexOf('__reactFiber') === 0));
-      if (!el) return null;
-      let fiber = el[Object.keys(el).find(key => key.indexOf('__reactFiber') === 0)];
+      if (!fiberAnchor || fiberAnchor.isConnected !== true || !fiberKey(fiberAnchor)) {
+        fiberAnchor = null;
+        const divs = document.querySelectorAll ? document.querySelectorAll('div') : [];
+        for (const candidate of divs) {
+          if (fiberKey(candidate)) { fiberAnchor = candidate; break; }
+        }
+      }
+      if (!fiberAnchor) return null;
+      let fiber = fiberAnchor[fiberKey(fiberAnchor)];
       let depth = 0;
       while (fiber && fiber.return && depth < 500) { fiber = fiber.return; depth += 1; }
-      return fiber;
+      // A node's fiber can be the stale alternate; the root container always
+      // points at the tree React rendered last.
+      const current = fiber && fiber.stateNode && fiber.stateNode.current;
+      return current && typeof current === 'object' ? current : fiber;
     }
     function patchShelfInstance(instance) {
       if (!instance || instance.__slsHltbShelf) return false;
@@ -1860,10 +1876,16 @@
       };
       return true;
     }
+    // A patched shelf re-sorts on Steam's own renders, so it is only forced to
+    // re-render when it was just patched or the times/direction it last drew
+    // with changed. Forcing it on every pass fed the DOM observer below: each
+    // re-render mutated the DOM, which scheduled the next pass, indefinitely.
     function refreshLibraryShelves() {
       let root = null;
       try { root = libraryRootFiber(); } catch (_) { root = null; }
       if (!root) return 0;
+      const data = hltb;
+      const order = hltbOrder();
       let refreshed = 0;
       eachFiber(root, node => {
         const instance = node.stateNode;
@@ -1873,14 +1895,20 @@
           if (instance.__slsHltbShelf && instance.__slsOrigSort) {
             try { instance.m_fnSort = instance.__slsOrigSort; } catch (_) {}
             instance.__slsHltbShelf = false;
+            instance.__slsHltbDrawn = null;
           }
           return;
         }
-        if (patchShelfInstance(instance) && typeof instance.forceUpdate === 'function') {
-          try { instance.forceUpdate(); refreshed += 1; } catch (_) {}
-        } else if (instance.__slsHltbShelf && typeof instance.forceUpdate === 'function') {
-          try { instance.forceUpdate(); refreshed += 1; } catch (_) {}
-        }
+        const patched = patchShelfInstance(instance);
+        if (!patched && !instance.__slsHltbShelf) return;
+        const drawn = instance.__slsHltbDrawn;
+        if (!patched && drawn && drawn.data === data && drawn.order === order) return;
+        if (typeof instance.forceUpdate !== 'function') return;
+        try {
+          instance.forceUpdate();
+          instance.__slsHltbDrawn = { data, order };
+          refreshed += 1;
+        } catch (_) {}
       });
       return refreshed;
     }
@@ -1890,6 +1918,8 @@
       const schedule = w.setTimeout || setTimeout;
       shelfTimer = schedule(() => {
         shelfTimer = null;
+        // A hidden window has nothing to show; the periodic pass catches up.
+        if (document.hidden === true) return;
         refreshLibraryShelves();
       }, delay == null ? 0 : delay);
     }
@@ -2207,13 +2237,13 @@
         line.className = 'sls-luna-note';
         const skipText = hltbQueue.skipped ? ', ' + hltbQueue.skipped + ' skipped (no match)' : '';
         if (hltbQueue.error) {
-          line.innerHTML = '<strong>Stopped:</strong> ' + hltbQueue.error;
+          line.innerHTML = '<strong>Stopped:</strong> ' + escapeHtml(hltbQueue.error);
         } else if (hltbQueue.wait) {
-          line.innerHTML = '<strong>Rate-limited.</strong> Waiting ' + hltbQueue.wait
-            + 's before retrying \u201c' + (hltbQueue.label || '') + '\u201d\u2026';
+          line.innerHTML = '<strong>Rate-limited.</strong> Waiting ' + (Number(hltbQueue.wait) || 0)
+            + 's before retrying \u201c' + escapeHtml(hltbQueue.label) + '\u201d\u2026';
         } else if (hltbQueue.running) {
           line.innerHTML = '<strong>Fetching ' + (hltbQueue.done + hltbQueue.skipped + 1)
-            + ' of ' + hltbQueue.total + '</strong> \u00b7 ' + (hltbQueue.label || '') + '\u2026'
+            + ' of ' + hltbQueue.total + '</strong> \u00b7 ' + escapeHtml(hltbQueue.label) + '\u2026'
             + (hltbQueue.skipped ? ' (skipped ' + hltbQueue.skipped + ')' : '')
             + ' <span style="color:#8d97a1">\u00b7 keeps running with this window closed</span>';
         } else {
@@ -2559,7 +2589,7 @@
       if (hasKey && sgdb && sgdb.gridDir) {
         const where = document.createElement('p');
         where.className = 'sls-luna-note';
-        where.innerHTML = 'Writing to <strong>' + sgdb.gridDir + '</strong>';
+        where.innerHTML = 'Writing to <strong>' + escapeHtml(sgdb.gridDir) + '</strong>';
         body.appendChild(where);
       } else if (hasKey && sgdb && sgdb.gridError) {
         const broken = document.createElement('p');
@@ -2618,9 +2648,7 @@
       const head = document.createElement('p');
       head.className = 'sls-luna-note';
       // Names come from the local library and SteamGridDB: text, never HTML.
-      const esc = text => String(text == null ? '' : text)
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
+      const esc = escapeHtml;
       head.innerHTML = 'Artwork for <strong>' + esc(sgdbGame.name) + '</strong> (#' + sgdbGame.appid + ')'
         + (sgdbGame.sgdbName && sgdbGame.sgdbName !== sgdbGame.name
           ? ' \u00b7 matched as &quot;' + esc(sgdbGame.sgdbName) + '&quot;' : '')
@@ -3692,7 +3720,12 @@
     // re-apply after the cache or direction changes. No shared objects change.
     (w.setTimeout || setTimeout)(() => { refreshLibraryShelves(); }, 3000);
     (w.setTimeout || setTimeout)(() => { refreshLibraryShelves(); }, 9000);
-    w.setInterval(() => { refreshLibraryShelves(); }, 15000);
+    w.setInterval(() => { if (document.hidden !== true) refreshLibraryShelves(); }, 15000);
+    if (typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden !== true) scheduleShelfRefresh(0);
+      });
+    }
     if (typeof w.MutationObserver === 'function') {
       try {
         const seen = new w.MutationObserver(() => { scheduleShelfRefresh(800); });
