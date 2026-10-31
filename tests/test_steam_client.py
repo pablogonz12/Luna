@@ -55,6 +55,10 @@ class SteamClientTestCase(unittest.TestCase):
                                     'XDG_DATA_HOME': str(self.home / '.local/share'),
                                     'XDG_RUNTIME_DIR': str(self.home / 'run')}).start()
         self.network = mock.patch.object(luna.urllib.request, 'urlopen', side_effect=AssertionError('unexpected network')).start()
+        # The hook worker and the SteamOS launchers have their own suites; run for
+        # real here they read the host's niri/DRM outputs and print hook errors.
+        self.hook = mock.patch.object(luna, 'lumen_hook', return_value=0).start()
+        self.launchers = mock.patch.object(luna, 'steam_machine_action', return_value=0).start()
         self.make_packages()
 
     def make_packages(self, extra=None, compressed=True, corrupt_crc=False):
@@ -161,6 +165,18 @@ class SteamClientTestCase(unittest.TestCase):
         for name in ('userdata/private', 'config/loginusers.vdf', 'steamapps/private-save'):
             self.assertEqual((self.root / name).read_text(), 'private sentinel')
         self.network.assert_not_called()
+        self.hook.assert_called_with('enable')
+        self.assertEqual(self.launchers.call_args.args[0], 'install')
+
+    def test_untraceable_pins_are_named(self):
+        commit = 'a' * 40
+        manifest = {'shared': {'bridge/bridge.lua': {'source_commit': 'unreleased'}},
+                    'addons': {'luna': {'source_commit': commit},
+                               'presence': {'source_commit': 'uncommitted-worktree'},
+                               'sgdb': {}}}
+        self.assertEqual(luna.untraceable_pins(manifest),
+                         ['bridge/bridge.lua (unreleased)', 'presence (uncommitted-worktree)', 'sgdb (no commit)'])
+        self.assertEqual(luna.untraceable_pins({'addons': {'luna': {'source_commit': commit}}}), [])
 
     def test_regular_zip_packages_are_supported(self):
         self.make_packages(compressed=False)

@@ -644,6 +644,24 @@ test('the status tab shows the game-by-game queue with bars',async()=>{
   assert.ok(findNode(overlay,node=>node.className==='sls-luna-mini'),'a per-game mini bar was not rendered');
 });
 
+test('game names from disk are written as text, never markup',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const fixture=compressorFixture();
+  const name='<img src=x onerror=alert(1)>';
+  fixture.job={action:'run',pid:42,running:true,startedAt:Date.now()/1000-90,finishedAt:0,elapsed:90,log:''};
+  fixture.queue={active:true,total:1,index:1,done:0,failed:0,skipped:0,saved:0,finished:false,
+    current:{name,path:'/games/x',size:100,totalBytes:100,doneBytes:1,phase:'compress',scannedBytes:0},
+    next:[],games:[{name,path:'/games/x',size:100,status:'running',saved:0}]};
+  const {w}=fakeWindow(document,{compressor:fixture});
+  mount(w);
+  const overlay=await openCompressor(document);
+  const line=findNode(overlay,node=>/Game 1 of 1/.test(node.innerHTML||''));
+  assert.ok(line,'the current-game line is missing');
+  assert.doesNotMatch(line.innerHTML,/<img/,'a game name must not become an element');
+  assert.match(line.innerHTML,/&lt;img src=x onerror=alert\(1\)&gt;/);
+});
+
 test('the settings tab saves switches and reveals the alpha resolution profiles',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
@@ -1360,6 +1378,38 @@ test('library home shelves sort view-locally by cached HLTB times',async()=>{
     'alphabetical shelf untouched');
   assert.deepEqual(apps.map(a=>a.display_name),['Zebra','Alpha','Missing'],
     'shared app objects are never mutated');
+});
+
+test('library shelves re-render only when their HLTB times or direction change',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const apps=[{appid:1,display_name:'Zebra'},{appid:2,display_name:'Alpha'}];
+  const hltbShelf={
+    props:{showcase:{eSortBy:12},collectionId:'games'},
+    m_fnSort:collection=>collection.visibleApps.slice(), updates:0,
+    forceUpdate(){ this.updates++; this.order=this.m_fnSort({visibleApps:apps}).map(a=>a.appid); },
+  };
+  const fiber={stateNode:hltbShelf,memoizedProps:{showcase:{eSortBy:12}},child:null,sibling:null};
+  const root={child:fiber,sibling:null};
+  fiber.return=root;
+  const anchor=document.createElement('div');
+  anchor['__reactFiber$test']=root;
+  document.body.appendChild(anchor);
+  const {w}=fakeWindow(document,{hltb:{success:true,games:{'1':{main:3600},'2':{main:120}}}});
+  const intervals=[];
+  w.setInterval=fn=>{intervals.push(fn);return intervals.length;};
+  mount(w);
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.deepEqual(hltbShelf.order,[2,1],'shortest first');
+  const settled=hltbShelf.updates;
+  for(let i=0;i<5;i++)intervals.forEach(fn=>fn());
+  assert.equal(hltbShelf.updates,settled,'unchanged times and direction must not force re-renders');
+  w.localStorage.setItem('slsLunaHltbOrder','long');
+  intervals.forEach(fn=>fn());
+  assert.equal(hltbShelf.updates,settled+1,'a direction change re-renders exactly once');
+  assert.deepEqual(hltbShelf.order,[1,2],'longest first');
+  intervals.forEach(fn=>fn());
+  assert.equal(hltbShelf.updates,settled+1);
 });
 
 test('Forget removes a cached record and the game becomes fetchable again',async()=>{

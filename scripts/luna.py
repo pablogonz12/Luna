@@ -979,6 +979,7 @@ def cmd_release(options):
             print('  - %s' % problem)
         print('Run scripts/vendor-update.sh, then verify, before releasing.', file=sys.stderr)
         return 1
+    warn_untraceable(manifest, sys.stderr)
     version = addon_version('luna')
     out_dir = Path(options.out).expanduser() if options.out else ROOT / 'dist'
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2851,6 +2852,24 @@ def cmd_uninstall(options):
     return EXIT_OK
 
 
+def untraceable_pins(manifest):
+    """Pins whose source_commit is not a commit id, so the bytes cannot be traced."""
+    found = []
+    for section in ('shared', 'addons'):
+        for name, entry in sorted(manifest.get(section, {}).items()):
+            commit = str(entry.get('source_commit', ''))
+            if not re.fullmatch(r'[0-9a-f]{40}', commit):
+                found.append('%s (%s)' % (name, commit or 'no commit'))
+    return found
+
+
+def warn_untraceable(manifest, stream=sys.stdout):
+    found = untraceable_pins(manifest)
+    if found:
+        print('\nWARNING: pinned to no commit, so these bytes cannot be traced to a source '
+              'revision: %s. Commit the source and re-run vendor.' % ', '.join(found), file=stream)
+
+
 def cmd_verify(options):
     manifest = load_manifest()
     problems = []
@@ -2917,13 +2936,19 @@ def cmd_verify(options):
         for problem in problems:
             print('  - %s' % problem)
         return 1
+    warn_untraceable(manifest)
     print('\nOK: the payloads match the manifest.')
     return EXIT_OK
 
 
 def cmd_vendor(options):
+    # --only re-pins the named add-ons and keeps every other manifest entry as
+    # it is, so refreshing one payload never silently moves the others.
+    only = set(selected_addons(options)) if options.only else None
     sources = {}
     for name in SOURCED:
+        if only is not None and name not in only:
+            continue
         source = Path(options.source_dir or (home() / 'Documents/Scripts' / ('slsteam-' + name)))
         if not (source / '.git').is_dir():
             print('FAIL: no git checkout for %s at %s (pass --source-dir)' % (name, source), file=sys.stderr)
@@ -2956,39 +2981,32 @@ def cmd_vendor(options):
             raise SystemExit('FAIL: git archive from %s failed: %s'
                              % (source, producer.stderr.read().decode(errors='replace')))
 
-    manifest = {'generated': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'shared': {}, 'addons': {}}
-    # The shared bridge and patcher come from the playtime project; both projects
-    # ship byte-identical copies, and `verify --sources` keeps them honest.
-    shared_source = sources['playtime']
-    shared_commit = head(shared_source)
-    for rel, source_path in (('bridge/bridge.lua', 'bridge/bridge.lua'),
-                             ('scripts/patch-lumen.py', 'scripts/patch-lumen.py')):
-        (ROOT / rel).write_bytes(show(shared_source, shared_commit, source_path))
-        manifest['shared'][rel] = {'source_repo': 'https://github.com/pgm1207/slsteam-playtime',
-                                   'source_commit': shared_commit, 'source_path': source_path,
-                                   'sha256': sha256(ROOT / rel)}
-        print('pinned %s from %s@%s' % (rel, shared_source.name, shared_commit[:12]))
-    # First-party add-ons come from this repository, so they are pinned to this
-    # checkout rather than fetched from another project.
+    generated = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    if only is None:
+        manifest = {'generated': generated, 'shared': {}, 'addons': {}}
+    else:
+        manifest = json.loads(MANIFEST_PATH.read_text())
+        manifest['generated'] = generated
     repo_commit = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
                                  capture_output=True, text=True).stdout.strip()
-    manifest['shared']['scripts/steam-machine.py'] = {
-        'source_repo': 'https://github.com/pgm1207/Luna', 'source_commit': repo_commit,
-        'source_path': 'scripts/steam-machine.py', 'sha256': sha256(ROOT / 'scripts/steam-machine.py')}
-    hook_rel = 'scripts/lumen-hook.py'
-    committed_hook = subprocess.run(['git', '-C', str(ROOT), 'show', repo_commit + ':' + hook_rel],
-                                    capture_output=True)
-    hook_clean = committed_hook.returncode == 0 and committed_hook.stdout == (ROOT / hook_rel).read_bytes()
-    manifest['shared'][hook_rel] = {
-        'source_repo': 'https://github.com/pgm1207/Luna',
-        'source_commit': repo_commit if hook_clean else 'uncommitted-worktree',
-        'source_path': hook_rel, 'sha256': sha256(ROOT / hook_rel)}
+    if only is None:
+        vendor_shared(manifest, sources['playtime'], head, show, repo_commit)
+    # First-party add-ons come from this repository, so they are pinned to this
+    # checkout's HEAD - and only when the bytes are HEAD's, so a pin always names
+    # a commit that really contains them.
     for name in FIRST_PARTY:
+        if only is not None and name not in only:
+            continue
         files = {}
         for source_rel, dest_rel in ADDON_FILES[name]:
             path = payload_path(name, source_rel)
             if not path.is_file():
                 raise SystemExit('FAIL: this repository has no addons/%s/%s' % (name, source_rel))
+            rel = path.relative_to(ROOT).as_posix()
+            committed = subprocess.run(['git', '-C', str(ROOT), 'show', '%s:%s' % (repo_commit, rel)],
+                                       capture_output=True)
+            if committed.returncode != 0 or committed.stdout != path.read_bytes():
+                raise SystemExit('FAIL: %s differs from HEAD; commit it before pinning' % rel)
             files[dest_rel] = {'source_path': source_rel, 'sha256': sha256(path)}
         manifest['addons'][name] = {
             'source_repo': 'https://github.com/pgm1207/Luna',
@@ -3018,6 +3036,31 @@ def cmd_vendor(options):
     MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
     print('wrote %s' % MANIFEST_PATH)
     return EXIT_OK
+
+
+def vendor_shared(manifest, shared_source, head, show, repo_commit):
+    # The shared bridge and patcher come from the playtime project; both projects
+    # ship byte-identical copies, and `verify --sources` keeps them honest.
+    shared_commit = head(shared_source)
+    for rel, source_path in (('bridge/bridge.lua', 'bridge/bridge.lua'),
+                             ('scripts/patch-lumen.py', 'scripts/patch-lumen.py')):
+        (ROOT / rel).write_bytes(show(shared_source, shared_commit, source_path))
+        manifest['shared'][rel] = {'source_repo': 'https://github.com/pgm1207/slsteam-playtime',
+                                   'source_commit': shared_commit, 'source_path': source_path,
+                                   'sha256': sha256(ROOT / rel)}
+        print('pinned %s from %s@%s' % (rel, shared_source.name, shared_commit[:12]))
+    # First-party scripts come from this repository, pinned to its HEAD.
+    manifest['shared']['scripts/steam-machine.py'] = {
+        'source_repo': 'https://github.com/pgm1207/Luna', 'source_commit': repo_commit,
+        'source_path': 'scripts/steam-machine.py', 'sha256': sha256(ROOT / 'scripts/steam-machine.py')}
+    hook_rel = 'scripts/lumen-hook.py'
+    committed_hook = subprocess.run(['git', '-C', str(ROOT), 'show', repo_commit + ':' + hook_rel],
+                                    capture_output=True)
+    hook_clean = committed_hook.returncode == 0 and committed_hook.stdout == (ROOT / hook_rel).read_bytes()
+    manifest['shared'][hook_rel] = {
+        'source_repo': 'https://github.com/pgm1207/Luna',
+        'source_commit': repo_commit if hook_clean else 'uncommitted-worktree',
+        'source_path': hook_rel, 'sha256': sha256(ROOT / hook_rel)}
 
 
 def steam_machine_action(action, dry_run=False, migrate=False):
