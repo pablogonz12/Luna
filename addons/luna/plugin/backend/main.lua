@@ -30,6 +30,9 @@ local UA = 'Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140
 -- the fetch is user-triggered, so a small spacing keeps refreshes polite.
 M.min_fetch_interval = 2
 local last_fetch_at = 0
+-- In-flight non-blocking searches by app id; see M.advance_fetch_job.
+M.fetch_job_ttl = 60
+local fetch_jobs = {}
 
 local function reply(data) return json.encode(data) end
 
@@ -291,56 +294,140 @@ local function decode_body(body)
   return nil
 end
 
+-- Response checks shared by the blocking and the non-blocking paths.
+local function token_from(response, err)
+  if type(response) ~= 'table' then return nil, tostring(err or 'no response'), 'unavailable' end
+  if response.status ~= 200 then
+    return nil, 'HowLongToBeat search init failed (HTTP ' .. tostring(response.status) .. ').', 'unavailable'
+  end
+  local parsed = decode_body(response.body)
+  if not parsed or type(parsed.token) ~= 'string' or parsed.token == '' then
+    return nil, 'HowLongToBeat returned no search token.', 'unavailable'
+  end
+  return parsed.token
+end
+
+-- Rows, or nil + reason + code; code 'expired' asks the caller for a new token.
+local function rows_from(response, err)
+  if type(response) ~= 'table' then
+    return nil, 'HowLongToBeat request failed: ' .. tostring(err or 'no response'), 'unavailable'
+  end
+  if response.status == 403 then
+    return nil, 'HowLongToBeat rejected the search token twice.', 'expired'
+  elseif response.status == 429 then
+    return nil, 'HowLongToBeat is rate-limiting searches; wait a minute and try again.', 'rate_limit'
+  elseif response.status ~= 200 then
+    return nil, 'HowLongToBeat search failed (HTTP ' .. tostring(response.status) .. ').', 'unavailable'
+  end
+  local parsed = decode_body(response.body)
+  local rows = parsed and (parsed.data or parsed.results)
+  if type(rows) ~= 'table' then
+    return nil, 'HowLongToBeat returned an unexpected response.', 'unavailable'
+  end
+  return rows
+end
+
+local function token_request()
+  return INIT_URL .. tostring(os.time()) .. '000', { headers = request_headers(), timeout = 15 }
+end
+
+local function search_request(name, token)
+  return SEARCH_URL, json.encode(search_payload(name)), {
+    headers = request_headers({ ['Content-Type'] = 'application/json', ['x-auth-token'] = token }),
+    timeout = 20,
+  }
+end
+
 -- Two requests, exactly like the site's own search page: fetch a token, then
 -- POST the query with it. A 403 means the token expired; refresh once.
--- Returns rows, or nil + a user-facing reason.
+-- Returns rows, or nil + a user-facing reason. This blocking form is only the
+-- fallback for a Lumen without http.start/http.poll.
 local function fetch_rows(name)
   if not ok_http or type(http) ~= 'table'
       or type(http.get) ~= 'function' or type(http.post) ~= 'function' then
     return nil, 'The Lumen HTTP module is unavailable; cannot reach HowLongToBeat.', 'unavailable'
   end
   local function token()
-    local response, err = http.get(INIT_URL .. tostring(os.time()) .. '000',
-      { headers = request_headers(), timeout = 15 })
-    if type(response) ~= 'table' then return nil, tostring(err or 'no response'), 'unavailable' end
-    if response.status ~= 200 then
-      return nil, 'HowLongToBeat search init failed (HTTP ' .. tostring(response.status) .. ').', 'unavailable'
-    end
-    local parsed = decode_body(response.body)
-    if not parsed or type(parsed.token) ~= 'string' or parsed.token == '' then
-      return nil, 'HowLongToBeat returned no search token.', 'unavailable'
-    end
-    return parsed.token
+    local url, options = token_request()
+    return token_from(http.get(url, options))
   end
-
   local current, why, code = token()
   if not current then return nil, why, code end
-  local payload = json.encode(search_payload(name))
   for attempt = 1, 2 do
-    local response, err = http.post(SEARCH_URL, payload, {
-      headers = request_headers({ ['Content-Type'] = 'application/json', ['x-auth-token'] = current }),
-      timeout = 20,
-    })
-    if type(response) ~= 'table' then
-      return nil, 'HowLongToBeat request failed: ' .. tostring(err or 'no response'), 'unavailable'
-    end
-    if response.status == 403 and attempt == 1 then
+    local rows
+    rows, why, code = rows_from(http.post(search_request(name, current)))
+    if code == 'expired' and attempt == 1 then
       current, why, code = token()
       if not current then return nil, why, code end
-    elseif response.status == 429 then
-      return nil, 'HowLongToBeat is rate-limiting searches; wait a minute and try again.', 'rate_limit'
-    elseif response.status ~= 200 then
-      return nil, 'HowLongToBeat search failed (HTTP ' .. tostring(response.status) .. ').', 'unavailable'
+    elseif code == 'expired' then
+      return nil, why, 'unavailable'
     else
-      local parsed = decode_body(response.body)
-      local rows = parsed and (parsed.data or parsed.results)
-      if type(rows) ~= 'table' then
-        return nil, 'HowLongToBeat returned an unexpected response.', 'unavailable'
-      end
-      return rows
+      return rows, why, code
     end
   end
-  return nil, 'HowLongToBeat rejected the search token twice.', 'unavailable'
+end
+
+-- Non-blocking form. Lumen runs every RPC on its single injector thread, so a
+-- blocking search froze Steam's UI for each game of a fetch pass. A job holds
+-- one in-flight request; each SlsHltbFetch call polls it without waiting and
+-- reports 'pending' until the rows (or the reason there are none) are known.
+local function async_http()
+  return ok_http and type(http) == 'table'
+    and type(http.start) == 'function' and type(http.poll) == 'function'
+end
+
+local function start_token(job)
+  local url, options = token_request()
+  local ok, handle, err = pcall(http.start, url, options)
+  if not ok or not handle then
+    return nil, 'HowLongToBeat request failed: ' .. tostring(ok and err or handle), 'unavailable'
+  end
+  job.step, job.handle = 'token', handle
+  return true
+end
+
+local function start_search(job)
+  local url, body, options = search_request(job.name, job.token)
+  options.method, options.data = 'POST', body
+  local ok, handle, err = pcall(http.start, url, options)
+  if not ok or not handle then
+    return nil, 'HowLongToBeat request failed: ' .. tostring(ok and err or handle), 'unavailable'
+  end
+  job.step, job.handle = 'search', handle
+  return true
+end
+
+function M.new_fetch_job(name)
+  local job = { name = name, attempt = 1, startedAt = os.time() }
+  local started, why, code = start_token(job)
+  if not started then return nil, why, code end
+  return job
+end
+
+-- 'pending', or 'done' + rows, or 'failed' + reason + code.
+function M.advance_fetch_job(job)
+  local ok, done, response, err = pcall(http.poll, job.handle, 0)
+  if not ok then return 'failed', nil, 'HowLongToBeat request failed: ' .. tostring(done), 'unavailable' end
+  if not done then return 'pending' end
+  if job.step == 'token' then
+    local token, why, code = token_from(response, err)
+    if not token then return 'failed', nil, why, code end
+    job.token = token
+    local started
+    started, why, code = start_search(job)
+    if not started then return 'failed', nil, why, code end
+    return 'pending'
+  end
+  local rows, why, code = rows_from(response, err)
+  if code == 'expired' and job.attempt == 1 then
+    job.attempt = 2
+    local started
+    started, why, code = start_token(job)
+    if not started then return 'failed', nil, why, code end
+    return 'pending'
+  end
+  if not rows then return 'failed', nil, why, code == 'expired' and 'unavailable' or code end
+  return 'done', rows
 end
 
 -- ------------------------------------------------------------------ records
@@ -526,13 +613,26 @@ local function write_json(path, value)
   return (written and closed) and true or false
 end
 
+-- Lumen runs every RPC on its single injector thread, so a call that waits
+-- here stalls Steam's UI and every other add-on. Synchronous runs are capped
+-- with coreutils timeout; the network check never runs synchronously at all.
+local function bounded(seconds)
+  for _, candidate in ipairs({ '/usr/bin/timeout', '/bin/timeout' }) do
+    if path_exists(candidate) then
+      return candidate .. ' -k 5 ' .. tostring(math.floor(seconds)) .. ' '
+    end
+  end
+  return ''
+end
+
 -- Runs the standalone updater. Only the small actions come through here: the
 -- download-and-apply belongs to the user's timer, never inside an RPC.
-local function run_updater(args)
+local function run_updater(args, seconds)
   if not path_exists(updater_path()) then
     return nil, 'the updater is not installed yet; run install --force once'
   end
-  local pipe = io.popen(python_bin() .. ' ' .. shq(updater_path()) .. ' ' .. args .. ' 2>&1')
+  local pipe = io.popen(bounded(seconds or 60) .. shq(python_bin()) .. ' ' .. shq(updater_path())
+    .. ' ' .. args .. ' 2>&1')
   if not pipe then return nil, 'could not run the updater' end
   local output = pipe:read('*a') or ''
   local ok, why, code = pipe:close()
@@ -541,6 +641,41 @@ local function run_updater(args)
     return nil, (message ~= '' and message or ('the updater exited with ' .. tostring(code or why)))
   end
   return output, nil
+end
+
+-- The update check talks to GitHub, so it runs detached: the RPC returns at
+-- once and the panel follows update-check.json, which the check always writes
+-- (errors included). One check at a time; a stuck one is retried after 90s.
+local CHECK_GRACE = 90
+local check_started_path = update_dir .. '/check-started'
+
+local function check_started_at()
+  local handle = io.open(check_started_path, 'rb')
+  if not handle then return 0 end
+  local raw = handle:read('*a') or ''
+  handle:close()
+  return tonumber(raw:match('%d+')) or 0
+end
+
+local function checking(cached)
+  local started = check_started_at()
+  return started > 0 and started > (tonumber(cached.checkedAt) or 0)
+    and os.time() - started < CHECK_GRACE
+end
+
+local function spawn_check(force)
+  if not path_exists(updater_path()) then
+    return false, 'the updater is not installed yet; run install --force once'
+  end
+  fs.create_directories(update_dir)
+  local handle = io.open(check_started_path, 'wb')
+  if not handle then return false, 'could not record the update check' end
+  handle:write(tostring(os.time()))
+  handle:close()
+  local inner = 'exec ' .. bounded(CHECK_GRACE - 10) .. shq(python_bin()) .. ' ' .. shq(updater_path())
+    .. ' check' .. (force and ' --force' or '')
+  os.execute('setsid sh -c ' .. shq(inner) .. ' < /dev/null > /dev/null 2>&1 &')
+  return true
 end
 
 local function update_state()
@@ -554,6 +689,7 @@ local function update_state()
     available = cached.available == true,
     checkedAt = tonumber(cached.checkedAt) or 0,
     checkError = tostring(cached.checkError or ''),
+    checking = checking(cached),
     pending = pending.tag ~= nil,
     pendingTag = tostring(pending.tag or ''),
     autoUpdate = tostring(prefs.auto_update or 'off'),
@@ -806,8 +942,10 @@ function M.register(registry)
       return reply({ success = true, update = update_state() })
     end
     if action == 'check' then
-      local out, err = run_updater('check' .. (entry.force == true and ' --force' or ''))
-      if not out then return reply({ success = false, error = err }) end
+      if not checking(read_json(update_dir .. '/update-check.json') or {}) then
+        local started, err = spawn_check(entry.force == true)
+        if not started then return reply({ success = false, error = err }) end
+      end
       return reply({ success = true, update = update_state() })
     end
     if action == 'install' then
@@ -825,7 +963,7 @@ function M.register(registry)
       if value ~= 'on' and value ~= 'off' and value ~= 'status' then
         return reply({ success = false, error = 'Send on, off or status.' })
       end
-      local out, err = run_updater('timer ' .. value)
+      local out, err = run_updater('timer ' .. value, 30)
       if not out then return reply({ success = false, error = err }) end
       return reply({ success = true, timer = (out:gsub('%s+$', '')), update = update_state() })
     end
@@ -843,7 +981,7 @@ function M.register(registry)
       return reply({ success = true, steam = steam_client_state() })
     end
     if action == 'pin' then
-      local out, err = run_updater('steam pin')
+      local out, err = run_updater('steam pin', 60)
       if not out then return reply({ success = false, error = err }) end
       return reply({ success = true, message = (out:gsub('%s+$', '')),
         steam = steam_client_state() })
@@ -871,7 +1009,7 @@ function M.register(registry)
   -- while Steam runs (same guard as the shell), so the panel surfaces the
   -- refusal instead of changing anything.
   registry.SlsLunaRepair = function()
-    local out, err = run_updater('install --keep-steam-client')
+    local out, err = run_updater('install --keep-steam-client', 180)
     if not out then return reply({ success = false, error = err }) end
     return reply({ success = true, message = (out:gsub('%s+$', '')),
       health = build_health() })
@@ -911,7 +1049,7 @@ function M.register(registry)
       return reply({ success = true, helper = path_exists(tools .. '/steam-machine.py') })
     end
     if action == 'create' then
-      local out, err = run_updater('launchers')
+      local out, err = run_updater('launchers', 60)
       if not out then return reply({ success = false, error = err }) end
       return reply({ success = true, message = (out:gsub('%s+$', '')) })
     end
@@ -968,15 +1106,39 @@ function M.register(registry)
     if name == '' then
       return reply({ success = false, code = 'invalid', error = 'This game has no name to search for.' })
     end
-    local now = os.time()
-    if now - last_fetch_at < M.min_fetch_interval then
-      return reply({ success = false, code = 'throttled',
-        error = 'Wait a moment before the next HowLongToBeat request.' })
-    end
-    last_fetch_at = now
-    local rows, why, code = fetch_rows(name)
-    local store = load_store()
     local key = tostring(math.floor(tonumber(appid)))
+    local now = os.time()
+    local job = fetch_jobs[key]
+    -- A job nobody polled for a minute is abandoned (menu closed mid-fetch).
+    if job and now - job.startedAt > M.fetch_job_ttl then
+      fetch_jobs[key], job = nil, nil
+    end
+    local rows, why, code
+    if not job then
+      if now - last_fetch_at < M.min_fetch_interval then
+        return reply({ success = false, code = 'throttled',
+          error = 'Wait a moment before the next HowLongToBeat request.' })
+      end
+      last_fetch_at = now
+      if not async_http() then
+        rows, why, code = fetch_rows(name)
+      else
+        job, why, code = M.new_fetch_job(name)
+        if not job then return reply({ success = false, code = code or 'unavailable', error = why }) end
+        fetch_jobs[key] = job
+      end
+    end
+    if job then
+      local state
+      state, rows, why, code = M.advance_fetch_job(job)
+      if state == 'pending' then
+        return reply({ success = false, pending = true, code = 'pending',
+          error = 'HowLongToBeat is still answering.' })
+      end
+      fetch_jobs[key] = nil
+      name = job.name
+    end
+    local store = load_store()
     if not rows then
       return reply({ success = false, code = code or 'unavailable', error = why })
     end

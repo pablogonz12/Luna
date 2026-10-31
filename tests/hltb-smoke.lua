@@ -502,4 +502,93 @@ assert(out.success == false, 'an unknown launchers action must be refused')
 out = call('SlsLunaRepair')
 assert(out.success == false, 'repair with no updater copy must fail closed, not shell out')
 
+-- Non-blocking fetch: with http.start/http.poll available, SlsHltbFetch never
+-- waits on the network. The fake answers each request after two empty polls,
+-- reusing the blocking fake's responses so both paths see the same site.
+local started = 0
+wire.start = function(url, options)
+  started = started + 1
+  return { url = url, options = options or {}, polls = 2 }
+end
+wire.poll = function(handle, timeout)
+  assert(timeout == 0, 'polling must never wait')
+  handle.polls = handle.polls - 1
+  if handle.polls > 0 then return false end
+  if handle.options.method == 'POST' then
+    return true, wire.post(handle.url, handle.options.data, handle.options)
+  end
+  return true, wire.get(handle.url, handle.options)
+end
+local function fetch_async(appid, name)
+  local pending = 0
+  for _ = 1, 40 do
+    local result = call('SlsHltbFetch', { appid = appid, name = name })
+    if result.code ~= 'pending' then return result, pending end
+    assert(result.pending == true and result.success == false, 'a pending fetch must say so')
+    pending = pending + 1
+  end
+  error('the non-blocking fetch never finished')
+end
+wire.mode = 'ok'
+local gets, posts = wire.get_calls, wire.post_calls
+out, pending = fetch_async(413150, 'Stardew Valley')
+assert(out.success == true and out.record.name == 'Stardew Valley', 'the non-blocking fetch must store a record')
+assert(pending >= 2, 'the RPC must return while requests are in flight')
+assert(started == 2 and wire.get_calls == gets + 1 and wire.post_calls == posts + 1,
+  'one token request and one search, through http.start only')
+wire.mode = 'expired'
+wire.expired_armed = true
+out = fetch_async(504230, 'Celeste')
+assert(out.success == true, 'an expired token is refreshed on the non-blocking path too')
+assert(started == 6, 'token, rejected search, new token and the retried search')
+wire.mode = 'ratelimit'
+out = fetch_async(250900, 'The Binding of Isaac')
+assert(out.success == false and out.code == 'rate_limit', 'rate limiting is reported, not hidden')
+wire.mode = 'ok'
+-- An abandoned job expires instead of pinning the game forever.
+local first = call('SlsHltbFetch', { appid = 105600, name = 'Terraria' })
+assert(first.code == 'pending', 'the first call starts the job')
+local before = started
+backend.fetch_job_ttl = -1
+assert(call('SlsHltbFetch', { appid = 105600, name = 'Terraria' }).code == 'pending')
+assert(started == before + 1, 'a stale job is dropped and a fresh token request starts')
+backend.fetch_job_ttl = 60
+out = fetch_async(105600, 'Terraria')
+assert(out.success == true, 'the restarted job completes')
+wire.start, wire.poll = nil, nil
+
+-- The update check runs detached: a slow GitHub must not hold the RPC (Lumen
+-- runs every RPC on its single injector thread). The fake updater takes two
+-- seconds; the RPC has to answer before it finishes, and the result shows up
+-- in the status afterwards.
+local tools = os.getenv('HOME') .. '/.local/share/Lumen/sls-luna'
+assert(os.execute('mkdir -p ' .. string.format('%q', tools)))
+local fake = io.open(tools .. '/luna.py', 'wb')
+fake:write([[
+import json, os, sys, time
+tools = os.path.dirname(os.path.abspath(__file__))
+if sys.argv[1:2] == ['check']:
+    time.sleep(2)
+    with open(os.path.join(tools, 'update-check.json'), 'w') as out:
+        json.dump({'latest': '9.9.9', 'checkedAt': int(time.time()), 'checkError': '',
+                   'available': True}, out)
+elif sys.argv[1:2] == ['timer']:
+    print('unattended updates: ' + sys.argv[2])
+]])
+fake:close()
+out = call('SlsLunaUpdate', { raw = json.encode({ action = 'check', force = true }) })
+assert(out.success == true and out.update.checking == true, 'a started check must report checking')
+assert(out.update.latest == '', 'the RPC must return before the check has finished')
+out = call('SlsLunaUpdate', { raw = json.encode({ action = 'check', force = true }) })
+assert(out.success == true and out.update.checking == true, 'a second request joins the running check')
+local finished = false
+for _ = 1, 50 do
+  os.execute('sleep 0.2')
+  out = call('SlsLunaUpdate', { raw = json.encode({ action = 'status' }) })
+  if not out.update.checking then finished = true; break end
+end
+assert(finished and out.update.latest == '9.9.9', 'the detached check result must reach the status')
+out = call('SlsLunaUpdate', { raw = json.encode({ action = 'timer', value = 'on' }) })
+assert(out.success == true and out.timer == 'unattended updates: on', 'bounded updater runs keep their output')
+
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs, health')
