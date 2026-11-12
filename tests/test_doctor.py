@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -144,6 +145,19 @@ class DoctorTestCase(test_luna.LunaTestCase):
         self.assertTrue((self.steam / 'steam.cfg').is_file())
         self.assertTrue((self.steam / 'Steam.cfg').is_file())
 
+    def test_fix_prints_its_own_result_not_another_fix_hint(self):
+        self.adoptable_lock()
+        apps = self.home / '.local/share/applications'
+        apps.mkdir(parents=True)
+        launcher = apps / 'a.desktop'
+        launcher.write_text('x')
+        (self.tools / 'steam-machine-shortcuts.json').write_text(json.dumps(
+            {'files': {str(launcher): {'sha256': '0' * 64}}, 'profiles': {}}))
+        out = self.luna('doctor', '--fix').stdout.splitlines()
+        at = next(i for i, l in enumerate(out) if l.startswith('FIXED steam.foreign-lock'))
+        self.assertIn('result: adopted the existing read-only Steam lock for build 1', out[at + 1])
+        self.assertNotIn('fix:', out[at + 1])
+
     def test_fix_never_touches_foreign_lock(self):
         package = self.read_only_package()
         cfg = self.steam / 'steam.cfg'
@@ -214,6 +228,35 @@ class DoctorTestCase(test_luna.LunaTestCase):
         self.assertIn('luna launchers', found['launchers.changed']['fix'])
         self.doctor('--fix')
         self.assertEqual(launcher.read_text(), '[Desktop Entry]\nExec=mine\n')
+
+    # -- installed copy (no checkout next to luna.py) ---------------------
+    def installed_copy_findings(self):
+        import shutil, tempfile
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / 'sls-luna').mkdir()
+        shutil.copy2(test_luna.LUNA, root / 'sls-luna' / 'luna.py')
+        result = subprocess.run([sys.executable, str(root / 'sls-luna' / 'luna.py'), 'doctor', '--json'],
+                                capture_output=True, text=True, env=dict(self.env))
+        return {f['id']: f for f in json.loads(result.stdout)['findings']}, result
+
+    def test_installed_copy_without_snapshot_is_info_not_error(self):
+        found, result = self.installed_copy_findings()
+        self.assertEqual(found['addons.manifest']['severity'], 'info')
+        self.assertNotEqual(json.loads(result.stdout)['exit'], 2)
+
+    def test_installed_copy_uses_install_snapshot(self):
+        plugin = self.addons / 'sgdb'
+        (plugin / 'backend').mkdir(parents=True)
+        (plugin / 'backend' / 'main.lua').write_text('one')
+        (self.addons / 'luna-manifest.json').write_text(json.dumps(
+            {'versions': {'sgdb': '1.0.0'}, 'files': {'sgdb': {'backend/main.lua': self.sha(plugin / 'backend' / 'main.lua')}}}))
+        found, _ = self.installed_copy_findings()
+        self.assertNotIn('addons.manifest', found)
+        self.assertEqual(found['addons.payloads']['severity'], 'ok')
+        (plugin / 'backend' / 'main.lua').write_text('edited')
+        found, _ = self.installed_copy_findings()
+        self.assertEqual(found['addon.sgdb.drift']['severity'], 'warn')
 
     def test_launcher_unchanged_is_ok(self):
         launcher = self.home / 'a.desktop'
