@@ -4189,6 +4189,12 @@ def _doctor_adopt():
     code, message = adopt_steam_lock()
     if code != 0:
         raise OSError(message)
+    return message
+
+
+def _doctor_cfg_restore():
+    ensure_steam_cfg_block()
+    return 'restored the Luna update-lock block in %s' % ' and '.join(p.name for p in steam_cfg_paths())
 
 
 def _doctor_steam_lock():
@@ -4235,40 +4241,58 @@ def _doctor_steam_lock():
                 'steam.lock-missing', 'warn',
                 'Luna recorded a hard Steam lock but it is incomplete (%s)' % what,
                 'luna steam lock',
-                (lambda: ensure_steam_cfg_block()) if missing else None))
+                (lambda: _doctor_cfg_restore()) if missing else None))
     elif pin and not steam_updates_blocked():
         found.append(_finding(
             'steam.lock-missing', 'warn',
             'a Steam build is pinned but %s does not block updates' % steam_cfg_path(),
             'luna doctor --fix   # rewrites steam.cfg (undo: luna steam unpin)',
-            lambda: ensure_steam_cfg_block()))
+            lambda: _doctor_cfg_restore()))
     if not found and (pin or cfgs):
         found.append(_finding('steam.lock', 'ok', 'Steam update lock matches Luna\'s record'))
     return found
 
 
+def _doctor_pins():
+    """(source label, {addon: (pinned version, {rel: sha256})}) from the checkout's
+    vendor/MANIFEST.json, else from the install-time snapshot (luna-manifest.json) -
+    the installed copy has no checkout. (None, {}) when neither exists."""
+    if MANIFEST_PATH.is_file():
+        manifest = load_manifest()
+        return 'vendor/MANIFEST.json', {
+            name: (str(entry.get('plugin_version') or ''),
+                   {rel: meta.get('sha256') for rel, meta in (entry.get('files') or {}).items()})
+            for name, entry in (manifest.get('addons') or {}).items()}
+    snapshot = read_json_file(addons_dir() / 'luna-manifest.json') or {}
+    files = snapshot.get('files') if isinstance(snapshot.get('files'), dict) else {}
+    versions = snapshot.get('versions') if isinstance(snapshot.get('versions'), dict) else {}
+    pins = {name: (str(versions.get(name) or ''), dict(hashes))
+            for name, hashes in files.items() if isinstance(hashes, dict) and hashes}
+    return ('install snapshot' if pins else None), pins
+
+
 def _doctor_payloads():
     found = []
-    try:
-        manifest = load_manifest()
-    except SystemExit:
-        return [_finding('addons.manifest', 'error', 'vendor/MANIFEST.json missing', 'scripts/vendor-update.sh')]
+    source, pins = _doctor_pins()
+    if source is None:
+        return [_finding('addons.manifest', 'info',
+                         'no vendor/MANIFEST.json (no checkout) and no install snapshot; '
+                         'add-on payloads not checked', 'luna install   # records a snapshot')]
     installed = installed_addons()
     clean = True
     for name in installed:
-        entry = manifest.get('addons', {}).get(name) or {}
-        pinned = str(entry.get('plugin_version') or '')
+        pinned, pin_files = pins.get(name, ('', {}))
         try:
             have = str(json.loads((addons_dir() / name / 'plugin.json').read_text()).get('version') or '')
         except (OSError, ValueError):
             have = ''
         changed, missing = [], []
-        for rel, meta in (entry.get('files') or {}).items():
+        for rel, expected in pin_files.items():
             path = addons_dir() / name / rel
             try:
                 if not path.is_file():
                     missing.append(rel)
-                elif sha256(path) != meta.get('sha256'):
+                elif sha256(path) != expected:
                     changed.append(rel)
             except OSError:
                 changed.append(rel)
@@ -4288,7 +4312,7 @@ def _doctor_payloads():
             '%s differs from the pinned payload: %s [%s]'
             % (name, kind, ', '.join(changed + ['%s (missing)' % m for m in missing])), fix))
     if clean and installed:
-        found.append(_finding('addons.payloads', 'ok', '%d installed add-on(s) match vendor/MANIFEST.json' % len(installed)))
+        found.append(_finding('addons.payloads', 'ok', '%d installed add-on(s) match %s' % (len(installed), source)))
     return found
 
 
@@ -4459,8 +4483,9 @@ def cmd_doctor(options):
                     item['fixError'] = 'Steam is running; close it and retry'
                     continue
                 try:
-                    item['_apply']()
+                    result = item['_apply']()
                     item['fixed'] = True
+                    item['result'] = result if isinstance(result, str) and result else 'fixed'
                 except OSError as error:
                     item['fixError'] = str(error)
     remaining = [i for i in findings if i['severity'] in ('warn', 'error') and not i.get('fixed')]
@@ -4474,7 +4499,9 @@ def cmd_doctor(options):
     for item in sorted(public, key=lambda i: order[i['severity']]):
         tag = 'FIXED' if item.get('fixed') else item['severity'].upper()
         print('%-5s %-22s %s' % (tag, item['id'], item['message']))
-        if item.get('fixError'):
+        if item.get('fixed'):
+            print('      %-22s result: %s' % ('', item.get('result', 'fixed')))
+        elif item.get('fixError'):
             print('      %-22s fix failed: %s' % ('', item['fixError']))
         elif item['fix'] and item['severity'] != 'ok' and not item.get('fixed'):
             print('      %-22s fix: %s%s' % ('', item['fix'], '  [--fix can apply]' if item['fixable'] else ''))
