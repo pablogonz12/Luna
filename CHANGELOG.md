@@ -5,6 +5,18 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **Add-on installs no longer drag the Steam client along.** `luna install
+  --only NAME` skips the Steam client unless it is actually needed (no pin, pin
+  differs from the compatibility build, or packages/executables drifted); a full
+  install still verifies it. New `--steam-client` forces it, `--no-steam-client`
+  skips it (same as `--keep-steam-client`).
+- **Robust, visible client download.** Retries with exponential backoff and
+  jitter on HTTP 429/5xx and timeouts (honours `Retry-After`), prints
+  "need N files, X MB to download, Y reused from cache" first, shows per-file
+  progress (carriage-return on a TTY, sparse plain lines otherwise), and
+  `--dry-run` reports the same summary (offline; "size unknown" until the
+  manifest is cached). `--client-cache DIR` / `LUNA_STEAM_CACHE` names an extra
+  local package directory checked (sha256) before any download.
 - **`luna steam lock` / `luna steam unlock`.** `lock` rolls Steam back to the
   old ubuntu12 client (kills Steam: needs `--force` or a y/N answer), pins the
   result, writes the hard update block to both `Steam.cfg` and `steam.cfg`,
