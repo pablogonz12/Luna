@@ -175,7 +175,7 @@ def games_parse_remote(code, out, err):
                     flags, size = int(parts[3] or 0), int(parts[2] or 0)
                 except ValueError:
                     continue
-                name = parts[5] or parts[1]
+                name = _vdf_unescape(parts[5]) or parts[1]
                 if flags & GAMES_INSTALLED_FLAG and not GAMES_TOOL_RE.match(name):
                     record['items'].setdefault(int(parts[1]), {
                         'id': int(parts[1]), 'name': name, 'size': size, 'lib': '',
@@ -339,8 +339,11 @@ def games_install_cmd(options):
         print('started Steam on %s; give it a moment to load before the installs are picked up' % host)
     failed = False
     for appid, name, _ in queue:
+        # ssh has no graphical session env: run inside the user's systemd manager (it has it), so the
+        # steam:// URL is handed to the running Steam instance.
         script = ('[ -n "$XDG_RUNTIME_DIR" ] || export XDG_RUNTIME_DIR="/run/user/$(id -u)"\n'
-                  'steam steam://install/%d >/dev/null 2>&1\n' % appid)
+                  '[ -n "$DBUS_SESSION_BUS_ADDRESS" ] || export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"\n'
+                  'systemd-run --user --quiet --collect steam steam://install/%d >/dev/null 2>&1\n' % appid)
         code, _, err = fleet_ssh(host, script, timeout=60)
         print('%-9d %s %s' % (appid, 'queued' if code == 0 else 'FAIL', name if code == 0 else err.strip()))
         failed = failed or code != 0

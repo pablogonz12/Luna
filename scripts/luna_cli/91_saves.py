@@ -203,6 +203,20 @@ def saves_game_running(appid):
     return result.returncode == 0
 
 
+def saves_steam_running():
+    """Steam itself (client or web helper) is up: it can rewrite a Proton prefix under our feet."""
+    return process_running('steam') or process_running('steamwebhelper')
+
+
+def saves_check_running(appid, kind, label):
+    """Error message when the link/unlink must wait, else None. Proton prefixes also need Steam closed."""
+    if saves_game_running(appid):
+        return '%s: the game is running; close it first' % label
+    if kind == 'proton' and saves_steam_running():
+        return '%s: Steam is running and the save is inside a Proton prefix; close Steam first' % label
+    return None
+
+
 def saves_link_points_to(link, target):
     return os.path.islink(str(link)) and os.path.realpath(str(link)) == os.path.realpath(str(target))
 
@@ -366,8 +380,9 @@ def saves_link_one(target, prefer=None, dry_run=False):
         return 'error', '%s: %s is a symlink to %s, not to the store' % (label, local, os.path.realpath(str(local)))
     if kind == 'proton' and saves_prefix_user(appid) is None:
         return 'skipped', '%s: no Proton prefix on this machine - launch the game once, then retry' % label
-    if saves_game_running(appid):
-        return 'error', '%s: the game is running; close it first' % label
+    blocked = saves_check_running(appid, kind, label)
+    if blocked:
+        return 'error', blocked
     local_has, store_has = saves_has_data(local), saves_has_data(store)
     if local.exists() and not local.is_dir():
         return 'error', '%s: %s is not a directory' % (label, local)
@@ -413,8 +428,9 @@ def saves_unlink_one(target, dry_run=False):
         return 'skipped', '%s: not linked here' % label
     if not saves_link_points_to(local, store):
         return 'error', '%s: %s does not point into the store' % (label, local)
-    if saves_game_running(appid):
-        return 'error', '%s: the game is running; close it first' % label
+    blocked = saves_check_running(appid, kind, label)
+    if blocked:
+        return 'error', blocked
     if dry_run:
         return 'linked', '%s: would copy the store back to %s and remove the symlink' % (label, local)
     if store.is_dir():
