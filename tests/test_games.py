@@ -117,6 +117,12 @@ class GamesTest(unittest.TestCase):
         self.assertFalse(record['steamRunning'])
         self.assertFalse(luna.games_parse_remote(255, '', 'no route\n')['reachable'])
 
+    def test_parse_remote_unescapes_vdf_names(self):
+        raw = 'The \\"Best\\" Game \\\\ 2'
+        out = 'APP\t10\t5\t4\t0\t%s\nSTEAMRUN 1\n' % raw
+        record = luna.games_parse_remote(0, out, '')
+        self.assertEqual(record['items'][10]['name'], 'The "Best" Game \\ 2')
+
     def test_diff_flags_blocked_and_too_big(self):
         remote = luna.games_parse_remote(*remote_script_out([(10, 'Alpha', 5 * GB, 4, 0), (99, 'Only There', GB, 4, 0)],
                                                             lua=[], free=10 * GB))
@@ -186,8 +192,8 @@ class GamesTest(unittest.TestCase):
         self.assertIn('already installed', out)
         uris = [c for c in calls if 'steam://install/' in c]
         self.assertEqual(len(uris), 2)
-        self.assertIn('steam steam://install/20', uris[0])
-        self.assertIn('steam steam://install/50', uris[1])
+        self.assertIn('systemd-run --user --quiet --collect steam steam://install/20', uris[0])
+        self.assertIn('systemd-run --user --quiet --collect steam steam://install/50', uris[1])
 
     def test_install_rejects_bad_arguments(self):
         self.assertEqual(self.run_cli('games', 'install', 'laptop')[0], luna.EXIT_REFUSED)

@@ -27,6 +27,7 @@ class SavesTestCase(unittest.TestCase):
         self.temp = Path(tempfile.mkdtemp(prefix='luna-saves-'))
         self.addCleanup(shutil.rmtree, str(self.temp), True)
         self.luna = load_luna()
+        self.patch_steam()
         self.shared = self.temp / 'shared-store'  # what Syncthing keeps identical
         self.shared.mkdir()
         self.desktop = self.make_home('desktop')
@@ -56,8 +57,13 @@ class SavesTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def patch_steam(self):
+        self.steam_running = mock.patch.object(self.luna, 'saves_steam_running', return_value=False).start()
+        self.addCleanup(mock.patch.stopall)
+
     def switch(self, home):
         mock.patch.stopall()
+        self.patch_steam()
         self.use(home)
 
     def prefix(self, home, appid='2124120', library=None):
@@ -203,6 +209,26 @@ class LinkTests(SavesTestCase):
         self.assertEqual(code, 1)
         self.assertIn('running', out)
         self.assertFalse(local.is_symlink())
+
+    def test_steam_running_refuses_proton_but_not_native(self):
+        local = self.save_dir(self.desktop)
+        self.steam_running.return_value = True
+        code, out, _ = self.run_luna('link', '2124120')
+        self.assertEqual(code, 1)
+        self.assertIn('Steam is running', out)
+        self.assertFalse(local.is_symlink())
+        game = self.desktop / '.config/unity3d/Studio X/Game Y'
+        game.mkdir(parents=True)
+        (game / 'p.dat').write_text('p')
+        code, out, _ = self.run_luna('link', str(game))
+        self.assertEqual(code, 0, out)
+        self.steam_running.return_value = False
+        self.assertEqual(self.run_luna('link', '2124120')[0], 0)
+        self.steam_running.return_value = True
+        code, out, _ = self.run_luna('unlink', '2124120')
+        self.assertEqual(code, 1)
+        self.assertIn('Steam is running', out)
+        self.assertTrue(local.is_symlink())
 
     def test_dry_run_changes_nothing(self):
         local = self.save_dir(self.desktop)
