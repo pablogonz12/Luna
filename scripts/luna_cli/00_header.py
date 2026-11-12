@@ -58,6 +58,11 @@ Commands:
     luna fleet push-cache HOST...       rsync the verified Steam client cache when HOST's differs
     luna fleet install [HOST...] [--only NAME] [--restart-steam] [--force] [--dry-run]
                                         push the release bundle; refuses while Steam runs
+    luna games list [--json]            installed Steam games here (size, library, prefix, stplug-in lua)
+    luna games diff [HOST] [--json]     which games are installed where; for those missing on HOST:
+                                        lua present there? fits in its free space?
+    luna games install HOST APPID... [--dry-run] [--start-steam]
+                                        queue steam://install on HOST (never copies game files)
     luna refresh [--dry-run]            update Steam to Valve's latest, pin and
                                         cache it, then reinstall Luna on top
                                         (Steam closed; never kills anything)
