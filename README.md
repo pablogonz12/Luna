@@ -256,6 +256,23 @@ The attention list, headers
 and action buttons switch to Spanish when Settings → Language is Español;
 paths and bug-report dumps stay in English in both languages.
 
+## Doctor
+
+`luna doctor` finds drift and problems Luna did not cause, one line per
+finding with its severity and the exact fix command: a Steam update lock Luna
+has no record of (a manual or community-script lock), installed add-ons that
+differ from the pins (older/newer release or a `-dev` build), an outdated
+installed `luna.py`, SteamOS Mode launchers edited outside Luna, Steam not in
+pacman's `IgnorePkg`, updater errors, a drifted `boot.lua` bridge or stale
+Lumen sidecar, and Syncthing `*.sync-conflict-*` files. Exit code 0 = ok,
+1 = warnings, 2 = errors; `--json` is for scripts. `--fix` applies only safe,
+reversible fixes (restoring Luna's own `steam.cfg` block, with Steam closed);
+it never uses sudo, overwrites payloads or touches a foreign lock.
+
+```bash
+python3 scripts/luna.py doctor [--json] [--fix]
+```
+
 ## How Luna fits into the stack
 
 ```text
