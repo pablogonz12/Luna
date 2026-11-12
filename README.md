@@ -112,6 +112,8 @@ python3 scripts/luna.py steam status    # running build, pin, cache, drift
 python3 scripts/luna.py steam pin       # pin the currently working build
 python3 scripts/luna.py steam cache     # copy its packages aside (Steam closed)
 python3 scripts/luna.py steam recover   # put the pinned build back (Steam closed)
+python3 scripts/luna.py steam lock      # roll back to the ubuntu12 client + hard-lock updates (kills Steam; --force)
+python3 scripts/luna.py steam unlock    # undo the lock and pin (--now launches Steam to self-update)
 python3 scripts/luna.py refresh         # update Steam, pin, cache, reinstall Luna (Steam closed)
 ```
 

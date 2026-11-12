@@ -37,7 +37,7 @@
     "luna": {
       "files": {
         "backend/main.lua": {
-          "sha256": "86a7142b5c1cea24f45867844e128d539dc06109824a02cf250188d7e3777ac0",
+          "sha256": "838da56be818ad1da04408972148aa0d81e976a04f9a1aa6d759c530999708b5",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
@@ -49,7 +49,7 @@
           "source_path": "plugin/public/agent.js"
         },
         "public/panel.js": {
-          "sha256": "31883c4836022378bb7b6c2d79e20ca20b96c4fbef64e3da10c896f6413e586c",
+          "sha256": "01f839fdd10d7bef663743c4ae459917263bd03ba4d7f9d1c5000cf65ef17472",
           "source_path": "plugin/public/panel.js"
         }
       },
