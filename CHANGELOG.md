@@ -5,6 +5,19 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **`luna fleet`: see and manage Luna across machines over SSH.** `fleet
+  add|remove|list HOST` keeps hosts in `~/.config/luna/fleet.json` (names are
+  validated and only ever passed to ssh as argv); `fleet status [--json]` shows
+  per machine the Luna version, `luna.py` hash, add-on payload match/drift, the
+  Steam pin, package match, update block / hard lock and whether Steam runs
+  (unreachable hosts and older remote Luna builds are reported, not fatal);
+  `fleet push-cache HOST` rsyncs the verified Steam client cache only when the
+  remote build differs; `fleet install [HOST...] [--only NAME]
+  [--restart-steam] [--dry-run] [--force]` ships the release bundle through the
+  remote `luna update --bundle`, refuses while Steam or Lumen runs there (with
+  `--restart-steam`: `steam -shutdown`, wait, install, relaunch), and refuses
+  drifted payloads without `--force`. New `luna probe --json` is the
+  machine-readable state it reads (works from the installed copy).
 - **`luna steam lock` / `luna steam unlock`.** `lock` rolls Steam back to the
   old ubuntu12 client (kills Steam: needs `--force` or a y/N answer), pins the
   result, writes the hard update block to both `Steam.cfg` and `steam.cfg`,
