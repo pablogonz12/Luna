@@ -18,6 +18,7 @@ Commands:
     luna preflight [--only NAME]        read-only environment and state report
     luna status [--only NAME]           what is installed, and whether it matches
     luna install [--only NAME] [--force] [--dry-run]
+                 [--steam-client | --no-steam-client] [--client-cache DIR]
     luna hook on|off|status|repair       automatic bridge recovery after Lumen updates
     luna uninstall [--only NAME]
     luna verify [--sources]             manifest, payload and drift checks
@@ -60,8 +61,10 @@ import struct
 import subprocess
 import sys
 import tarfile
+import random
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 import zlib
@@ -2241,20 +2244,111 @@ def _steam_package_entries(data, want):
     return entries
 
 
-def _download_steam_file(url, destination, expected, limit=512 * 1024 * 1024):
+STEAM_DOWNLOAD_ATTEMPTS = 5
+STEAM_RETRY_STATUS = (408, 425, 429, 500, 502, 503, 504)
+STEAM_CACHE_HINT = ('copy the verified package files into a local directory and pass '
+                    '--client-cache DIR (or set LUNA_STEAM_CACHE=DIR), e.g. from another '
+                    "machine's ~/.local/share/Lumen/sls-luna/steam-client-cache/package")
+
+
+def _retry_after_seconds(error):
+    """Seconds from a Retry-After header (delta-seconds form), else None."""
+    try:
+        value = error.headers.get('Retry-After') if error.headers else None
+        return max(0.0, min(float(value), 300.0)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_mb(size):
+    return '%.1f MB' % (size / 1e6)
+
+
+class _Progress:
+    """Throttled progress: carriage-return on a TTY, sparse plain lines otherwise."""
+
+    def __init__(self, label, total=0):
+        self.label, self.total = label, total
+        self.tty = sys.stdout.isatty()
+        self.last = 0.0
+        self.step = 0
+
+    def update(self, done, final=False):
+        now = time.monotonic()
+        if not final and now - self.last < (0.2 if self.tty else 5.0):
+            return
+        self.last = now
+        text = ('%s of %s (%d%%)' % (_format_mb(done), _format_mb(self.total), 100 * done // self.total)
+                if self.total else _format_mb(done))
+        if self.tty:
+            print('\r\033[Ksteam     : %s  %s' % (self.label, text), end='\n' if final else '', flush=True)
+        else:
+            print('steam     :   %s  %s' % (self.label, text), flush=True)
+
+
+def _download_steam_file(url, destination, expected, limit=512 * 1024 * 1024,
+                         label=None, total=0, attempts=None):
+    """Download `url` to `destination`, verify sha256.
+
+    Retries timeouts, connection errors and HTTP 408/425/429/5xx with
+    exponential backoff + jitter (honouring Retry-After). A hash mismatch or
+    other 4xx is final for this URL.
+    """
+    attempts = attempts or STEAM_DOWNLOAD_ATTEMPTS
     request = urllib.request.Request(url, headers={'User-Agent': 'Luna-Steam-Installer'})
-    with urllib.request.urlopen(request, timeout=60) as source, open(destination, 'wb') as out:
-        size = 0
-        while True:
-            chunk = source.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > limit:
-                raise ValueError('Steam download exceeds size limit')
-            out.write(chunk)
+    for attempt in range(1, attempts + 1):
+        try:
+            progress = _Progress(label, total) if label else None
+            with urllib.request.urlopen(request, timeout=60) as source, open(destination, 'wb') as out:
+                size = 0
+                try:
+                    header_size = int(source.headers.get('Content-Length') or 0)
+                except (AttributeError, TypeError, ValueError):
+                    header_size = 0
+                if progress and header_size:
+                    progress.total = header_size
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > limit:
+                        raise ValueError('Steam download exceeds size limit')
+                    out.write(chunk)
+                    if progress:
+                        progress.update(size)
+            if progress:
+                progress.update(size, final=True)
+            break
+        except urllib.error.HTTPError as error:
+            if error.code not in STEAM_RETRY_STATUS or attempt == attempts:
+                raise OSError('HTTP %s from %s' % (error.code, url)) from error
+            delay = _retry_after_seconds(error)
+            reason = 'HTTP %s' % error.code
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt == attempts:
+                raise OSError('%s: %s' % (url, error)) from error
+            delay = None
+            reason = str(error)
+        if delay is None:
+            delay = min(60.0, 2.0 ** attempt) * (0.5 + random.random() / 2)
+        print('steam     : %s; retry %d/%d in %.0fs' % (reason, attempt, attempts - 1, delay), flush=True)
+        time.sleep(delay)
     if sha256(destination) != expected:
         raise ValueError('Steam download SHA256 mismatch: %s' % url)
+
+
+def _steam_package_sizes(data):
+    """{package name: advertised size in bytes or 0} from the manifest."""
+    body = parse_vdf(data.decode('utf-8')).get('ubuntu12') or {}
+    sizes = {}
+    for values in body.values():
+        if isinstance(values, dict) and 'file' in values:
+            compressed = 'zipvz' in values
+            name = values.get('zipvz') if compressed else values['file']
+            raw = str(values.get('sizevz' if compressed else 'size', ''))
+            sizes[name] = int(raw) if raw.isdigit() else 0
+    return sizes
 
 
 def _stage_steam_payload(packages, data, want, destination):
@@ -2418,7 +2512,76 @@ def _install_steam_payload_locked(payload, entries, want, packages):
     return backup
 
 
-def ensure_compatible_steam():
+def _steam_sources(extra_cache=None):
+    """Directories searched (sha256-verified) before downloading, in order."""
+    sources = []
+    for raw in (extra_cache, os.environ.get('LUNA_STEAM_CACHE')):
+        if raw:
+            base = Path(raw).expanduser()
+            sources.append(base / 'package' if (base / 'package').is_dir() else base)
+    sources += [steam_home() / 'package', steam_cache_dir() / 'package']
+    return sources
+
+
+def _find_steam_package(sources, name, digest):
+    for source in sources:
+        candidate = source / name
+        try:
+            if candidate.is_file() and not candidate.is_symlink() and sha256(candidate) == digest:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def steam_client_summary(extra_cache=None):
+    """Read-only, offline description of what installing the client would fetch."""
+    sources = _steam_sources(extra_cache)
+    for source in sources:
+        candidate = source / STEAM_MANIFEST_NAME
+        try:
+            if candidate.is_file() and sha256(candidate) == STEAM_COMPAT_MANIFEST_SHA256:
+                data = candidate.read_bytes()
+                break
+        except OSError:
+            continue
+    else:
+        return ('need the build %s manifest from Valve/archive.org (download size unknown until '
+                'manifest download)' % STEAM_COMPAT_BUILD)
+    sizes = _steam_package_sizes(data)
+    need, reuse = [], 0
+    for name, digest, _ in _steam_package_entries(data, STEAM_COMPAT_BUILD):
+        if _find_steam_package(sources, name, digest):
+            reuse += 1
+        else:
+            need.append(name)
+    total = sum(sizes.get(name, 0) for name in need)
+    return ('need %d file(s), %s to download, %d reused from cache'
+            % (len(need) + reuse, _format_mb(total) if total or not need else 'size unknown', reuse))
+
+
+def steam_client_needed(options):
+    """(needed, reason). Install touches the Steam client only when this says so."""
+    if getattr(options, 'keep_steam_client', False) or getattr(options, 'no_steam_client', False):
+        return False, 'skipped by --no-steam-client / --keep-steam-client'
+    if getattr(options, 'steam_client', False):
+        return True, 'forced by --steam-client'
+    pin = read_steam_pin()
+    if not pin.get('clientBuild'):
+        return True, 'no Steam client pin yet'
+    if str(pin['clientBuild']) != STEAM_COMPAT_BUILD:
+        return True, 'pin is build %s, Luna targets %s' % (pin['clientBuild'], STEAM_COMPAT_BUILD)
+    state = steam_state()
+    if state['build'] != state['pinned']:
+        return True, 'Steam is build %s but the pin is %s' % (state['build'] or 'unknown', state['pinned'])
+    if state['packagesMatch'] is False or state['binariesMatch'] is False:
+        return True, 'Steam packages/executables drifted from the pin'
+    if not getattr(options, 'only', None):
+        return True, 'full install (verifies the pinned client; nothing is downloaded if it matches)'
+    return False, 'pinned client build %s is intact; use --steam-client to force' % STEAM_COMPAT_BUILD
+
+
+def ensure_compatible_steam(extra_cache=None):
     """Default install policy: fetch/verify the pinned Valve build, then extract it."""
     try:
         _steam_client_closed()
@@ -2433,29 +2596,42 @@ def ensure_compatible_steam():
             packages = work / 'package'
             packages.mkdir()
             manifest = packages / STEAM_MANIFEST_NAME
-            sources = (steam_home() / 'package', steam_cache_dir() / 'package')
+            sources = _steam_sources(extra_cache)
             for source in sources:
                 candidate = source / STEAM_MANIFEST_NAME
                 if candidate.is_file() and sha256(candidate) == STEAM_COMPAT_MANIFEST_SHA256:
                     shutil.copy2(candidate, manifest)
                     break
             else:
+                print('steam     : fetching the build %s manifest ...' % STEAM_COMPAT_BUILD, flush=True)
                 _download_steam_file(STEAM_ARCHIVE_BASE + 'steam_client_ubuntu12', manifest,
                                      STEAM_COMPAT_MANIFEST_SHA256, limit=1024 * 1024)
             data = manifest.read_bytes()
-            for name, digest, _ in _steam_package_entries(data, STEAM_COMPAT_BUILD):
+            sizes = _steam_package_sizes(data)
+            entries_list = _steam_package_entries(data, STEAM_COMPAT_BUILD)
+            found = {name: _find_steam_package(sources, name, digest) for name, digest, _ in entries_list}
+            todo = [name for name, _, _ in entries_list if not found[name]]
+            print('steam     : need %d file(s), %s to download, %d reused from cache'
+                  % (len(entries_list), _format_mb(sum(sizes.get(n, 0) for n in todo)),
+                     len(entries_list) - len(todo)), flush=True)
+            for index, (name, digest, _) in enumerate(entries_list, 1):
                 destination = packages / name
-                for source in sources:
-                    candidate = source / name
-                    if candidate.is_file() and not candidate.is_symlink() and sha256(candidate) == digest:
-                        shutil.copy2(candidate, destination)
-                        break
-                else:
-                    print('steam     : downloading %s' % name, flush=True)
+                if found[name]:
+                    shutil.copy2(found[name], destination)
+                    continue
+                label = '%s (%d/%d)' % (name, index, len(entries_list))
+                print('steam     : downloading %s' % label, flush=True)
+                try:
+                    _download_steam_file('https://client-update.steamstatic.com/' + name, destination, digest,
+                                         label=name, total=sizes.get(name, 0))
+                except (OSError, ValueError) as first:
+                    print('steam     : primary mirror failed (%s); trying the archive' % first, flush=True)
                     try:
-                        _download_steam_file('https://client-update.steamstatic.com/' + name, destination, digest)
-                    except (OSError, ValueError):
-                        _download_steam_file(STEAM_ARCHIVE_BASE + name, destination, digest)
+                        _download_steam_file(STEAM_ARCHIVE_BASE + name, destination, digest,
+                                             label=name, total=sizes.get(name, 0))
+                    except (OSError, ValueError) as second:
+                        raise ValueError('could not download %s: %s; %s. To avoid downloading, %s'
+                                         % (name, first, second, STEAM_CACHE_HINT)) from second
             entries = _stage_steam_payload(packages, data, STEAM_COMPAT_BUILD, work / 'payload')
             # Keep a complete verified cache, not a copy of stale installed metadata.
             cache = steam_cache_dir()
@@ -3044,9 +3220,13 @@ def cmd_install(options):
                                         migrate=getattr(options, 'migrate_steam_machine', False))
             if code:
                 return code
-        if not getattr(options, 'keep_steam_client', False):
-            print('steam     : would install/verify build %s executables, cache, pin and block updates'
-                  % STEAM_COMPAT_BUILD)
+        needed, why = steam_client_needed(options)
+        if needed:
+            print('steam     : would install/verify build %s executables, cache, pin and block updates (%s)'
+                  % (STEAM_COMPAT_BUILD, why))
+            print('steam     : %s' % steam_client_summary(getattr(options, 'client_cache', None)))
+        else:
+            print('steam     : Steam client untouched (%s)' % why)
         print('\nDRY RUN: %d file(s) would change%s.' % (len(to_write),
               ' + bridge reinstall' if needs_bridge else ', nothing was written'))
         return EXIT_OK
@@ -3058,11 +3238,15 @@ def cmd_install(options):
         print('Re-run with --force if you really want to replace them.')
         return EXIT_NEEDS_FORCE
 
-    if not getattr(options, 'keep_steam_client', False):
-        ok, message = ensure_compatible_steam()
+    touch_client, why = steam_client_needed(options)
+    if touch_client:
+        print('steam     : installing client build %s (%s)' % (STEAM_COMPAT_BUILD, why), flush=True)
+        ok, message = ensure_compatible_steam(getattr(options, 'client_cache', None))
         print('steam     : %s' % message, file=sys.stdout if ok else sys.stderr)
         if not ok:
             return 1
+    else:
+        print('steam     : client untouched (%s)' % why)
     if not to_write and not needs_bridge:
         if not getattr(options, 'no_steam_machine', False):
             code = steam_machine_action('install', migrate=getattr(options, 'migrate_steam_machine', False))
@@ -3091,7 +3275,7 @@ def cmd_install(options):
         apply.rollback()
         print('FAILED: %s' % error, file=sys.stderr)
         print('Every add-on change made by this run was rolled back.', file=sys.stderr)
-        if not getattr(options, 'keep_steam_client', False):
+        if touch_client:
             print('The separately verified Steam client installation remains in place; '
                   'its rollback backup was retained.', file=sys.stderr)
         return 1
@@ -3449,6 +3633,14 @@ def build_parser():
             child.add_argument('--keep-steam-client', action='store_true',
                                default=os.environ.get('LUNA_KEEP_STEAM_CLIENT') == '1',
                                help='skip the default verified Steam compatibility downgrade')
+            child.add_argument('--no-steam-client', action='store_true',
+                               help='never touch the Steam client (same as --keep-steam-client)')
+            child.add_argument('--steam-client', action='store_true',
+                               help='force the Steam client install/verify even with --only or a matching pin')
+            child.add_argument('--client-cache', metavar='DIR',
+                               default=os.environ.get('LUNA_STEAM_CACHE') or None,
+                               help='extra local directory of Steam client packages checked (sha256) '
+                                    'before downloading; also LUNA_STEAM_CACHE')
             child.add_argument('--no-steam-machine', action='store_true',
                                help='do not generate SteamOS Mode application shortcuts')
             child.add_argument('--migrate-steam-machine', action='store_true',

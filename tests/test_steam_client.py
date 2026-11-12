@@ -574,5 +574,151 @@ class SteamHardLockTestCase(unittest.TestCase):
         self.assertEqual(self.steam('unlock')[0], 0)
 
 
+class FakeResponse:
+    def __init__(self, body):
+        self.body = io.BytesIO(body)
+        self.headers = {'Content-Length': str(len(body))}
+
+    def read(self, size=-1):
+        return self.body.read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def http_error(code, retry_after=None):
+    headers = {'Retry-After': retry_after} if retry_after else {}
+    return luna.urllib.error.HTTPError('https://example.invalid/x', code, 'err', headers, None)
+
+
+class SteamDownloadTestCase(SteamClientTestCase):
+    def download(self, **kwargs):
+        dest = self.home / 'download.bin'
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            luna._download_steam_file('https://example.invalid/x', dest, hashlib.sha256(b'payload').hexdigest(), **kwargs)
+        return dest, out.getvalue()
+
+    def test_retry_on_429_then_success_honours_retry_after(self):
+        self.network.side_effect = [http_error(429, '7'), http_error(503), FakeResponse(b'payload')]
+        with mock.patch.object(luna.time, 'sleep') as sleep:
+            dest, out = self.download()
+        self.assertEqual(dest.read_bytes(), b'payload')
+        self.assertEqual(sleep.call_args_list[0], mock.call(7.0))
+        self.assertEqual(sleep.call_count, 2)
+        self.assertGreater(sleep.call_args_list[1].args[0], 0)
+        self.assertIn('retry 1/', out)
+
+    def test_gives_up_after_the_attempts(self):
+        self.network.side_effect = http_error(429)
+        with mock.patch.object(luna.time, 'sleep') as sleep, self.assertRaises(OSError) as raised:
+            self.download(attempts=3)
+        self.assertIn('429', str(raised.exception))
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_404_is_not_retried(self):
+        self.network.side_effect = http_error(404)
+        with mock.patch.object(luna.time, 'sleep') as sleep, self.assertRaises(OSError):
+            self.download()
+        sleep.assert_not_called()
+
+    def test_hash_mismatch_is_not_retried(self):
+        self.network.side_effect = [FakeResponse(b'other')]
+        with mock.patch.object(luna.time, 'sleep') as sleep, self.assertRaises(ValueError):
+            self.download()
+        sleep.assert_not_called()
+
+    def test_final_error_names_the_cache_workaround(self):
+        self.archive.unlink()
+        self.network.side_effect = http_error(429)
+        with mock.patch.object(luna.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()):
+            ok, message = luna.ensure_compatible_steam()
+        self.assertFalse(ok)
+        self.assertIn('--client-cache', message)
+        self.assertIn('LUNA_STEAM_CACHE', message)
+
+    def test_extra_cache_dir_avoids_the_network(self):
+        extra = self.home / 'copied-cache'
+        extra.mkdir()
+        shutil.copy2(self.archive, extra / self.archive.name)
+        self.archive.unlink()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            ok, message = luna.ensure_compatible_steam(str(extra))
+        self.assertTrue(ok, message)
+        self.assertIn('need 1 file(s), 0.0 MB to download, 1 reused from cache', out.getvalue())
+        self.network.assert_not_called()
+
+    def test_extra_cache_with_bad_hash_is_ignored(self):
+        extra = self.home / 'copied-cache'
+        extra.mkdir()
+        (extra / self.archive.name).write_bytes(b'tampered')
+        self.assertIsNone(luna._find_steam_package([extra], self.archive.name, hashlib.sha256(b'x').hexdigest()))
+
+
+class SteamInstallDecisionTestCase(SteamClientTestCase):
+    def run_install(self, **kwargs):
+        options = dict(only=[], force=False, dry_run=False, keep_steam_client=False)
+        options.update(kwargs)
+        with mock.patch.object(luna, 'ensure_compatible_steam', return_value=(True, 'ok')) as ensure, \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            code = luna.cmd_install(argparse.Namespace(**options))
+        return code, ensure, out.getvalue()
+
+    def pin_intact(self):
+        self.assertTrue(luna.ensure_compatible_steam()[0])
+
+    def test_only_with_no_pin_still_installs_client(self):
+        code, ensure, _ = self.run_install(only=['luna'])
+        self.assertEqual(code, 0)
+        ensure.assert_called_once()
+
+    def test_only_skips_client_when_pin_is_intact(self):
+        self.pin_intact()
+        code, ensure, out = self.run_install(only=['luna'])
+        self.assertEqual(code, 0)
+        ensure.assert_not_called()
+        self.assertIn('client untouched', out)
+
+    def test_steam_client_flag_forces_it(self):
+        self.pin_intact()
+        _, ensure, _ = self.run_install(only=['luna'], steam_client=True)
+        ensure.assert_called_once()
+
+    def test_no_steam_client_flag_skips_it_even_without_pin(self):
+        _, ensure, _ = self.run_install(no_steam_client=True)
+        ensure.assert_not_called()
+
+    def test_full_install_still_verifies_client(self):
+        self.pin_intact()
+        _, ensure, _ = self.run_install()
+        ensure.assert_called_once()
+
+    def test_drift_triggers_client_even_with_only(self):
+        self.pin_intact()
+        (self.root / luna.STEAM_CORE_FILES[0]).write_bytes(b'drifted')
+        _, ensure, _ = self.run_install(only=['luna'])
+        ensure.assert_called_once()
+
+    def test_dry_run_reports_summary_offline(self):
+        code, ensure, out = self.run_install(dry_run=True)
+        self.assertEqual(code, 0)
+        ensure.assert_not_called()
+        self.assertIn('need 1 file(s), 0.0 MB to download, 1 reused from cache', out)
+        self.network.assert_not_called()
+
+    def test_dry_run_without_manifest_says_size_unknown(self):
+        self.manifest.unlink()
+        _, _, out = self.run_install(dry_run=True)
+        self.assertIn('size unknown until manifest download', out)
+        self.network.assert_not_called()
+
+    def test_dry_run_only_with_intact_pin_leaves_client_alone(self):
+        self.pin_intact()
+        _, _, out = self.run_install(dry_run=True, only=['luna'])
+        self.assertIn('Steam client untouched', out)
+
+
 if __name__ == '__main__':
     unittest.main()
