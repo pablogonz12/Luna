@@ -5,6 +5,9 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **CLI source split into fragments.** The 4600-line `scripts/luna.py` is now generated
+  from `scripts/luna_cli/*.py` by `scripts/build-luna.py`; the deployed artifact is still the
+  single `luna.py`, with identical behaviour. A test fails if it is stale.
 - **Add-on installs no longer drag the Steam client along.** `luna install
   --only NAME` skips the Steam client unless it is actually needed (no pin, pin
   differs from the compatibility build, or packages/executables drifted); a full
