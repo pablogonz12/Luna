@@ -57,6 +57,13 @@ Commands:
                                         launches Steam so it self-updates;
                                         --relaunch closes a running Steam first
                                         and reopens it (used by the in-Steam UI)
+    luna proton status [--json]         GE-Proton tools installed on this machine, the latest release,
+                                        and games mapped to a missing tool (Steam config is only read)
+    luna proton install [VERSION|latest] [--dry-run]
+                                        download, sha512-verify and atomically install GE-Proton
+                                        (restart Steam afterwards)
+    luna proton remove VERSION [--force]  refuses while a game is mapped to it
+    luna proton prune [--keep N] [--dry-run]  keep the newest N (default 2); mapped tools are kept
     luna fleet add|remove|list [HOST]   hosts managed over SSH (~/.config/luna/fleet.json)
     luna fleet status [--json]          Luna/Steam state and doctor warn/error counts (DOCTOR column)
                                         of this machine and every host

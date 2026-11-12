@@ -290,7 +290,8 @@ def doctor_summary(findings):
 def doctor_findings():
     findings = []
     for check in (_doctor_steam_lock, _doctor_payloads, _doctor_installed_luna, _doctor_launchers,
-                  _doctor_pacman, _doctor_updater, _doctor_bridge, _doctor_conflicts, _doctor_saves):
+                  _doctor_pacman, _doctor_updater, _doctor_bridge, _doctor_conflicts, _doctor_saves,
+                  _doctor_proton):
         try:
             findings.extend(check())
         except Exception as error:  # a broken check must not hide the others

@@ -130,6 +130,17 @@ refuses it otherwise; it also checks free space in the target's default library 
 when Steam is not running there unless `--start-steam`. Game files are never copied between
 machines. A future opt-in `--copy` (rsync of the install directory) is a possible addition.
 
+## GE-Proton
+
+GE-Proton lives in `~/.local/share/Steam/compatibilitytools.d`, which is not
+synced, so each machine installs its own. `luna proton status` lists the
+installed tools, the latest GitHub release (shown as `unknown` when offline) and
+games mapped to a tool this machine lacks. `luna proton install [VERSION|latest]`
+verifies the release's sha512, extracts beside the target and renames atomically;
+restart Steam afterwards. `luna proton remove VERSION` refuses while a game is
+mapped to it (`--force` overrides); `luna proton prune --keep N` keeps the newest
+N and never removes mapped tools. Luna only reads Steam's `config.vdf`.
+
 ## Steam client versions
 
 A Steam client update can move the interfaces used by the native integration.

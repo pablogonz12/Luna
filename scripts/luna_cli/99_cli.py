@@ -10,7 +10,7 @@ def build_parser():
                           ('check', cmd_check), ('autoupdate', cmd_autoupdate),
                           ('reconcile', cmd_reconcile),
                           ('backup', cmd_backup), ('restore', cmd_restore),
-                          ('steam', cmd_steam),
+                          ('steam', cmd_steam), ('proton', cmd_proton),
                           ('refresh', cmd_refresh),
                           ('probe', cmd_probe), ('fleet', cmd_fleet), ('games', cmd_games),
                           ('launchers', cmd_launchers),
@@ -78,6 +78,15 @@ def build_parser():
             child.add_argument('--now', action='store_true',
                                help='with update: apply right away instead of queueing (Steam must be closed); '
                                     'with unlock: launch Steam so it self-updates')
+        if name == 'proton':
+            child.add_argument('proton_action', nargs='?', default='status',
+                               choices=['status', 'install', 'remove', 'prune'],
+                               help='what to do (default: status)')
+            child.add_argument('proton_version', nargs='?', help='GE-Proton version (install: default latest)')
+            child.add_argument('--json', action='store_true', help='with status: machine-readable output')
+            child.add_argument('--dry-run', action='store_true', help='report only; change nothing')
+            child.add_argument('--force', action='store_true', help='with remove: even if games are mapped to it')
+            child.add_argument('--keep', type=int, default=2, help='with prune: newest GE-Proton to keep (default 2)')
         if name == 'probe':
             child.add_argument('--json', action='store_true', help='one-line JSON (used by luna fleet)')
         if name == 'fleet':
