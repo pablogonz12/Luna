@@ -1943,11 +1943,13 @@ def new_steam_pin(build):
 def steam_package_writable():
     """Let Luna write into SDIR/package despite the hard lock's read-only bit.
 
-    A no-op without a hard lock; with one, the directory is made writable and
-    put back to read-only afterwards, even if the work raises.
+    A no-op when the directory is writable and no hard lock is recorded;
+    otherwise (Luna's hard lock, or a read-only bit left by a manual/community
+    lock) it is made writable and put back to read-only afterwards, even if
+    the work raises.
     """
     package = steam_home() / 'package'
-    relock = steam_hard_lock_active() and package.is_dir()
+    relock = package.is_dir() and (steam_hard_lock_active() or not os.access(package, os.W_OK))
     if relock:
         package.chmod(package.stat().st_mode | stat.S_IWUSR)
     try:
