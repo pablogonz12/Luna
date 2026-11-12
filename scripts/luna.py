@@ -27,6 +27,7 @@ Commands:
                                         conflicts, ...); one line each with the fix;
                                         exit 0 ok / 1 warnings / 2 errors; --fix
                                         applies only safe, reversible fixes
+                                        (a matching foreign lock is adopted: steam lock --adopt)
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
     luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
@@ -44,12 +45,16 @@ Commands:
                                         roll back to the ubuntu12 client, pin it and
                                         hard-lock updates (kills Steam; package/
                                         read-only, Steam.cfg + steam.cfg)
+    luna steam lock --adopt             record an existing read-only lock (pin + cfg block +
+                                        read-only package/, packages matching the pin) as
+                                        Luna's hard lock; no rollback, nothing killed
     luna steam unlock [--now|--relaunch] undo the hard lock and the pin; --now
                                         launches Steam so it self-updates;
                                         --relaunch closes a running Steam first
                                         and reopens it (used by the in-Steam UI)
     luna fleet add|remove|list [HOST]   hosts managed over SSH (~/.config/luna/fleet.json)
-    luna fleet status [--json]          Luna/Steam state of this machine and every host
+    luna fleet status [--json]          Luna/Steam state and doctor warn/error counts (DOCTOR column)
+                                        of this machine and every host
     luna fleet push-cache HOST...       rsync the verified Steam client cache when HOST's differs
     luna fleet install [HOST...] [--only NAME] [--restart-steam] [--force] [--dry-run]
                                         push the release bundle; refuses while Steam runs
@@ -2864,6 +2869,48 @@ def _lock_steam_client(force, confirm):
                'Steam.cfg + steam.cfg written, package/ read-only. Undo: luna steam unlock' % build)
 
 
+def adoptable_steam_lock():
+    """Why a read-only package/ + pin can (or cannot) become Luna's hard lock. (ok, reason)
+
+    Adoption only records the lock for a Steam that already is the pinned build and
+    already has read-only package/ and the update block; it changes none of Steam's files.
+    """
+    if steam_hard_lock_active():
+        return False, 'the hard lock is already recorded'
+    pin = read_steam_pin()
+    if not pin.get('clientBuild'):
+        return False, 'no Steam pin recorded (run: luna steam pin)'
+    package = steam_home() / 'package'
+    if not package.is_dir():
+        return False, 'no Steam package/ directory at %s' % package
+    if not _package_read_only():
+        return False, 'package/ is not read-only; nothing to adopt (use: luna steam lock)'
+    if not steam_updates_blocked():
+        return False, 'steam.cfg does not block updates (run: luna steam pin)'
+    state = steam_state()
+    if not state['match']:
+        return False, ('Steam (build %s) does not match the pin (%s): run luna steam recover '
+                       'first' % (state['build'] or '?', state['pinned']))
+    return True, ''
+
+
+def adopt_steam_lock():
+    """`luna steam lock --adopt`: record hardLock for the pinned build as it stands.
+
+    No rollback, no process killed, Steam's files untouched; only the pin record and
+    Luna's own cfg block (both Steam.cfg and steam.cfg) are written. Undo: luna steam unlock.
+    """
+    ok, reason = adoptable_steam_lock()
+    if not ok:
+        return 1, 'cannot adopt the lock: %s' % reason
+    pin = read_steam_pin()
+    pin['hardLock'] = {'rollback': 'adopted', 'at': int(time.time()), 'by': installed_version()}
+    write_json_file(steam_pin_path(), pin)
+    ensure_steam_cfg_block()
+    return 0, ('adopted the existing read-only Steam lock for build %s as Luna\'s hard lock '
+               '(nothing rolled back or killed). Undo: luna steam unlock' % pin['clientBuild'])
+
+
 def _notify(title, text):
     """Best-effort desktop notification; never fails the job."""
     try:
@@ -3051,6 +3098,10 @@ def cmd_steam(options):
         ensure_steam_cfg_block()
         print('pinned Steam client %s with current SLSsteam hashes; updates blocked via steam.cfg' % build)
         return EXIT_OK
+    if action == 'lock' and getattr(options, 'adopt', False):
+        code, message = adopt_steam_lock()
+        print(message, file=sys.stdout if code == 0 else sys.stderr)
+        return code
     if action == 'lock':
         def confirm():
             if not sys.stdin.isatty():
@@ -3756,6 +3807,9 @@ else
   echo LEGACY
   python3 "$p" steam status 2>/dev/null | sed 's/^/ST /'
 fi
+# doctor exits 1/2 when it has findings, so only its output decides support
+d=$(python3 "$p" doctor --json 2>/dev/null | tr -d '\n')
+case "$d" in "{"*) echo "DOCTOR $d";; esac
 '''
 
 
@@ -3788,6 +3842,13 @@ def fleet_parse_status(code, out, err):
                     if value is not None:
                         record[key] = value or bool(probe.get(key))
                 record['installed'] = True
+        elif tag == 'DOCTOR':
+            try:
+                report = json.loads(rest)
+            except ValueError:
+                continue
+            if isinstance(report, dict) and isinstance(report.get('findings'), list):
+                record['doctor'] = doctor_summary(report['findings'])
         elif tag == 'LEGACY':
             record['legacy'] = True
         elif tag == 'ST':
@@ -3823,6 +3884,10 @@ def fleet_collect(host):
         record['installed'] = True
         record['host'] = os.uname().nodename
         record['local'] = True
+        try:
+            record['doctor'] = doctor_summary(doctor_findings())
+        except Exception:  # a broken check must not hide the fleet table
+            pass
         return record
     code, out, err = fleet_ssh(host, FLEET_STATUS_SCRIPT)
     record = fleet_parse_status(code, out, err)
@@ -3845,6 +3910,10 @@ def fleet_notes(records):
         if record.get('legacy'):
             notes.append('%s: older Luna without `probe --json`; add-on state unknown '
                          '(run: luna fleet install %s --force)' % (record['host'], record['host']))
+        doctor = record.get('doctor')
+        if doctor and (doctor.get('warn') or doctor.get('error')):
+            notes.append('%s: doctor reports %d warning(s), %d error(s) (run `luna doctor` there)'
+                         % (record['host'], doctor.get('warn', 0), doctor.get('error', 0)))
         if record is reference:
             continue
         if record.get('lunaSha') and reference.get('lunaSha') and record['lunaSha'] != reference['lunaSha']:
@@ -3864,11 +3933,20 @@ def _fleet_yes(value):
     return '?' if value is None else ('yes' if value else 'no')
 
 
+def _fleet_doctor(summary):
+    """'ok' / '2w 1e' / '?' (remote too old for `doctor --json`)."""
+    if not isinstance(summary, dict):
+        return '?'
+    if not summary.get('warn') and not summary.get('error'):
+        return 'ok'
+    return '%dw %de' % (summary.get('warn', 0), summary.get('error', 0))
+
+
 def fleet_row(record):
     if not record.get('reachable'):
-        return [record['host'], 'UNREACHABLE', '', '', '', '', '', '']
+        return [record['host'], 'UNREACHABLE', '', '', '', '', '', '', '']
     if record.get('installed') is False:
-        return [record['host'], 'no luna', '', '', '', '', '', '']
+        return [record['host'], 'no luna', '', '', '', '', '', '', '']
     steam = record.get('steam') or {}
     if record.get('legacy'):
         addons = 'unknown'
@@ -3878,7 +3956,7 @@ def fleet_row(record):
     lock = 'HARD' if steam.get('hardLock') else ('blocked' if steam.get('updatesBlocked') else 'open')
     return [record['host'], record.get('lunaVersion') or '?', (record.get('lunaSha') or '')[:8] or '?',
             addons, steam.get('pinned') or 'none', _fleet_yes(steam.get('packagesMatch')), lock,
-            _fleet_yes(record.get('steamRunning'))]
+            _fleet_yes(record.get('steamRunning')), _fleet_doctor(record.get('doctor'))]
 
 
 def fleet_status(hosts, as_json):
@@ -3887,7 +3965,7 @@ def fleet_status(hosts, as_json):
     if as_json:
         print(json.dumps({'hosts': records, 'notes': notes}, indent=2, sort_keys=True))
     else:
-        header = ['HOST', 'LUNA', 'SHA', 'ADD-ONS', 'STEAM PIN', 'PKGS', 'UPDATES', 'RUNNING']
+        header = ['HOST', 'LUNA', 'SHA', 'ADD-ONS', 'STEAM PIN', 'PKGS', 'UPDATES', 'RUNNING', 'DOCTOR']
         rows = [header] + [fleet_row(record) for record in records]
         widths = [max(len(str(row[i])) for row in rows) for i in range(len(header))]
         for row in rows:
@@ -3932,7 +4010,8 @@ def fleet_push_cache(host, dry_run=False):
             return 1, 'rsync not runnable: %s' % error
         if result.returncode != 0:
             return 1, 'rsync failed (%d): %s' % (result.returncode, (result.stderr.strip().splitlines() or ['?'])[-1])
-    return 0, 'pushed cache build %s' % build
+    return 0, ('pushed cache build %s (a later install there finds it in its standard cache '
+               'dir; no --client-cache needed)' % build)
 
 
 FLEET_STOP_STEAM_SCRIPT = r'''
@@ -4104,6 +4183,12 @@ def _finding(ident, severity, message, fix='', apply=None):
             'fixable': apply is not None, '_apply': apply}
 
 
+def _doctor_adopt():
+    code, message = adopt_steam_lock()
+    if code != 0:
+        raise OSError(message)
+
+
 def _doctor_steam_lock():
     found = []
     steam = steam_home()
@@ -4130,11 +4215,15 @@ def _doctor_steam_lock():
         elif not hard and path.name == 'Steam.cfg':
             foreign.append('%s has BootStrapper* lines (Luna only writes it for a hard lock)' % path)
     if foreign:
+        adoptable = adoptable_steam_lock()[0]
         found.append(_finding(
             'steam.foreign-lock', 'warn',
             'Steam update lock not recorded by Luna (%s); `luna install` may fail on it' % '; '.join(foreign),
-            'luna steam lock   # take the lock over (kills Steam, rolls back to ubuntu12); '
-            'or release: chmod u+w %s && rm -f %s' % (package, ' '.join(str(p) for p in steam_cfg_paths()))))
+            ('luna steam lock --adopt   # record it as Luna\'s lock (Steam untouched; undo: luna steam unlock); '
+             if adoptable else
+             'luna steam lock   # take the lock over (kills Steam, rolls back to ubuntu12); ')
+            + 'or release: chmod u+w %s && rm -f %s' % (package, ' '.join(str(p) for p in steam_cfg_paths())),
+            (lambda: _doctor_adopt()) if adoptable else None))
     pin = read_steam_pin()
     if hard:
         missing = [path.name for path in steam_cfg_paths() if path not in cfg_locked]
@@ -4334,6 +4423,16 @@ def _doctor_conflicts():
     return found
 
 
+def doctor_summary(findings):
+    """{'warn': n, 'error': n} over doctor findings (dicts or tuples from doctor_findings)."""
+    counts = {'warn': 0, 'error': 0}
+    for item in findings:
+        severity = item.get('severity') if isinstance(item, dict) else None
+        if severity in counts:
+            counts[severity] += 1
+    return counts
+
+
 def doctor_findings():
     findings = []
     for check in (_doctor_steam_lock, _doctor_payloads, _doctor_installed_luna, _doctor_launchers,
@@ -4450,6 +4549,10 @@ def build_parser():
                                help='what to do (default: status)')
             child.add_argument('--force', action='store_true',
                                help='with lock: kill a running Steam without asking')
+            child.add_argument('--adopt', action='store_true',
+                               help='with lock: only record the hard lock for the current pinned build '
+                                    'when package/ is already read-only and matches the pin '
+                                    '(no rollback, Steam not touched)')
             child.add_argument('--relaunch', action='store_true',
                                help='with lock/unlock: notify the result and reopen Steam detached '
                                     '(unlock closes a running Steam first); for the in-Steam UI')

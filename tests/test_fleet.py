@@ -49,12 +49,38 @@ class FleetTestCase(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, {'LUNA_FLEET_CONFIG': str(self.config)})
         patcher.start()
         self.addCleanup(patcher.stop)
+        doctor = mock.patch.object(luna, 'doctor_findings', return_value=[])
+        doctor.start()
+        self.addCleanup(doctor.stop)
 
     def run_cmd(self, opts):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = luna.cmd_fleet(opts)
         return code, out.getvalue(), err.getvalue()
+
+
+class DoctorSummaryTests(FleetTestCase):
+    def test_remote_doctor_counts_reach_the_record_and_notes(self):
+        report = {'findings': [{'severity': 'warn'}, {'severity': 'warn'}, {'severity': 'error'},
+                               {'severity': 'ok'}]}
+        code, out, err = remote_out(probe=probe())
+        out += 'DOCTOR ' + json.dumps(report) + '\n'
+        record = luna.fleet_parse_status(code, out, err)
+        record['host'] = 'deck'
+        self.assertEqual(record['doctor'], {'warn': 2, 'error': 1})
+        self.assertEqual(luna._fleet_doctor(record['doctor']), '2w 1e')
+        self.assertEqual(luna._fleet_doctor({'warn': 0, 'error': 0}), 'ok')
+        self.assertTrue(any('doctor reports 2 warning' in n for n in luna.fleet_notes([record])))
+
+    def test_remote_without_doctor_is_unknown_not_an_error(self):
+        record = luna.fleet_parse_status(*remote_out(probe=probe()))
+        self.assertNotIn('doctor', record)
+        record['host'] = 'old'
+        self.assertEqual(luna.fleet_row(record)[-1], '?')
+
+    def test_status_script_asks_the_remote_for_doctor_json(self):
+        self.assertIn('doctor --json', luna.FLEET_STATUS_SCRIPT)
 
 
 class ConfigTests(FleetTestCase):

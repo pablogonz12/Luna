@@ -36,6 +36,13 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
   bridge and sidecar state, sync-conflict files) with a fix command per line,
   `--json` output and exit codes 0/1/2. `--fix` applies only safe, reversible
   fixes and never overwrites payloads, uses sudo or touches a foreign lock.
+- **`luna steam lock --adopt` and doctor adoption.** Records a read-only
+  `package/` + pin + update block left by a manual lock (or preserved by
+  `luna install`) as Luna's hard lock, only when the packages match the pin;
+  nothing is rolled back or killed (undo: `luna steam unlock`). `luna doctor`
+  suggests it for `steam.foreign-lock` and `--fix` applies it (Steam closed).
+  `luna fleet status` gains a DOCTOR column (warn/error counts, `?` for hosts
+  whose Luna lacks `doctor --json`) and a note per host with findings.
 - **`luna steam lock` / `luna steam unlock`.** `lock` rolls Steam back to the
   old ubuntu12 client (kills Steam: needs `--force` or a y/N answer), pins the
   result, writes the hard update block to both `Steam.cfg` and `steam.cfg`,

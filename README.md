@@ -267,7 +267,10 @@ pacman's `IgnorePkg`, updater errors, a drifted `boot.lua` bridge or stale
 Lumen sidecar, and Syncthing `*.sync-conflict-*` files. Exit code 0 = ok,
 1 = warnings, 2 = errors; `--json` is for scripts. `--fix` applies only safe,
 reversible fixes (restoring Luna's own `steam.cfg` block, with Steam closed);
-it never uses sudo, overwrites payloads or touches a foreign lock.
+it never uses sudo or overwrites payloads. A foreign read-only Steam lock whose
+packages match the pin is *adopted* (`luna steam lock --adopt`: records Luna's
+hard lock, no rollback, nothing killed; undo with `luna steam unlock`).
+`luna fleet status` shows each host's doctor warn/error counts in a DOCTOR column.
 
 ```bash
 python3 scripts/luna.py doctor [--json] [--fix]
