@@ -30,6 +30,12 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
   `--restart-steam`: `steam -shutdown`, wait, install, relaunch), and refuses
   drifted payloads without `--force`. New `luna probe --json` is the
   machine-readable state it reads (works from the installed copy).
+
+- **`luna doctor`.** Aggregates the existing checks into one report (foreign
+  Steam locks, payload/`luna.py`/launcher drift, `IgnorePkg`, updater errors,
+  bridge and sidecar state, sync-conflict files) with a fix command per line,
+  `--json` output and exit codes 0/1/2. `--fix` applies only safe, reversible
+  fixes and never overwrites payloads, uses sudo or touches a foreign lock.
 - **`luna steam lock` / `luna steam unlock`.** `lock` rolls Steam back to the
   old ubuntu12 client (kills Steam: needs `--force` or a y/N answer), pins the
   result, writes the hard update block to both `Steam.cfg` and `steam.cfg`,
