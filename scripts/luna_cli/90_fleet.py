@@ -94,7 +94,12 @@ def probe_data():
         script = Path(__file__).resolve()
     steam = steam_state()
     versions = snapshot.get('versions') if isinstance(snapshot.get('versions'), dict) else {}
+    try:
+        games = games_probe_block()  # additive (93_games.py); older readers ignore it
+    except Exception:  # a broken library must not hide the rest of the probe
+        games = None
     return {
+        'games': games,
         'schema': 1,
         'lunaVersion': str(versions.get('luna') or addon_version('luna')),
         'lunaSha': sha256(script),

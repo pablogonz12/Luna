@@ -5,6 +5,11 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **`luna games list|diff|install`.** See which Steam games are installed on which
+  machine (`luna probe --json` gains an additive `games` section; older remotes are
+  scanned over ssh) and queue `steam://install` on another host after checking free space
+  and the stplug-in lua for unlock-only games. No game files are copied.
+
 - **CLI source split into fragments.** The 4600-line `scripts/luna.py` is now generated
   from `scripts/luna_cli/*.py` by `scripts/build-luna.py`; the deployed artifact is still the
   single `luna.py`, with identical behaviour. A test fails if it is stale.
