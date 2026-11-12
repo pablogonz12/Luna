@@ -395,6 +395,20 @@ source.
 
 ## Development checks
 
+**Where the CLI code lives.** `scripts/luna.py` is a *generated* single file (it is
+what the `luna` shim, `luna update`, `luna fleet install` and the in-Steam add-on
+run, so it must stay one file). Edit the fragments in `scripts/luna_cli/` instead
+(`10_reconcile`, `20_common`, `30_plan_apply`, `40_status_release_update`,
+`50_timer_backup`, `60_steam_client`, `70_steam_cmd_refresh`,
+`80_install_verify_vendor`, `90_fleet`, `95_doctor`, `99_cli`). They are
+consecutive slices of one module, concatenated in filename order, not
+separately importable packages. After editing, rebuild and commit both:
+
+```bash
+python3 scripts/build-luna.py           # rewrite scripts/luna.py
+python3 scripts/build-luna.py --check   # exit 1 if it is stale (also a unit test)
+```
+
 ```bash
 bash scripts/test-all.sh                   # everything CI runs: UI, backends, installer
 python3 scripts/luna.py verify --sources   # also compares against local checkouts

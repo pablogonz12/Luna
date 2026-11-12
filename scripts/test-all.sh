@@ -21,6 +21,7 @@ luac -p tests/bridge-smoke.lua tests/presence/backend-smoke.lua tests/compressor
 bash scripts/test-backend.sh
 
 echo '== python: installer tests + compile + verify =='
+python3 scripts/build-luna.py --check
 python3 -m py_compile scripts/luna.py scripts/lumen-hook.py tests/*.py
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 scripts/luna.py verify
