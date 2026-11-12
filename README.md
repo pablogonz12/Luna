@@ -92,6 +92,25 @@ fully exit Steam (check no `lumen`/`steamwebhelper` lingers), let the sync
 settle, reconcile, then start Steam on the other machine. The Health page
 reports waiting conflicts so the menu tells you when this is needed.
 
+## Several machines over SSH
+
+`luna fleet` manages Luna on your other machines from one place. Register them
+once (`luna fleet add laptop` - any name `ssh` understands, key-based login
+required; connections run with `BatchMode` and a connect timeout):
+
+```
+luna fleet status [--json]           version, luna.py hash, add-on match/drift,
+                                     Steam pin, packages, update block, Steam running
+luna fleet push-cache laptop         rsync the verified Steam client cache if the build differs
+luna fleet install [laptop] [--only NAME] [--restart-steam] [--dry-run] [--force]
+```
+
+`install` builds the release bundle from this checkout and installs it with the
+remote `luna update --bundle`. It refuses a host where Steam or Lumen is running
+unless `--restart-steam` (graceful `steam -shutdown`, install, relaunch), and
+refuses drifted payloads (or an older Luna that cannot report them) unless
+`--force`. The config lives in `~/.config/luna/fleet.json`.
+
 ## Steam client versions
 
 A Steam client update can move the interfaces used by the native integration.
