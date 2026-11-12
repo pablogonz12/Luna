@@ -17,6 +17,13 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
   `link --all` re-creates the links on the other machine (backs up local data, refuses with
   `--prefer local|store` when both sides have saves, never deletes); `unlink` copies it back;
   `status` and a `luna doctor` check report broken links and sync conflicts.
+
+- **`luna proton`.** Manage GE-Proton per machine (`~/.local/share/Steam` is not synced):
+  `status [--json]` (installed tools, latest release, games mapped to a missing tool; Steam
+  config is only read), `install [VERSION|latest] [--dry-run]` (sha512-verified, extracted
+  then atomically renamed, retry/backoff), `remove VERSION [--force]`, `prune [--keep N]`.
+  `luna probe --json` lists the installed tools; `luna doctor` warns about a game mapped to a
+  missing tool. Restart Steam after installing.
 - **CLI source split into fragments.** The 4600-line `scripts/luna.py` is now generated
   from `scripts/luna_cli/*.py` by `scripts/build-luna.py`; the deployed artifact is still the
   single `luna.py`, with identical behaviour. A test fails if it is stale.
