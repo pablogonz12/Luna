@@ -10,6 +10,13 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
   scanned over ssh) and queue `steam://install` on another host after checking free space
   and the stplug-in lua for unlock-only games. No game files are copied.
 
+
+- **`luna saves`: share saves that have no Steam Cloud.** `scan` finds installed games with
+  Proton-prefix or `~/.config/unity3d` saves and no `remotecache.vdf`; `link APPID|PATH` moves the
+  save directory into `~/.local/share/game-saves/` (synced by Syncthing) and leaves a symlink;
+  `link --all` re-creates the links on the other machine (backs up local data, refuses with
+  `--prefer local|store` when both sides have saves, never deletes); `unlink` copies it back;
+  `status` and a `luna doctor` check report broken links and sync conflicts.
 - **CLI source split into fragments.** The 4600-line `scripts/luna.py` is now generated
   from `scripts/luna_cli/*.py` by `scripts/build-luna.py`; the deployed artifact is still the
   single `luna.py`, with identical behaviour. A test fails if it is stale.
