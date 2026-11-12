@@ -65,6 +65,41 @@ class DoctorTestCase(test_luna.LunaTestCase):
         self.assertEqual(found['steam.foreign-lock']['severity'], 'warn')
         self.assertFalse(found['steam.foreign-lock']['fixable'])
 
+    def adoptable_lock(self, build='1'):
+        """`luna install` over a manual lock: pin + cfg block + read-only package/, no hardLock."""
+        package = self.read_only_package()
+        (self.steam / 'logs').mkdir()
+        (self.steam / 'logs/console_log.txt').write_text('Client version: %s\n' % build)
+        (self.steam / 'steam.cfg').write_text('BootStrapperInhibitAll=enable\n')
+        self.pin()
+        return package
+
+    def test_foreign_lock_is_adoptable_when_packages_match_the_pin(self):
+        self.adoptable_lock()
+        found, result = self.findings()
+        item = found['steam.foreign-lock']
+        self.assertTrue(item['fixable'])
+        self.assertIn('luna steam lock --adopt', item['fix'])
+
+    def test_foreign_lock_is_not_adoptable_when_build_differs_from_pin(self):
+        self.adoptable_lock(build='2')
+        found, _ = self.findings()
+        self.assertFalse(found['steam.foreign-lock']['fixable'])
+
+    def test_fix_adopts_the_lock_without_touching_steam(self):
+        package = self.adoptable_lock()
+        cfg = (self.steam / 'steam.cfg').read_bytes()
+        found, result = self.findings('--fix')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        pin = json.loads((self.tools / 'steam-pin.json').read_text())
+        self.assertIsInstance(pin['hardLock'], dict)
+        self.assertEqual(pin['clientBuild'], '1')
+        self.assertEqual(stat.S_IMODE(package.stat().st_mode) & 0o222, 0)
+        self.assertTrue(cfg in (self.steam / 'steam.cfg').read_bytes())
+        found, result = self.findings()
+        self.assertNotIn('steam.foreign-lock', found)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_foreign_lock_cfg_without_pin(self):
         (self.steam / 'steam.cfg').write_text('BootStrapperInhibitAll=enable\n')
         found, _ = self.findings()

@@ -26,7 +26,7 @@ luna = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(luna)
 
 
-class SteamClientTestCase(unittest.TestCase):
+class SteamClientFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='luna-steam-client-')
         self.addCleanup(self.temp.cleanup)
@@ -113,6 +113,8 @@ class SteamClientTestCase(unittest.TestCase):
         updater.chmod(0o755)
         return updater
 
+
+class SteamClientTestCase(SteamClientFixture):
     def test_refresh_updates_pins_caches_and_reinstalls(self):
         updater = self.bump_updater()
         with mock.patch.dict(os.environ, {'LUNA_STEAM_SH': str(updater)}):
@@ -430,11 +432,11 @@ class SteamHardLockTestCase(unittest.TestCase):
 
     ROLLED_BACK = '777'
 
-    make_packages = SteamClientTestCase.make_packages
+    make_packages = SteamClientFixture.make_packages
 
     def setUp(self):
         # Reuse the fake-Steam fixture without inheriting (and re-running) its tests.
-        SteamClientTestCase.setUp(self)
+        SteamClientFixture.setUp(self)
         self.calls = []
         self.state = self.home / '.local/state/slsteam-moon'
         self.state.mkdir(parents=True)
@@ -460,6 +462,51 @@ class SteamHardLockTestCase(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = luna.cmd_steam(options)
         return code, out.getvalue() + err.getvalue()
+
+    def adoptable_state(self):
+        """What `luna install` leaves after preserving a manual read-only lock."""
+        build = luna.steam_client_build()
+        luna.luna_tools_dir().mkdir(parents=True, exist_ok=True)
+        luna.write_json_file(luna.steam_pin_path(), luna.new_steam_pin(build))
+        luna.ensure_steam_cfg_block()
+        luna._steam_package_set_readonly(self.packages, True)
+        self.addCleanup(luna._steam_package_set_readonly, self.packages, False)
+        return build
+
+    def test_adopt_records_hard_lock_without_touching_steam(self):
+        build = self.adoptable_state()
+        steam_files = lambda: {str(q): q.read_bytes() for q in self.root.rglob('*') if q.is_file() and q.name.lower() != 'steam.cfg'}  # noqa: E731
+        before = steam_files()
+        self.assertFalse(luna.steam_hard_lock_active())
+        code, output = self.steam('lock', adopt=True)
+        self.assertEqual(code, 0, output)
+        self.assertTrue(luna.steam_hard_lock_active())
+        self.assertEqual(luna.read_steam_pin()['clientBuild'], build)
+        self.assertEqual(steam_files(), before)  # only Luna's cfg block may be added
+        for name in ('Steam.cfg', 'steam.cfg'):
+            self.assertIn('BootStrapperInhibitAll', (self.root / name).read_text())
+        self.assertEqual([c for c in self.calls if c[0] not in ('notify-send', 'pacman')], [])
+        # The in-Steam UI reads pin.hardLock as a table (backend main.lua).
+        self.assertIsInstance(luna.read_steam_pin()['hardLock'], dict)
+        self.assertTrue(luna.steam_state()['hardLock'])
+        self.assertEqual(self.steam('unlock')[0], 0)
+        self.assertFalse(luna.steam_hard_lock_active())
+
+    def test_adopt_refuses_without_pin_readonly_or_matching_packages(self):
+        code, output = self.steam('lock', adopt=True)
+        self.assertEqual(code, 1)
+        self.assertIn('no Steam pin', output)
+        self.adoptable_state()
+        luna._steam_package_set_readonly(self.packages, False)
+        self.assertIn('not read-only', self.steam('lock', adopt=True)[1])
+        luna._steam_package_set_readonly(self.packages, True)
+        pin = luna.read_steam_pin()
+        pin['clientBuild'] = '12345'
+        luna.write_json_file(luna.steam_pin_path(), pin)
+        code, output = self.steam('lock', adopt=True)
+        self.assertEqual(code, 1)
+        self.assertIn('does not match the pin', output)
+        self.assertFalse(luna.steam_hard_lock_active())
 
     def test_lock_rolls_back_pins_and_locks(self):
         (self.root / 'steam.cfg').write_text('# mine\nBootStrapperInhibitAll=disable\n')
@@ -594,7 +641,7 @@ def http_error(code, retry_after=None):
     return luna.urllib.error.HTTPError('https://example.invalid/x', code, 'err', headers, None)
 
 
-class SteamDownloadTestCase(SteamClientTestCase):
+class SteamDownloadTestCase(SteamClientFixture):
     def download(self, **kwargs):
         dest = self.home / 'download.bin'
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -657,7 +704,7 @@ class SteamDownloadTestCase(SteamClientTestCase):
         self.assertIsNone(luna._find_steam_package([extra], self.archive.name, hashlib.sha256(b'x').hexdigest()))
 
 
-class SteamInstallDecisionTestCase(SteamClientTestCase):
+class SteamInstallDecisionTestCase(SteamClientFixture):
     def run_install(self, **kwargs):
         options = dict(only=[], force=False, dry_run=False, keep_steam_client=False)
         options.update(kwargs)
