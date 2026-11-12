@@ -111,6 +111,17 @@ unless `--restart-steam` (graceful `steam -shutdown`, install, relaunch), and
 refuses drifted payloads (or an older Luna that cannot report them) unless
 `--force`. The config lives in `~/.config/luna/fleet.json`.
 
+## GE-Proton
+
+GE-Proton lives in `~/.local/share/Steam/compatibilitytools.d`, which is not
+synced, so each machine installs its own. `luna proton status` lists the
+installed tools, the latest GitHub release (shown as `unknown` when offline) and
+games mapped to a tool this machine lacks. `luna proton install [VERSION|latest]`
+verifies the release's sha512, extracts beside the target and renames atomically;
+restart Steam afterwards. `luna proton remove VERSION` refuses while a game is
+mapped to it (`--force` overrides); `luna proton prune --keep N` keeps the newest
+N and never removes mapped tools. Luna only reads Steam's `config.vdf`.
+
 ## Steam client versions
 
 A Steam client update can move the interfaces used by the native integration.
