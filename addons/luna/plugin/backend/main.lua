@@ -736,7 +736,7 @@ end
 local function steam_client_state()
   -- What `luna steam status` reports on the shell, read-only for the menu:
   -- running build, pin, match, update block and local package cache.
-  local state = { build = '', pinned = '', match = false, updatesBlocked = false,
+  local state = { build = '', pinned = '', hardLock = false, match = false, updatesBlocked = false,
     cachedBuild = '', cacheReady = false }
   local steam_root = home .. '/.local/share/Steam'
   local log_path = steam_root .. '/logs/console_log.txt'
@@ -764,7 +764,21 @@ local function steam_client_state()
   local pin_raw = read_file(tools .. '/steam-pin.json')
   if pin_raw then
     local ok, pin = pcall(json.decode, pin_raw)
-    if ok and type(pin) == 'table' then state.pinned = tostring(pin.clientBuild or '') end
+    if ok and type(pin) == 'table' then
+      state.pinned = tostring(pin.clientBuild or '')
+      state.hardLock = type(pin.hardLock) == 'table'
+    end
+  end
+  -- A detached lock/unlock job (see SlsLunaSteam) leaves this marker until it ends.
+  state.job = ''
+  do
+    local job_raw = read_file(tools .. '/steam-job.json')
+    if job_raw then
+      local ok_job, job = pcall(json.decode, job_raw)
+      if ok_job and type(job) == 'table' and os.time() - (tonumber(job.at) or 0) < 7200 then
+        state.job = tostring(job.action or '')
+      end
+    end
   end
   local cfg = read_file(steam_root .. '/steam.cfg')
   state.updatesBlocked = cfg ~= nil and cfg:find('BootStrapperInhibitAll', 1, true) ~= nil
@@ -985,6 +999,29 @@ function M.register(registry)
       if not out then return reply({ success = false, error = err }) end
       return reply({ success = true, message = (out:gsub('%s+$', '')),
         steam = steam_client_state() })
+    end
+    if action == 'lock' or action == 'unlock' then
+      -- Lock kills Steam (and this very Lua VM with it), so the job runs fully
+      -- detached: setsid -f puts it in its own session, the CLI notifies and
+      -- reopens Steam itself, and the job marker is removed when it ends. The
+      -- command line is built from constants only; nothing from the request.
+      local tools = home .. '/.local/share/Lumen/sls-luna'
+      if not path_exists(updater_path()) then
+        return reply({ success = false, error = 'the updater is not installed yet; run install --force once' })
+      end
+      if steam_client_state().job ~= '' then
+        return reply({ success = false, error = 'A Steam lock/unlock job is already running.' })
+      end
+      local flags = action == 'lock' and 'steam lock --force --relaunch' or 'steam unlock --relaunch'
+      local job_path = tools .. '/steam-job.json'
+      local log_path = tools .. '/steam-job.log'
+      if not write_json(job_path, { action = action, at = os.time() }) then
+        return reply({ success = false, error = 'could not record the Steam job' })
+      end
+      local inner = shq(python_bin()) .. ' ' .. shq(updater_path()) .. ' ' .. flags
+        .. '; rm -f ' .. shq(job_path)
+      os.execute('setsid -f sh -c ' .. shq(inner) .. ' < /dev/null >> ' .. shq(log_path) .. ' 2>&1')
+      return reply({ success = true, started = action, log = log_path, steam = steam_client_state() })
     end
     local pending_path = home .. '/.local/share/Lumen/sls-luna/pending-steam.json'
     if action == 'cancel' then

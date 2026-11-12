@@ -425,5 +425,154 @@ class SteamClientTestCase(unittest.TestCase):
         self.assertTrue(ok, message)
 
 
+class SteamHardLockTestCase(unittest.TestCase):
+    """`luna steam lock/unlock` against a fake Steam dir; every process call is mocked."""
+
+    ROLLED_BACK = '777'
+
+    make_packages = SteamClientTestCase.make_packages
+
+    def setUp(self):
+        # Reuse the fake-Steam fixture without inheriting (and re-running) its tests.
+        SteamClientTestCase.setUp(self)
+        self.calls = []
+        self.state = self.home / '.local/state/slsteam-moon'
+        self.state.mkdir(parents=True)
+        (self.state / 'boot_fail_count').write_text('3\n')
+        (self.state / 'safe_mode_on').write_text('1')
+        (self.packages / 'steam_client_steamrt64.manifest').write_text('x')
+        (self.packages / 'steam_client_steamrt64_x').write_text('x')
+        mock.patch.object(luna.time, 'sleep').start()
+
+        def fake_run(command, *args, **kwargs):
+            self.calls.append(list(command))
+            if '-forcemanifestsuffix' in command:
+                # The rolled-back client rewrites the on-disk manifest to its build.
+                self.manifest.write_text(self.manifest.read_text().replace(
+                    '"version" "%s"' % luna.STEAM_COMPAT_BUILD, '"version" "%s"' % self.ROLLED_BACK))
+                return mock.Mock(returncode=7)  # non-zero must be tolerated
+            return mock.Mock(returncode=1, stdout='', stderr='')
+        mock.patch.object(luna.subprocess, 'run', side_effect=fake_run).start()
+
+    def steam(self, action, **kwargs):
+        options = argparse.Namespace(steam_action=action, build=None, now=False, force=False, **kwargs)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = luna.cmd_steam(options)
+        return code, out.getvalue() + err.getvalue()
+
+    def test_lock_rolls_back_pins_and_locks(self):
+        (self.root / 'steam.cfg').write_text('# mine\nBootStrapperInhibitAll=disable\n')
+        code, output = self.steam('lock')
+        self.assertEqual(code, 0, output)
+        self.assertIn(['%s' % (self.root / 'ubuntu12_32/steam'), '-forcemanifestsuffix', 'ubuntu12', '-exitsteam'],
+                      self.calls)
+        self.assertFalse(list(self.packages.glob('steam_client_steamrt64*')))
+        self.assertFalse(list(self.state.glob('safe_mode*')))
+        self.assertEqual((self.state / 'boot_fail_count').read_text().strip(), '0')
+        for name in ('Steam.cfg', 'steam.cfg'):
+            content = (self.root / name).read_text()
+            self.assertIn('BootStrapperInhibitAll=enable', content)
+            self.assertIn('BootStrapperInhibitUpdateOnLaunch=enable', content)
+            self.assertIn('BootStrapperForceSelfUpdate=false', content)
+        self.assertNotIn('=disable', (self.root / 'steam.cfg').read_text())
+        self.assertEqual(stat.S_IMODE(self.packages.stat().st_mode) & 0o222, 0)
+        pin = luna.read_steam_pin()
+        self.assertEqual(pin['clientBuild'], self.ROLLED_BACK)
+        self.assertEqual(pin['hardLock']['rollback'], 'ubuntu12')
+        state = luna.steam_state()
+        self.assertTrue(state['match'])
+        self.assertTrue(state['hardLock'] and state['packageReadOnly'])
+        self.assertEqual(luna.steam_drift_note(), '')
+        self.assertIn('HARD', self.steam('status')[1])
+
+    def test_lock_needs_force_or_confirmation_to_kill_a_running_steam(self):
+        mock.patch.object(luna, 'process_running', side_effect=lambda name: name == 'steam').start()
+        code, output = self.steam('lock')
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertIn('--force', output)
+        self.assertFalse([call for call in self.calls if call[0] == 'pkill'])
+        self.assertFalse(luna.steam_pin_path().exists())
+        options = argparse.Namespace(steam_action='lock', build=None, now=False, force=True)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(luna.cmd_steam(options), 0)
+        killed = sorted(call[-1] for call in self.calls if call[0] == 'pkill')
+        self.assertEqual(killed, ['steam', 'steamwebhelper'])
+
+    def test_unlock_undoes_lock_and_launches_only_with_now(self):
+        self.assertEqual(self.steam('lock')[0], 0)
+        launched = mock.patch.object(luna.subprocess, 'Popen').start()
+        code, output = self.steam('unlock')
+        self.assertEqual(code, 0, output)
+        launched.assert_not_called()
+        self.assertTrue(os.access(self.packages, os.W_OK))
+        self.assertFalse((self.root / 'Steam.cfg').exists())
+        self.assertFalse((self.root / 'steam.cfg').exists())
+        self.assertFalse(luna.steam_pin_path().exists())
+        self.assertFalse(luna.steam_hard_lock_active())
+        self.assertEqual(self.steam('lock')[0], 0)
+        self.assertEqual(self.steam('unlock')[0], 0)
+        options = argparse.Namespace(steam_action='unlock', build=None, now=True, force=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(luna.cmd_steam(options), 0)
+        self.assertEqual(launched.call_args[0][0], ['setsid', 'steam'])
+
+    def test_relaunch_modes_notify_and_reopen_steam_detached(self):
+        launched = mock.patch.object(luna.subprocess, 'Popen').start()
+        options = argparse.Namespace(steam_action='lock', build=None, now=False, force=True, relaunch=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(luna.cmd_steam(options), 0)
+        self.assertEqual(launched.call_args[0][0], ['setsid', 'steam'])
+        self.assertTrue(any(call[0] == 'notify-send' and 'blocked' in call[-2] for call in self.calls))
+        launched.reset_mock()
+        self.calls.clear()
+        running = {'steam': True}
+        mock.patch.object(luna, 'process_running', side_effect=lambda name: running.get(name, False)).start()
+
+        def fake_run(command, *args, **kwargs):
+            self.calls.append(list(command))
+            if command[:2] == ['steam', '-shutdown']:
+                running['steam'] = False
+            return mock.Mock(returncode=0, stdout='', stderr='')
+        luna.subprocess.run.side_effect = fake_run
+        options = argparse.Namespace(steam_action='unlock', build=None, now=False, force=False, relaunch=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(luna.cmd_steam(options), 0)
+        self.assertLess(self.calls.index(['steam', '-shutdown']),
+                        next(i for i, c in enumerate(self.calls) if c[0] == 'notify-send'))
+        self.assertEqual(launched.call_args[0][0], ['setsid', 'steam'])
+        self.assertFalse(luna.steam_hard_lock_active())
+
+    def test_unlock_relaunch_changes_nothing_when_steam_will_not_close(self):
+        self.assertEqual(self.steam('lock')[0], 0)
+        mock.patch.object(luna, 'process_running', return_value=True).start()
+        launched = mock.patch.object(luna.subprocess, 'Popen').start()
+        options = argparse.Namespace(steam_action='unlock', build=None, now=False, force=False, relaunch=True)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(luna.cmd_steam(options), 1)
+        launched.assert_not_called()
+        self.assertTrue(luna.steam_hard_lock_active())
+
+    def test_hard_lock_survives_repin_and_guards_unpin_and_update(self):
+        self.assertEqual(self.steam('lock')[0], 0)
+        self.assertEqual(self.steam('pin')[0], 0)
+        self.assertTrue(luna.steam_hard_lock_active())
+        self.assertEqual(self.steam('unpin')[0], 1)
+        self.assertEqual(self.steam('update')[0], 1)
+        self.assertFalse(luna.steam_pending_path().exists())
+
+    def test_package_writes_work_under_the_read_only_lock(self):
+        self.assertEqual(self.steam('lock')[0], 0)
+        self.assertFalse(os.access(self.packages, os.W_OK))
+        code, output = self.steam('recover')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(stat.S_IMODE(self.packages.stat().st_mode) & 0o222, 0)
+        self.assertTrue(luna.steam_hard_lock_active())
+        # Re-caching a read-only package tree must leave a deletable cache.
+        luna._cache_client_packages(self.ROLLED_BACK)
+        shutil.rmtree(luna.steam_cache_dir())
+        self.assertEqual(self.steam('unlock')[0], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

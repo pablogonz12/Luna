@@ -34,6 +34,14 @@ Commands:
     luna steam status|pin|cache|recover manage the Steam client build: pin the
                                         working build, cache its packages, recover
                                         it after an unwanted update
+    luna steam lock [--force] [--relaunch]
+                                        roll back to the ubuntu12 client, pin it and
+                                        hard-lock updates (kills Steam; package/
+                                        read-only, Steam.cfg + steam.cfg)
+    luna steam unlock [--now|--relaunch] undo the hard lock and the pin; --now
+                                        launches Steam so it self-updates;
+                                        --relaunch closes a running Steam first
+                                        and reopens it (used by the in-Steam UI)
     luna refresh [--dry-run]            update Steam to Valve's latest, pin and
                                         cache it, then reinstall Luna on top
                                         (Steam closed; never kills anything)
@@ -1800,8 +1808,22 @@ STEAM_CFG_BLOCK = ('BootStrapperInhibitAll=enable\n'
                      'BootStrapperForceSelfUpdate=disable\n')
 
 
+# The hard lock (`luna steam lock`) also stops the launch-time update check and
+# is written to both spellings of the file name that Steam's bootstrapper reads.
+STEAM_HARD_CFG_BLOCK = ('BootStrapperInhibitAll=enable\n'
+                        'BootStrapperInhibitUpdateOnLaunch=enable\n'
+                        'BootStrapperForceSelfUpdate=false\n')
+_STEAM_CFG_KEYS = re.compile(
+    r'\s*BootStrapper(?:InhibitAll|InhibitUpdateOnLaunch|ForceSelfUpdate)\s*=', re.I)
+
+
 def steam_cfg_path():
     return steam_home() / 'steam.cfg'
+
+
+def steam_cfg_paths():
+    """Both spellings the bootstrapper honors (distinct files on Linux)."""
+    return [steam_home() / 'Steam.cfg', steam_home() / 'steam.cfg']
 
 
 def steam_updates_blocked():
@@ -1812,32 +1834,48 @@ def steam_updates_blocked():
     return bool(re.search(r'^\s*BootStrapperInhibitAll\s*=\s*enable\s*$', content, re.M | re.I))
 
 
-def ensure_steam_cfg_block():
-    """Write the bootstrapper inhibit block; Steam honors it on next launch."""
-    steam_cfg_path().parent.mkdir(parents=True, exist_ok=True)
-    try:
-        previous = steam_cfg_path().read_text()
-    except FileNotFoundError:
-        previous = ''
-    lines = [line for line in previous.splitlines()
-             if not re.match(r'\s*BootStrapper(?:InhibitAll|ForceSelfUpdate)\s*=', line, re.I)]
-    steam_cfg_path().write_text('\n'.join(lines + STEAM_CFG_BLOCK.splitlines()) + '\n')
-    return steam_cfg_path()
+def ensure_steam_cfg_block(paths=None, block=None):
+    """Write the bootstrapper inhibit block; Steam honors it on next launch.
 
-
-def remove_steam_cfg_block():
-    """Remove the block only if the file holds exactly what Luna wrote."""
-    try:
-        content = steam_cfg_path().read_text()
-    except OSError:
-        return False
-    if content == STEAM_CFG_BLOCK:
+    While a hard lock is recorded the hard block goes to both cfg files, so
+    every code path that re-applies the block keeps the lock intact.
+    """
+    hard = steam_hard_lock_active()
+    if block is None:
+        block = STEAM_HARD_CFG_BLOCK if hard else STEAM_CFG_BLOCK
+    if paths is None:
+        paths = steam_cfg_paths() if hard else [steam_cfg_path()]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            steam_cfg_path().unlink()
+            previous = path.read_text()
+        except FileNotFoundError:
+            previous = ''
+        lines = [line for line in previous.splitlines() if not _STEAM_CFG_KEYS.match(line)]
+        path.write_text('\n'.join(lines + block.splitlines()) + '\n')
+    return paths[-1]
+
+
+def remove_steam_cfg_block(paths=None):
+    """Remove the block only if the file holds exactly what Luna wrote.
+
+    Returns True when every file that held a Luna block was removed.
+    """
+    removed, kept = False, False
+    for path in (paths if paths is not None else [steam_cfg_path()]):
+        try:
+            content = path.read_text()
         except OSError:
-            return False
-        return True
-    return False
+            continue
+        if content in (STEAM_CFG_BLOCK, STEAM_HARD_CFG_BLOCK):
+            try:
+                path.unlink()
+                removed = True
+            except OSError:
+                kept = True
+        elif any(_STEAM_CFG_KEYS.match(line) for line in content.splitlines()):
+            kept = True
+    return removed and not kept
 
 
 def pacman_conf_path():
@@ -1883,6 +1921,40 @@ def steam_cache_dir():
 def read_steam_pin():
     pin = read_json_file(steam_pin_path())
     return pin if isinstance(pin, dict) else {}
+
+
+def steam_hard_lock_active():
+    """Is the ubuntu12 rollback + read-only package lock recorded in the pin?"""
+    lock = read_steam_pin().get('hardLock')
+    return isinstance(lock, dict) and bool(lock)
+
+
+def new_steam_pin(build):
+    """A pin record for `build`; carries an active hard lock forward."""
+    pin = {'clientBuild': str(build), 'slssteam': slssteam_hashes(),
+           'at': int(time.time()), 'by': installed_version()}
+    lock = read_steam_pin().get('hardLock')
+    if isinstance(lock, dict) and lock:
+        pin['hardLock'] = lock
+    return pin
+
+
+@contextlib.contextmanager
+def steam_package_writable():
+    """Let Luna write into SDIR/package despite the hard lock's read-only bit.
+
+    A no-op without a hard lock; with one, the directory is made writable and
+    put back to read-only afterwards, even if the work raises.
+    """
+    package = steam_home() / 'package'
+    relock = steam_hard_lock_active() and package.is_dir()
+    if relock:
+        package.chmod(package.stat().st_mode | stat.S_IWUSR)
+    try:
+        yield
+    finally:
+        if relock and package.is_dir():
+            package.chmod(package.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
 
 
 def slssteam_hashes():
@@ -1939,6 +2011,13 @@ def packages_match_cache():
     return _stats_match(manifest, _package_stats(target))
 
 
+def _package_read_only():
+    try:
+        return not (steam_home() / 'package').stat().st_mode & stat.S_IWUSR
+    except OSError:
+        return False
+
+
 def steam_state():
     """Everything the menu and preflight report about the Steam client."""
     build = steam_client_build()
@@ -1981,6 +2060,8 @@ def steam_state():
         'cacheReady': cache_ready,
         'pacmanManaged': pacman_managed,
         'pacmanIgnored': pacman_ignored,
+        'hardLock': bool(pin.get('hardLock')),
+        'packageReadOnly': _package_read_only(),
     }
 
 
@@ -2013,6 +2094,9 @@ def _steam_force_update():
     Called only with Steam closed. Returns (ok, message). The update block
     is lifted for the run and re-applied afterwards either way.
     """
+    if steam_hard_lock_active():
+        return False, ('the Steam hard lock is active (package/ read-only, ubuntu12 rollback); '
+                       'run: luna steam unlock --now to let Steam update')
     try:
         _steam_client_closed()
     except ValueError as error:
@@ -2107,6 +2191,8 @@ def _cache_client_packages(build):
     if cache.exists():
         shutil.rmtree(cache, ignore_errors=True)
     shutil.copytree(source, cache / 'package', symlinks=False)
+    # copytree preserves the hard lock's read-only bit; the cache must stay deletable.
+    (cache / 'package').chmod((cache / 'package').stat().st_mode | stat.S_IWUSR)
     (cache / 'build.txt').write_text(build + '\n')
     write_json_file(cache / 'manifest.json', _package_stats(cache / 'package', with_hash=True))
     return cache
@@ -2240,6 +2326,12 @@ def _steam_client_closed():
 
 
 def _install_steam_payload(payload, entries, want, packages):
+    """Install extracted binaries transactionally (package/ unlocked meanwhile)."""
+    with steam_package_writable():
+        return _install_steam_payload_locked(payload, entries, want, packages)
+
+
+def _install_steam_payload_locked(payload, entries, want, packages):
     """Install extracted binaries transactionally; retain a machine-local backup."""
     _steam_client_closed()
     root = steam_home().resolve()
@@ -2385,9 +2477,7 @@ def ensure_compatible_steam():
                     if (backup / 'previous-cache').exists():
                         os.replace(backup / 'previous-cache', cache)
                     raise
-            write_json_file(steam_pin_path(), {'clientBuild': STEAM_COMPAT_BUILD,
-                                             'slssteam': slssteam_hashes(), 'at': int(time.time()),
-                                             'by': installed_version()})
+            write_json_file(steam_pin_path(), new_steam_pin(STEAM_COMPAT_BUILD))
             pruned = prune_steam_client_backups()
         return True, ('installed and verified Steam client %s executables; updates blocked; backup: %s%s. '
                       'Runtime version will be confirmed on the next Steam launch.'
@@ -2469,6 +2559,187 @@ def _apply_steam_update():
     return True, message + note
 
 
+def steam_moon_state_dir():
+    return home() / '.local/state/slsteam-moon'
+
+
+def _find_steam_dir():
+    """First Steam root that has a package/ dir, symlinks resolved."""
+    candidates = [steam_home(), home() / '.local/share/Steam', home() / '.steam/steam',
+                  home() / '.steam/root',
+                  home() / '.var/app/com.valvesoftware.Steam/.local/share/Steam']
+    for candidate in candidates:
+        if (candidate / 'package').is_dir():
+            return candidate.resolve()
+    return None
+
+
+def _steam_package_set_readonly(package, readonly):
+    mode = package.stat().st_mode
+    package.chmod(mode & ~0o222 if readonly else mode | stat.S_IWUSR)
+
+
+def _rollback_steam_client(sdir, say):
+    """Kill Steam, wipe the steamrt64 client packages and fetch the ubuntu12 client.
+
+    Returns (ok, message). Never touches the cfg/pin; the caller locks only
+    after this succeeded. The bootstrapper download is ~500 MB.
+    """
+    package = sdir / 'package'
+    binary = sdir / 'ubuntu12_32' / 'steam'
+    if not binary.is_file():
+        binary = sdir / 'steam.sh'
+    if not binary.is_file():
+        return False, 'no Steam launcher found under %s' % sdir
+    uid = str(os.getuid())
+    say('stopping Steam')
+    for name in ('steam', 'steamwebhelper'):
+        subprocess.run(['pkill', '-9', '-u', uid, '-x', name], capture_output=True)
+    time.sleep(2)
+    _steam_package_set_readonly(package, False)
+    for stale in package.glob('steam_client_steamrt64*'):
+        stale.unlink()
+    for stale in steam_moon_state_dir().glob('safe_mode*'):
+        stale.unlink()
+    say('downloading the ubuntu12 client (about 500 MB); this can take a while')
+    # The Luna block would inhibit this very download; it is re-applied by the caller.
+    try:
+        subprocess.run([str(binary), '-forcemanifestsuffix', 'ubuntu12', '-exitsteam'],
+                       timeout=3600)  # a non-zero exit is tolerated, as in the community script
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, 'Steam bootstrapper failed: %s' % error
+    return True, 'ubuntu12 client downloaded'
+
+
+def _lock_steam_client(force, confirm):
+    """`luna steam lock`: roll back to the ubuntu12 client and hard-lock updates."""
+    sdir = _find_steam_dir()
+    if sdir is None:
+        return 1, 'no Steam installation with a package/ directory found'
+    if sdir != steam_home().resolve():
+        return 1, ('Steam found at %s, but Luna manages %s; refusing to lock a layout it '
+                   'cannot pin' % (sdir, steam_home()))
+    if read_steam_pending():
+        return EXIT_REFUSED, 'a Steam task is queued; run: luna steam cancel first'
+    running = [name for name in ('steam', 'steamwebhelper') if process_running(name)]
+    if running and not force and not confirm():
+        return EXIT_REFUSED, ('REFUSING: Steam is running and lock must kill it (kill -9, unsaved '
+                              'state is lost). Close it, or re-run with --force.')
+
+    def say(text):
+        print('lock    : %s' % text, flush=True)
+
+    # The bootstrapper must be free to download: lift Luna's block for the run.
+    had_block = steam_updates_blocked() or steam_hard_lock_active()
+    remove_steam_cfg_block(steam_cfg_paths())
+    try:
+        ok, message = _rollback_steam_client(sdir, say)
+    except OSError as error:
+        ok, message = False, 'rollback failed: %s' % error
+    if not ok:
+        if had_block:
+            ensure_steam_cfg_block()
+        return 1, message
+    say(message)
+    build = steam_client_build()
+    if not build:
+        if had_block:
+            ensure_steam_cfg_block()
+        return 1, ('rolled back, but the client build cannot be determined; launch Steam once '
+                   'and re-run: luna steam lock')
+    tools = luna_tools_dir()
+    tools.mkdir(parents=True, exist_ok=True)
+    # Pin first (carrying the lock marker) so every block/cfg helper agrees.
+    pin = new_steam_pin(build)
+    pin['hardLock'] = {'rollback': 'ubuntu12', 'at': int(time.time()), 'by': installed_version()}
+    write_json_file(steam_pin_path(), pin)
+    # The old receipt/cache describe the previous build and would read as drift.
+    shutil.rmtree(steam_cache_dir(), ignore_errors=True)
+    try:
+        write_json_file(tools / 'steam-client-installed.json', {
+            'build': build, 'at': int(time.time()), 'backup': '',
+            'core': {name: sha256(sdir / _steam_payload_path(name)) for name in STEAM_CORE_FILES}})
+    except (OSError, ValueError):
+        try:
+            (tools / 'steam-client-installed.json').unlink()
+        except OSError:
+            pass
+    try:
+        _cache_client_packages(build)
+    except (OSError, ValueError) as error:
+        say('warning: could not cache build %s (%s); run: luna steam cache' % (build, error))
+    ensure_steam_cfg_block()
+    _steam_package_set_readonly(sdir / 'package', True)
+    if steam_moon_state_dir().is_dir():
+        (steam_moon_state_dir() / 'boot_fail_count').write_text('0\n')
+    return 0, ('Steam rolled back to the ubuntu12 client (build %s), pinned and hard-locked: '
+               'Steam.cfg + steam.cfg written, package/ read-only. Undo: luna steam unlock' % build)
+
+
+def _notify(title, text):
+    """Best-effort desktop notification; never fails the job."""
+    try:
+        subprocess.run(['notify-send', '-a', 'Luna', title, text], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _launch_steam_detached():
+    try:
+        subprocess.Popen(['setsid', 'steam'], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return True
+    except OSError as error:
+        print('could not launch Steam: %s' % error, file=sys.stderr)
+        return False
+
+
+def _close_steam_gracefully(timeout=90):
+    """`steam -shutdown`, then wait for the client to exit. True when it is gone."""
+    if not process_running('steam'):
+        return True
+    try:
+        subprocess.run(['steam', '-shutdown'], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for _ in range(timeout):
+        if not process_running('steam'):
+            return True
+        time.sleep(1)
+    return False
+
+
+def _unlock_steam_client(now):
+    """`luna steam unlock`: undo the hard lock and the pin."""
+    package = steam_home() / 'package'
+    if package.is_dir():
+        _steam_package_set_readonly(package, False)
+        print('package/ is writable again')
+    if remove_steam_cfg_block(steam_cfg_paths()):
+        print('update block removed: Steam may update itself again')
+    elif any(path.exists() for path in steam_cfg_paths()):
+        print('note: Steam.cfg/steam.cfg left in place (they hold more than the Luna block)')
+    try:
+        steam_pin_path().unlink()
+        print('pin and hard-lock marker removed')
+    except OSError:
+        print('no pin to remove')
+    if now:
+        if process_running('steam'):
+            print('Steam is already running; restart it to let it self-update')
+        else:
+            try:
+                subprocess.Popen(['setsid', 'steam'], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                print('Steam launched; it will self-update to the latest client')
+            except OSError as error:
+                print('could not launch Steam: %s' % error, file=sys.stderr)
+                return 1
+    return EXIT_OK
+
+
 def refresh_pending_path():
     return luna_tools_dir() / 'pending-refresh.json'
 
@@ -2498,8 +2769,7 @@ def _refresh_steam_side():
     if not build:
         return False, ('Steam updated, but the new build cannot be determined; '
                        'launch Steam once, then run: luna steam pin [--build N]'), ''
-    pin = {'clientBuild': str(build), 'slssteam': slssteam_hashes(),
-           'at': int(time.time()), 'by': installed_version()}
+    pin = new_steam_pin(build)
     try:
         luna_tools_dir().mkdir(parents=True, exist_ok=True)
         write_json_file(steam_pin_path(), pin)
@@ -2562,6 +2832,10 @@ def cmd_steam(options):
                                  if state['pinned'] and state['cacheReady']
                                  else 'unknown (no cache)'))
         print('updates: %s' % ('blocked (steam.cfg)' if state['updatesBlocked'] else 'NOT blocked'))
+        if state['hardLock']:
+            print('lock   : HARD (ubuntu12 rollback, package/ %s)'
+                  % ('read-only' if state['packageReadOnly']
+                     else 'WRITABLE - re-run: luna steam lock'))
         if state['pacmanManaged']:
             print('pacman : Steam is system-managed%s'
                   % (', ignored on updates' if state['pacmanIgnored']
@@ -2583,14 +2857,46 @@ def cmd_steam(options):
         if not build:
             print('cannot determine the client build; pass --build N explicitly', file=sys.stderr)
             return 2
-        pin = {'clientBuild': str(build), 'slssteam': slssteam_hashes(),
-               'at': int(time.time()), 'by': installed_version()}
+        pin = new_steam_pin(build)
         luna_tools_dir().mkdir(parents=True, exist_ok=True)
         write_json_file(steam_pin_path(), pin)
         ensure_steam_cfg_block()
         print('pinned Steam client %s with current SLSsteam hashes; updates blocked via steam.cfg' % build)
         return EXIT_OK
+    if action == 'lock':
+        def confirm():
+            if not sys.stdin.isatty():
+                return False
+            answer = input('Steam is running and will be killed (kill -9). Continue? [y/N] ')
+            return answer.strip().lower() in ('y', 'yes')
+        code, message = _lock_steam_client(getattr(options, 'force', False), confirm)
+        print(message, file=sys.stdout if code == 0 else sys.stderr)
+        if getattr(options, 'relaunch', False):
+            # Detached-job mode (in-Steam UI): report, then bring Steam back even on failure.
+            _notify('Luna: Steam updates blocked' if code == 0 else 'Luna: could not block Steam updates',
+                    message[:200])
+            _launch_steam_detached()
+        return code
+    if action == 'unlock':
+        if getattr(options, 'relaunch', False):
+            # Close Steam first so the next start runs the bootstrapper and self-updates.
+            if not _close_steam_gracefully():
+                print('Steam did not close in time; nothing was changed', file=sys.stderr)
+                _notify('Luna: Steam update not started', 'Steam did not close; try again.')
+                return 1
+            code = _unlock_steam_client(False)
+            if code == EXIT_OK:
+                _notify('Luna: Steam unblocked', 'Steam is restarting and will update to the latest client.')
+                _launch_steam_detached()
+            else:
+                _notify('Luna: could not unblock Steam', 'See the Luna steam job log.')
+            return code
+        return _unlock_steam_client(getattr(options, 'now', False))
     if action == 'unpin':
+        if steam_hard_lock_active():
+            print('the hard lock is active (package/ read-only); run: luna steam unlock',
+                  file=sys.stderr)
+            return 1
         try:
             steam_pin_path().unlink()
             print('pin removed')
@@ -2631,6 +2937,10 @@ def cmd_steam(options):
         # The blessed path for a Steam client update: queue it here (menu or
         # shell); the timer applies it while Steam is closed, then re-blocks.
         # --now applies it right away instead (Steam must already be closed).
+        if steam_hard_lock_active():
+            print('the hard lock is active; run: luna steam unlock --now to let Steam update',
+                  file=sys.stderr)
+            return 1
         if getattr(options, 'now', False):
             if process_running('steam') or process_running('steamwebhelper') or process_running('lumen'):
                 print('REFUSING: Steam or the Lumen sidecar is running. '
@@ -2677,7 +2987,7 @@ def cmd_steam(options):
         print(message)
         print('launch Steam and verify, then run: luna steam pin')
         return EXIT_OK
-    print('unknown steam action: %s (status|pin|unpin|cache|recover|update|cancel)' % action, file=sys.stderr)
+    print('unknown steam action: %s (status|pin|unpin|cache|recover|update|cancel|lock|unlock)' % action, file=sys.stderr)
     return 2
 
 
@@ -3160,11 +3470,17 @@ def build_parser():
         if name == 'steam':
             child.add_argument('steam_action', nargs='?', default='status',
                                choices=['status', 'pin', 'unpin', 'cache', 'recover',
-                                        'update', 'cancel'],
+                                        'update', 'cancel', 'lock', 'unlock'],
                                help='what to do (default: status)')
+            child.add_argument('--force', action='store_true',
+                               help='with lock: kill a running Steam without asking')
+            child.add_argument('--relaunch', action='store_true',
+                               help='with lock/unlock: notify the result and reopen Steam detached '
+                                    '(unlock closes a running Steam first); for the in-Steam UI')
             child.add_argument('--build', help='client build for pin/cache/recover (default: detected/pinned)')
             child.add_argument('--now', action='store_true',
-                               help='with update: apply right away instead of queueing (Steam must be closed)')
+                               help='with update: apply right away instead of queueing (Steam must be closed); '
+                                    'with unlock: launch Steam so it self-updates')
         if name == 'check':
             child.add_argument('--force', action='store_true', help='ignore the 6h cache')
         if name == 'autoupdate':

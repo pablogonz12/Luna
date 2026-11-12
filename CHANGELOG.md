@@ -5,6 +5,13 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **`luna steam lock` / `luna steam unlock`.** `lock` rolls Steam back to the
+  old ubuntu12 client (kills Steam: needs `--force` or a y/N answer), pins the
+  result, writes the hard update block to both `Steam.cfg` and `steam.cfg`,
+  makes `package/` read-only and resets Moon's `boot_fail_count`. Recover,
+  cache and install keep working under the lock (they unlock `package/` only
+  while writing); `update` and `unpin` refuse until `unlock`. `unlock [--now]`
+  undoes it all and can launch Steam so it self-updates. `status` shows the lock.
 - **Steam's UI no longer stalls on Luna's network calls.** Lumen runs every
   add-on RPC on its single injector thread. HowLongToBeat lookups now use
   Lumen's non-blocking HTTP (the panel polls until the answer is in, with the

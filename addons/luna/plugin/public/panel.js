@@ -498,6 +498,8 @@
     // In-page confirmation state: native confirm()/prompt() freeze the Steam
     // shell, so every destructive action is armed with a second click instead.
     let confirmAction = null;
+    let steamLockArmed = null;
+    let steamJobNotice = null;
     let cancelArmed = false;
     let cleanupArmed = false;
     let query = '';
@@ -2867,6 +2869,23 @@
         dataFiles: 'Data files',
         updates: 'Updates',
         steamClient: 'Steam client (update only from here)',
+        steamUpdates: 'Steam updates',
+        steamUpdNormal: 'Normal: Steam updates itself',
+        steamUpdSoft: 'Blocked by a pin (soft): this build is pinned and the bootstrapper is told not to update',
+        steamUpdHard: 'Hard-locked on the ubuntu12 rollback: updates blocked, package files read-only',
+        steamUpdBuild: 'Pinned build',
+        steamUpdJob: 'A lock/unlock job is running in the background; Steam will close and reopen by itself.',
+        blockUpdates: 'Block updates (roll back)',
+        unblockUpdates: 'Unblock & update Steam',
+        blockConfirm: 'This rolls Steam back to the ubuntu12 client and locks it there. Steam will close now '
+          + '(anything unsaved is lost), about 500 MB is downloaded (it can take several minutes), and Steam '
+          + 'reopens by itself when it is done. You will get a desktop notification with the result.',
+        unblockConfirm: 'This removes the lock and the pin. Steam will close and restart, and it updates itself '
+          + 'to the latest client on that start.',
+        confirmBlock: 'Yes, close Steam and block updates',
+        confirmUnblock: 'Yes, restart Steam and update',
+        cancel: 'Cancel',
+        steamJobStarted: 'Started. Steam will close and reopen by itself; progress is in the Luna steam job log.',
         issueUpdateAvailable: (latest, installed) => 'Luna update available: ' + latest + ' (you have '
           + installed + '). Press Install update below, then restart Steam.',
         issueUpdateQueued: tag => 'Luna update queued (' + tag + '): it lands the next time Steam is closed.',
@@ -2939,6 +2958,23 @@
         dataFiles: 'Archivos de datos',
         updates: 'Actualizaciones',
         steamClient: 'Cliente Steam (actualizar solo desde aquí)',
+        steamUpdates: 'Actualizaciones de Steam',
+        steamUpdNormal: 'Normal: Steam se actualiza solo',
+        steamUpdSoft: 'Bloqueado por un pin (suave): esta versión está fijada y el bootstrapper no actualiza',
+        steamUpdHard: 'Bloqueo duro en el rollback ubuntu12: actualizaciones bloqueadas, archivos de package de solo lectura',
+        steamUpdBuild: 'Versión fijada',
+        steamUpdJob: 'Hay una tarea de bloqueo/desbloqueo en segundo plano; Steam se cerrará y reabrirá solo.',
+        blockUpdates: 'Bloquear actualizaciones (rollback)',
+        unblockUpdates: 'Desbloquear y actualizar Steam',
+        blockConfirm: 'Esto devuelve Steam al cliente ubuntu12 y lo bloquea ahí. Steam se cerrará ahora '
+          + '(se pierde lo no guardado), se descargan unos 500 MB (puede tardar varios minutos) y Steam '
+          + 'se reabre solo al terminar. Recibirás una notificación con el resultado.',
+        unblockConfirm: 'Esto quita el bloqueo y el pin. Steam se cerrará y reiniciará, y en ese inicio '
+          + 'se actualizará al último cliente.',
+        confirmBlock: 'Sí, cerrar Steam y bloquear',
+        confirmUnblock: 'Sí, reiniciar Steam y actualizar',
+        cancel: 'Cancelar',
+        steamJobStarted: 'Iniciado. Steam se cerrará y reabrirá solo; el progreso está en el log de la tarea de Luna.',
         issueUpdateAvailable: (latest, installed) => 'Actualización de Luna disponible: ' + latest + ' (tienes '
           + installed + '). Pulsa Instalar actualización abajo y reinicia Steam.',
         issueUpdateQueued: tag => 'Actualización de Luna en cola (' + tag + '): se aplicará con Steam cerrado.',
@@ -3490,7 +3526,81 @@
       steamosButton.onclick = () => createSteamosShortcuts();
       steamosRow.appendChild(steamosButton);
       body.appendChild(steamosRow);
+
+      // Steam updates: block (rollback + hard lock) or unblock. Both kill or
+      // restart Steam, so the backend runs them as a detached job and the
+      // click is armed in the page first (a native confirm() freezes the shell).
+      const sc = lunaSteam || {};
+      const updHeader = document.createElement('p');
+      updHeader.className = 'sls-luna-note';
+      updHeader.innerHTML = '<strong>' + settingsT.steamUpdates + '</strong>';
+      body.appendChild(updHeader);
+      const updState = document.createElement('p');
+      updState.className = 'sls-luna-note';
+      updState.textContent = (sc.hardLock ? settingsT.steamUpdHard
+        : (sc.pinned && sc.updatesBlocked) ? settingsT.steamUpdSoft : settingsT.steamUpdNormal)
+        + (sc.pinned ? ' \u00b7 ' + settingsT.steamUpdBuild + ' ' + sc.pinned : '');
+      body.appendChild(updState);
+      if (sc.job) {
+        const busy = document.createElement('p');
+        busy.className = 'sls-luna-note';
+        busy.textContent = settingsT.steamUpdJob;
+        body.appendChild(busy);
+      }
+      if (steamJobNotice) {
+        const notice = document.createElement('p');
+        notice.className = 'sls-luna-note';
+        notice.textContent = steamJobNotice;
+        body.appendChild(notice);
+      }
+      if (steamLockArmed) {
+        const box = document.createElement('div');
+        box.className = 'sls-luna-confirm';
+        const detail = document.createElement('div');
+        detail.className = 'sub';
+        detail.textContent = steamLockArmed === 'lock' ? settingsT.blockConfirm : settingsT.unblockConfirm;
+        const confirmRow = document.createElement('div');
+        confirmRow.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
+        const yes = document.createElement('button');
+        yes.className = 'sls-luna-btn';
+        yes.textContent = steamLockArmed === 'lock' ? settingsT.confirmBlock : settingsT.confirmUnblock;
+        yes.onclick = () => runSteamLockJob(steamLockArmed);
+        const no = document.createElement('button');
+        no.className = 'sls-luna-btn secondary';
+        no.textContent = settingsT.cancel;
+        no.onclick = () => { steamLockArmed = null; repaintIfOpen(); };
+        confirmRow.append(yes, no);
+        box.append(detail, confirmRow);
+        body.appendChild(box);
+      }
+      const updRow = document.createElement('div');
+      updRow.className = 'sls-luna-row';
+      const blockButton = document.createElement('button');
+      blockButton.className = 'sls-luna-btn';
+      blockButton.textContent = settingsT.blockUpdates;
+      blockButton.disabled = Boolean(sc.job) || Boolean(sc.hardLock);
+      blockButton.onclick = () => { steamLockArmed = 'lock'; steamJobNotice = null; repaintIfOpen(); };
+      const unblockButton = document.createElement('button');
+      unblockButton.className = 'sls-luna-btn secondary';
+      unblockButton.textContent = settingsT.unblockUpdates;
+      unblockButton.disabled = Boolean(sc.job) || !(sc.hardLock || sc.pinned || sc.updatesBlocked);
+      unblockButton.onclick = () => { steamLockArmed = 'unlock'; steamJobNotice = null; repaintIfOpen(); };
+      updRow.append(blockButton, unblockButton);
+      body.appendChild(updRow);
       return body;
+    }
+
+    async function runSteamLockJob(action) {
+      const settingsT = HEALTH_TEXT[((lunaInfo && lunaInfo.prefs) || {}).lang] || HEALTH_TEXT.en;
+      steamLockArmed = null;
+      try {
+        const out = await rpc(w, 'SlsLunaSteam', { raw: JSON.stringify({ action }) });
+        if (out && out.steam) lunaSteam = out.steam;
+        steamJobNotice = settingsT.steamJobStarted;
+      } catch (error) {
+        steamJobNotice = 'Steam action failed: ' + String(error && error.message ? error.message : error);
+      }
+      repaintIfOpen();
     }
 
     // SteamOS Mode shortcuts, one per detected screen. Creation only writes

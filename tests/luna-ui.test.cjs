@@ -285,6 +285,9 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
         if(action==='queue-update'||action==='queue-cache'){
           sgdbSteamState.pending=action==='queue-update'?'update':'cache';
           return JSON.stringify({success:true,queued:sgdbSteamState.pending,steam:sgdbSteamState});}
+        if(action==='lock'||action==='unlock'){
+          sgdbSteamState.job=action;
+          return JSON.stringify({success:true,started:action,steam:sgdbSteamState});}
         if(action==='cancel'){sgdbSteamState.pending='';return JSON.stringify({success:true,steam:sgdbSteamState});}
         return JSON.stringify({success:true,steam:sgdbSteamState});
       }
@@ -1183,6 +1186,35 @@ test('Settings offers SteamOS Mode shortcut creation',async()=>{
     &&entry.payload.action==='create'),'creation must go through its own RPC');
   assert.match(textOf(document.getElementById('sls-luna-overlay')),/SteamOS Mode shortcuts: 3/,
     'the creation result must be shown');
+});
+
+test('Settings arms and starts the Steam update lock/unlock jobs',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='Settings').onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  let overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/Steam updates/);
+  assert.match(textOf(overlay),/Normal: Steam updates itself/);
+  const block=findNode(overlay,node=>node.textContent==='Block updates (roll back)'
+    &&typeof node.onclick==='function');
+  assert.ok(block,'the block button must exist');
+  block.onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.ok(!calls.some(entry=>entry.fn==='SlsLunaSteam'&&entry.payload.action==='lock'),
+    'the first click only arms the confirmation');
+  overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/500 MB/,'the confirmation must state the consequences');
+  findNode(overlay,node=>node.textContent==='Yes, close Steam and block updates').onclick();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.ok(calls.some(entry=>entry.fn==='SlsLunaSteam'&&entry.payload.action==='lock'),
+    'confirming must start the lock job');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/background/);
 });
 
 test('the Health page renders Spanish when the language preference says so',async()=>{
