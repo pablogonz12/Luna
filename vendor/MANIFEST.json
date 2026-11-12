@@ -16,7 +16,7 @@
         }
       },
       "plugin_version": "0.3.1",
-      "source_commit": "a9c3588e81a3249917bc82c855f94894bf5338da",
+      "source_commit": "12e0c2acd1d798af1690d30bcfd00698c1ab7874",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "graphics": {
@@ -31,7 +31,7 @@
         }
       },
       "plugin_version": "0.2.0",
-      "source_commit": "a9c3588e81a3249917bc82c855f94894bf5338da",
+      "source_commit": "12e0c2acd1d798af1690d30bcfd00698c1ab7874",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "luna": {
@@ -54,7 +54,7 @@
         }
       },
       "plugin_version": "0.14.18",
-      "source_commit": "07adf59c866552e5dd6c35cb2dc06ab218487a28",
+      "source_commit": "12e0c2acd1d798af1690d30bcfd00698c1ab7874",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -100,9 +100,7 @@
         }
       },
       "plugin_version": "0.3.2-dev.2",
-      "source_base_commit": "0490b34c9430436764602698237b6f8492971f0b",
-      "source_branch": "fix/presence-session-cleanup",
-      "source_commit": "uncommitted-worktree",
+      "source_commit": "5c382a2c898231bc1db74544cd53f3ea41c8ef08",
       "source_repo": "https://github.com/pgm1207/slsteam-presence"
     },
     "sgdb": {
@@ -117,34 +115,33 @@
         }
       },
       "plugin_version": "0.2.3",
-      "source_commit": "a9c3588e81a3249917bc82c855f94894bf5338da",
+      "source_commit": "12e0c2acd1d798af1690d30bcfd00698c1ab7874",
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-10-31T21:04:00+0100",
+  "generated": "2026-11-12T12:14:35+0100",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "fa3e18871c8a4ca4f0da432f5de0242c741e3299e3d35ba8af143b25b088b101",
-      "source_commit": "unreleased",
+      "source_commit": "5b3f0709d007977ae5028469ed2f7e291f9e6adc",
       "source_path": "bridge/bridge.lua",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     },
     "scripts/lumen-hook.py": {
       "sha256": "fed8ed22b9542e1cf52d05bd712922b09b617bcedf41f7bfa897114a48285c8a",
-      "source_base_commit": "cb1facd0ff0c65555065bbec957d3a3bfb800f7d",
-      "source_commit": "uncommitted-worktree",
+      "source_commit": "12e0c2acd1d798af1690d30bcfd00698c1ab7874",
       "source_path": "scripts/lumen-hook.py",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "scripts/patch-lumen.py": {
       "sha256": "b9a7d060b818f1ed0ed9c81afd5b51c85ba2144cac89f96888771663794a5335",
-      "source_commit": "unreleased",
+      "source_commit": "5b3f0709d007977ae5028469ed2f7e291f9e6adc",
       "source_path": "scripts/patch-lumen.py",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     },
     "scripts/steam-machine.py": {
       "sha256": "2b4fe6e43b52576101bea421a1cf4565f3daa5e63a97863e27430362a3324736",
-      "source_commit": "7bf7a898cd938a525f6141a65bd3a36ba6d8406a",
+      "source_commit": "12e0c2acd1d798af1690d30bcfd00698c1ab7874",
       "source_path": "scripts/steam-machine.py",
       "source_repo": "https://github.com/pgm1207/Luna"
     }
