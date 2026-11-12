@@ -12,7 +12,7 @@ def build_parser():
                           ('backup', cmd_backup), ('restore', cmd_restore),
                           ('steam', cmd_steam),
                           ('refresh', cmd_refresh),
-                          ('probe', cmd_probe), ('fleet', cmd_fleet),
+                          ('probe', cmd_probe), ('fleet', cmd_fleet), ('games', cmd_games),
                           ('launchers', cmd_launchers),
                           ('doctor', cmd_doctor),
                            ('timer', cmd_timer), ('hook', cmd_hook)):
@@ -89,6 +89,14 @@ def build_parser():
                                help='with install: close Steam gracefully first and relaunch it afterwards')
             child.add_argument('--force', action='store_true',
                                help='with install: overwrite drifted payloads (and old Luna builds)')
+        if name == 'games':
+            child.add_argument('games_action', choices=['list', 'diff', 'install'], help='games action')
+            child.add_argument('games_args', nargs='*', metavar='HOST/APPID',
+                               help='diff [HOST]; install HOST APPID...')
+            child.add_argument('--json', action='store_true', help='with list/diff: machine-readable output')
+            child.add_argument('--dry-run', action='store_true', help='with install: report only')
+            child.add_argument('--start-steam', action='store_true',
+                               help='with install: start Steam on the target if it is not running')
         if name == 'check':
             child.add_argument('--force', action='store_true', help='ignore the 6h cache')
         if name == 'autoupdate':

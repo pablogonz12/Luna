@@ -111,6 +111,25 @@ unless `--restart-steam` (graceful `steam -shutdown`, install, relaunch), and
 refuses drifted payloads (or an older Luna that cannot report them) unless
 `--force`. The config lives in `~/.config/luna/fleet.json`.
 
+### Games across machines
+
+```
+luna games list [--json]                 installed games here: appid, name, size, library,
+                                         Proton prefix, unlocked via stplug-in lua
+luna games diff [laptop] [--json]        installed where; for games missing on the target:
+                                         does it have the stplug-in lua, does it fit
+luna games install laptop 1245620 ...    ask the target's Steam to install (steam://install/ID)
+                [--dry-run] [--start-steam]
+```
+
+Independent of Proton and save sync. `diff` reads the target through `luna probe --json`
+(the `games` section) and falls back to scanning its `appmanifest_*.acf` files over ssh when
+the remote Luna is older. A game unlocked through SLSsteam/Lumen can only be installed on a
+machine that has `config/stplug-in/<appid>.lua` (normally Syncthing-synced), so `install`
+refuses it otherwise; it also checks free space in the target's default library and refuses
+when Steam is not running there unless `--start-steam`. Game files are never copied between
+machines. A future opt-in `--copy` (rsync of the install directory) is a possible addition.
+
 ## Steam client versions
 
 A Steam client update can move the interfaces used by the native integration.
