@@ -108,6 +108,7 @@ def probe_data():
                                                  'hardLock', 'cachedBuild', 'cacheReady')},
         'steamRunning': process_running('steam') or process_running('steamwebhelper'),
         'lumenRunning': process_running('lumen'),
+        'proton': [t['name'] for t in proton_installed()],
     }
 
 
