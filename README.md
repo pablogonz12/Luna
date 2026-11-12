@@ -107,6 +107,14 @@ your chosen Steam client instead, use `bash install.sh --keep-steam-client` or
 `python3 scripts/luna.py install --keep-steam-client`. Ordinary Luna bundle
 updates preserve the client choice; they do not silently undo a Health update.
 
+`install --only NAME` leaves the client alone when the pinned build is intact;
+add `--steam-client` to force it, or `--no-steam-client` to skip it entirely.
+Downloads retry on HTTP 429/5xx (honouring `Retry-After`), print the size up
+front (`--dry-run` shows it too) and show progress. If Valve rate-limits you,
+copy the `package` files from another machine's
+`~/.local/share/Lumen/sls-luna/steam-client-cache/package` and pass
+`--client-cache DIR` (or set `LUNA_STEAM_CACHE=DIR`); files are sha256-verified.
+
 ```bash
 python3 scripts/luna.py steam status    # running build, pin, cache, drift
 python3 scripts/luna.py steam pin       # pin the currently working build
