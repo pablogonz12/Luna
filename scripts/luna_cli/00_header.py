@@ -28,6 +28,11 @@ Commands:
                                         exit 0 ok / 1 warnings / 2 errors; --fix
                                         applies only safe, reversible fixes
                                         (a matching foreign lock is adopted: steam lock --adopt)
+    luna saves scan [--json] [--all]    list installed games whose saves have no Steam Cloud
+    luna saves link|unlink APPID|PATH|--all [--prefer local|store] [--dry-run]
+                                        share such saves via the Syncthing-synced store
+                                        ~/.local/share/game-saves (symlink in place; nothing deleted)
+    luna saves status [--json]          link health, broken links, Syncthing conflicts
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
     luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
