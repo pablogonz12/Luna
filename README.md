@@ -275,6 +275,17 @@ The attention list, headers
 and action buttons switch to Spanish when Settings → Language is Español;
 paths and bug-report dumps stay in English in both languages.
 
+## Game saves without Steam Cloud
+
+`luna saves scan` lists installed games whose saves (Proton prefix `AppData`/`Documents`/`Saved Games`,
+`~/.config/unity3d`) are not covered by Steam Cloud. `luna saves link <appid|path>` moves the save
+directory into `~/.local/share/game-saves/<appid>/` (which Syncthing syncs) and leaves a symlink at the
+original path. On the other machine run `luna saves link --all` (launch each game once first so its
+Proton prefix exists). If both sides already have saves Luna refuses; choose with `--prefer local|store`
+- the losing side is kept as a `.luna-backup-<timestamp>` copy. Nothing is ever deleted.
+`luna saves unlink <appid|path>` copies the data back; `luna saves status` shows link health and sync
+conflicts (also surfaced by `luna doctor`). Close the game first; `--dry-run` previews.
+
 ## Doctor
 
 `luna doctor` finds drift and problems Luna did not cause, one line per

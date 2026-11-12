@@ -15,6 +15,7 @@ def build_parser():
                           ('probe', cmd_probe), ('fleet', cmd_fleet), ('games', cmd_games),
                           ('launchers', cmd_launchers),
                           ('doctor', cmd_doctor),
+                          ('saves', cmd_saves),
                            ('timer', cmd_timer), ('hook', cmd_hook)):
         child = sub.add_parser(name)
         child.set_defaults(handler=handler)
@@ -97,6 +98,16 @@ def build_parser():
             child.add_argument('--dry-run', action='store_true', help='with install: report only')
             child.add_argument('--start-steam', action='store_true',
                                help='with install: start Steam on the target if it is not running')
+
+        if name == 'saves':
+            child.add_argument('saves_action', choices=['scan', 'status', 'link', 'unlink'],
+                               help='scan candidates / show links / link / unlink')
+            child.add_argument('target', nargs='?', help='appid, store key or save directory path')
+            child.add_argument('--all', action='store_true', help='with link/unlink: every game in saves.json')
+            child.add_argument('--prefer', choices=['local', 'store'],
+                               help='with link: which side wins when both have saves (other side is backed up)')
+            child.add_argument('--json', action='store_true', help='with scan/status: machine-readable output')
+            child.add_argument('--dry-run', action='store_true', help='with link/unlink: report only')
         if name == 'check':
             child.add_argument('--force', action='store_true', help='ignore the 6h cache')
         if name == 'autoupdate':
