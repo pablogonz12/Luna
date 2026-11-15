@@ -392,7 +392,10 @@ def _steam_force_update():
     # stay closed. Never kill processes; report if it is still up.
     note = ('; block re-applied' if had_block
             else '; updates currently allowed - pin the new build to block them')
+    relaunched = ''
     if process_running('steam') or process_running('steamwebhelper'):
+        windows = gui_describe_blockers()  # best effort; '' when the GUI layer is unavailable
+        relaunched = '; the updater relaunched Steam (%s)' % windows if windows else ''
         try:
             subprocess.run([str(steam_sh_path()), '-shutdown'],
                            capture_output=True, text=True, timeout=30)
@@ -404,9 +407,14 @@ def _steam_force_update():
                 break
             time.sleep(2)
         if process_running('steam') or process_running('steamwebhelper'):
+            still = gui_describe_blockers()
             return False, ('Steam updated but is still running after a shutdown request; '
-                           'close it completely (Steam -> Exit) before pinning or installing' + note)
-    return True, 'Steam client updated by Valve' + note
+                           'close it completely (Steam -> Exit) before pinning or installing' + note
+                           + (' [%s]' % still if still else ''))
+        sidecar = gui_lumen_note()
+        if sidecar:
+            note += '; ' + sidecar
+    return True, 'Steam client updated by Valve' + relaunched + note
 
 
 def prune_steam_client_backups(keep=5):
@@ -1184,6 +1192,9 @@ def _close_steam_gracefully(timeout=90):
         pass
     for _ in range(timeout):
         if not process_running('steam'):
+            sidecar = gui_lumen_note()
+            if sidecar:
+                print('note: %s' % sidecar, file=sys.stderr)
             return True
         time.sleep(1)
     return False

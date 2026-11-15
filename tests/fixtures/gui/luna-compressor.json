@@ -1,0 +1,1829 @@
+{
+ "command": "snapshot",
+ "data": {
+  "app": "steamwebhelper",
+  "complete": true,
+  "tree": {
+   "available_actions": [
+    "RightClick"
+   ],
+   "children": [
+    {
+     "available_actions": [
+      "RightClick"
+     ],
+     "children": [
+      {
+       "available_actions": [
+        "RightClick",
+        "SetFocus"
+       ],
+       "children": [
+        {
+         "available_actions": [
+          "Click",
+          "RightClick"
+         ],
+         "children": [
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "GG9wVQz6PLlhGHlJyZh4E"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e4",
+               "role": "image"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Steam",
+               "ref_id": "@s3ixoy9stzy6vz:e5",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e3",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e2",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "View",
+               "ref_id": "@s3ixoy9stzy6vz:e8",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e7",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e6",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Friends",
+               "ref_id": "@s3ixoy9stzy6vz:e11",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e10",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e9",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Games",
+               "ref_id": "@s3ixoy9stzy6vz:e14",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e13",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e12",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Help",
+               "ref_id": "@s3ixoy9stzy6vz:e17",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e16",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e15",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Lumen",
+               "ref_id": "@s3ixoy9stzy6vz:e20",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "lumen-auto-fix-pill-copy"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e19",
+             "role": "group"
+            }
+           ],
+           "description": "Lumen settings",
+           "name": "Lumen settings",
+           "native_id": {
+            "kind": "ax_dom_identifier",
+            "value": "lumen-moon-btn"
+           },
+           "ref_id": "@s3ixoy9stzy6vz:e18",
+           "role": "button",
+           "subrole": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "description": "SLS Luna - settings for Playtime, Presence and Compressor",
+           "name": "Luna",
+           "native_id": {
+            "kind": "ax_dom_identifier",
+            "value": "sls-luna-btn"
+           },
+           "ref_id": "@s3ixoy9stzy6vz:e21",
+           "role": "button",
+           "states": [
+            "focused"
+           ],
+           "subrole": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_34bQcTHo5QKzuujoEyU1tm"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e23",
+             "role": "image"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_1B_GY6Ybp1MERAoz73-3um"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e24",
+             "role": "image"
+            }
+           ],
+           "dom_classes": [
+            "_2Szzh5sKyGgnLUR870zbDE",
+            "_5wILZhsLODVwGfcJ0hKmJ",
+            "_1oEwirQksXfZ-3RWWslbAR"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e22",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_34bQcTHo5QKzuujoEyU1tm"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e27",
+               "role": "image"
+              }
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e26",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_3mGEzzp18imtSzGPkduedi"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e25",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_3xUpb5DWXPFNcHHIcv-9pe",
+                "avatarStatus",
+                "right"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e30",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_3h-QRJGxnVOIExtHD1R0f2",
+                "avatar"
+               ],
+               "name": "To get missing image descriptions, open the context menu.",
+               "ref_id": "@s3ixoy9stzy6vz:e31",
+               "role": "image",
+               "role_description": "Unlabeled image"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 001",
+                 "ref_id": "@s3ixoy9stzy6vz:e33",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e32",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_3x51wbt5DYyWC8JKwQ51ir"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e34",
+               "role": "image"
+              }
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e29",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e28",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_34bQcTHo5QKzuujoEyU1tm"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e36",
+             "role": "image"
+            }
+           ],
+           "dom_classes": [
+            "_2Szzh5sKyGgnLUR870zbDE",
+            "_3LKQ3S_yqrebeNLF6aeiog"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e35",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "title-area-highlight"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e39",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "dom_classes": [
+                  "SVGIcon_Button",
+                  "SVGIcon_X_Line"
+                 ],
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "Layer_2"
+                 },
+                 "ref_id": "@s3ixoy9stzy6vz:e41",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "title-area-icon",
+                "closeButton",
+                "windowControlButton"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e40",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "dom_classes": [
+                  "SVGIcon_Button",
+                  "SVGIcon_Maximize"
+                 ],
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "base"
+                 },
+                 "ref_id": "@s3ixoy9stzy6vz:e43",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "title-area-icon",
+                "maximizeButton",
+                "windowControlButton"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e42",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "dom_classes": [
+                  "SVGIcon_Button",
+                  "SVGIcon_Minimize"
+                 ],
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "base"
+                 },
+                 "ref_id": "@s3ixoy9stzy6vz:e45",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "title-area-icon",
+                "minimizeButton",
+                "windowControlButton"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e44",
+               "role": "group"
+              }
+             ],
+             "dom_classes": [
+              "TitleBar",
+              "title-area"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e38",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "qP17eBPXkfezFfexZ4hC3"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e37",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "_25lBLzuVeYAUG279up4xP8",
+            "_2cO0HdvLEGAdhosLekWsmo"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e46",
+           "role": "image"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "_25lBLzuVeYAUG279up4xP8",
+            "_2cO0HdvLEGAdhosLekWsmo"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e47",
+           "role": "image"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "STORE",
+             "ref_id": "@s3ixoy9stzy6vz:e49",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e48",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "LIBRARY",
+             "ref_id": "@s3ixoy9stzy6vz:e51",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e50",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "COMMUNITY",
+             "ref_id": "@s3ixoy9stzy6vz:e53",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e52",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 002",
+             "ref_id": "@s3ixoy9stzy6vz:e55",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e54",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "ref_id": "@s3ixoy9stzy6vz:e59",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "_3izqEKa-zuPIrUDSm1bRvf",
+                "_3KaB94Jl4r0hFkthDPJy09"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e58",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "ref_id": "@s3ixoy9stzy6vz:e62",
+                   "role": "image"
+                  }
+                 ],
+                 "dom_classes": [
+                  "_3izqEKa-zuPIrUDSm1bRvf",
+                  "_3GFljPJsX8WvOJcPupy_RG",
+                  "Focusable"
+                 ],
+                 "ref_id": "@s3ixoy9stzy6vz:e61",
+                 "role": "group"
+                },
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "name": "Text 003",
+                   "ref_id": "@s3ixoy9stzy6vz:e64",
+                   "role": "statictext"
+                  }
+                 ],
+                 "dom_classes": [
+                  "MZPxEZcxAGtPDf1NYtouS"
+                 ],
+                 "ref_id": "@s3ixoy9stzy6vz:e63",
+                 "role": "group"
+                }
+               ],
+               "dom_classes": [
+                "_2m_orETo6AghzAnc0sISCt"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e60",
+               "role": "group"
+              }
+             ],
+             "dom_classes": [
+              "UkR3sY319PuaUNuUWks2K"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e57",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_1rDh5rXSFZJOqCa4UpnI4z"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e56",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_3Zx5iV3_8FmQXnVasZx_5z"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e66",
+             "role": "image"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Your Steam Client has been updated",
+               "ref_id": "@s3ixoy9stzy6vz:e68",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2EXJTyc69b45nXI4h3RknI"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e67",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Thanks for participating in the beta. This beta has ended. Restart Steam to return to the current release.",
+               "ref_id": "@s3ixoy9stzy6vz:e70",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "SwtQX-CurM3HPVJ9DPI1V"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e69",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Restart Steam",
+               "ref_id": "@s3ixoy9stzy6vz:e72",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2ohOQgahhMYnIEfAQmv9B8"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e71",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Dismiss",
+               "ref_id": "@s3ixoy9stzy6vz:e74",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2ohOQgahhMYnIEfAQmv9B8"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e73",
+             "role": "group"
+            }
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e65",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Your Steam Client is already up to date - ",
+               "ref_id": "@s3ixoy9stzy6vz:e77",
+               "role": "statictext"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick",
+                "SetFocus"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "View patch notes",
+                 "ref_id": "@s3ixoy9stzy6vz:e79",
+                 "role": "statictext"
+                }
+               ],
+               "dom_classes": [
+                "_3om6pVKUdxdBkypYpSroHM"
+               ],
+               "name": "View patch notes",
+               "ref_id": "@s3ixoy9stzy6vz:e78",
+               "role": "link"
+              }
+             ],
+             "dom_classes": [
+              "_2EXJTyc69b45nXI4h3RknI"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e76",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Close",
+               "ref_id": "@s3ixoy9stzy6vz:e81",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2ohOQgahhMYnIEfAQmv9B8"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e80",
+             "role": "group"
+            }
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e75",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e83",
+             "role": "image"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Add a Game",
+               "ref_id": "@s3ixoy9stzy6vz:e85",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_3OhUxFVlQYr9W5ThxstR8k"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e84",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2foCkpRXhqq0UGVE50BWqj"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e82",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "ref_id": "@s3ixoy9stzy6vz:e88",
+               "role": "image"
+              }
+             ],
+             "dom_classes": [
+              "_1KrJ3sFAqPBN9mfpaNTU5F"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e87",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 004",
+               "ref_id": "@s3ixoy9stzy6vz:e90",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_3wJnTtcTLEp0R7eQj_mK8Y"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e89",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "ip-YZhijAMZcuRoXBGiye"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e86",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Friends & Chat",
+               "ref_id": "@s3ixoy9stzy6vz:e93",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_3OhUxFVlQYr9W5ThxstR8k"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e92",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e94",
+             "role": "image"
+            }
+           ],
+           "dom_classes": [
+            "_1TdaAqMFadi0UTqilrkelR"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e91",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "window_resize_grip"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e95",
+           "role": "group"
+          }
+         ],
+         "dom_classes": [
+          "_1mfQu39T7gxcr0KSHso6_A"
+         ],
+         "native_id": {
+          "kind": "ax_dom_identifier",
+          "value": "popup_target"
+         },
+         "ref_id": "@s3ixoy9stzy6vz:e1",
+         "role": "group"
+        },
+        {
+         "available_actions": [
+          "Click",
+          "RightClick"
+         ],
+         "children": [
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "LUNA",
+             "ref_id": "@s3ixoy9stzy6vz:e98",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-side-title"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e97",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Playtime",
+             "ref_id": "@s3ixoy9stzy6vz:e100",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e99",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Presence",
+             "ref_id": "@s3ixoy9stzy6vz:e102",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e101",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Compressor",
+             "ref_id": "@s3ixoy9stzy6vz:e104",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab",
+            "active"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e103",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "HowLongToBeat",
+             "ref_id": "@s3ixoy9stzy6vz:e106",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e105",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "SteamGridDB",
+             "ref_id": "@s3ixoy9stzy6vz:e108",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e107",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Graphics",
+             "ref_id": "@s3ixoy9stzy6vz:e110",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e109",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Health",
+             "ref_id": "@s3ixoy9stzy6vz:e112",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e111",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Settings",
+             "ref_id": "@s3ixoy9stzy6vz:e114",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e113",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "About",
+             "ref_id": "@s3ixoy9stzy6vz:e116",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e115",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "Account 00000",
+           "ref_id": "@s3ixoy9stzy6vz:e117",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "Text 005",
+           "ref_id": "@s3ixoy9stzy6vz:e118",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Compressor",
+             "ref_id": "@s3ixoy9stzy6vz:e120",
+             "role": "statictext"
+            }
+           ],
+           "name": "Compressor",
+           "ref_id": "@s3ixoy9stzy6vz:e119",
+           "role": "heading"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-btn",
+            "secondary"
+           ],
+           "name": "Refresh",
+           "ref_id": "@s3ixoy9stzy6vz:e121",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-x"
+           ],
+           "name": "\u2715",
+           "ref_id": "@s3ixoy9stzy6vz:e122",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-subtab",
+            "active"
+           ],
+           "name": "Status",
+           "ref_id": "@s3ixoy9stzy6vz:e123",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-subtab"
+           ],
+           "name": "Stats",
+           "ref_id": "@s3ixoy9stzy6vz:e124",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-subtab"
+           ],
+           "name": "Settings",
+           "ref_id": "@s3ixoy9stzy6vz:e125",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-subtab"
+           ],
+           "name": "Games",
+           "ref_id": "@s3ixoy9stzy6vz:e126",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-subtab"
+           ],
+           "name": "Log",
+           "ref_id": "@s3ixoy9stzy6vz:e127",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "A run does: ",
+             "ref_id": "@s3ixoy9stzy6vz:e129",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "ZSTD compression + deduplication",
+               "ref_id": "@s3ixoy9stzy6vz:e131",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e130",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": ". Asset changes are never applied by a run, and a game that is playing is skipped.",
+             "ref_id": "@s3ixoy9stzy6vz:e132",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-note"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e128",
+           "role": "paragraph"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "15",
+             "ref_id": "@s3ixoy9stzy6vz:e134",
+             "role": "statictext"
+            }
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e133",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "Pending",
+           "ref_id": "@s3ixoy9stzy6vz:e135",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "0",
+             "ref_id": "@s3ixoy9stzy6vz:e137",
+             "role": "statictext"
+            }
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e136",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "To compress",
+           "ref_id": "@s3ixoy9stzy6vz:e138",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "0",
+             "ref_id": "@s3ixoy9stzy6vz:e140",
+             "role": "statictext"
+            }
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e139",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "Dedupe only",
+           "ref_id": "@s3ixoy9stzy6vz:e141",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "15",
+             "ref_id": "@s3ixoy9stzy6vz:e143",
+             "role": "statictext"
+            }
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e142",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "Held back",
+           "ref_id": "@s3ixoy9stzy6vz:e144",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Filters: 0 game(s) excluded, only games under 20 GB. Pending counts come from the last scan.",
+             "ref_id": "@s3ixoy9stzy6vz:e146",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-note"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e145",
+           "role": "paragraph"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Tool: /opt/tools/btrfs-game-compressor v0.3.1. Scanned 769h ago.",
+             "ref_id": "@s3ixoy9stzy6vz:e148",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-note"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e147",
+           "role": "paragraph"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Last job: preview (started at 16:27).",
+             "ref_id": "@s3ixoy9stzy6vz:e150",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-note"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e149",
+           "role": "paragraph"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Last run finished",
+               "ref_id": "@s3ixoy9stzy6vz:e153",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s3ixoy9stzy6vz:e152",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 006",
+             "ref_id": "@s3ixoy9stzy6vz:e154",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-note"
+           ],
+           "ref_id": "@s3ixoy9stzy6vz:e151",
+           "role": "paragraph"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-btn",
+            "secondary"
+           ],
+           "name": "Scan library",
+           "ref_id": "@s3ixoy9stzy6vz:e155",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-btn",
+            "secondary"
+           ],
+           "name": "Preview (dry-run)",
+           "ref_id": "@s3ixoy9stzy6vz:e156",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-btn"
+           ],
+           "name": "Run now",
+           "ref_id": "@s3ixoy9stzy6vz:e157",
+           "role": "button"
+          }
+         ],
+         "native_id": {
+          "kind": "ax_dom_identifier",
+          "value": "sls-luna-overlay"
+         },
+         "ref_id": "@s3ixoy9stzy6vz:e96",
+         "role": "group"
+        }
+       ],
+       "name": "Steam",
+       "role": "webarea"
+      }
+     ],
+     "role": "group"
+    }
+   ],
+   "role": "window"
+  }
+ },
+ "ok": true,
+ "version": "2.6"
+}

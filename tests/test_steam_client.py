@@ -7,6 +7,7 @@ import io
 import json
 import lzma
 import os
+os.environ.setdefault('LUNA_GUI_CHECKS', '0')  # hermetic: tests never probe the real desktop (test_gui_check manages it itself)
 from pathlib import Path
 import shutil
 import stat
@@ -54,7 +55,8 @@ class SteamClientFixture(unittest.TestCase):
         mock.patch.object(luna, 'process_running', return_value=False).start()
         mock.patch.dict(os.environ, {'HOME': str(self.home),
                                     'XDG_DATA_HOME': str(self.home / '.local/share'),
-                                    'XDG_RUNTIME_DIR': str(self.home / 'run')}).start()
+                                    'XDG_RUNTIME_DIR': str(self.home / 'run'),
+                                    'LUNA_GUI_CHECKS': '0'}).start()  # never probe the host's real desktop
         self.network = mock.patch.object(luna.urllib.request, 'urlopen', side_effect=AssertionError('unexpected network')).start()
         # The hook worker and the SteamOS launchers have their own suites; run for
         # real here they read the host's niri/DRM outputs and print hook errors.

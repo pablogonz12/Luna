@@ -15,8 +15,6 @@ def cmd_refresh(options):
         for reason in reasons:
             print('  - %s' % reason)
         return EXIT_REFUSED
-    if read_refresh_pending() and False:
-        pass
     ok, message, build = _refresh_steam_side()
     print('refresh : %s' % message, file=sys.stdout if ok else sys.stderr)
     if not ok:
@@ -89,6 +87,9 @@ def cmd_steam(options):
         def confirm():
             if not sys.stdin.isatty():
                 return False
+            blockers = gui_describe_blockers()  # best effort; '' when unavailable
+            if blockers:
+                print('Steam currently shows: %s' % blockers)
             answer = input('Steam is running and will be killed (kill -9). Continue? [y/N] ')
             return answer.strip().lower() in ('y', 'yes')
         code, message = _lock_steam_client(getattr(options, 'force', False), confirm)

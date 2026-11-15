@@ -14,7 +14,7 @@ def build_parser():
                           ('refresh', cmd_refresh),
                           ('probe', cmd_probe), ('fleet', cmd_fleet), ('games', cmd_games),
                           ('launchers', cmd_launchers),
-                          ('doctor', cmd_doctor),
+                          ('doctor', cmd_doctor), ('gui', cmd_gui),
                           ('saves', cmd_saves),
                            ('timer', cmd_timer), ('hook', cmd_hook)):
         child = sub.add_parser(name)
@@ -44,6 +44,30 @@ def build_parser():
             child.add_argument('--json', action='store_true', help='machine-readable findings')
             child.add_argument('--fix', action='store_true',
                                help='apply only safe, reversible fixes (never sudo, never overwrites payloads)')
+        if name == 'gui':
+            child.add_argument('gui_action', nargs='?', default='status',
+                               choices=['status', 'launch', 'verify', 'library'],
+                               help='status (default), launch Steam in accessible mode, verify add-on panels, '
+                                    'or read the Library list order')
+            child.add_argument('--json', action='store_true', help='with status/library: machine-readable output')
+            child.add_argument('--launch', action='store_true',
+                               help='with verify: start Steam in accessible mode first if it is not running')
+            child.add_argument('--wait', type=int, default=90, metavar='SECONDS',
+                               help='with verify: how long to wait for the Steam window (default 90)')
+            child.add_argument('--no-navigate', action='store_true',
+                               help='with verify: do not open the Luna overlay (only the entry point is checked)')
+            child.add_argument('--open', action='store_true',
+                               help='with library: click the Library tab first if it is not showing')
+            child.add_argument('--save', metavar='FILE', help='with library: save the order to FILE (JSON)')
+            child.add_argument('--compare', metavar='FILE',
+                               help='with library: compare with a saved order; exit 1 when it differs')
+            child.add_argument('--common', action='store_true',
+                               help='with library --compare: only the relative order of names in both lists')
+            child.add_argument('--report', metavar='FILE', help='with verify: markdown report path')
+            child.add_argument('--screenshots', metavar='DIR', help='with verify: screenshot directory')
+            child.add_argument('--full-screen', action='store_true',
+                               help='with verify: capture the WHOLE screen with grim (everything visible, '
+                                    'including unrelated windows); default is the Steam window only')
         if name == 'refresh':
             child.add_argument('--dry-run', action='store_true',
                                help='print the plan without updating or writing')

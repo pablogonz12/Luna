@@ -3,6 +3,8 @@
 # the shell/UI tests, the Lua backend suites, the installer tests and the
 # static checks. Lua is required; node is required for the UI tests.
 set -euo pipefail
+# Hermetic: no test may probe the real desktop (tests/test_gui_check.py manages this itself).
+export LUNA_GUI_CHECKS=0
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 

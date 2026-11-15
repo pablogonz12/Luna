@@ -1,0 +1,68 @@
+[
+ {
+  "id": 53,
+  "title": "Sign in to Steam",
+  "app_id": "steam",
+  "pid": 8145,
+  "workspace_id": 1,
+  "is_focused": true,
+  "is_floating": true,
+  "is_urgent": false,
+  "layout": {
+   "pos_in_scrolling_layout": null,
+   "tile_size": [
+    704.0,
+    444.0
+   ],
+   "window_size": [
+    700,
+    440
+   ],
+   "tile_pos_in_workspace_view": [
+    928.0,
+    520.0
+   ],
+   "window_offset_in_tile": [
+    2.0,
+    2.0
+   ]
+  },
+  "focus_timestamp": {
+   "secs": 84286,
+   "nanos": 118449454
+  }
+ },
+ {
+  "id": 42,
+  "title": "unrelated",
+  "app_id": "brave-hkhckfoofhljcngmlnlojcbplgkcpcab-Default",
+  "pid": 1202417,
+  "workspace_id": 1,
+  "is_focused": false,
+  "is_floating": false,
+  "is_urgent": false,
+  "layout": {
+   "pos_in_scrolling_layout": [
+    6,
+    1
+   ],
+   "tile_size": [
+    1268.0,
+    1380.0
+   ],
+   "window_size": [
+    1264,
+    1376
+   ],
+   "tile_pos_in_workspace_view": null,
+   "window_offset_in_tile": [
+    2.0,
+    2.0
+   ]
+  },
+  "focus_timestamp": {
+   "secs": 46528,
+   "nanos": 107219865
+  }
+ }
+]

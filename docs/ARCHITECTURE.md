@@ -120,6 +120,23 @@ command to refresh. The trade-off is drift: the payload can grow stale relative
 to the add-on projects, which is why `verify --sources` compares against the local
 checkouts and the drift issue in `docs/issues/` asks for an automated check.
 
+## Optional GUI checks
+
+`scripts/luna_cli/94_gui_check.py` drives `agent-desktop` (AT-SPI) to see what the
+Steam client shows. Steam must have been started with `-cef-force-accessibility`
+(`luna gui launch`; a normal launch never gets the flag). Window titles come from
+`niri msg --json windows` when available (agent-desktop reports them empty); the
+screen is classified `login`/`main`/`dialog`/`unknown` from the tree; evidence is a
+window-only niri `screenshot-window` PNG (skipped, not full-screen, without niri;
+`--full-screen` opts into `grim`). Steam exposes ~13 AT-SPI windows, so `gui_snapshot()` lists them and snapshots by
+window id (the largest for `main`, all for blocker diagnosis). Add-on selectors live in
+one table, `GUI_PANEL_SELECTORS` (entry point `button 'Luna'`, pages reached through
+the overlay's `sls-luna-tab` groups, one navigation click); `gui_library_order()` reads
+the virtualized Library grid. `gui_rendered()` returns found/missing/unstable per add-on (reusable by a future
+`status --live`). Everything degrades to "GUI checks skipped: <reason>", and the
+shutdown diagnosis in the Steam paths is a silent, time-boxed (~3 s) best effort.
+No CDP/DevTools probe is used.
+
 ## Current safety boundaries
 
 * It does not edit SLSsteam configuration, manifests, games or Steam userdata.

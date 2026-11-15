@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+os.environ.setdefault('LUNA_GUI_CHECKS', '0')  # hermetic: tests never probe the real desktop (test_gui_check manages it itself)
 from pathlib import Path
 import tempfile
 import unittest

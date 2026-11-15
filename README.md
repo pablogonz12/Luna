@@ -317,6 +317,40 @@ hard lock, no rollback, nothing killed; undo with `luna steam unlock`).
 python3 scripts/luna.py doctor [--json] [--fix]
 ```
 
+## GUI checks (optional)
+
+`luna gui` looks at what the Steam client actually shows, through the
+`agent-desktop` accessibility CLI (AT-SPI). It is optional:
+without the tool, a graphical session or an accessible Steam every command prints
+`GUI checks skipped: <reason>` and exits 0.
+
+```bash
+python3 scripts/luna.py gui                    # tool, session, Steam, accessible mode, screen, window titles
+python3 scripts/luna.py gui launch             # start Steam with -cef-force-accessibility (never the normal launch)
+python3 scripts/luna.py gui verify [--launch] [--no-navigate] [--full-screen] [--report FILE] [--screenshots DIR] [--wait SECONDS] [--only NAME]
+python3 scripts/luna.py gui library [--open] [--json] [--save FILE] [--compare FILE [--common]]
+```
+
+`verify` waits for a Steam window, refuses the sign-in screen ("sign in first"),
+then checks that each installed add-on's panel is found in the accessibility tree
+(sampled several times, so an element that appears and vanishes is reported
+`unstable`), takes a screenshot of the Steam window only (`niri msg action screenshot-window`, the
+main window picked by title, checked to exist and sized against niri's window size;
+without niri the screenshot is skipped with a note, never a full-screen fallback; the
+explicit `--full-screen` flag captures everything visible with `grim`) and writes a markdown report under
+`~/.local/share/Lumen/sls-luna/gui-reports/`. Exit 1 on any failure. Set
+`LUNA_GUI_CHECKS=0` to disable the layer. The panel selectors were confirmed on a
+live signed-in client; the Luna entry point is `button 'Luna'` and the add-on pages
+are reached by one navigation click (the Luna overlay, closed again afterwards;
+`--no-navigate` checks only the entry point). The dialog shape used for blocker
+descriptions is still unverified. `library` reads the Library list in display order
+(a virtualized grid: only the rendered rows exist, ~54 of the whole library, so the
+result depends on the scroll position); `--save` writes it, `--compare` exits 1 on
+a difference, `--common` compares only the relative order of shared names. Steam
+exposes many AT-SPI windows, so Luna lists them and snapshots the main one. When Steam will not shut down, the
+messages also list the open Steam windows and any dialog buttons, and a Lumen
+sidecar that outlives Steam is reported with its pid and start time.
+
 ## How Luna fits into the stack
 
 ```text

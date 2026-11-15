@@ -1,0 +1,230 @@
+{
+ "command": "snapshot",
+ "data": {
+  "app": "steamwebhelper",
+  "complete": true,
+  "tree": {
+   "available_actions": [
+    "RightClick"
+   ],
+   "children": [
+    {
+     "available_actions": [
+      "RightClick"
+     ],
+     "children": [
+      {
+       "available_actions": [
+        "RightClick",
+        "SetFocus"
+       ],
+       "children": [
+        {
+         "available_actions": [
+          "Click",
+          "RightClick"
+         ],
+         "children": [
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Select",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_2uiDecKkKjAq7nimy3uLhG",
+              "_1n7Wloe5jZ6fSuvV18NNWI",
+              "contextMenuItem"
+             ],
+             "name": "Change Account...",
+             "ref_id": "@s153q0elwjxz8p:e3",
+             "role": "menuitem",
+             "subrole": "menuitem"
+            },
+            {
+             "available_actions": [
+              "Select",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_2uiDecKkKjAq7nimy3uLhG",
+              "_1n7Wloe5jZ6fSuvV18NNWI",
+              "contextMenuItem"
+             ],
+             "name": "Sign Out...",
+             "ref_id": "@s153q0elwjxz8p:e4",
+             "role": "menuitem",
+             "subrole": "menuitem"
+            },
+            {
+             "available_actions": [
+              "Select",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_2uiDecKkKjAq7nimy3uLhG",
+              "_1n7Wloe5jZ6fSuvV18NNWI",
+              "contextMenuItem"
+             ],
+             "name": "Go Offline...",
+             "ref_id": "@s153q0elwjxz8p:e5",
+             "role": "menuitem",
+             "subrole": "menuitem"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_21GPYlKBCLsHQpTsHw_RL_"
+             ],
+             "ref_id": "@s153q0elwjxz8p:e6",
+             "role": "separator"
+            },
+            {
+             "available_actions": [
+              "Select",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_2uiDecKkKjAq7nimy3uLhG",
+              "_1n7Wloe5jZ6fSuvV18NNWI",
+              "contextMenuItem"
+             ],
+             "name": "Check for Steam Client Updates...",
+             "ref_id": "@s153q0elwjxz8p:e7",
+             "role": "menuitem",
+             "subrole": "menuitem"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_21GPYlKBCLsHQpTsHw_RL_"
+             ],
+             "ref_id": "@s153q0elwjxz8p:e8",
+             "role": "separator"
+            },
+            {
+             "available_actions": [
+              "Select",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_2uiDecKkKjAq7nimy3uLhG",
+              "_1n7Wloe5jZ6fSuvV18NNWI",
+              "contextMenuItem"
+             ],
+             "name": "Restore Game Backup...",
+             "ref_id": "@s153q0elwjxz8p:e9",
+             "role": "menuitem",
+             "subrole": "menuitem"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_21GPYlKBCLsHQpTsHw_RL_"
+             ],
+             "ref_id": "@s153q0elwjxz8p:e10",
+             "role": "separator"
+            },
+            {
+             "available_actions": [
+              "Select",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_2uiDecKkKjAq7nimy3uLhG",
+              "_1n7Wloe5jZ6fSuvV18NNWI",
+              "contextMenuItem"
+             ],
+             "name": "Settings",
+             "ref_id": "@s153q0elwjxz8p:e11",
+             "role": "menuitem",
+             "subrole": "menuitem"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_21GPYlKBCLsHQpTsHw_RL_"
+             ],
+             "ref_id": "@s153q0elwjxz8p:e12",
+             "role": "separator"
+            },
+            {
+             "available_actions": [
+              "Select",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_2jXHP0742MyApMUVUM8IFn",
+              "_2uiDecKkKjAq7nimy3uLhG",
+              "_1n7Wloe5jZ6fSuvV18NNWI",
+              "contextMenuItem"
+             ],
+             "name": "Exit",
+             "ref_id": "@s153q0elwjxz8p:e13",
+             "role": "menuitem",
+             "subrole": "menuitem"
+            }
+           ],
+           "dom_classes": [
+            "PP7LM0Ow1K5qkR8WElLpt",
+            "visible",
+            "ready",
+            "_2yAm5LY_eu-Vg_52l0HFlM"
+           ],
+           "name": "Text 001",
+           "ref_id": "@s153q0elwjxz8p:e2",
+           "role": "group",
+           "states": [
+            "focused"
+           ]
+          }
+         ],
+         "native_id": {
+          "kind": "ax_dom_identifier",
+          "value": "popup_target"
+         },
+         "ref_id": "@s153q0elwjxz8p:e1",
+         "role": "group"
+        }
+       ],
+       "name": "Steam Root Menu",
+       "role": "webarea"
+      }
+     ],
+     "role": "group"
+    }
+   ],
+   "role": "window"
+  }
+ },
+ "ok": true,
+ "version": "2.6"
+}
