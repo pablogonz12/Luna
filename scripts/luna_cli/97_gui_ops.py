@@ -18,7 +18,10 @@ def gui_watch_selector(options):
         return GUI_PANEL_SELECTORS[addon]['panel']
     if not role and not name:
         raise ValueError('gui watch needs --role and/or --name, or --addon KEY')
-    return role, name, not getattr(options, 'contains', False)
+    return (str(role).strip().lower() if role else role), name, not getattr(options, 'contains', False)
+
+
+GUI_WATCH_UNREADABLE_LIMIT = 3   # consecutive unreadable samples that count as "Steam is gone"
 
 
 def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=None):
@@ -27,8 +30,9 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
     clicks, so it does not navigate (open the page you want to watch yourself).
 
     Exit: 0 normally (Ctrl-C and --duration end it cleanly with a summary); 1 with
-    --fail-if-vanished when the element disappeared after having been seen (the watch
-    then stops at that moment); EXIT_SKIPPED when GUI checks cannot run; EXIT_REFUSED
+    --fail-if-vanished when the element disappeared after having been seen, or when the
+    last GUI_WATCH_UNREADABLE_LIMIT samples were all unreadable (Steam died or hung); the
+    watch then stops at that moment; EXIT_SKIPPED when GUI checks cannot run; EXIT_REFUSED
     for a bad selector."""
     out = out or (lambda line: print(line, flush=True))
     try:
@@ -49,6 +53,8 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
     stats = {'samples': 0, 'unreadable': 0, 'appeared': 0, 'vanished': 0, 'seen': False}
     state = None  # None unknown, True present, False absent
     readable = True
+    streak = 0      # consecutive unreadable samples
+    reason = ''
 
     def stamp():
         now = clock()
@@ -65,6 +71,12 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
                 tree, error = None, str(problem)
             if tree is None:
                 stats['unreadable'] += 1
+                streak += 1
+                if fail_on_vanish and streak >= GUI_WATCH_UNREADABLE_LIMIT:
+                    out('%s unreadable (%s)' % (stamp(), error or 'no snapshot'))
+                    reason = 'the last %d samples were unreadable (Steam is gone or not responding)' % streak
+                    code = 1
+                    break
                 if readable:
                     out('%s unreadable (%s); element state unchanged' % (stamp(), error or 'no snapshot'))
                 readable = False
@@ -72,6 +84,7 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
                 if not readable and stats['samples']:
                     out('%s readable again' % stamp())
                 readable = True
+                streak = 0
                 stats['samples'] += 1
                 count = len(gui_find_nodes(tree, role, name, exact))
                 present = count > 0
@@ -87,6 +100,7 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
                         out('%s absent    %s (not seen yet)' % (stamp(), label))
                     state = present
                     if fail_on_vanish and stats['vanished']:
+                        reason = '%s vanished after having been seen' % label
                         code = 1
                         break
             if duration is not None and clock() - started >= duration:
@@ -98,7 +112,7 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
         % (stats['samples'], stats['unreadable'], stats['appeared'], stats['vanished'],
            {None: 'unknown', True: 'present', False: 'absent'}[state], clock() - started))
     if code:
-        out('FAIL: %s vanished after having been seen' % label)
+        out('FAIL: %s' % reason)
     return code
 
 
@@ -126,7 +140,7 @@ def gui_running_games(proc='/proc'):
     for entry in entries:
         try:
             argv = [a for a in (entry / 'cmdline').read_bytes().decode('utf-8', 'replace').split('\0') if a]
-            comm = (entry / 'comm').read_text().strip() if (entry / 'comm').exists() else ''
+            comm = (entry / 'comm').read_text(errors='replace').strip() if (entry / 'comm').exists() else ''
         except OSError:
             continue
         joined = ' '.join(argv)
@@ -162,6 +176,8 @@ def gui_read_order(open_library=True, attempts=1, sleep=time.sleep):
     for attempt in range(max(1, attempts)):  # the Library list can be unmounted for a moment
         try:
             order = live_library_order()
+            if not order.get('names'):
+                raise LiveProbeError('the Library list has no games yet')
             return {'source': 'cdp', 'names': list(order['names']), 'total': order.get('rows') or len(order['names']),
                     'sort': order.get('sort')}
         except Exception as error:  # LiveProbeError and anything unexpected: fall back
@@ -182,7 +198,7 @@ def gui_read_order(open_library=True, attempts=1, sleep=time.sleep):
                     order = gui_library_order(tree) if tree else None
                     if order:
                         break
-        if order:
+        if order and order['names']:
             return {'source': 'tree (visible rows only)', 'names': order['names'], 'total': order.get('total'),
                     'sort': None, 'why': cdp_error}
         why += '; tree: %s' % (error or 'no Library list on screen')
@@ -224,6 +240,11 @@ def gui_read_hltb(open_home=True, sleep=time.sleep):
             pass
     if grid['active']:
         return {'state': 'active', 'views': grid['views'], 'why': '', 'sorts': grid['sorts']}
+    if grid.get('empty'):  # sorted views were found but hold no rows: that is a failed read, not "inactive"
+        cut = [v for v in grid['empty'] if v.get('exhausted')]
+        return gui_hltb_off('%d HowLongToBeat-sorted view(s) mounted but empty%s' % (
+            len(grid['empty']), ' (the fiber walk ran out of its node budget for %d of them: not a real empty list)'
+            % len(cut) if cut else ''))
     if grid['mounted']:
         return gui_hltb_off('%d collection views are mounted, none sorted by HowLongToBeat (sort values: %s)'
                             % (grid['mounted'], ', '.join(sorted(grid['sorts'])) or 'none'), 'inactive')
@@ -261,6 +282,10 @@ def gui_compare_hltb(before, after, limit=5):
             twin = after['views'][0]
         if twin is None:
             problems.append('%s view missing after the restart' % view['kind'])
+            continue
+        if not view['appids'] or not twin['appids']:  # empty vs anything proves nothing
+            problems.append('%s: %d games before, %d after: an empty read cannot be compared'
+                            % (view['kind'], len(view['appids']), len(twin['appids'])))
             continue
         if view['appids'] == twin['appids']:
             continue
@@ -337,12 +362,25 @@ def gui_compare_states(before, after, warnings=None):
     if hltb_difference:
         differences.append(hltb_difference)
     left, right = before['order'], after['order']
-    if left['source'] == 'unavailable' or right['source'] == 'unavailable':
+    unreadable = [(side, o) for side, o in (('before', left), ('after', right))
+                  if o['source'] == 'unavailable' or not o.get('names')]
+    if unreadable:
         rows.append(('library order', left.get('why') or '%d rows' % len(left['names']),
                      right.get('why') or '%d rows' % len(right['names']), 'n/a'))
-        differences.append('library order could not be read on both sides')
+        for side, _o in unreadable:  # an empty read proves nothing: never "same"
+            differences.append('library order could not be read %s the restart' % side)
         return rows, differences
     if left['source'] != right['source']:
+        if left['source'] == 'cdp':  # lost the richer read: nothing can be proven about the order
+            rows.append(('library order', '%d rows via %s' % (len(left['names']), left['source']),
+                         '%d rows via %s' % (len(right['names']), right['source']), 'n/a'))
+            rows.append(('sort state', 'n/a', 'n/a', 'n/a'))
+            differences.append('library order could not be read via CDP after the restart (before: cdp, after: %s)'
+                               % right['source'])
+            return rows, differences
+        same, lines = gui_library_compare(left['names'], right['names'], common=True)
+        if not same:
+            differences.append('library order (%s)' % '; '.join(lines[:3]))
         # A tree read (visible rows only, no sort state) and a CDP read (every row, duplicates
         # included) cannot prove anything about each other: say so instead of a false DIFFERENT.
         shown = lambda o: '%d rows via %s%s' % (len(o['names']), o['source'],  # noqa: E731
@@ -460,8 +498,7 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
             'STOPPED\n\n' + '\n'.join('- %s' % f for f in failures)
         path = Path(getattr(options, 'report', None) or luna_tools_dir() / 'gui-reports' / ('gui-restart-%s.md' % stamp))
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(gui_restart_report(report), encoding='utf-8')
+            gui_private_write(path, gui_restart_report(report))
             print('report : %s' % path)
         except OSError as error:
             print('could not write the report: %s' % error, file=sys.stderr)
@@ -576,6 +613,7 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
     # 6. after state, compare, evidence
     settle = clock() + getattr(options, 'settle', 90)
     previous = None
+    previous_names = None
     while True:  # the Lumen plugin, its Library order and the HowLongToBeat cache take a while to come up
         after = gui_read_state(sleep=sleep)
         after.setdefault('hltb', gui_hltb_off('not read'))
@@ -585,8 +623,13 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
         hltb_now = gui_hltb_ids(after.get('hltb'))
         hltb_ready = before['hltb']['state'] != 'active' or (after['hltb']['state'] == 'active' and hltb_now == previous)
         previous = hltb_now
+        names_now = list(after['order'].get('names') or [])
+        # a CDP order that was up before is only judged once it is non-empty and unchanged between two reads
+        order_ready = (before['order']['source'] != 'cdp'
+                       or (after['order']['source'] == 'cdp' and bool(names_now) and names_now == previous_names))
+        previous_names = names_now
         ready = (after['screen'] == 'main' and expected <= {n for n, v in after['panels'].items() if v == 'found'}
-                 and (after['order']['source'] == 'cdp' or before['order']['source'] != 'cdp') and hltb_ready)
+                 and order_ready and hltb_ready)
         if ready or clock() >= settle:
             break
         sleep(5)
@@ -600,7 +643,7 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
                              full_screen=getattr(options, 'full_screen', False))
     report['screenshot'] = ('`%s` (%s)' % (shot, note)) if shot else 'none (%s)' % note
     if start_mode == 'not running':
-        differences = [d for d in differences if not d.startswith('library order could not')]
+        differences = [d for d in differences if d != 'library order could not be read before the restart']
         steps.append(('compare', 'nothing to compare: Steam was not running before'))
     failures.extend('differs after the restart: %s' % d for d in differences)
     for item in after['panels'] if after['panels'] else ():

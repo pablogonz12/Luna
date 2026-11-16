@@ -5,6 +5,23 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **GE-Proton manager + GUI/CDP review fixes.**
+  - `luna proton remove|prune` never follow or delete a symlinked tool directory (listed, reported, refused: remove exits 5,
+    prune exits 5); a failing delete is reported instead of a traceback; `remove` without `--force` now refuses (exit 5)
+    when `config.vdf` exists but cannot be read (mappings unknown), like `prune`.
+  - Steam/wine detection for destructive commands fails CLOSED (unlistable `/proc` or an unreadable entry -> refuse, exit 5),
+    uses the one shared detector (comm or argv[0] basename: steam, steamwebhelper, steam.sh), is re-checked right before the
+    install rename and the delete, and `LUNA_PROC_DIR` is ignored when the Steam home is under the real home.
+  - Archive extraction resolves symlinks in a virtual filesystem (`a -> ../..` then `a/x` is refused) and uses the tarfile
+    `data` filter. A malformed integrity manifest is reported as "manifest unreadable" (verify exit 1, doctor
+    `proton.manifest-unreadable`) instead of crashing; non-UTF-8 files no longer crash listing.
+  - GUI: `restart-check` fails (exit 1) when the library order is empty or unreadable on either side or CDP is lost after the
+    restart, and waits for a non-empty, stable CDP order; `library --save`/`library-order --save` refuse an empty baseline;
+    an empty list never compares equal; `gui watch --fail-if-vanished` exits 1 after 3 unreadable samples; role matching is
+    case-insensitive. The DevTools client refuses non-loopback hosts and never follows redirects. The clipboard is restored
+    in a `finally` (also on SIGTERM), including a PNG the user already had; reports, baselines and screenshots are 0600 and
+    newly created directories 0700 (existing directories are untouched). Subprocess output is decoded with replacement.
+
 - **`luna fleet gui [HOST...] [--json] [--verify]`**: one table of every machine's Steam client state
   (agent-desktop, running, accessible mode, screen, blocker windows, backend) from the remote `luna gui status --json`.
   Read-only; never starts/stops Steam. `--verify` (opt-in) also runs the new `luna gui verify --json`

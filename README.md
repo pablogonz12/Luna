@@ -479,11 +479,11 @@ unverified. `verify --launch` closes the Steam it started again (through the
 normal graceful shutdown, never a kill) unless `--keep-steam`; a Steam that was
 already running is never closed. The screenshot step saves and restores the
 clipboard (niri's `screenshot-window` overwrites it; needs `wl-clipboard`, else the
-report notes that the clipboard was not restored). Window listing and capture use
+report notes that the clipboard was not restored; only the preferred clipboard type is restored, and the note lists what could not be). Reports and screenshots are written 0600 into directories created 0700. Window listing and capture use
 the `niri` backend (tested) or a `generic` one (agent-desktop window list, no
 capture; other compositors are not guessed at, `luna gui` shows which is active). `library` reads the Library list in display order
 (a virtualized grid: only the rendered rows exist, ~54 of the whole library, so the
-result depends on the scroll position); `--save` writes it, `--compare` exits 1 on
+result depends on the scroll position); `--save` writes it (mode 0600; an empty list is refused), `--compare` exits 1 on
 a difference, `--common` compares only the relative order of shared names. Steam
 exposes many AT-SPI windows, so Luna lists them and snapshots the main one. When Steam will not shut down, the
 messages also list the open Steam windows and any dialog buttons, and a Lumen

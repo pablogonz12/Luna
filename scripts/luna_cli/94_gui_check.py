@@ -52,6 +52,44 @@ def gui_enabled():
     return os.environ.get('LUNA_GUI_CHECKS', '1') != '0'
 
 
+def gui_private_mkdir(path):
+    """mkdir -p where every directory created HERE is 0700 (minus umask); a directory that
+    already exists is never touched, so a user's own folder keeps its permissions."""
+    path = Path(path)
+    missing = []
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        missing.append(probe)
+        probe = probe.parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(str(directory), 0o700)
+        except FileExistsError:
+            if not directory.is_dir():
+                raise
+
+
+def gui_private_write(path, text):
+    """Write a text file as 0600 (new parents 0700), atomically: a temp file in the same
+    directory is renamed over `path`, so a symlink at `path` is replaced, never followed."""
+    path = Path(path)
+    gui_private_mkdir(path.parent)
+    fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '.', dir=str(path.parent))  # mkstemp is 0600
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.replace(tmp, str(path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return path
+
+
+def gui_private_write_json(path, data):
+    return gui_private_write(path, json.dumps(data, indent=2, sort_keys=True) + '\n')
+
+
 def gui_session_env(environ=None, runtime_dir=None, x11_dir='/tmp/.X11-unix'):
     """A copy of the environment with the display variables Steam and
     agent-desktop need. Values already set are never overridden; missing ones
@@ -97,7 +135,7 @@ def gui_run(args, timeout=GUI_TIMEOUT, env=None):
     if not tool:
         return {'ok': False, 'data': None, 'error': '%s is not installed' % GUI_TOOL, 'unavailable': True}
     try:
-        result = subprocess.run([tool] + list(args), capture_output=True, text=True,
+        result = subprocess.run([tool] + list(args), capture_output=True, encoding='utf-8', errors='replace',
                                 timeout=timeout, env=env or gui_session_env())
     except subprocess.TimeoutExpired:
         return {'ok': False, 'data': None, 'error': '%s timed out' % GUI_TOOL, 'unavailable': False}
@@ -147,7 +185,7 @@ def gui_windows(timeout=GUI_TIMEOUT, env=None):
     if gui_backend(env)['name'] == 'niri':
         try:
             result = subprocess.run([niri, 'msg', '--json', 'windows'], capture_output=True,
-                                    text=True, timeout=timeout, env=env)
+                                    encoding='utf-8', errors='replace', timeout=timeout, env=env)
             windows = json.loads(result.stdout) if result.returncode == 0 else None
         except (OSError, subprocess.SubprocessError, ValueError):
             windows = None
@@ -183,7 +221,7 @@ def gui_find_nodes(tree, role=None, name=None, exact=True):
     wanted = (name or '').lower()
     found = []
     for node in gui_walk(tree):
-        if role and str(node.get('role', '')).lower() != role:
+        if role and str(node.get('role', '')).lower() != str(role).lower():
             continue
         label = str(node.get('name') or '').lower()
         if name is not None and not (label == wanted if exact else wanted in label):
@@ -354,7 +392,7 @@ def gui_process_started(proc='/proc'):
     """Epoch start time of this user's oldest Steam client process, or None."""
     root, uid, best = Path(proc), os.getuid(), None
     try:
-        btime = next(int(line.split()[1]) for line in (root / 'stat').read_text().splitlines() if line.startswith('btime '))
+        btime = next(int(line.split()[1]) for line in (root / 'stat').read_text(errors='replace').splitlines() if line.startswith('btime '))
         entries = list(root.iterdir())
     except (OSError, StopIteration, ValueError):
         return None
@@ -371,7 +409,7 @@ def gui_process_started(proc='/proc'):
             argv = (entry / 'cmdline').read_bytes().split(b'\0')
             if os.path.basename(argv[0].decode('utf-8', 'replace')) not in ('steam', 'steam.sh'):
                 continue
-            text = (entry / 'stat').read_text()
+            text = (entry / 'stat').read_text(errors='replace')
             started = btime + int(text[text.rindex(')') + 2:].split()[19]) / float(hertz)
         except (OSError, ValueError, IndexError):
             continue
@@ -414,30 +452,9 @@ def gui_exit_hint(since):
 
 def gui_steam_state(proc='/proc'):
     """(running, accessible): whether this user's Steam runs and whether it was
-    started with the accessibility flags (read from /proc cmdlines)."""
-    running = accessible = False
-    try:
-        entries = list(Path(proc).iterdir())
-    except OSError:
-        return False, False
-    uid = os.getuid()
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            if entry.stat().st_uid != uid:
-                continue
-            argv = (entry / 'cmdline').read_bytes().split(b'\0')
-        except OSError:
-            continue
-        program = os.path.basename(argv[0].decode('utf-8', 'replace')) if argv else ''
-        if program not in ('steam', 'steamwebhelper', 'steam.sh'):
-            continue
-        running = True
-        args = [a.decode('utf-8', 'replace') for a in argv[1:]]
-        if any(a in GUI_ACCESS_ARGS or a.startswith('--force-renderer-accessibility') for a in args):
-            accessible = True
-    return running, accessible
+    started with the accessibility flags. Uses the one shared detector (steam_process_scan)."""
+    scan = steam_process_scan(proc)
+    return scan['running'], scan['accessible']
 
 
 def gui_png_size(path):
@@ -459,8 +476,8 @@ def gui_main_window_id(env):
     if not niri or not env.get('NIRI_SOCKET'):
         return None
     try:
-        result = subprocess.run([niri, 'msg', '--json', 'windows'], capture_output=True, text=True,
-                                timeout=GUI_TIMEOUT, env=env)
+        result = subprocess.run([niri, 'msg', '--json', 'windows'], capture_output=True,
+                                encoding='utf-8', errors='replace', timeout=GUI_TIMEOUT, env=env)
         windows = json.loads(result.stdout) if result.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
@@ -477,6 +494,9 @@ def gui_main_window_id(env):
 
 
 GUI_CLIP_PREFER = ('text/plain;charset=utf-8', 'image/png')
+# wl-copy offers the usual text aliases itself when it serves one text type
+GUI_CLIP_TEXT_TYPES = frozenset({'text/plain', 'text/plain;charset=utf-8', 'UTF8_STRING', 'STRING', 'TEXT',
+                                 'COMPOUND_TEXT'})
 
 
 def gui_clip_tools():
@@ -495,9 +515,35 @@ def gui_clip_types(env):
     return [] if b'nothing is copied' in result.stderr.lower() else None
 
 
+def gui_clip_read(env, paste, types):
+    """(type, bytes) of the preferred offered type, or None when wl-paste fails."""
+    kind = next((t for t in GUI_CLIP_PREFER if t in types), types[0])
+    try:
+        result = subprocess.run([paste, '--no-newline', '--type', kind], capture_output=True, timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (kind, result.stdout) if result.returncode == 0 else None
+
+
+def gui_clip_fingerprint(env):
+    """What the clipboard holds, by content: (types, sha256 of the preferred type), or None."""
+    paste = shutil.which('wl-paste')
+    types = gui_clip_types(env) if paste else None
+    if types is None:
+        return None
+    if not types:
+        return ((), '')
+    got = gui_clip_read(env, paste, types)
+    return (tuple(types), hashlib.sha256(got[1]).hexdigest() if got else '?')
+
+
 def gui_clipboard_save(env):
-    """(saved, note). saved is {'type', 'data'} or {'empty': True}, or None when it cannot
-    be kept (then `note` says why). niri's screenshot-window overwrites the clipboard."""
+    """(saved, note). saved is {'type', 'data', 'fingerprint', 'dropped'} or {'empty': True,
+    'fingerprint'}, or None when it cannot be kept (then `note` says why). niri's
+    screenshot-window overwrites the clipboard. wl-copy serves exactly ONE MIME type per
+    call, so only the preferred offered type is preserved (text/plain;charset=utf-8, else
+    image/png, else the first); `dropped` lists the other offered types, apart from the
+    text aliases wl-copy adds on its own."""
     paste, copy = gui_clip_tools()
     if not paste or not copy:
         return None, 'clipboard not restored: wl-clipboard (wl-paste/wl-copy) is not installed'
@@ -505,32 +551,63 @@ def gui_clipboard_save(env):
     if types is None:
         return None, 'clipboard not restored: wl-paste could not read it'
     if not types:
-        return {'empty': True}, ''
-    kind = next((t for t in GUI_CLIP_PREFER if t in types), types[0])
-    try:
-        result = subprocess.run([paste, '--no-newline', '--type', kind], capture_output=True, timeout=10, env=env)
-    except (OSError, subprocess.SubprocessError):
+        return {'empty': True, 'fingerprint': ((), '')}, ''
+    got = gui_clip_read(env, paste, types)
+    if got is None:
         return None, 'clipboard not restored: wl-paste failed'
-    if result.returncode != 0:
-        return None, 'clipboard not restored: wl-paste failed'
-    return {'type': kind, 'data': result.stdout}, ''
+    kind, data = got
+    covered = GUI_CLIP_TEXT_TYPES if kind in GUI_CLIP_TEXT_TYPES else {kind}
+    return {'type': kind, 'data': data, 'fingerprint': (tuple(types), hashlib.sha256(data).hexdigest()),
+            'dropped': [t for t in types if t not in covered]}, ''
 
 
-def gui_clipboard_restore(saved, env, sleep=time.sleep):
-    """Put `saved` back once niri's image has landed on the clipboard. Returns a note
-    ('' when restored)."""
+def gui_clipboard_restore(saved, env, sleep=time.sleep, wait=True):
+    """Put `saved` back once niri's screenshot has landed on the clipboard (`wait`): it has
+    landed when the clipboard offers image/png AND its content differs from what was saved
+    (a clipboard that already held a PNG would otherwise look finished at once). Gives up
+    waiting after ~3 s and restores anyway. Returns a note ('' = fully restored)."""
     copy = shutil.which('wl-copy')
-    for _ in range(8):  # niri sets the clipboard a moment after the file appears
-        if 'image/png' in (gui_clip_types(env) or []):
-            break
-        sleep(0.2)
+    if wait:
+        for _ in range(15):
+            if 'image/png' in (gui_clip_types(env) or []) and gui_clip_fingerprint(env) != saved.get('fingerprint'):
+                break
+            sleep(0.2)
     command = [copy, '--clear'] if saved.get('empty') else [copy, '--type', saved['type']]
     try:  # wl-copy forks to serve the data: no inherited pipes, or run() would wait for it
         subprocess.run(command, input=None if saved.get('empty') else saved['data'], timeout=10, env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return 'clipboard not restored: wl-copy failed'
+    if saved.get('dropped'):
+        return 'clipboard restored as %s only; not preserved: %s' % (saved['type'], ', '.join(saved['dropped']))
     return ''
+
+
+@contextlib.contextmanager
+def gui_sigterm_as_exit():
+    """For the duration of the block SIGTERM raises SystemExit(143) so `finally` clauses run
+    (the previous handler is put back afterwards). Only in the main thread, and never over
+    an ignored SIGTERM."""
+    import signal
+    import threading
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        try:
+            previous = signal.getsignal(signal.SIGTERM)
+            if previous == signal.SIG_IGN:
+                previous = None
+            else:
+                def handler(signum, frame):
+                    raise SystemExit(128 + signum)
+                signal.signal(signal.SIGTERM, handler)
+        except (ValueError, OSError):
+            previous = None
+    try:
+        yield
+    finally:
+        if previous is not None:
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
 
 
 def gui_capture(directory, name, full_screen=False):
@@ -538,23 +615,34 @@ def gui_capture(directory, name, full_screen=False):
 
     Default: only the main Steam window, through `niri msg action screenshot-window --path`
     (never anything else on screen). When that is impossible the screenshot is skipped.
-    `full_screen` (explicit opt-in) captures everything visible with grim instead."""
+    `full_screen` (explicit opt-in) captures everything visible with grim instead.
+    Directories created here are 0700 and the PNG is 0600. niri puts its screenshot on the
+    clipboard too: the user's clipboard is restored in a `finally` (also on Ctrl-C and
+    SIGTERM while the capture runs; only one MIME type can be preserved, see
+    gui_clipboard_save)."""
     env = gui_session_env()
     target = Path(directory) / name
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        gui_private_mkdir(target.parent)
     except OSError as error:
         return None, 'screenshot skipped: %s' % error
+
+    def private(path):
+        with contextlib.suppress(OSError):
+            os.chmod(str(path), 0o600)
+
     if full_screen:
         grim = shutil.which('grim')
         if not grim:
             return None, 'grim not installed; screenshot skipped'
         try:
-            result = subprocess.run([grim, str(target)], capture_output=True, text=True, timeout=15, env=env)
+            result = subprocess.run([grim, str(target)], capture_output=True, encoding='utf-8', errors='replace',
+                                    timeout=15, env=env)
         except (OSError, subprocess.SubprocessError) as error:
             return None, 'grim failed: %s' % error
         if result.returncode != 0 or not target.is_file():
             return None, 'grim failed: %s' % (result.stderr.strip()[:120] or 'exit %d' % result.returncode)
+        private(target)
         return target, 'saved (full screen)'
     backend = gui_backend(env)
     if backend['name'] != 'niri':
@@ -564,24 +652,34 @@ def gui_capture(directory, name, full_screen=False):
         return None, 'no window-only screenshot: niri or its Steam window is unavailable (use --full-screen to capture the whole screen)'
     window_id, window_size = main
     saved, clip_note = gui_clipboard_save(env)
+    started = []
+
+    def shoot():
+        try:
+            result = subprocess.run([shutil.which('niri'), 'msg', 'action', 'screenshot-window', '--id', str(window_id),
+                                     '--path', str(target.resolve())], capture_output=True, encoding='utf-8',
+                                    errors='replace', timeout=15, env=env)
+        except (OSError, subprocess.SubprocessError) as error:
+            return None, 'niri screenshot-window failed: %s' % error
+        if result.returncode != 0:
+            return None, 'niri screenshot-window failed: %s' % (result.stderr.strip()[:120] or 'exit %d' % result.returncode)
+        started.append(True)
+        deadline = time.monotonic() + 5  # the action is asynchronous
+        while time.monotonic() < deadline and not (target.is_file() and target.stat().st_size > 0):
+            time.sleep(0.2)
+        private(target)
+        size = gui_png_size(target) if target.is_file() else None
+        if size is None:
+            return None, 'niri did not write a PNG to %s' % target
+        return target, 'saved, window only, %dx%d px (niri window %dx%d)' % (size + tuple(window_size))
+
     try:
-        result = subprocess.run([shutil.which('niri'), 'msg', 'action', 'screenshot-window', '--id', str(window_id),
-                                 '--path', str(target.resolve())], capture_output=True, text=True,
-                                timeout=15, env=env)
-    except (OSError, subprocess.SubprocessError) as error:
-        return None, 'niri screenshot-window failed: %s' % error
-    if result.returncode != 0:
-        return None, 'niri screenshot-window failed: %s' % (result.stderr.strip()[:120] or 'exit %d' % result.returncode)
-    deadline = time.monotonic() + 5  # the action is asynchronous
-    while time.monotonic() < deadline and not (target.is_file() and target.stat().st_size > 0):
-        time.sleep(0.2)
-    if saved is not None:
-        clip_note = gui_clipboard_restore(saved, env)
-    size = gui_png_size(target) if target.is_file() else None
-    extra = '; ' + clip_note if clip_note else ''
-    if size is None:
-        return None, 'niri did not write a PNG to %s%s' % (target, extra)
-    return target, 'saved, window only, %dx%d px (niri window %dx%d)%s' % (size + tuple(window_size) + (extra,))
+        with gui_sigterm_as_exit():
+            path, message = shoot()
+    finally:
+        if saved is not None:  # always: failure, Ctrl-C and SIGTERM included
+            clip_note = gui_clipboard_restore(saved, env, wait=bool(started))
+    return path, message + ('; ' + clip_note if clip_note else '')
 
 
 def gui_install_hint(stream=None):
@@ -754,6 +852,9 @@ def gui_library_compare(saved, current, common=False):
     lists (the visible window moves with the scroll position)."""
     import difflib
     a, b = list(saved), list(current)
+    if not a or not b:  # nothing on a side proves nothing: two empty captures are not "the same"
+        return False, ['no game names on the %s side: the library could not be read, so there is nothing to compare'
+                       % ('saved' if not a else 'current')]
     if common:
         shared = set(a) & set(b)
         if not shared:
@@ -784,6 +885,8 @@ def gui_library(options):
                 order = gui_library_order(tree) if tree else None
                 if order:
                     break
+    if order is not None and not order['names']:
+        order = None  # a list with no rows (still loading) is not a reading
     if order is None:
         print('FAIL: the Library list is not showing%s (open the Library tab or pass --open)'
               % (': %s' % error if error else ''), file=sys.stderr)
@@ -791,7 +894,7 @@ def gui_library(options):
     stamp = time.strftime('%Y-%m-%dT%H:%M:%S')
     if getattr(options, 'save', None):
         try:
-            write_json_file(Path(options.save), dict(order, savedAt=stamp))
+            gui_private_write_json(Path(options.save), dict(order, savedAt=stamp))
         except OSError as problem:
             print('could not save: %s' % problem, file=sys.stderr)
             return 1
@@ -804,7 +907,8 @@ def gui_library(options):
         same, lines = gui_library_compare(saved['names'], order['names'], getattr(options, 'common', False))
         if same:
             print('library order matches %s (%d rows%s)' % (
-                options.compare, order['rendered'], ', relative order of shared names' if options.common else ''))
+                options.compare, order['rendered'],
+                ', relative order of shared names' if getattr(options, 'common', False) else ''))
         else:
             print('FAIL: library order differs from %s' % options.compare, file=sys.stderr)
             print('\n'.join(lines), file=sys.stderr)
@@ -1037,8 +1141,7 @@ def gui_verify_run(options, sleep, launched, summary=None):
     path = Path(getattr(options, 'report', None)
                 or luna_tools_dir() / 'gui-reports' / ('gui-verify-%s.md' % stamp))
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(gui_report_markdown(report), encoding='utf-8')
+        gui_private_write(path, gui_report_markdown(report))
         print('report : %s' % path)
     except OSError as error:
         print('could not write the report: %s' % error, file=sys.stderr)

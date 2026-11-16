@@ -75,6 +75,13 @@ covered: other compositors than niri. Fleet hosts: `luna fleet gui [--verify]` i
 hermetically tested (`tests/test_fleet.py`, mocked ssh), but NOT yet confirmed against a real
 remote host with a running accessible Steam (and `gui` session discovery over non-interactive SSH is unproven).
 
+Review-fix coverage (all hermetic: temp HOME, fake `/proc`, fake niri/wl-clipboard, local loopback HTTP):
+`tests/test_proton.py` (symlinked tool dirs, unreadable `config.vdf`, fail-closed process scan, Steam re-check before
+rename/delete, symlink-chain tar escapes vs legitimate internal links, malformed manifest, non-UTF-8 files),
+`tests/test_gui_check.py` (empty/unreadable/CDP-lost restart compare, stable-order settle, clipboard PNG and SIGTERM
+restore, 0600/0700 permissions, `watch` unreadable streak, empty-baseline refusal) and `tests/test_live_probe.py`
+(redirect and non-loopback refusal, zero-row library, `--save` refusal/permissions). Not run against a real Steam.
+
 ## Evidence requirements
 
 Record the environment, the commands, the observed output and any screenshot.

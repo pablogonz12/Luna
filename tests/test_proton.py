@@ -422,6 +422,155 @@ class ProtonSafetyTest(ProtonTest):
         self.assertTrue((self.tools / 'GE-Proton9-2').exists())
         self.assertEqual(luna.proton_remove('9-3'), 0)
 
+    # ---- review findings 5-9, 11 -------------------------------------------------------
+
+    def run_quiet(self, func, *args, **kwargs):
+        with mock.patch('sys.stdout', new=io.StringIO()) as out:
+            code = func(*args, **kwargs)
+        return code, out.getvalue()
+
+    def test_symlinked_tool_dir_is_never_followed_or_deleted(self):
+        outside = Path(self.temp.name) / 'outside'
+        outside.mkdir()
+        (outside / 'precious').write_text('keep')
+        (outside / 'version').write_text('1 GE-Proton9-2\n')
+        os.symlink(str(outside), str(self.tools / 'GE-Proton9-2'))
+        self.tool('GE-Proton9-3')
+        code, _ = self.run_quiet(luna.proton_remove, '9-2', force=True)
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        code, out = self.run_quiet(luna.proton_prune, 1)
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertIn('symlink', out)
+        self.assertTrue((self.tools / 'GE-Proton9-2').is_symlink())
+        self.assertEqual((outside / 'precious').read_text(), 'keep')
+
+    def test_rmtree_failure_is_reported_not_a_traceback(self):
+        self.tool('GE-Proton9-2')
+        with mock.patch.object(luna.shutil, 'rmtree', side_effect=OSError('read-only')):
+            code, out = self.run_quiet(luna.proton_remove, '9-2')
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertIn('read-only', out)
+
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root ignores file modes')
+    def test_remove_refuses_when_config_is_unreadable_unless_forced(self):
+        self.tool('GE-Proton9-2')
+        self.tool('GE-Proton9-3')
+        config = self.steam / 'config/config.vdf'
+        os.chmod(str(config), 0)
+        self.addCleanup(os.chmod, str(config), 0o644)
+        code, out = self.run_quiet(luna.proton_remove, '9-2')
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertIn('cannot read', out)
+        self.assertTrue((self.tools / 'GE-Proton9-2').exists())
+        self.assertEqual(self.run_quiet(luna.proton_remove, '9-2', force=True)[0], 0)
+
+    def test_install_rechecks_steam_right_before_the_rename(self):
+        self.serve(self.tarball())
+        with mock.patch.object(luna, 'proton_busy_reason', side_effect=['', 'Steam is running']):
+            code, _ = self.run_quiet(luna.proton_install, 'latest')
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertEqual([p.name for p in self.tools.iterdir() if not p.name.startswith('.')], [])
+
+    def test_remove_rechecks_steam_right_before_the_delete(self):
+        self.tool('GE-Proton9-2')
+        with mock.patch.object(luna, 'proton_busy_reason', return_value='Steam is running'):
+            self.assertEqual(self.run_quiet(luna.proton_remove, '9-2')[0], luna.EXIT_REFUSED)
+        self.assertTrue((self.tools / 'GE-Proton9-2').exists())
+
+    def test_unlistable_process_table_fails_closed(self):
+        self.tool('GE-Proton9-2')
+        self.proc.rmdir()                                  # LUNA_PROC_DIR points at nothing
+        code, out = self.run_quiet(luna.proton_remove, '9-2', force=True)
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertIn('cannot tell whether Steam is running', out)
+        self.assertTrue((self.tools / 'GE-Proton9-2').exists())
+
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root ignores file modes')
+    def test_unreadable_process_entry_fails_closed(self):
+        self.tool('GE-Proton9-2')
+        self.fake_proc(55, 'bash', 'bash')
+        os.chmod(str(self.proc / '55/cmdline'), 0)
+        code, _ = self.run_quiet(luna.proton_remove, '9-2', force=True)
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertTrue((self.tools / 'GE-Proton9-2').exists())
+
+    def test_steam_found_by_argv0_when_comm_differs(self):
+        self.fake_proc(61, 'SteamRuntime', '/home/u/.steam/steam/ubuntu12_32/steam -foo')
+        self.assertIn('Steam is running', luna.proton_busy_reason())
+
+    def test_proc_override_is_ignored_for_a_real_home_steam(self):
+        import pwd
+        real = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        with mock.patch.object(luna, 'home', lambda: real):
+            self.assertEqual(luna.proton_proc_dir(), '/proc')
+        self.assertEqual(luna.proton_proc_dir(), str(self.proc))
+
+    def tar_with(self, members):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as archive:
+            for name, kind, link in members:
+                info = tarfile.TarInfo(name)
+                if kind == 'sym':
+                    info.type, info.linkname = tarfile.SYMTYPE, link
+                    archive.addfile(info)
+                elif kind == 'dir':
+                    info.type = tarfile.DIRTYPE
+                    archive.addfile(info)
+                else:
+                    info.size = 1
+                    archive.addfile(info, io.BytesIO(b'x'))
+        buf.seek(0)
+        return tarfile.open(fileobj=buf, mode='r:gz')
+
+    def test_extract_rejects_a_symlink_chain_that_escapes(self):
+        dest = Path(self.temp.name) / 'ex'
+        dest.mkdir()
+        archive = self.tar_with([('GE', 'dir', None), ('GE/a', 'sym', '../..'), ('GE/a/x', 'file', None)])
+        with self.assertRaises(ValueError):
+            luna._proton_safe_extract(archive, str(dest))
+        self.assertFalse((Path(self.temp.name) / 'x').exists())
+        self.assertEqual(list(dest.iterdir()), [])
+
+    def test_extract_rejects_escape_through_a_link_to_a_link(self):
+        dest = Path(self.temp.name) / 'ex2'
+        dest.mkdir()
+        archive = self.tar_with([('GE', 'dir', None), ('GE/up', 'sym', '..'), ('GE/up2', 'sym', 'up/..'),
+                                 ('GE/up2/y', 'file', None)])
+        with self.assertRaises(ValueError):
+            luna._proton_safe_extract(archive, str(dest))
+
+    def test_extract_keeps_legitimate_internal_links(self):
+        dest = Path(self.temp.name) / 'ex3'
+        dest.mkdir()
+        archive = self.tar_with([('GE', 'dir', None), ('GE/lib', 'dir', None), ('GE/lib/f', 'file', None),
+                                 ('GE/lib64', 'sym', 'lib'), ('GE/files', 'dir', None),
+                                 ('GE/files/l', 'sym', '../lib/f')])
+        luna._proton_safe_extract(archive, str(dest))
+        self.assertTrue((dest / 'GE/lib64').is_symlink())
+        self.assertEqual((dest / 'GE/files/l').read_text(), 'x')
+
+    def test_malformed_manifest_is_reported_not_a_traceback(self):
+        self.tool('GE-Proton9-2')
+        path = luna.proton_manifest_path('GE-Proton9-2')
+        for bad in ({'version': 1, 'files': {'proton': 'oops'}}, {'version': 1, 'files': {'proton': [1]}},
+                    {'version': 1, 'files': {}, 'links': ['x']}, {'version': 1, 'files': {'p': ['3', 'h']}}):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(bad))
+            self.assertEqual(luna.proton_manifest_state('GE-Proton9-2'), 'unreadable')
+            code, out = self.run_quiet(luna.proton_verify, '9-2')
+            self.assertEqual(code, 1)
+            self.assertIn('manifest unreadable', out)
+            self.assertEqual(luna.proton_status_data()['tools'][0]['manifest'], False)
+            self.assertIn('proton.manifest-unreadable', [f['id'] for f in luna._doctor_proton()])
+        with self.assertRaises(ValueError):
+            luna.proton_compare(str(self.tools / 'GE-Proton9-2'), {'proton': 'oops'}, {})
+        self.assertEqual(luna.proton_manifest_state('GE-Proton9-3'), 'missing')
+
+    def test_non_utf8_version_file_does_not_crash_listing(self):
+        self.tool('GE-Proton9-2')
+        (self.tools / 'GE-Proton9-2/version').write_bytes(b'1 GE-\xff\xfe\n')
+        self.assertEqual([t['name'] for t in luna.proton_installed()], ['GE-Proton9-2'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -6046,7 +6046,7 @@ def proton_installed():
     for path in entries:
         version = path.name
         try:
-            fields = (path / 'version').read_text().split()
+            fields = (path / 'version').read_text(errors='replace').split()
             if len(fields) >= 2:
                 version = fields[-1]
         except OSError:
@@ -6054,12 +6054,13 @@ def proton_installed():
         internal = []
         try:
             internal = re.findall(r'^\s{0,6}"([^"]+)"\s*(?://.*)?$\s*\{',
-                                  (path / 'compatibilitytool.vdf').read_text().split('"compat_tools"', 1)[-1],
+                                  (path / 'compatibilitytool.vdf').read_text(errors='replace').split('"compat_tools"', 1)[-1],
                                   re.M)
         except OSError:
             pass
-        tools.append({'name': path.name, 'version': version, 'internal': internal,
-                      'size': _proton_dir_size(path), 'path': str(path)})
+        link = path.is_symlink()
+        tools.append({'name': path.name, 'version': version, 'internal': internal, 'symlink': link,
+                      'size': 0 if link else _proton_dir_size(path), 'path': str(path)})
     tools.sort(key=lambda t: proton_version_key(t['name']), reverse=True)
     return tools
 
@@ -6202,11 +6203,32 @@ def proton_manifest_path(name):
     return proton_manifest_dir() / (name + '.json')
 
 
+def _proton_manifest_valid(data, size_optional=False):
+    """True when `data` has the exact shape proton_compare relies on."""
+    if not (isinstance(data, dict) and data.get('version') == PROTON_MANIFEST_VERSION):
+        return False
+    files, links = data.get('files'), data.get('links', {})
+    if not isinstance(files, dict) or not isinstance(links, dict):
+        return False
+    for rel, entry in files.items():
+        if not (isinstance(rel, str) and isinstance(entry, list) and len(entry) == 2
+                and ((isinstance(entry[0], int) and not isinstance(entry[0], bool)) or (size_optional and entry[0] is None))
+                and isinstance(entry[1], str)):
+            return False
+    return all(isinstance(k, str) and isinstance(v, str) for k, v in links.items())
+
+
+def proton_manifest_state(name):
+    """'ok' | 'missing' | 'unreadable' (present but malformed, or not valid JSON)."""
+    path = proton_manifest_path(name)
+    if not os.path.lexists(str(path)):
+        return 'missing'
+    return 'ok' if _proton_manifest_valid(read_json_file(path)) else 'unreadable'
+
+
 def proton_manifest_load(name):
     data = read_json_file(proton_manifest_path(name))
-    if isinstance(data, dict) and data.get('version') == PROTON_MANIFEST_VERSION and isinstance(data.get('files'), dict):
-        return data
-    return None
+    return data if _proton_manifest_valid(data) else None
 
 
 def proton_ge_tools(tools=None):
@@ -6224,18 +6246,73 @@ def proton_multi_warning(tools=None):
             'luna proton prune (or luna proton remove VERSION).' % (len(ge), ', '.join(t['name'] for t in ge)))
 
 
+def proton_proc_dir():
+    """/proc, unless a test points LUNA_PROC_DIR at a look-alike AND the Steam home is not
+    under the real user's home: on a real Steam install the override is ignored, so it can
+    never hide a running Steam from a destructive command."""
+    override = os.environ.get('LUNA_PROC_DIR')
+    if not override:
+        return '/proc'
+    try:
+        import pwd
+        real_home = os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError, OSError):
+        return '/proc'
+    steam = os.path.realpath(str(steam_home()))
+    return '/proc' if steam == real_home or steam.startswith(real_home + os.sep) else override
+
+
+def _proton_config_unreadable():
+    """Path of config.vdf when it exists but cannot be read (mappings unknown), else ''."""
+    config = steam_home() / 'config/config.vdf'
+    if not os.path.lexists(str(config)):
+        return ''
+    if not os.access(str(config), os.R_OK):
+        return str(config)
+    try:
+        with open(str(config), 'rb') as handle:
+            handle.read(1)
+    except FileNotFoundError:
+        return ''
+    except OSError:
+        return str(config)
+    return ''
+
+
+def _proton_remove_tree(tool):
+    """Delete one tool dir + manifest after the final safety checks. '' on success, else why not."""
+    path = tool['path']
+    if os.path.islink(path):
+        return 'it is a symlink; never followed or deleted here'
+    busy = proton_busy_reason(path)
+    if busy:
+        return busy
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        return 'could not delete it: %s' % error
+    try:
+        proton_manifest_path(tool['name']).unlink()
+    except OSError:
+        pass
+    return ''
+
+
 def proton_busy_reason(path=None, proc=None):
     """Why a tool directory must not be replaced or removed right now, or ''.
     Steam up (it owns the shared prefix links) or any wine process running from `path`."""
-    proc = proc or live_proc_dir()
-    if live_steam_running(proc):
+    proc = proc or proton_proc_dir()
+    scan = steam_process_scan(proc)
+    if scan['running']:
         return 'Steam is running; close it completely first (its prefix links point into the tool directory)'
+    if scan['error']:  # fail CLOSED: an unreadable process table is not "Steam is not running"
+        return 'cannot tell whether Steam is running (%s); not touching the tool directory' % scan['error']
     if path:
         root = os.path.realpath(str(path))
         try:
             entries = [e for e in Path(proc).iterdir() if e.name.isdigit()]
-        except OSError:
-            return ''
+        except OSError as error:
+            return 'cannot list the processes (%s); not touching the tool directory' % error
         uid = os.getuid()
         for entry in entries:
             try:
@@ -6246,8 +6323,10 @@ def proton_busy_reason(path=None, proc=None):
                 if not hit:
                     hit = any(a.startswith(root + os.sep) or a == root for a in
                               (entry / 'cmdline').read_bytes().decode('utf-8', 'replace').split('\0'))
-            except OSError:
-                continue
+            except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+                continue  # exited while we looked
+            except OSError as error:
+                return 'cannot inspect process %s (%s); not touching the tool directory' % (entry.name, error)
             if hit:
                 return 'a process (pid %s) is running from %s; stop it first' % (entry.name, path)
     return ''
@@ -6319,7 +6398,10 @@ def proton_build_manifest(root, name, source, tag=''):
 
 def proton_compare(root, expected, expected_links=None, label='verifying'):
     """Compare a tree with {rel: [size|None, sha256]} (+ optional {rel: link target}).
-    Returns {'changed': [], 'missing': [], 'extra': [], 'checked': n}."""
+    Returns {'changed': [], 'missing': [], 'extra': [], 'checked': n}. ValueError on a bad shape."""
+    if not _proton_manifest_valid({'version': PROTON_MANIFEST_VERSION, 'files': expected,
+                                   'links': {} if expected_links is None else expected_links}, size_optional=True):
+        raise ValueError('malformed manifest data')
     files, links = _proton_walk(root)
     changed, missing = [], []
     todo = [rel for rel in sorted(expected) if rel in files]
@@ -6419,6 +6501,11 @@ def proton_verify(version=None, rebuild=False, against=None):
         if rebuild:
             code = _proton_rebuild(tool)
             ok = ok and code == EXIT_OK
+            continue
+        if proton_manifest_state(name) == 'unreadable':
+            print('verify    : %s: manifest unreadable or malformed (%s); it is not trusted. Run: '
+                  'luna proton verify %s --rebuild' % (name, proton_manifest_path(name), name))
+            ok = False
             continue
         manifest = proton_manifest_load(name)
         if not manifest:
@@ -6625,21 +6712,65 @@ def proton_status(as_json):
     return EXIT_OK
 
 
+def _proton_virtual_resolve(links, name, limit=40):
+    """Resolve `name` (relative to the extraction root) through the symlinks the archive has
+    created so far, in a virtual filesystem. Returns the normalised parts, or None when the
+    path escapes the root. `links` maps a normalised member path (tuple) to its target text."""
+    pending = [p for p in name.split('/') if p not in ('', '.')]
+    done = []
+    hops = 0
+    while pending:
+        part = pending.pop(0)
+        if part == '..':
+            if not done:
+                return None
+            done.pop()
+            continue
+        done.append(part)
+        target = links.get(tuple(done))
+        if target is not None:
+            hops += 1
+            if hops > limit or target.startswith('/'):
+                return None
+            done.pop()
+            pending = [p for p in target.split('/') if p not in ('', '.')] + pending
+    return done
+
+
 def _proton_safe_extract(archive, dest):
-    root = os.path.realpath(dest)
+    """Validate every member against a virtual filesystem (so `a -> ../..` followed by `a/x`
+    is caught), then extract with the tarfile 'data' filter where Python has it."""
+    links = {}
     for member in archive.getmembers():
-        target = os.path.realpath(os.path.join(root, member.name))
-        if not (target == root or target.startswith(root + os.sep)):
-            raise ValueError('unsafe path in archive: %s' % member.name)
-        if member.issym() and os.path.isabs(member.linkname):
-            raise ValueError('absolute symlink in archive: %s' % member.name)
-        if member.islnk():
-            link = os.path.realpath(os.path.join(root, member.linkname))
-            if not link.startswith(root + os.sep):
-                raise ValueError('unsafe hard link in archive: %s' % member.name)
         if member.isdev():
             raise ValueError('device node in archive: %s' % member.name)
-    archive.extractall(dest)
+        if member.name.startswith('/'):
+            raise ValueError('unsafe path in archive: %s' % member.name)
+        parent = _proton_virtual_resolve(links, os.path.dirname(member.name.rstrip('/')))
+        if parent is None:
+            raise ValueError('unsafe path in archive: %s' % member.name)
+        leaf = os.path.basename(member.name.rstrip('/'))
+        if leaf in ('', '.', '..'):
+            if member.isdir() and leaf in ('', '.'):
+                continue
+            raise ValueError('unsafe path in archive: %s' % member.name)
+        here = tuple(parent) + (leaf,)
+        if member.issym():
+            if os.path.isabs(member.linkname):
+                raise ValueError('absolute symlink in archive: %s' % member.name)
+            if _proton_virtual_resolve(links, '/'.join(parent + [member.linkname])) is None:
+                raise ValueError('symlink escapes the archive: %s -> %s' % (member.name, member.linkname))
+            links[here] = member.linkname
+        elif member.islnk():
+            if os.path.isabs(member.linkname) or _proton_virtual_resolve(links, member.linkname) is None:
+                raise ValueError('unsafe hard link in archive: %s' % member.name)
+            links.pop(here, None)
+        else:
+            links.pop(here, None)
+    if hasattr(tarfile, 'data_filter'):
+        archive.extractall(dest, filter='data')
+    else:
+        archive.extractall(dest)
 
 
 def _proton_download(url, destination, total=0, label=None):
@@ -6761,6 +6892,13 @@ def proton_install(version='latest', dry_run=False):
             print('proton    : %s appeared meanwhile; leaving it alone' % top.name)
             return 1
         manifest = proton_build_manifest(top, top.name, 'install', tag)  # from the sha512-verified tree
+        busy = proton_busy_reason()  # the download took minutes: Steam may have started meanwhile
+        if busy:
+            print('proton    : refusing to install: %s' % busy)
+            return EXIT_REFUSED
+        if (base / top.name).exists() or os.path.islink(str(base / top.name)):
+            print('proton    : %s appeared meanwhile; leaving it alone' % top.name)
+            return 1
         os.rename(str(top), str(base / top.name))
         name = top.name
     except (OSError, ValueError, tarfile.TarError) as error:
@@ -6790,6 +6928,14 @@ def proton_remove(version, force=False, dry_run=False):
     if not tool:
         print('proton    : %s is not installed' % name)
         return 1
+    if tool.get('symlink'):
+        print('proton    : refusing: %s is a symlink (%s); it is never followed or deleted here' % (name, tool['path']))
+        return EXIT_REFUSED
+    unreadable = _proton_config_unreadable()
+    if unreadable and not force:
+        print('proton    : refusing: cannot read %s, so games mapped to %s cannot be detected; use --force'
+              % (unreadable, name))
+        return EXIT_REFUSED
     apps = proton_mapped_to(tool)
     if apps and not force:
         print('proton    : refusing: %d game(s) are mapped to %s (appid %s); use --force'
@@ -6798,15 +6944,10 @@ def proton_remove(version, force=False, dry_run=False):
     if dry_run:
         print('proton    : would remove %s' % name)
         return EXIT_OK
-    busy = proton_busy_reason(tool['path'])
-    if busy:
-        print('proton    : refusing to remove %s: %s' % (name, busy))
+    problem = _proton_remove_tree(tool)
+    if problem:
+        print('proton    : refusing to remove %s: %s' % (name, problem))
         return EXIT_REFUSED
-    shutil.rmtree(tool['path'])
-    try:
-        proton_manifest_path(tool['name']).unlink()
-    except OSError:
-        pass
     print('proton    : removed %s' % name)
     return EXIT_OK
 
@@ -6817,9 +6958,9 @@ def proton_prune(keep, dry_run=False):
     if keep < 0:
         print('proton    : --keep must be >= 0')
         return 1
-    config = steam_home() / 'config/config.vdf'
-    if config.exists() and not os.access(str(config), os.R_OK):
-        print('proton    : cannot read %s, so mapped versions cannot be protected; nothing pruned' % config)
+    unreadable = _proton_config_unreadable()
+    if unreadable:
+        print('proton    : cannot read %s, so mapped versions cannot be protected; nothing pruned' % unreadable)
         return EXIT_REFUSED
     mappings = proton_mappings()
     ge = proton_ge_tools()
@@ -6837,19 +6978,18 @@ def proton_prune(keep, dry_run=False):
         apps = proton_mapped_to(tool, mappings)
         if apps:
             print('proton    : keeping %s (mapped by %d game(s))' % (tool['name'], len(apps)))
+        elif tool.get('symlink'):
+            print('proton    : not removing %s: it is a symlink (%s); remove the link yourself if you mean to'
+                  % (tool['name'], tool['path']))
+            refused = True
         elif dry_run:
             print('proton    : would remove %s' % tool['name'])
         else:
-            busy = proton_busy_reason(tool['path'])
-            if busy:
-                print('proton    : not removing %s: %s' % (tool['name'], busy))
+            problem = _proton_remove_tree(tool)
+            if problem:
+                print('proton    : not removing %s: %s' % (tool['name'], problem))
                 refused = True
                 continue
-            shutil.rmtree(tool['path'])
-            try:
-                proton_manifest_path(tool['name']).unlink()
-            except OSError:
-                pass
             print('proton    : removed %s' % tool['name'])
     warning = proton_multi_warning()
     if warning and not dry_run:
@@ -6879,7 +7019,11 @@ def _doctor_proton():
     for item in proton_health():
         found.append(_finding(item['id'], item['severity'], item['message'], item['fix']))
     for tool in proton_ge_tools():
-        if not proton_manifest_load(tool['name']):
+        if proton_manifest_state(tool['name']) == 'unreadable':
+            found.append(_finding('proton.manifest-unreadable', 'warn',
+                                  '%s: the integrity manifest is unreadable or malformed, so it is not trusted' % tool['name'],
+                                  'luna proton verify %s --rebuild' % tool['name']))
+        elif not proton_manifest_load(tool['name']):
             found.append(_finding('proton.no-manifest', 'info',
                                   '%s has no integrity manifest, so corruption cannot be proven' % tool['name'],
                                   'luna proton verify %s --rebuild' % tool['name']))
@@ -7310,6 +7454,44 @@ def gui_enabled():
     return os.environ.get('LUNA_GUI_CHECKS', '1') != '0'
 
 
+def gui_private_mkdir(path):
+    """mkdir -p where every directory created HERE is 0700 (minus umask); a directory that
+    already exists is never touched, so a user's own folder keeps its permissions."""
+    path = Path(path)
+    missing = []
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        missing.append(probe)
+        probe = probe.parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(str(directory), 0o700)
+        except FileExistsError:
+            if not directory.is_dir():
+                raise
+
+
+def gui_private_write(path, text):
+    """Write a text file as 0600 (new parents 0700), atomically: a temp file in the same
+    directory is renamed over `path`, so a symlink at `path` is replaced, never followed."""
+    path = Path(path)
+    gui_private_mkdir(path.parent)
+    fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '.', dir=str(path.parent))  # mkstemp is 0600
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.replace(tmp, str(path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return path
+
+
+def gui_private_write_json(path, data):
+    return gui_private_write(path, json.dumps(data, indent=2, sort_keys=True) + '\n')
+
+
 def gui_session_env(environ=None, runtime_dir=None, x11_dir='/tmp/.X11-unix'):
     """A copy of the environment with the display variables Steam and
     agent-desktop need. Values already set are never overridden; missing ones
@@ -7355,7 +7537,7 @@ def gui_run(args, timeout=GUI_TIMEOUT, env=None):
     if not tool:
         return {'ok': False, 'data': None, 'error': '%s is not installed' % GUI_TOOL, 'unavailable': True}
     try:
-        result = subprocess.run([tool] + list(args), capture_output=True, text=True,
+        result = subprocess.run([tool] + list(args), capture_output=True, encoding='utf-8', errors='replace',
                                 timeout=timeout, env=env or gui_session_env())
     except subprocess.TimeoutExpired:
         return {'ok': False, 'data': None, 'error': '%s timed out' % GUI_TOOL, 'unavailable': False}
@@ -7405,7 +7587,7 @@ def gui_windows(timeout=GUI_TIMEOUT, env=None):
     if gui_backend(env)['name'] == 'niri':
         try:
             result = subprocess.run([niri, 'msg', '--json', 'windows'], capture_output=True,
-                                    text=True, timeout=timeout, env=env)
+                                    encoding='utf-8', errors='replace', timeout=timeout, env=env)
             windows = json.loads(result.stdout) if result.returncode == 0 else None
         except (OSError, subprocess.SubprocessError, ValueError):
             windows = None
@@ -7441,7 +7623,7 @@ def gui_find_nodes(tree, role=None, name=None, exact=True):
     wanted = (name or '').lower()
     found = []
     for node in gui_walk(tree):
-        if role and str(node.get('role', '')).lower() != role:
+        if role and str(node.get('role', '')).lower() != str(role).lower():
             continue
         label = str(node.get('name') or '').lower()
         if name is not None and not (label == wanted if exact else wanted in label):
@@ -7612,7 +7794,7 @@ def gui_process_started(proc='/proc'):
     """Epoch start time of this user's oldest Steam client process, or None."""
     root, uid, best = Path(proc), os.getuid(), None
     try:
-        btime = next(int(line.split()[1]) for line in (root / 'stat').read_text().splitlines() if line.startswith('btime '))
+        btime = next(int(line.split()[1]) for line in (root / 'stat').read_text(errors='replace').splitlines() if line.startswith('btime '))
         entries = list(root.iterdir())
     except (OSError, StopIteration, ValueError):
         return None
@@ -7629,7 +7811,7 @@ def gui_process_started(proc='/proc'):
             argv = (entry / 'cmdline').read_bytes().split(b'\0')
             if os.path.basename(argv[0].decode('utf-8', 'replace')) not in ('steam', 'steam.sh'):
                 continue
-            text = (entry / 'stat').read_text()
+            text = (entry / 'stat').read_text(errors='replace')
             started = btime + int(text[text.rindex(')') + 2:].split()[19]) / float(hertz)
         except (OSError, ValueError, IndexError):
             continue
@@ -7672,30 +7854,9 @@ def gui_exit_hint(since):
 
 def gui_steam_state(proc='/proc'):
     """(running, accessible): whether this user's Steam runs and whether it was
-    started with the accessibility flags (read from /proc cmdlines)."""
-    running = accessible = False
-    try:
-        entries = list(Path(proc).iterdir())
-    except OSError:
-        return False, False
-    uid = os.getuid()
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            if entry.stat().st_uid != uid:
-                continue
-            argv = (entry / 'cmdline').read_bytes().split(b'\0')
-        except OSError:
-            continue
-        program = os.path.basename(argv[0].decode('utf-8', 'replace')) if argv else ''
-        if program not in ('steam', 'steamwebhelper', 'steam.sh'):
-            continue
-        running = True
-        args = [a.decode('utf-8', 'replace') for a in argv[1:]]
-        if any(a in GUI_ACCESS_ARGS or a.startswith('--force-renderer-accessibility') for a in args):
-            accessible = True
-    return running, accessible
+    started with the accessibility flags. Uses the one shared detector (steam_process_scan)."""
+    scan = steam_process_scan(proc)
+    return scan['running'], scan['accessible']
 
 
 def gui_png_size(path):
@@ -7717,8 +7878,8 @@ def gui_main_window_id(env):
     if not niri or not env.get('NIRI_SOCKET'):
         return None
     try:
-        result = subprocess.run([niri, 'msg', '--json', 'windows'], capture_output=True, text=True,
-                                timeout=GUI_TIMEOUT, env=env)
+        result = subprocess.run([niri, 'msg', '--json', 'windows'], capture_output=True,
+                                encoding='utf-8', errors='replace', timeout=GUI_TIMEOUT, env=env)
         windows = json.loads(result.stdout) if result.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
@@ -7735,6 +7896,9 @@ def gui_main_window_id(env):
 
 
 GUI_CLIP_PREFER = ('text/plain;charset=utf-8', 'image/png')
+# wl-copy offers the usual text aliases itself when it serves one text type
+GUI_CLIP_TEXT_TYPES = frozenset({'text/plain', 'text/plain;charset=utf-8', 'UTF8_STRING', 'STRING', 'TEXT',
+                                 'COMPOUND_TEXT'})
 
 
 def gui_clip_tools():
@@ -7753,9 +7917,35 @@ def gui_clip_types(env):
     return [] if b'nothing is copied' in result.stderr.lower() else None
 
 
+def gui_clip_read(env, paste, types):
+    """(type, bytes) of the preferred offered type, or None when wl-paste fails."""
+    kind = next((t for t in GUI_CLIP_PREFER if t in types), types[0])
+    try:
+        result = subprocess.run([paste, '--no-newline', '--type', kind], capture_output=True, timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (kind, result.stdout) if result.returncode == 0 else None
+
+
+def gui_clip_fingerprint(env):
+    """What the clipboard holds, by content: (types, sha256 of the preferred type), or None."""
+    paste = shutil.which('wl-paste')
+    types = gui_clip_types(env) if paste else None
+    if types is None:
+        return None
+    if not types:
+        return ((), '')
+    got = gui_clip_read(env, paste, types)
+    return (tuple(types), hashlib.sha256(got[1]).hexdigest() if got else '?')
+
+
 def gui_clipboard_save(env):
-    """(saved, note). saved is {'type', 'data'} or {'empty': True}, or None when it cannot
-    be kept (then `note` says why). niri's screenshot-window overwrites the clipboard."""
+    """(saved, note). saved is {'type', 'data', 'fingerprint', 'dropped'} or {'empty': True,
+    'fingerprint'}, or None when it cannot be kept (then `note` says why). niri's
+    screenshot-window overwrites the clipboard. wl-copy serves exactly ONE MIME type per
+    call, so only the preferred offered type is preserved (text/plain;charset=utf-8, else
+    image/png, else the first); `dropped` lists the other offered types, apart from the
+    text aliases wl-copy adds on its own."""
     paste, copy = gui_clip_tools()
     if not paste or not copy:
         return None, 'clipboard not restored: wl-clipboard (wl-paste/wl-copy) is not installed'
@@ -7763,32 +7953,63 @@ def gui_clipboard_save(env):
     if types is None:
         return None, 'clipboard not restored: wl-paste could not read it'
     if not types:
-        return {'empty': True}, ''
-    kind = next((t for t in GUI_CLIP_PREFER if t in types), types[0])
-    try:
-        result = subprocess.run([paste, '--no-newline', '--type', kind], capture_output=True, timeout=10, env=env)
-    except (OSError, subprocess.SubprocessError):
+        return {'empty': True, 'fingerprint': ((), '')}, ''
+    got = gui_clip_read(env, paste, types)
+    if got is None:
         return None, 'clipboard not restored: wl-paste failed'
-    if result.returncode != 0:
-        return None, 'clipboard not restored: wl-paste failed'
-    return {'type': kind, 'data': result.stdout}, ''
+    kind, data = got
+    covered = GUI_CLIP_TEXT_TYPES if kind in GUI_CLIP_TEXT_TYPES else {kind}
+    return {'type': kind, 'data': data, 'fingerprint': (tuple(types), hashlib.sha256(data).hexdigest()),
+            'dropped': [t for t in types if t not in covered]}, ''
 
 
-def gui_clipboard_restore(saved, env, sleep=time.sleep):
-    """Put `saved` back once niri's image has landed on the clipboard. Returns a note
-    ('' when restored)."""
+def gui_clipboard_restore(saved, env, sleep=time.sleep, wait=True):
+    """Put `saved` back once niri's screenshot has landed on the clipboard (`wait`): it has
+    landed when the clipboard offers image/png AND its content differs from what was saved
+    (a clipboard that already held a PNG would otherwise look finished at once). Gives up
+    waiting after ~3 s and restores anyway. Returns a note ('' = fully restored)."""
     copy = shutil.which('wl-copy')
-    for _ in range(8):  # niri sets the clipboard a moment after the file appears
-        if 'image/png' in (gui_clip_types(env) or []):
-            break
-        sleep(0.2)
+    if wait:
+        for _ in range(15):
+            if 'image/png' in (gui_clip_types(env) or []) and gui_clip_fingerprint(env) != saved.get('fingerprint'):
+                break
+            sleep(0.2)
     command = [copy, '--clear'] if saved.get('empty') else [copy, '--type', saved['type']]
     try:  # wl-copy forks to serve the data: no inherited pipes, or run() would wait for it
         subprocess.run(command, input=None if saved.get('empty') else saved['data'], timeout=10, env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return 'clipboard not restored: wl-copy failed'
+    if saved.get('dropped'):
+        return 'clipboard restored as %s only; not preserved: %s' % (saved['type'], ', '.join(saved['dropped']))
     return ''
+
+
+@contextlib.contextmanager
+def gui_sigterm_as_exit():
+    """For the duration of the block SIGTERM raises SystemExit(143) so `finally` clauses run
+    (the previous handler is put back afterwards). Only in the main thread, and never over
+    an ignored SIGTERM."""
+    import signal
+    import threading
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        try:
+            previous = signal.getsignal(signal.SIGTERM)
+            if previous == signal.SIG_IGN:
+                previous = None
+            else:
+                def handler(signum, frame):
+                    raise SystemExit(128 + signum)
+                signal.signal(signal.SIGTERM, handler)
+        except (ValueError, OSError):
+            previous = None
+    try:
+        yield
+    finally:
+        if previous is not None:
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
 
 
 def gui_capture(directory, name, full_screen=False):
@@ -7796,23 +8017,34 @@ def gui_capture(directory, name, full_screen=False):
 
     Default: only the main Steam window, through `niri msg action screenshot-window --path`
     (never anything else on screen). When that is impossible the screenshot is skipped.
-    `full_screen` (explicit opt-in) captures everything visible with grim instead."""
+    `full_screen` (explicit opt-in) captures everything visible with grim instead.
+    Directories created here are 0700 and the PNG is 0600. niri puts its screenshot on the
+    clipboard too: the user's clipboard is restored in a `finally` (also on Ctrl-C and
+    SIGTERM while the capture runs; only one MIME type can be preserved, see
+    gui_clipboard_save)."""
     env = gui_session_env()
     target = Path(directory) / name
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        gui_private_mkdir(target.parent)
     except OSError as error:
         return None, 'screenshot skipped: %s' % error
+
+    def private(path):
+        with contextlib.suppress(OSError):
+            os.chmod(str(path), 0o600)
+
     if full_screen:
         grim = shutil.which('grim')
         if not grim:
             return None, 'grim not installed; screenshot skipped'
         try:
-            result = subprocess.run([grim, str(target)], capture_output=True, text=True, timeout=15, env=env)
+            result = subprocess.run([grim, str(target)], capture_output=True, encoding='utf-8', errors='replace',
+                                    timeout=15, env=env)
         except (OSError, subprocess.SubprocessError) as error:
             return None, 'grim failed: %s' % error
         if result.returncode != 0 or not target.is_file():
             return None, 'grim failed: %s' % (result.stderr.strip()[:120] or 'exit %d' % result.returncode)
+        private(target)
         return target, 'saved (full screen)'
     backend = gui_backend(env)
     if backend['name'] != 'niri':
@@ -7822,24 +8054,34 @@ def gui_capture(directory, name, full_screen=False):
         return None, 'no window-only screenshot: niri or its Steam window is unavailable (use --full-screen to capture the whole screen)'
     window_id, window_size = main
     saved, clip_note = gui_clipboard_save(env)
+    started = []
+
+    def shoot():
+        try:
+            result = subprocess.run([shutil.which('niri'), 'msg', 'action', 'screenshot-window', '--id', str(window_id),
+                                     '--path', str(target.resolve())], capture_output=True, encoding='utf-8',
+                                    errors='replace', timeout=15, env=env)
+        except (OSError, subprocess.SubprocessError) as error:
+            return None, 'niri screenshot-window failed: %s' % error
+        if result.returncode != 0:
+            return None, 'niri screenshot-window failed: %s' % (result.stderr.strip()[:120] or 'exit %d' % result.returncode)
+        started.append(True)
+        deadline = time.monotonic() + 5  # the action is asynchronous
+        while time.monotonic() < deadline and not (target.is_file() and target.stat().st_size > 0):
+            time.sleep(0.2)
+        private(target)
+        size = gui_png_size(target) if target.is_file() else None
+        if size is None:
+            return None, 'niri did not write a PNG to %s' % target
+        return target, 'saved, window only, %dx%d px (niri window %dx%d)' % (size + tuple(window_size))
+
     try:
-        result = subprocess.run([shutil.which('niri'), 'msg', 'action', 'screenshot-window', '--id', str(window_id),
-                                 '--path', str(target.resolve())], capture_output=True, text=True,
-                                timeout=15, env=env)
-    except (OSError, subprocess.SubprocessError) as error:
-        return None, 'niri screenshot-window failed: %s' % error
-    if result.returncode != 0:
-        return None, 'niri screenshot-window failed: %s' % (result.stderr.strip()[:120] or 'exit %d' % result.returncode)
-    deadline = time.monotonic() + 5  # the action is asynchronous
-    while time.monotonic() < deadline and not (target.is_file() and target.stat().st_size > 0):
-        time.sleep(0.2)
-    if saved is not None:
-        clip_note = gui_clipboard_restore(saved, env)
-    size = gui_png_size(target) if target.is_file() else None
-    extra = '; ' + clip_note if clip_note else ''
-    if size is None:
-        return None, 'niri did not write a PNG to %s%s' % (target, extra)
-    return target, 'saved, window only, %dx%d px (niri window %dx%d)%s' % (size + tuple(window_size) + (extra,))
+        with gui_sigterm_as_exit():
+            path, message = shoot()
+    finally:
+        if saved is not None:  # always: failure, Ctrl-C and SIGTERM included
+            clip_note = gui_clipboard_restore(saved, env, wait=bool(started))
+    return path, message + ('; ' + clip_note if clip_note else '')
 
 
 def gui_install_hint(stream=None):
@@ -8012,6 +8254,9 @@ def gui_library_compare(saved, current, common=False):
     lists (the visible window moves with the scroll position)."""
     import difflib
     a, b = list(saved), list(current)
+    if not a or not b:  # nothing on a side proves nothing: two empty captures are not "the same"
+        return False, ['no game names on the %s side: the library could not be read, so there is nothing to compare'
+                       % ('saved' if not a else 'current')]
     if common:
         shared = set(a) & set(b)
         if not shared:
@@ -8042,6 +8287,8 @@ def gui_library(options):
                 order = gui_library_order(tree) if tree else None
                 if order:
                     break
+    if order is not None and not order['names']:
+        order = None  # a list with no rows (still loading) is not a reading
     if order is None:
         print('FAIL: the Library list is not showing%s (open the Library tab or pass --open)'
               % (': %s' % error if error else ''), file=sys.stderr)
@@ -8049,7 +8296,7 @@ def gui_library(options):
     stamp = time.strftime('%Y-%m-%dT%H:%M:%S')
     if getattr(options, 'save', None):
         try:
-            write_json_file(Path(options.save), dict(order, savedAt=stamp))
+            gui_private_write_json(Path(options.save), dict(order, savedAt=stamp))
         except OSError as problem:
             print('could not save: %s' % problem, file=sys.stderr)
             return 1
@@ -8062,7 +8309,8 @@ def gui_library(options):
         same, lines = gui_library_compare(saved['names'], order['names'], getattr(options, 'common', False))
         if same:
             print('library order matches %s (%d rows%s)' % (
-                options.compare, order['rendered'], ', relative order of shared names' if options.common else ''))
+                options.compare, order['rendered'],
+                ', relative order of shared names' if getattr(options, 'common', False) else ''))
         else:
             print('FAIL: library order differs from %s' % options.compare, file=sys.stderr)
             print('\n'.join(lines), file=sys.stderr)
@@ -8295,8 +8543,7 @@ def gui_verify_run(options, sleep, launched, summary=None):
     path = Path(getattr(options, 'report', None)
                 or luna_tools_dir() / 'gui-reports' / ('gui-verify-%s.md' % stamp))
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(gui_report_markdown(report), encoding='utf-8')
+        gui_private_write(path, gui_report_markdown(report))
         print('report : %s' % path)
     except OSError as error:
         print('could not write the report: %s' % error, file=sys.stderr)
@@ -8807,8 +9054,8 @@ def live_candidate_ports(proc=None, lumen=None):
         add(os.environ['LUNA_CDP_PORT'])
         return ports
     try:
-        add((Path(lumen or lumen_root()) / 'cef_port').read_text().split()[0])
-    except (OSError, IndexError):
+        add((Path(lumen or lumen_root()) / 'cef_port').read_text(errors='replace').split()[0])
+    except (OSError, IndexError, ValueError):
         pass
     try:
         entries = list(Path(proc or live_proc_dir()).iterdir())
@@ -8833,33 +9080,77 @@ def live_candidate_ports(proc=None, lumen=None):
     return ports
 
 
-def live_http_json(port, path, timeout=LIVE_TIMEOUT):
-    """GET http://127.0.0.1:<port><path> -> parsed JSON. Raises OSError/ValueError."""
-    request = urllib.request.Request('http://%s:%d%s' % (LIVE_HOST, port, path))
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via a proxy
+LIVE_LOOPBACK = ('127.0.0.1', 'localhost', '::1')
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The debug port never redirects; following one could leave the loopback interface."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def live_http_json(port, path, timeout=LIVE_TIMEOUT, host=LIVE_HOST):
+    """GET http://127.0.0.1:<port><path> -> parsed JSON. Raises OSError/ValueError.
+    Refuses any non-loopback host and never follows a redirect (HTTP 3xx -> OSError)."""
+    if host not in LIVE_LOOPBACK:
+        raise ValueError('refusing a non-loopback DevTools host: %s' % host)
+    request = urllib.request.Request('http://%s:%d%s' % ('[::1]' if host == '::1' else host, port, path))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)  # never via a proxy
     with opener.open(request, timeout=timeout) as response:
         return json.loads(response.read(LIVE_MAX_MESSAGE).decode('utf-8', 'replace'))
 
 
-def live_steam_running(proc=None):
-    """True when this user has a steam/steamwebhelper process (reads /proc only)."""
+STEAM_PROCESS_NAMES = ('steam', 'steamwebhelper', 'steam.sh')
+
+
+def steam_process_scan(proc=None):
+    """THE Steam detector (live probe, GUI checks and the GE-Proton manager all use it).
+    {'running', 'accessible', 'error'} for this user's processes, read from /proc only. A
+    process counts when its `comm` or the basename of argv[0] is steam, steamwebhelper or
+    steam.sh. `error` is non-empty when the answer cannot be trusted (the listing failed,
+    the real /proc shows no processes, or an entry of this user could not be read for a
+    reason other than having just exited); callers that must not guess fail closed on it."""
+    root = Path(proc or live_proc_dir())
+    result = {'running': False, 'accessible': False, 'error': ''}
     try:
-        entries = list(Path(proc or live_proc_dir()).iterdir())
-    except OSError:
-        return False
+        entries = list(root.iterdir())
+    except OSError as error:
+        result['error'] = 'cannot list %s: %s' % (root, error)
+        return result
+    numeric = [e for e in entries if e.name.isdigit()]
+    if not numeric and os.path.realpath(str(root)) == '/proc':
+        result['error'] = 'no processes are visible in /proc'
+        return result
     uid = os.getuid()
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
+    for entry in numeric:
         try:
             if entry.stat().st_uid != uid:
                 continue
-            name = (entry / 'comm').read_text().strip()
-        except OSError:
+            try:
+                comm = (entry / 'comm').read_text(errors='replace').strip()
+            except FileNotFoundError:
+                comm = ''  # tests build /proc look-alikes with only a cmdline
+            argv = (entry / 'cmdline').read_bytes().split(b'\0')
+        except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+            continue  # the process exited while we looked
+        except OSError as error:
+            result['error'] = result['error'] or 'cannot read %s: %s' % (entry, error)
             continue
-        if name in ('steam', 'steamwebhelper'):
-            return True
-    return False
+        program = os.path.basename(argv[0].decode('utf-8', 'replace')) if argv else ''
+        if comm not in STEAM_PROCESS_NAMES and program not in STEAM_PROCESS_NAMES:
+            continue
+        result['running'] = True
+        args = [a.decode('utf-8', 'replace') for a in argv[1:]]
+        if any(a in GUI_ACCESS_ARGS or a.startswith('--force-renderer-accessibility') for a in args):
+            result['accessible'] = True
+    return result
+
+
+def live_steam_running(proc=None):
+    """True when this user has a Steam process (see steam_process_scan). Informational:
+    it answers False when /proc cannot be read; destructive callers use steam_process_scan."""
+    return steam_process_scan(proc)['running']
 
 
 def live_connect_info(timeout=LIVE_TIMEOUT):
@@ -9081,16 +9372,17 @@ LIVE_READ_EXPRESSIONS = {
         };
         const kids = fiber => {
           let found = null;
-          const walk = (f, budget) => {
+          const budget = {n: 0};
+          const walk = f => {
             for (; f && !found && budget.n < 4000; f = f.sibling) {
               budget.n++;
               const p = f.memoizedProps;
               if (p && Array.isArray(p.childElements) && p.childElements.length > 0) { found = p.childElements; return; }
-              if (f.child) walk(f.child, budget);
+              if (f.child) walk(f.child);
             }
           };
-          walk(fiber.child, {n: 0});
-          return found;
+          walk(fiber.child);
+          return {list: found, exhausted: !found && budget.n >= 4000};
         };
         for (const el of document.querySelectorAll('*')) {
           const key = Object.keys(el).find(k => k.startsWith('__reactFiber'));
@@ -9107,14 +9399,14 @@ LIVE_READ_EXPRESSIONS = {
               mounted++;
               sorts[p.showcase.eSortBy] = (sorts[p.showcase.eSortBy] || 0) + 1;
               if (p.showcase.eSortBy !== SORT) continue;
-              const list = kids(fiber) || [];
+              const walked = kids(fiber);
               const rows = [];
-              for (const child of list) {
+              for (const child of walked.list || []) {
                 const named = nameFrom(child);
                 const id = Number(String(child && child.key || '').replace(/^app_list_/, '')) || (named ? named[0] : 0);
                 rows.push([id, named ? named[1] : '']);
               }
-              views.push({kind: 'shelf', id: String(p.collectionId), count: rows.length,
+              views.push({kind: 'shelf', id: String(p.collectionId), count: rows.length, exhausted: walked.exhausted,
                           total: Number(node.state && node.state.nItemsDisplayed) || null, rows});
             } else if (typeName !== 'SlsLunaHltbGrid' && Array.isArray(p.childSections) && typeof p.eSortBy === 'number') {
               mounted++;
@@ -9128,7 +9420,7 @@ LIVE_READ_EXPRESSIONS = {
                 }
               }
               views.push({kind: 'grid', id: String(p.collectionId || p.strCollectionId || ''), count: rows.length,
-                          total: null, rows});
+                          exhausted: false, total: null, rows});
             }
           }
         }
@@ -9235,12 +9527,12 @@ def live_sidecar(proc=None):
         if not entry.name.isdigit():
             continue
         try:
-            if entry.stat().st_uid != uid or (entry / 'comm').read_text().strip() != 'lumen':
+            if entry.stat().st_uid != uid or (entry / 'comm').read_text(errors='replace').strip() != 'lumen':
                 continue
-            stat_text = (entry / 'stat').read_text()
+            stat_text = (entry / 'stat').read_text(errors='replace')
             fields = stat_text[stat_text.rindex(')') + 2:].split()
             ticks = int(fields[19])  # field 22 overall; `pid (comm)` precede the split
-            btime = next(int(line.split()[1]) for line in (root / 'stat').read_text().splitlines()
+            btime = next(int(line.split()[1]) for line in (root / 'stat').read_text(errors='replace').splitlines()
                          if line.startswith('btime '))
         except (OSError, ValueError, IndexError, StopIteration):
             continue
@@ -9331,7 +9623,7 @@ def live_addon_report(session, addon):
                 problems.append('contract probe: %s' % error)
     disk = None
     try:
-        disk = json.loads((addons_dir() / addon / 'plugin.json').read_text()).get('version')
+        disk = json.loads((addons_dir() / addon / 'plugin.json').read_text(errors='replace')).get('version')
     except (OSError, ValueError):
         pass
     if running:
@@ -9493,6 +9785,8 @@ def live_library_order(session=None):
                              'start': len(names)})
         elif row and row[0] == 'a':
             names.append(str(row[2]))
+    if not names:  # still loading (or unreadable): an empty list proves nothing, so it is never a result
+        raise LiveProbeError('the Library list is mounted but shows no games yet (still loading?)')
     sort = {'stored': {}, 'luna': None}
     for key, value in (data.get('storage') or {}).items():
         try:
@@ -9515,8 +9809,10 @@ def live_hltb_grid(session=None):
 
     Returns {'mounted': n, 'sorts': {value: views}, 'liveSort': str|None, 'active': bool,
     'views': [{'kind', 'id', 'count', 'appids', 'names'}]} where `views` lists only views
-    whose sort is Luna's HowLongToBeat value, one per (kind, collection). `active` is False
-    when no mounted view uses it (a read-only fact; nothing is toggled to find out).
+    whose sort is Luna's HowLongToBeat value, one per (kind, collection), each with at least
+    one row. `empty` lists sorted views that had no rows ({'kind','id','exhausted'}; `exhausted`
+    = the fiber walk ran out of its node budget, so the emptiness is not a fact). `active` is False
+    when no mounted view with rows uses it (a read-only fact; nothing is toggled to find out).
     Raises LiveProbeError when the main-window page cannot be read."""
     owner = session is None
     session = session or LiveSession(title=LIVE_MAIN_TITLE)
@@ -9527,17 +9823,23 @@ def live_hltb_grid(session=None):
             session.close()
     if not isinstance(data, dict):
         raise LiveProbeError('the sorted grid could not be read')
-    views, taken = [], set()
+    views, empty, taken = [], [], set()
     for view in data.get('views') or []:
+        if not isinstance(view, dict):
+            continue
         key = (view.get('kind'), view.get('id'))
         if key in taken or not isinstance(view.get('rows'), list):
             continue  # React keeps two fibers per mounted component
         taken.add(key)
         rows = [r for r in view['rows'] if isinstance(r, list) and len(r) >= 2]
+        if not rows:  # a sorted view with no rows proves nothing: never part of `views`
+            empty.append({'kind': str(view.get('kind')), 'id': str(view.get('id')),
+                          'exhausted': bool(view.get('exhausted'))})
+            continue
         views.append({'kind': str(view.get('kind')), 'id': str(view.get('id')), 'count': len(rows),
                       'appids': [int(r[0] or 0) for r in rows], 'names': [str(r[1] or '') for r in rows]})
     return {'mounted': int(data.get('mounted') or 0), 'sorts': dict(data.get('sorts') or {}),
-            'liveSort': data.get('live'), 'active': bool(views), 'views': views}
+            'liveSort': data.get('live'), 'active': bool(views), 'views': views, 'empty': empty}
 
 
 def cmd_library_order(options):
@@ -9551,8 +9853,11 @@ def cmd_library_order(options):
         return 1
     code = EXIT_OK
     if getattr(options, 'save', None):
+        if not order['names']:  # unreachable while live_library_order raises on empty, kept as a guard
+            print('FAIL: the Library list is empty; refusing to save an empty baseline', file=sys.stderr)
+            return 1
         try:
-            write_json_file(Path(options.save), dict(order, savedAt=time.strftime('%Y-%m-%dT%H:%M:%S')))
+            gui_private_write_json(Path(options.save), dict(order, savedAt=time.strftime('%Y-%m-%dT%H:%M:%S')))
         except OSError as problem:
             print('could not save: %s' % problem, file=sys.stderr)
             return 1
@@ -9605,7 +9910,10 @@ def gui_watch_selector(options):
         return GUI_PANEL_SELECTORS[addon]['panel']
     if not role and not name:
         raise ValueError('gui watch needs --role and/or --name, or --addon KEY')
-    return role, name, not getattr(options, 'contains', False)
+    return (str(role).strip().lower() if role else role), name, not getattr(options, 'contains', False)
+
+
+GUI_WATCH_UNREADABLE_LIMIT = 3   # consecutive unreadable samples that count as "Steam is gone"
 
 
 def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=None):
@@ -9614,8 +9922,9 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
     clicks, so it does not navigate (open the page you want to watch yourself).
 
     Exit: 0 normally (Ctrl-C and --duration end it cleanly with a summary); 1 with
-    --fail-if-vanished when the element disappeared after having been seen (the watch
-    then stops at that moment); EXIT_SKIPPED when GUI checks cannot run; EXIT_REFUSED
+    --fail-if-vanished when the element disappeared after having been seen, or when the
+    last GUI_WATCH_UNREADABLE_LIMIT samples were all unreadable (Steam died or hung); the
+    watch then stops at that moment; EXIT_SKIPPED when GUI checks cannot run; EXIT_REFUSED
     for a bad selector."""
     out = out or (lambda line: print(line, flush=True))
     try:
@@ -9636,6 +9945,8 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
     stats = {'samples': 0, 'unreadable': 0, 'appeared': 0, 'vanished': 0, 'seen': False}
     state = None  # None unknown, True present, False absent
     readable = True
+    streak = 0      # consecutive unreadable samples
+    reason = ''
 
     def stamp():
         now = clock()
@@ -9652,6 +9963,12 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
                 tree, error = None, str(problem)
             if tree is None:
                 stats['unreadable'] += 1
+                streak += 1
+                if fail_on_vanish and streak >= GUI_WATCH_UNREADABLE_LIMIT:
+                    out('%s unreadable (%s)' % (stamp(), error or 'no snapshot'))
+                    reason = 'the last %d samples were unreadable (Steam is gone or not responding)' % streak
+                    code = 1
+                    break
                 if readable:
                     out('%s unreadable (%s); element state unchanged' % (stamp(), error or 'no snapshot'))
                 readable = False
@@ -9659,6 +9976,7 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
                 if not readable and stats['samples']:
                     out('%s readable again' % stamp())
                 readable = True
+                streak = 0
                 stats['samples'] += 1
                 count = len(gui_find_nodes(tree, role, name, exact))
                 present = count > 0
@@ -9674,6 +9992,7 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
                         out('%s absent    %s (not seen yet)' % (stamp(), label))
                     state = present
                     if fail_on_vanish and stats['vanished']:
+                        reason = '%s vanished after having been seen' % label
                         code = 1
                         break
             if duration is not None and clock() - started >= duration:
@@ -9685,7 +10004,7 @@ def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=Non
         % (stats['samples'], stats['unreadable'], stats['appeared'], stats['vanished'],
            {None: 'unknown', True: 'present', False: 'absent'}[state], clock() - started))
     if code:
-        out('FAIL: %s vanished after having been seen' % label)
+        out('FAIL: %s' % reason)
     return code
 
 
@@ -9713,7 +10032,7 @@ def gui_running_games(proc='/proc'):
     for entry in entries:
         try:
             argv = [a for a in (entry / 'cmdline').read_bytes().decode('utf-8', 'replace').split('\0') if a]
-            comm = (entry / 'comm').read_text().strip() if (entry / 'comm').exists() else ''
+            comm = (entry / 'comm').read_text(errors='replace').strip() if (entry / 'comm').exists() else ''
         except OSError:
             continue
         joined = ' '.join(argv)
@@ -9749,6 +10068,8 @@ def gui_read_order(open_library=True, attempts=1, sleep=time.sleep):
     for attempt in range(max(1, attempts)):  # the Library list can be unmounted for a moment
         try:
             order = live_library_order()
+            if not order.get('names'):
+                raise LiveProbeError('the Library list has no games yet')
             return {'source': 'cdp', 'names': list(order['names']), 'total': order.get('rows') or len(order['names']),
                     'sort': order.get('sort')}
         except Exception as error:  # LiveProbeError and anything unexpected: fall back
@@ -9769,7 +10090,7 @@ def gui_read_order(open_library=True, attempts=1, sleep=time.sleep):
                     order = gui_library_order(tree) if tree else None
                     if order:
                         break
-        if order:
+        if order and order['names']:
             return {'source': 'tree (visible rows only)', 'names': order['names'], 'total': order.get('total'),
                     'sort': None, 'why': cdp_error}
         why += '; tree: %s' % (error or 'no Library list on screen')
@@ -9811,6 +10132,11 @@ def gui_read_hltb(open_home=True, sleep=time.sleep):
             pass
     if grid['active']:
         return {'state': 'active', 'views': grid['views'], 'why': '', 'sorts': grid['sorts']}
+    if grid.get('empty'):  # sorted views were found but hold no rows: that is a failed read, not "inactive"
+        cut = [v for v in grid['empty'] if v.get('exhausted')]
+        return gui_hltb_off('%d HowLongToBeat-sorted view(s) mounted but empty%s' % (
+            len(grid['empty']), ' (the fiber walk ran out of its node budget for %d of them: not a real empty list)'
+            % len(cut) if cut else ''))
     if grid['mounted']:
         return gui_hltb_off('%d collection views are mounted, none sorted by HowLongToBeat (sort values: %s)'
                             % (grid['mounted'], ', '.join(sorted(grid['sorts'])) or 'none'), 'inactive')
@@ -9848,6 +10174,10 @@ def gui_compare_hltb(before, after, limit=5):
             twin = after['views'][0]
         if twin is None:
             problems.append('%s view missing after the restart' % view['kind'])
+            continue
+        if not view['appids'] or not twin['appids']:  # empty vs anything proves nothing
+            problems.append('%s: %d games before, %d after: an empty read cannot be compared'
+                            % (view['kind'], len(view['appids']), len(twin['appids'])))
             continue
         if view['appids'] == twin['appids']:
             continue
@@ -9924,12 +10254,25 @@ def gui_compare_states(before, after, warnings=None):
     if hltb_difference:
         differences.append(hltb_difference)
     left, right = before['order'], after['order']
-    if left['source'] == 'unavailable' or right['source'] == 'unavailable':
+    unreadable = [(side, o) for side, o in (('before', left), ('after', right))
+                  if o['source'] == 'unavailable' or not o.get('names')]
+    if unreadable:
         rows.append(('library order', left.get('why') or '%d rows' % len(left['names']),
                      right.get('why') or '%d rows' % len(right['names']), 'n/a'))
-        differences.append('library order could not be read on both sides')
+        for side, _o in unreadable:  # an empty read proves nothing: never "same"
+            differences.append('library order could not be read %s the restart' % side)
         return rows, differences
     if left['source'] != right['source']:
+        if left['source'] == 'cdp':  # lost the richer read: nothing can be proven about the order
+            rows.append(('library order', '%d rows via %s' % (len(left['names']), left['source']),
+                         '%d rows via %s' % (len(right['names']), right['source']), 'n/a'))
+            rows.append(('sort state', 'n/a', 'n/a', 'n/a'))
+            differences.append('library order could not be read via CDP after the restart (before: cdp, after: %s)'
+                               % right['source'])
+            return rows, differences
+        same, lines = gui_library_compare(left['names'], right['names'], common=True)
+        if not same:
+            differences.append('library order (%s)' % '; '.join(lines[:3]))
         # A tree read (visible rows only, no sort state) and a CDP read (every row, duplicates
         # included) cannot prove anything about each other: say so instead of a false DIFFERENT.
         shown = lambda o: '%d rows via %s%s' % (len(o['names']), o['source'],  # noqa: E731
@@ -10047,8 +10390,7 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
             'STOPPED\n\n' + '\n'.join('- %s' % f for f in failures)
         path = Path(getattr(options, 'report', None) or luna_tools_dir() / 'gui-reports' / ('gui-restart-%s.md' % stamp))
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(gui_restart_report(report), encoding='utf-8')
+            gui_private_write(path, gui_restart_report(report))
             print('report : %s' % path)
         except OSError as error:
             print('could not write the report: %s' % error, file=sys.stderr)
@@ -10163,6 +10505,7 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
     # 6. after state, compare, evidence
     settle = clock() + getattr(options, 'settle', 90)
     previous = None
+    previous_names = None
     while True:  # the Lumen plugin, its Library order and the HowLongToBeat cache take a while to come up
         after = gui_read_state(sleep=sleep)
         after.setdefault('hltb', gui_hltb_off('not read'))
@@ -10172,8 +10515,13 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
         hltb_now = gui_hltb_ids(after.get('hltb'))
         hltb_ready = before['hltb']['state'] != 'active' or (after['hltb']['state'] == 'active' and hltb_now == previous)
         previous = hltb_now
+        names_now = list(after['order'].get('names') or [])
+        # a CDP order that was up before is only judged once it is non-empty and unchanged between two reads
+        order_ready = (before['order']['source'] != 'cdp'
+                       or (after['order']['source'] == 'cdp' and bool(names_now) and names_now == previous_names))
+        previous_names = names_now
         ready = (after['screen'] == 'main' and expected <= {n for n, v in after['panels'].items() if v == 'found'}
-                 and (after['order']['source'] == 'cdp' or before['order']['source'] != 'cdp') and hltb_ready)
+                 and order_ready and hltb_ready)
         if ready or clock() >= settle:
             break
         sleep(5)
@@ -10187,7 +10535,7 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
                              full_screen=getattr(options, 'full_screen', False))
     report['screenshot'] = ('`%s` (%s)' % (shot, note)) if shot else 'none (%s)' % note
     if start_mode == 'not running':
-        differences = [d for d in differences if not d.startswith('library order could not')]
+        differences = [d for d in differences if d != 'library order could not be read before the restart']
         steps.append(('compare', 'nothing to compare: Steam was not running before'))
     failures.extend('differs after the restart: %s' % d for d in differences)
     for item in after['panels'] if after['panels'] else ():

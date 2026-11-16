@@ -67,7 +67,7 @@ def proton_installed():
     for path in entries:
         version = path.name
         try:
-            fields = (path / 'version').read_text().split()
+            fields = (path / 'version').read_text(errors='replace').split()
             if len(fields) >= 2:
                 version = fields[-1]
         except OSError:
@@ -75,12 +75,13 @@ def proton_installed():
         internal = []
         try:
             internal = re.findall(r'^\s{0,6}"([^"]+)"\s*(?://.*)?$\s*\{',
-                                  (path / 'compatibilitytool.vdf').read_text().split('"compat_tools"', 1)[-1],
+                                  (path / 'compatibilitytool.vdf').read_text(errors='replace').split('"compat_tools"', 1)[-1],
                                   re.M)
         except OSError:
             pass
-        tools.append({'name': path.name, 'version': version, 'internal': internal,
-                      'size': _proton_dir_size(path), 'path': str(path)})
+        link = path.is_symlink()
+        tools.append({'name': path.name, 'version': version, 'internal': internal, 'symlink': link,
+                      'size': 0 if link else _proton_dir_size(path), 'path': str(path)})
     tools.sort(key=lambda t: proton_version_key(t['name']), reverse=True)
     return tools
 
@@ -223,11 +224,32 @@ def proton_manifest_path(name):
     return proton_manifest_dir() / (name + '.json')
 
 
+def _proton_manifest_valid(data, size_optional=False):
+    """True when `data` has the exact shape proton_compare relies on."""
+    if not (isinstance(data, dict) and data.get('version') == PROTON_MANIFEST_VERSION):
+        return False
+    files, links = data.get('files'), data.get('links', {})
+    if not isinstance(files, dict) or not isinstance(links, dict):
+        return False
+    for rel, entry in files.items():
+        if not (isinstance(rel, str) and isinstance(entry, list) and len(entry) == 2
+                and ((isinstance(entry[0], int) and not isinstance(entry[0], bool)) or (size_optional and entry[0] is None))
+                and isinstance(entry[1], str)):
+            return False
+    return all(isinstance(k, str) and isinstance(v, str) for k, v in links.items())
+
+
+def proton_manifest_state(name):
+    """'ok' | 'missing' | 'unreadable' (present but malformed, or not valid JSON)."""
+    path = proton_manifest_path(name)
+    if not os.path.lexists(str(path)):
+        return 'missing'
+    return 'ok' if _proton_manifest_valid(read_json_file(path)) else 'unreadable'
+
+
 def proton_manifest_load(name):
     data = read_json_file(proton_manifest_path(name))
-    if isinstance(data, dict) and data.get('version') == PROTON_MANIFEST_VERSION and isinstance(data.get('files'), dict):
-        return data
-    return None
+    return data if _proton_manifest_valid(data) else None
 
 
 def proton_ge_tools(tools=None):
@@ -245,18 +267,73 @@ def proton_multi_warning(tools=None):
             'luna proton prune (or luna proton remove VERSION).' % (len(ge), ', '.join(t['name'] for t in ge)))
 
 
+def proton_proc_dir():
+    """/proc, unless a test points LUNA_PROC_DIR at a look-alike AND the Steam home is not
+    under the real user's home: on a real Steam install the override is ignored, so it can
+    never hide a running Steam from a destructive command."""
+    override = os.environ.get('LUNA_PROC_DIR')
+    if not override:
+        return '/proc'
+    try:
+        import pwd
+        real_home = os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError, OSError):
+        return '/proc'
+    steam = os.path.realpath(str(steam_home()))
+    return '/proc' if steam == real_home or steam.startswith(real_home + os.sep) else override
+
+
+def _proton_config_unreadable():
+    """Path of config.vdf when it exists but cannot be read (mappings unknown), else ''."""
+    config = steam_home() / 'config/config.vdf'
+    if not os.path.lexists(str(config)):
+        return ''
+    if not os.access(str(config), os.R_OK):
+        return str(config)
+    try:
+        with open(str(config), 'rb') as handle:
+            handle.read(1)
+    except FileNotFoundError:
+        return ''
+    except OSError:
+        return str(config)
+    return ''
+
+
+def _proton_remove_tree(tool):
+    """Delete one tool dir + manifest after the final safety checks. '' on success, else why not."""
+    path = tool['path']
+    if os.path.islink(path):
+        return 'it is a symlink; never followed or deleted here'
+    busy = proton_busy_reason(path)
+    if busy:
+        return busy
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        return 'could not delete it: %s' % error
+    try:
+        proton_manifest_path(tool['name']).unlink()
+    except OSError:
+        pass
+    return ''
+
+
 def proton_busy_reason(path=None, proc=None):
     """Why a tool directory must not be replaced or removed right now, or ''.
     Steam up (it owns the shared prefix links) or any wine process running from `path`."""
-    proc = proc or live_proc_dir()
-    if live_steam_running(proc):
+    proc = proc or proton_proc_dir()
+    scan = steam_process_scan(proc)
+    if scan['running']:
         return 'Steam is running; close it completely first (its prefix links point into the tool directory)'
+    if scan['error']:  # fail CLOSED: an unreadable process table is not "Steam is not running"
+        return 'cannot tell whether Steam is running (%s); not touching the tool directory' % scan['error']
     if path:
         root = os.path.realpath(str(path))
         try:
             entries = [e for e in Path(proc).iterdir() if e.name.isdigit()]
-        except OSError:
-            return ''
+        except OSError as error:
+            return 'cannot list the processes (%s); not touching the tool directory' % error
         uid = os.getuid()
         for entry in entries:
             try:
@@ -267,8 +344,10 @@ def proton_busy_reason(path=None, proc=None):
                 if not hit:
                     hit = any(a.startswith(root + os.sep) or a == root for a in
                               (entry / 'cmdline').read_bytes().decode('utf-8', 'replace').split('\0'))
-            except OSError:
-                continue
+            except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+                continue  # exited while we looked
+            except OSError as error:
+                return 'cannot inspect process %s (%s); not touching the tool directory' % (entry.name, error)
             if hit:
                 return 'a process (pid %s) is running from %s; stop it first' % (entry.name, path)
     return ''
@@ -340,7 +419,10 @@ def proton_build_manifest(root, name, source, tag=''):
 
 def proton_compare(root, expected, expected_links=None, label='verifying'):
     """Compare a tree with {rel: [size|None, sha256]} (+ optional {rel: link target}).
-    Returns {'changed': [], 'missing': [], 'extra': [], 'checked': n}."""
+    Returns {'changed': [], 'missing': [], 'extra': [], 'checked': n}. ValueError on a bad shape."""
+    if not _proton_manifest_valid({'version': PROTON_MANIFEST_VERSION, 'files': expected,
+                                   'links': {} if expected_links is None else expected_links}, size_optional=True):
+        raise ValueError('malformed manifest data')
     files, links = _proton_walk(root)
     changed, missing = [], []
     todo = [rel for rel in sorted(expected) if rel in files]
@@ -440,6 +522,11 @@ def proton_verify(version=None, rebuild=False, against=None):
         if rebuild:
             code = _proton_rebuild(tool)
             ok = ok and code == EXIT_OK
+            continue
+        if proton_manifest_state(name) == 'unreadable':
+            print('verify    : %s: manifest unreadable or malformed (%s); it is not trusted. Run: '
+                  'luna proton verify %s --rebuild' % (name, proton_manifest_path(name), name))
+            ok = False
             continue
         manifest = proton_manifest_load(name)
         if not manifest:
@@ -646,21 +733,65 @@ def proton_status(as_json):
     return EXIT_OK
 
 
+def _proton_virtual_resolve(links, name, limit=40):
+    """Resolve `name` (relative to the extraction root) through the symlinks the archive has
+    created so far, in a virtual filesystem. Returns the normalised parts, or None when the
+    path escapes the root. `links` maps a normalised member path (tuple) to its target text."""
+    pending = [p for p in name.split('/') if p not in ('', '.')]
+    done = []
+    hops = 0
+    while pending:
+        part = pending.pop(0)
+        if part == '..':
+            if not done:
+                return None
+            done.pop()
+            continue
+        done.append(part)
+        target = links.get(tuple(done))
+        if target is not None:
+            hops += 1
+            if hops > limit or target.startswith('/'):
+                return None
+            done.pop()
+            pending = [p for p in target.split('/') if p not in ('', '.')] + pending
+    return done
+
+
 def _proton_safe_extract(archive, dest):
-    root = os.path.realpath(dest)
+    """Validate every member against a virtual filesystem (so `a -> ../..` followed by `a/x`
+    is caught), then extract with the tarfile 'data' filter where Python has it."""
+    links = {}
     for member in archive.getmembers():
-        target = os.path.realpath(os.path.join(root, member.name))
-        if not (target == root or target.startswith(root + os.sep)):
-            raise ValueError('unsafe path in archive: %s' % member.name)
-        if member.issym() and os.path.isabs(member.linkname):
-            raise ValueError('absolute symlink in archive: %s' % member.name)
-        if member.islnk():
-            link = os.path.realpath(os.path.join(root, member.linkname))
-            if not link.startswith(root + os.sep):
-                raise ValueError('unsafe hard link in archive: %s' % member.name)
         if member.isdev():
             raise ValueError('device node in archive: %s' % member.name)
-    archive.extractall(dest)
+        if member.name.startswith('/'):
+            raise ValueError('unsafe path in archive: %s' % member.name)
+        parent = _proton_virtual_resolve(links, os.path.dirname(member.name.rstrip('/')))
+        if parent is None:
+            raise ValueError('unsafe path in archive: %s' % member.name)
+        leaf = os.path.basename(member.name.rstrip('/'))
+        if leaf in ('', '.', '..'):
+            if member.isdir() and leaf in ('', '.'):
+                continue
+            raise ValueError('unsafe path in archive: %s' % member.name)
+        here = tuple(parent) + (leaf,)
+        if member.issym():
+            if os.path.isabs(member.linkname):
+                raise ValueError('absolute symlink in archive: %s' % member.name)
+            if _proton_virtual_resolve(links, '/'.join(parent + [member.linkname])) is None:
+                raise ValueError('symlink escapes the archive: %s -> %s' % (member.name, member.linkname))
+            links[here] = member.linkname
+        elif member.islnk():
+            if os.path.isabs(member.linkname) or _proton_virtual_resolve(links, member.linkname) is None:
+                raise ValueError('unsafe hard link in archive: %s' % member.name)
+            links.pop(here, None)
+        else:
+            links.pop(here, None)
+    if hasattr(tarfile, 'data_filter'):
+        archive.extractall(dest, filter='data')
+    else:
+        archive.extractall(dest)
 
 
 def _proton_download(url, destination, total=0, label=None):
@@ -782,6 +913,13 @@ def proton_install(version='latest', dry_run=False):
             print('proton    : %s appeared meanwhile; leaving it alone' % top.name)
             return 1
         manifest = proton_build_manifest(top, top.name, 'install', tag)  # from the sha512-verified tree
+        busy = proton_busy_reason()  # the download took minutes: Steam may have started meanwhile
+        if busy:
+            print('proton    : refusing to install: %s' % busy)
+            return EXIT_REFUSED
+        if (base / top.name).exists() or os.path.islink(str(base / top.name)):
+            print('proton    : %s appeared meanwhile; leaving it alone' % top.name)
+            return 1
         os.rename(str(top), str(base / top.name))
         name = top.name
     except (OSError, ValueError, tarfile.TarError) as error:
@@ -811,6 +949,14 @@ def proton_remove(version, force=False, dry_run=False):
     if not tool:
         print('proton    : %s is not installed' % name)
         return 1
+    if tool.get('symlink'):
+        print('proton    : refusing: %s is a symlink (%s); it is never followed or deleted here' % (name, tool['path']))
+        return EXIT_REFUSED
+    unreadable = _proton_config_unreadable()
+    if unreadable and not force:
+        print('proton    : refusing: cannot read %s, so games mapped to %s cannot be detected; use --force'
+              % (unreadable, name))
+        return EXIT_REFUSED
     apps = proton_mapped_to(tool)
     if apps and not force:
         print('proton    : refusing: %d game(s) are mapped to %s (appid %s); use --force'
@@ -819,15 +965,10 @@ def proton_remove(version, force=False, dry_run=False):
     if dry_run:
         print('proton    : would remove %s' % name)
         return EXIT_OK
-    busy = proton_busy_reason(tool['path'])
-    if busy:
-        print('proton    : refusing to remove %s: %s' % (name, busy))
+    problem = _proton_remove_tree(tool)
+    if problem:
+        print('proton    : refusing to remove %s: %s' % (name, problem))
         return EXIT_REFUSED
-    shutil.rmtree(tool['path'])
-    try:
-        proton_manifest_path(tool['name']).unlink()
-    except OSError:
-        pass
     print('proton    : removed %s' % name)
     return EXIT_OK
 
@@ -838,9 +979,9 @@ def proton_prune(keep, dry_run=False):
     if keep < 0:
         print('proton    : --keep must be >= 0')
         return 1
-    config = steam_home() / 'config/config.vdf'
-    if config.exists() and not os.access(str(config), os.R_OK):
-        print('proton    : cannot read %s, so mapped versions cannot be protected; nothing pruned' % config)
+    unreadable = _proton_config_unreadable()
+    if unreadable:
+        print('proton    : cannot read %s, so mapped versions cannot be protected; nothing pruned' % unreadable)
         return EXIT_REFUSED
     mappings = proton_mappings()
     ge = proton_ge_tools()
@@ -858,19 +999,18 @@ def proton_prune(keep, dry_run=False):
         apps = proton_mapped_to(tool, mappings)
         if apps:
             print('proton    : keeping %s (mapped by %d game(s))' % (tool['name'], len(apps)))
+        elif tool.get('symlink'):
+            print('proton    : not removing %s: it is a symlink (%s); remove the link yourself if you mean to'
+                  % (tool['name'], tool['path']))
+            refused = True
         elif dry_run:
             print('proton    : would remove %s' % tool['name'])
         else:
-            busy = proton_busy_reason(tool['path'])
-            if busy:
-                print('proton    : not removing %s: %s' % (tool['name'], busy))
+            problem = _proton_remove_tree(tool)
+            if problem:
+                print('proton    : not removing %s: %s' % (tool['name'], problem))
                 refused = True
                 continue
-            shutil.rmtree(tool['path'])
-            try:
-                proton_manifest_path(tool['name']).unlink()
-            except OSError:
-                pass
             print('proton    : removed %s' % tool['name'])
     warning = proton_multi_warning()
     if warning and not dry_run:
@@ -900,7 +1040,11 @@ def _doctor_proton():
     for item in proton_health():
         found.append(_finding(item['id'], item['severity'], item['message'], item['fix']))
     for tool in proton_ge_tools():
-        if not proton_manifest_load(tool['name']):
+        if proton_manifest_state(tool['name']) == 'unreadable':
+            found.append(_finding('proton.manifest-unreadable', 'warn',
+                                  '%s: the integrity manifest is unreadable or malformed, so it is not trusted' % tool['name'],
+                                  'luna proton verify %s --rebuild' % tool['name']))
+        elif not proton_manifest_load(tool['name']):
             found.append(_finding('proton.no-manifest', 'info',
                                   '%s has no integrity manifest, so corruption cannot be proven' % tool['name'],
                                   'luna proton verify %s --rebuild' % tool['name']))

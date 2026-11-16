@@ -454,11 +454,74 @@ class LibraryOrder(LiveCase):
         self.assertIn('not mounted', err.getvalue())
         self.assertNotIn('Traceback', err.getvalue())
 
+    def test_a_library_with_no_game_rows_is_an_error_not_an_empty_order(self):
+        server = self.fake()
+        server.answer = lambda expression: {'found': True, 'rowCount': 1, 'storage': {},
+                                            'rows': [['c', 'all', 'All', 0, 0]]}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(luna.main(['library-order']), 1)
+        self.assertNotIn('Traceback', err.getvalue())
+
+    def test_save_never_writes_an_empty_baseline(self):
+        server = self.fake()
+        server.answer = lambda expression: {'found': True, 'rowCount': 0, 'storage': {}, 'rows': []}
+        target = self.tmp / 'empty.json'
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(luna.main(['library-order', '--save', str(target)]), 1)
+        self.assertFalse(target.exists())
+
+    def test_saved_baseline_is_private(self):
+        self.fake()
+        target = self.tmp / 'order.json'
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(luna.main(['library-order', '--save', str(target)]), 0)
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o600)
+
     def test_steam_closed(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.assertEqual(luna.main(['library-order']), 1)
         self.assertIn('Steam is not running', err.getvalue())
+
+
+class LoopbackOnly(LiveCase):
+    def redirecting_server(self):
+        import http.server
+        import threading
+        hits = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(handler):
+                hits.append(handler.path)
+                handler.send_response(302)
+                handler.send_header('Location', 'http://127.0.0.1:9/elsewhere')
+                handler.end_headers()
+
+            def log_message(handler, *args):
+                pass
+        server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.allowed_ports.add(server.server_address[1])
+        return server.server_address[1], hits
+
+    def test_a_redirect_is_refused_not_followed(self):
+        port, hits = self.redirecting_server()
+        with self.assertRaises(OSError):
+            luna.live_http_json(port, '/json')
+        self.assertEqual(hits, ['/json'])  # exactly one request: the redirect target was never contacted
+
+    def test_a_non_loopback_host_is_refused_before_any_connection(self):
+        with self.assertRaises(ValueError):
+            luna.live_http_json(80, '/json', host='192.0.2.1')
+
+    def test_steam_is_found_by_argv0_or_comm_and_a_bad_proc_is_an_error(self):
+        self.fake_process(7, 'SteamRuntime', b'/x/ubuntu12_32/steam\0-foo\0')
+        self.assertTrue(luna.steam_process_scan(str(self.proc))['running'])
+        self.assertEqual(luna.steam_process_scan(str(self.tmp / 'nowhere'))['running'], False)
+        self.assertTrue(luna.steam_process_scan(str(self.tmp / 'nowhere'))['error'])
 
 
 if __name__ == '__main__':

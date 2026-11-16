@@ -647,6 +647,39 @@ class Capture(GuiFixture):
         self.assertIn('wl-paste could not read it', note)
         self.assertFalse((self.work / 'clip.json.log').exists())
 
+    def test_a_png_the_user_already_had_on_the_clipboard_is_restored(self):
+        self.install_window_niri()
+        self.clip.write_text(json.dumps({'type': 'image/png', 'data': 'USERPNG'}))
+        shot, note = self.capture()
+        self.assertIsNotNone(shot)
+        self.assertEqual(self.clip_state(), {'type': 'image/png', 'data': 'USERPNG'})
+
+    def test_clipboard_is_restored_when_terminated_during_the_capture(self):
+        import signal
+        self.install_window_niri()
+        windows = self.work / 'niri-windows.json'
+        self.install_tool('niri', '#!/bin/sh\ncase "$*" in\n *windows*) cat "%s";;\n'
+                                  ' *screenshot-window*) printf \'{"type":"image/png","data":"NEW"}\' > "$FAKE_CLIP";'
+                                  ' kill -TERM $PPID; sleep 3;;\nesac\n' % windows)
+        self.clip.write_text(json.dumps({'type': 'text/plain;charset=utf-8', 'data': 'precious'}))
+        before = signal.getsignal(signal.SIGTERM)
+        with self.assertRaises(SystemExit):
+            self.capture()
+        self.assertEqual(self.clip_state(), {'type': 'text/plain;charset=utf-8', 'data': 'precious'})
+        self.assertEqual(signal.getsignal(signal.SIGTERM), before)
+
+    def test_new_directories_are_private_and_files_are_0600(self):
+        self.install_window_niri()
+        shots = self.work / 'fresh/shots'
+        shot, _ = luna.gui_capture(shots, 'p.png')
+        self.assertEqual(stat.S_IMODE(shots.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(shot.stat().st_mode), 0o600)
+        existing = self.work / 'existing'
+        existing.mkdir()
+        existing.chmod(0o755)
+        luna.gui_capture(existing, 'q.png')
+        self.assertEqual(stat.S_IMODE(existing.stat().st_mode), 0o755)  # never chmod what we did not create
+
     def test_cli_flag_exists(self):
         with mock.patch.object(luna, 'gui_unavailable_reason', return_value='x'):
             self.assertEqual(self.run_cli('gui', 'verify', '--full-screen')[0], luna.EXIT_SKIPPED)
@@ -699,6 +732,21 @@ class Library(GuiFixture):
         self.assertIn('library order differs', err)
         saved.write_text('{"nope": 1}')
         self.assertEqual(self.run_library('--compare', str(saved))[0], 1)
+
+    def test_an_empty_side_never_compares_equal(self):
+        self.assertFalse(luna.gui_library_compare([], [])[0])
+        self.assertFalse(luna.gui_library_compare([], ['A'], common=True)[0])
+
+    def test_save_refuses_an_empty_baseline_and_saves_privately(self):
+        empty = fixture_tree('main-library.json')
+        with mock.patch.object(luna, 'gui_library_order', return_value={'names': [], 'rendered': 0, 'total': 0,
+                                                                        'virtualized': False}):
+            code, _, err = self.run_library('--save', str(self.work / 'e.json'))
+        self.assertEqual(code, 1)
+        self.assertFalse((self.work / 'e.json').exists())
+        saved = self.work / 'p.json'
+        self.assertEqual(self.run_library('--save', str(saved))[0], 0)
+        self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
 
     def test_command_json_and_missing_list(self):
         code, out, _ = self.run_library('--json')
@@ -794,6 +842,19 @@ class Watch(GuiFixture):
         self.assertIn('readable again', text)
         self.assertEqual(text.count('APPEARED'), 1)
         self.assertIn('vanished 0', lines[-1])
+
+    def test_unreadable_streak_fails_when_asked_to_watch_for_a_vanish(self):
+        code, lines = self.run_watch([self.PRESENT, 'no window'], fail_if_vanished=True, duration=30)
+        self.assertEqual(code, 1)
+        self.assertIn('FAIL:', lines[-1])
+        self.assertIn('unreadable', lines[-1])
+        # without --fail-if-vanished an unreadable run is only reported
+        code, _ = self.run_watch([self.PRESENT, 'no window'], duration=10)
+        self.assertEqual(code, 0)
+
+    def test_role_case_does_not_matter(self):
+        code, lines = self.run_watch([self.PRESENT], duration=1, role='Button')
+        self.assertIn('APPEARED', ' '.join(lines))
 
     def test_addon_key_and_contains_and_bad_selectors(self):
         page = fixture_tree('luna-presence.json')
@@ -1007,6 +1068,42 @@ class Restart(GuiFixture):
         self.assertEqual(diffs, [])
         self.assertIn('could not be compared', warnings[0])
         self.assertIn('n/a', [r[3] for r in rows])
+
+    def test_empty_or_unreadable_order_is_a_failure_not_same(self):
+        empty = self.state(order=[])
+        empty['order']['names'] = []
+        for before, after, wanted in ((empty, empty, ('before', 'after')), (self.state(), empty, ('after',)),
+                                      (empty, self.state(), ('before',))):
+            _, diffs = luna.gui_compare_states(before, after, [])
+            self.assertEqual(sorted(d.split()[-3] for d in diffs if d.startswith('library order could not')),
+                             sorted(wanted))
+
+    def test_cdp_before_but_tree_after_is_a_failure(self):
+        tree_after = self.state(source='tree (visible rows only)')
+        _, diffs = luna.gui_compare_states(self.state(), tree_after, [])
+        self.assertTrue(any('could not be read via CDP after' in d for d in diffs), diffs)
+
+    def test_tree_before_cdp_after_compares_relative_order(self):
+        before = self.state(order=['B', 'A'], source='tree (visible rows only)')
+        after = self.state(order=['A', 'B', 'C'])
+        _, diffs = luna.gui_compare_states(before, after, [])
+        self.assertTrue(any(d.startswith('library order (') for d in diffs), diffs)
+
+    def test_not_running_before_only_drops_the_before_difference(self):
+        unreadable = self.state()
+        unreadable['order']['names'] = []
+        code, _, err, _ = self.run_check(start=(False, False), states=[unreadable])
+        self.assertEqual(code, 1)
+        self.assertIn('library order could not be read after the restart', err)
+
+    def test_ready_waits_for_a_nonempty_stable_cdp_order(self):
+        empty = self.state()
+        empty['order']['names'] = []
+        states = [empty, self.state(order=['A']), self.state(order=['A', 'B']), self.state(order=['A', 'B']),
+                  self.state(order=['A', 'B']), self.state(order=['A', 'B'])]
+        code, _, _, m = self.run_check(states=[self.state(order=['A', 'B'])] + states, settle=60)
+        self.assertEqual(code, 0)
+        self.assertEqual(m['gui_read_state'].call_count, 1 + 4)
 
     def test_after_state_waits_for_panels_that_were_found_before(self):
         late = self.state(panels={'luna': 'found', 'playtime': 'missing'})

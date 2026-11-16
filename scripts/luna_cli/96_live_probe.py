@@ -82,8 +82,8 @@ def live_candidate_ports(proc=None, lumen=None):
         add(os.environ['LUNA_CDP_PORT'])
         return ports
     try:
-        add((Path(lumen or lumen_root()) / 'cef_port').read_text().split()[0])
-    except (OSError, IndexError):
+        add((Path(lumen or lumen_root()) / 'cef_port').read_text(errors='replace').split()[0])
+    except (OSError, IndexError, ValueError):
         pass
     try:
         entries = list(Path(proc or live_proc_dir()).iterdir())
@@ -108,33 +108,77 @@ def live_candidate_ports(proc=None, lumen=None):
     return ports
 
 
-def live_http_json(port, path, timeout=LIVE_TIMEOUT):
-    """GET http://127.0.0.1:<port><path> -> parsed JSON. Raises OSError/ValueError."""
-    request = urllib.request.Request('http://%s:%d%s' % (LIVE_HOST, port, path))
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via a proxy
+LIVE_LOOPBACK = ('127.0.0.1', 'localhost', '::1')
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The debug port never redirects; following one could leave the loopback interface."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def live_http_json(port, path, timeout=LIVE_TIMEOUT, host=LIVE_HOST):
+    """GET http://127.0.0.1:<port><path> -> parsed JSON. Raises OSError/ValueError.
+    Refuses any non-loopback host and never follows a redirect (HTTP 3xx -> OSError)."""
+    if host not in LIVE_LOOPBACK:
+        raise ValueError('refusing a non-loopback DevTools host: %s' % host)
+    request = urllib.request.Request('http://%s:%d%s' % ('[::1]' if host == '::1' else host, port, path))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)  # never via a proxy
     with opener.open(request, timeout=timeout) as response:
         return json.loads(response.read(LIVE_MAX_MESSAGE).decode('utf-8', 'replace'))
 
 
-def live_steam_running(proc=None):
-    """True when this user has a steam/steamwebhelper process (reads /proc only)."""
+STEAM_PROCESS_NAMES = ('steam', 'steamwebhelper', 'steam.sh')
+
+
+def steam_process_scan(proc=None):
+    """THE Steam detector (live probe, GUI checks and the GE-Proton manager all use it).
+    {'running', 'accessible', 'error'} for this user's processes, read from /proc only. A
+    process counts when its `comm` or the basename of argv[0] is steam, steamwebhelper or
+    steam.sh. `error` is non-empty when the answer cannot be trusted (the listing failed,
+    the real /proc shows no processes, or an entry of this user could not be read for a
+    reason other than having just exited); callers that must not guess fail closed on it."""
+    root = Path(proc or live_proc_dir())
+    result = {'running': False, 'accessible': False, 'error': ''}
     try:
-        entries = list(Path(proc or live_proc_dir()).iterdir())
-    except OSError:
-        return False
+        entries = list(root.iterdir())
+    except OSError as error:
+        result['error'] = 'cannot list %s: %s' % (root, error)
+        return result
+    numeric = [e for e in entries if e.name.isdigit()]
+    if not numeric and os.path.realpath(str(root)) == '/proc':
+        result['error'] = 'no processes are visible in /proc'
+        return result
     uid = os.getuid()
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
+    for entry in numeric:
         try:
             if entry.stat().st_uid != uid:
                 continue
-            name = (entry / 'comm').read_text().strip()
-        except OSError:
+            try:
+                comm = (entry / 'comm').read_text(errors='replace').strip()
+            except FileNotFoundError:
+                comm = ''  # tests build /proc look-alikes with only a cmdline
+            argv = (entry / 'cmdline').read_bytes().split(b'\0')
+        except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+            continue  # the process exited while we looked
+        except OSError as error:
+            result['error'] = result['error'] or 'cannot read %s: %s' % (entry, error)
             continue
-        if name in ('steam', 'steamwebhelper'):
-            return True
-    return False
+        program = os.path.basename(argv[0].decode('utf-8', 'replace')) if argv else ''
+        if comm not in STEAM_PROCESS_NAMES and program not in STEAM_PROCESS_NAMES:
+            continue
+        result['running'] = True
+        args = [a.decode('utf-8', 'replace') for a in argv[1:]]
+        if any(a in GUI_ACCESS_ARGS or a.startswith('--force-renderer-accessibility') for a in args):
+            result['accessible'] = True
+    return result
+
+
+def live_steam_running(proc=None):
+    """True when this user has a Steam process (see steam_process_scan). Informational:
+    it answers False when /proc cannot be read; destructive callers use steam_process_scan."""
+    return steam_process_scan(proc)['running']
 
 
 def live_connect_info(timeout=LIVE_TIMEOUT):
@@ -356,16 +400,17 @@ LIVE_READ_EXPRESSIONS = {
         };
         const kids = fiber => {
           let found = null;
-          const walk = (f, budget) => {
+          const budget = {n: 0};
+          const walk = f => {
             for (; f && !found && budget.n < 4000; f = f.sibling) {
               budget.n++;
               const p = f.memoizedProps;
               if (p && Array.isArray(p.childElements) && p.childElements.length > 0) { found = p.childElements; return; }
-              if (f.child) walk(f.child, budget);
+              if (f.child) walk(f.child);
             }
           };
-          walk(fiber.child, {n: 0});
-          return found;
+          walk(fiber.child);
+          return {list: found, exhausted: !found && budget.n >= 4000};
         };
         for (const el of document.querySelectorAll('*')) {
           const key = Object.keys(el).find(k => k.startsWith('__reactFiber'));
@@ -382,14 +427,14 @@ LIVE_READ_EXPRESSIONS = {
               mounted++;
               sorts[p.showcase.eSortBy] = (sorts[p.showcase.eSortBy] || 0) + 1;
               if (p.showcase.eSortBy !== SORT) continue;
-              const list = kids(fiber) || [];
+              const walked = kids(fiber);
               const rows = [];
-              for (const child of list) {
+              for (const child of walked.list || []) {
                 const named = nameFrom(child);
                 const id = Number(String(child && child.key || '').replace(/^app_list_/, '')) || (named ? named[0] : 0);
                 rows.push([id, named ? named[1] : '']);
               }
-              views.push({kind: 'shelf', id: String(p.collectionId), count: rows.length,
+              views.push({kind: 'shelf', id: String(p.collectionId), count: rows.length, exhausted: walked.exhausted,
                           total: Number(node.state && node.state.nItemsDisplayed) || null, rows});
             } else if (typeName !== 'SlsLunaHltbGrid' && Array.isArray(p.childSections) && typeof p.eSortBy === 'number') {
               mounted++;
@@ -403,7 +448,7 @@ LIVE_READ_EXPRESSIONS = {
                 }
               }
               views.push({kind: 'grid', id: String(p.collectionId || p.strCollectionId || ''), count: rows.length,
-                          total: null, rows});
+                          exhausted: false, total: null, rows});
             }
           }
         }
@@ -510,12 +555,12 @@ def live_sidecar(proc=None):
         if not entry.name.isdigit():
             continue
         try:
-            if entry.stat().st_uid != uid or (entry / 'comm').read_text().strip() != 'lumen':
+            if entry.stat().st_uid != uid or (entry / 'comm').read_text(errors='replace').strip() != 'lumen':
                 continue
-            stat_text = (entry / 'stat').read_text()
+            stat_text = (entry / 'stat').read_text(errors='replace')
             fields = stat_text[stat_text.rindex(')') + 2:].split()
             ticks = int(fields[19])  # field 22 overall; `pid (comm)` precede the split
-            btime = next(int(line.split()[1]) for line in (root / 'stat').read_text().splitlines()
+            btime = next(int(line.split()[1]) for line in (root / 'stat').read_text(errors='replace').splitlines()
                          if line.startswith('btime '))
         except (OSError, ValueError, IndexError, StopIteration):
             continue
@@ -606,7 +651,7 @@ def live_addon_report(session, addon):
                 problems.append('contract probe: %s' % error)
     disk = None
     try:
-        disk = json.loads((addons_dir() / addon / 'plugin.json').read_text()).get('version')
+        disk = json.loads((addons_dir() / addon / 'plugin.json').read_text(errors='replace')).get('version')
     except (OSError, ValueError):
         pass
     if running:
@@ -768,6 +813,8 @@ def live_library_order(session=None):
                              'start': len(names)})
         elif row and row[0] == 'a':
             names.append(str(row[2]))
+    if not names:  # still loading (or unreadable): an empty list proves nothing, so it is never a result
+        raise LiveProbeError('the Library list is mounted but shows no games yet (still loading?)')
     sort = {'stored': {}, 'luna': None}
     for key, value in (data.get('storage') or {}).items():
         try:
@@ -790,8 +837,10 @@ def live_hltb_grid(session=None):
 
     Returns {'mounted': n, 'sorts': {value: views}, 'liveSort': str|None, 'active': bool,
     'views': [{'kind', 'id', 'count', 'appids', 'names'}]} where `views` lists only views
-    whose sort is Luna's HowLongToBeat value, one per (kind, collection). `active` is False
-    when no mounted view uses it (a read-only fact; nothing is toggled to find out).
+    whose sort is Luna's HowLongToBeat value, one per (kind, collection), each with at least
+    one row. `empty` lists sorted views that had no rows ({'kind','id','exhausted'}; `exhausted`
+    = the fiber walk ran out of its node budget, so the emptiness is not a fact). `active` is False
+    when no mounted view with rows uses it (a read-only fact; nothing is toggled to find out).
     Raises LiveProbeError when the main-window page cannot be read."""
     owner = session is None
     session = session or LiveSession(title=LIVE_MAIN_TITLE)
@@ -802,17 +851,23 @@ def live_hltb_grid(session=None):
             session.close()
     if not isinstance(data, dict):
         raise LiveProbeError('the sorted grid could not be read')
-    views, taken = [], set()
+    views, empty, taken = [], [], set()
     for view in data.get('views') or []:
+        if not isinstance(view, dict):
+            continue
         key = (view.get('kind'), view.get('id'))
         if key in taken or not isinstance(view.get('rows'), list):
             continue  # React keeps two fibers per mounted component
         taken.add(key)
         rows = [r for r in view['rows'] if isinstance(r, list) and len(r) >= 2]
+        if not rows:  # a sorted view with no rows proves nothing: never part of `views`
+            empty.append({'kind': str(view.get('kind')), 'id': str(view.get('id')),
+                          'exhausted': bool(view.get('exhausted'))})
+            continue
         views.append({'kind': str(view.get('kind')), 'id': str(view.get('id')), 'count': len(rows),
                       'appids': [int(r[0] or 0) for r in rows], 'names': [str(r[1] or '') for r in rows]})
     return {'mounted': int(data.get('mounted') or 0), 'sorts': dict(data.get('sorts') or {}),
-            'liveSort': data.get('live'), 'active': bool(views), 'views': views}
+            'liveSort': data.get('live'), 'active': bool(views), 'views': views, 'empty': empty}
 
 
 def cmd_library_order(options):
@@ -826,8 +881,11 @@ def cmd_library_order(options):
         return 1
     code = EXIT_OK
     if getattr(options, 'save', None):
+        if not order['names']:  # unreachable while live_library_order raises on empty, kept as a guard
+            print('FAIL: the Library list is empty; refusing to save an empty baseline', file=sys.stderr)
+            return 1
         try:
-            write_json_file(Path(options.save), dict(order, savedAt=time.strftime('%Y-%m-%dT%H:%M:%S')))
+            gui_private_write_json(Path(options.save), dict(order, savedAt=time.strftime('%Y-%m-%dT%H:%M:%S')))
         except OSError as problem:
             print('could not save: %s' % problem, file=sys.stderr)
             return 1
