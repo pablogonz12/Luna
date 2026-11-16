@@ -207,6 +207,8 @@ def build_parser():
             child.add_argument('--url', help='install from a bundle URL (a .sha256 beside it is verified)')
             child.add_argument('--latest', action='store_true',
                                help='download the newest release asset (needs gh)')
+            child.add_argument('--allow-legacy-bundle', action='store_true',
+                               help='accept a pre-RELEASE-FILES.json bundle whose scripts/luna.py is unhashed')
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
         if name in ('verify', 'vendor'):
             child.add_argument('--sources', action='store_true',

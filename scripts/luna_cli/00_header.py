@@ -36,6 +36,7 @@ Commands:
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
     luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
+                [--allow-legacy-bundle]
                                         verify and install a released bundle
     luna reconcile [--dry-run]          merge Syncthing sync-conflict copies of
                                         Steam's localconfig.vdf (newest timestamp wins)

@@ -6,6 +6,7 @@ real Lumen, Steam or user data is touched. `pgrep` is stubbed so the tests never
 depend on whether the developer's own Steam is open.
 """
 import hashlib
+import io
 import json
 import os
 os.environ.setdefault('LUNA_GUI_CHECKS', '0')  # hermetic: tests never probe the real desktop (test_gui_check manages it itself)
@@ -621,7 +622,7 @@ class LunaTestCase(unittest.TestCase):
         self.assertFalse(self.addons.exists(), 'a corrupt bundle must not install')
 
     def test_update_refuses_a_flipped_byte_anywhere_in_the_stream(self):
-        # The inner manifest does not pin scripts/luna.py, so the gzip CRC is what protects it.
+        # The gzip CRC catches damage the file list would also catch; both layers are kept.
         out = self.temp / 'dist-flip'
         self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
         bundle = next(out.glob('luna-*.tar.gz'))
@@ -635,6 +636,97 @@ class LunaTestCase(unittest.TestCase):
             result = self.luna('update', '--bundle', str(bundle))
             self.assertNotEqual(result.returncode, 0, 'corrupt bundle accepted at %s' % fraction)
             self.assertFalse(self.addons.exists())
+
+    # -- bundle file list: every executed file is pinned, in both directions
+    def rewrite_bundle(self, mutate):
+        """Release a bundle, let `mutate(members)` edit {name: bytes|None-for-dir}, repack with a fresh sidecar."""
+        out = self.temp / 'dist-rewrite'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        with tarfile.open(bundle) as tar:
+            members = [(m, tar.extractfile(m).read() if m.isfile() else None) for m in tar.getmembers()]
+        members = mutate(members)
+        with tarfile.open(bundle, 'w:gz') as tar:
+            for info, data in members:
+                tar.addfile(info, io.BytesIO(data) if data is not None else None)
+        Path(str(bundle) + '.sha256').write_text(
+            '%s  %s\n' % (hashlib.sha256(bundle.read_bytes()).hexdigest(), bundle.name))
+        return bundle
+
+    def assert_refused(self, bundle, needle, *extra):
+        result = self.luna('update', '--bundle', str(bundle), *extra)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(needle, result.stdout + result.stderr)
+        self.assertFalse(self.addons.exists(), 'nothing may be installed from a refused bundle')
+
+    def tamper(self, suffix, payload=b'\n# evil\n'):
+        def mutate(members):
+            out = []
+            for info, data in members:
+                if info.name.endswith(suffix):
+                    data = data + payload
+                    info.size = len(data)
+                out.append((info, data))
+            return out
+        return mutate
+
+    def test_update_refuses_a_tampered_unpinned_luna_py(self):
+        bundle = self.rewrite_bundle(self.tamper('/scripts/luna.py'))
+        self.assert_refused(bundle, 'scripts/luna.py does not match')
+
+    def test_update_refuses_a_tampered_install_sh(self):
+        # install.sh is not shipped; if one appears (or is listed and changed) it is refused.
+        def mutate(members):
+            root = members[0][0].name.split('/')[0]
+            info = tarfile.TarInfo(root + '/install.sh')
+            info.size = 5
+            return members + [(info, b'evil\n')]
+        self.assert_refused(self.rewrite_bundle(mutate), 'unlisted file in the bundle: install.sh')
+
+    def test_update_refuses_an_extra_unlisted_file(self):
+        def mutate(members):
+            root = members[0][0].name.split('/')[0]
+            info = tarfile.TarInfo(root + '/scripts/extra.py')
+            info.size = 1
+            return members + [(info, b'x')]
+        self.assert_refused(self.rewrite_bundle(mutate), 'unlisted file in the bundle: scripts/extra.py')
+
+    def test_update_refuses_a_missing_listed_file(self):
+        bundle = self.rewrite_bundle(lambda m: [x for x in m if not x[0].name.endswith('/README.md')])
+        self.assert_refused(bundle, 'listed file is missing: README.md')
+
+    def test_update_refuses_a_duplicate_member(self):
+        def mutate(members):
+            last = [x for x in members if x[0].name.endswith('/scripts/luna.py')][0]
+            info = tarfile.TarInfo(last[0].name)
+            info.size = 5
+            return members + [(info, b'evil\n')]
+        self.assert_refused(self.rewrite_bundle(mutate), 'duplicate bundle member')
+
+    def test_update_refuses_a_symlink_member(self):
+        def mutate(members):
+            root = members[0][0].name.split('/')[0]
+            info = tarfile.TarInfo(root + '/scripts/link.py')
+            info.type = tarfile.SYMTYPE
+            info.linkname = '/etc/passwd'
+            return members + [(info, None)]
+        self.assert_refused(self.rewrite_bundle(mutate), 'link or special file')
+
+    def test_update_refuses_a_legacy_bundle_unless_allowed(self):
+        legacy = self.rewrite_bundle(lambda m: [x for x in m if not x[0].name.endswith('/RELEASE-FILES.json')])
+        self.assert_refused(legacy, '--allow-legacy-bundle')
+        result = self.luna('update', '--bundle', str(legacy), '--allow-legacy-bundle', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('legacy bundle', result.stderr)
+
+    def test_update_without_a_sidecar_says_it_is_self_consistency_only(self):
+        out = self.temp / 'dist-nosidecar'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        Path(str(bundle) + '.sha256').unlink()
+        result = self.luna('update', '--bundle', str(bundle), '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('self-consistency', result.stdout)
 
     def test_status_degrades_on_a_missing_installed_file(self):
         self.assertEqual(self.luna('install').returncode, 0)

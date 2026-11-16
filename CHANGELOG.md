@@ -5,6 +5,10 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- `luna update` verifies every bundle file (incl. `scripts/luna.py`) against `RELEASE-FILES.json` before running it; legacy bundles need `--allow-legacy-bundle`.
+
+## Unreleased
+
 - **GE-Proton safety.** `luna proton verify [VERSION] [--rebuild|--against FILE]` and an
   integrity manifest written by `install`; hash-free corruption warnings in `proton status` and
   `luna doctor` (several GE versions, DLLs bulk-newer than the tool, dangling/foreign prefix

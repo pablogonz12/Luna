@@ -38,6 +38,7 @@ Commands:
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
     luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
+                [--allow-legacy-bundle]
                                         verify and install a released bundle
     luna reconcile [--dry-run]          merge Syncthing sync-conflict copies of
                                         Steam's localconfig.vdf (newest timestamp wins)
@@ -1046,6 +1047,24 @@ def _manifest_problems(manifest, root):
     return problems
 
 
+RELEASE_LISTING = 'RELEASE-FILES.json'
+RELEASE_FORMAT = 2
+
+
+def _release_listing(entries):
+    """{relative path: sha256} for every regular file the bundle will carry."""
+    listing = {}
+    for arcname, path in entries:
+        files = sorted(p for p in path.rglob('*')) if path.is_dir() else [path]
+        for item in files:
+            if item.is_symlink():
+                raise ValueError('refusing to release a symlink: %s' % item)
+            if item.is_file():
+                rel = arcname if not path.is_dir() else '%s/%s' % (arcname, item.relative_to(path).as_posix())
+                listing[rel] = sha256(item)
+    return listing
+
+
 def cmd_release(options):
     """Build a bundle another machine can install with `luna update`."""
     manifest = load_manifest()  # fail early when the pins are missing
@@ -1065,7 +1084,7 @@ def cmd_release(options):
     entries = [
         ('addons', ROOT / 'addons'),
         ('vendor/MANIFEST.json', MANIFEST_PATH),
-         ('scripts/luna.py', ROOT / 'scripts' / 'luna.py'),
+        ('scripts/luna.py', ROOT / 'scripts' / 'luna.py'),
         ('scripts/lumen-hook.py', ROOT / 'scripts' / 'lumen-hook.py'),
         ('scripts/steam-machine.py', ROOT / 'scripts' / 'steam-machine.py'),
         ('scripts/patch-lumen.py', PATCHER),
@@ -1077,9 +1096,17 @@ def cmd_release(options):
     changelog = ROOT / 'CHANGELOG.md'
     if changelog.is_file():
         entries.append(('CHANGELOG.md', changelog))
+    listing = _release_listing(entries)
+    listing_bytes = (json.dumps({'format': RELEASE_FORMAT, 'files': listing},
+                                indent=1, sort_keys=True) + '\n').encode()
     with tarfile.open(bundle, 'w:gz') as tar:
         for arcname, path in entries:
             tar.add(path, arcname='%s/%s' % (name, arcname), recursive=path.is_dir())
+        info = tarfile.TarInfo('%s/%s' % (name, RELEASE_LISTING))
+        info.size = len(listing_bytes)
+        info.mode = 0o644
+        info.mtime = int(time.time())
+        tar.addfile(info, io.BytesIO(listing_bytes))
     digest = sha256(bundle)
     checksum = out_dir / (bundle.name + '.sha256')
     checksum.write_text('%s  %s\n' % (digest, bundle.name))
@@ -1142,12 +1169,13 @@ def cmd_update(options):
             except Exception:  # noqa: BLE001 - the sidecar is optional for --url
                 pass
             if not Path(str(bundle) + '.sha256').is_file():
-                print('warning: no .sha256 beside the URL; the bundled manifest is still verified, '
-                      'but prefer --latest or a checksum-signed source', file=sys.stderr)
+                print('warning: no .sha256 beside the URL; only the bundle\'s own manifest can be '
+                      'checked (self-consistency, not independent). Prefer --latest.', file=sys.stderr)
         else:
             print('Point at a bundle: --bundle FILE, --url URL or --latest', file=sys.stderr)
             return 2
-        return install_bundle(bundle, only=options.only, dry_run=options.dry_run)
+        return install_bundle(bundle, only=options.only, dry_run=options.dry_run,
+                              allow_legacy=getattr(options, 'allow_legacy_bundle', False))
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         _release_lock(lock_path)
@@ -1212,8 +1240,8 @@ def _safe_extract(bundle, extract_dir):
 
     A gzip bundle is first read to its end: tarfile stops at the tar end marker and never
     reaches the gzip CRC trailer, so a damaged stream that still decodes would otherwise
-    extract silently (the bundled manifest only pins the add-ons and shared scripts, not
-    scripts/luna.py, which `update` then runs)."""
+    extract silently. Members must be plain files or directories (no symlinks, hardlinks or
+    devices) and names must be unique, so a later member cannot replace a verified one."""
     with open(str(bundle), 'rb') as probe:
         gzipped = probe.read(2) == b'\x1f\x8b'
     if gzipped:
@@ -1225,17 +1253,56 @@ def _safe_extract(bundle, extract_dir):
             raise ValueError('the bundle is corrupt (gzip stream check failed: %s)' % error) from error
     with tarfile.open(bundle) as tar:
         members = tar.getmembers()
+        seen = set()
         for member in members:
             name = member.name
             if not name or name.startswith('/') or '..' in Path(name).parts:
                 raise ValueError('REFUSING: unsafe path in bundle: %r' % name)
+            if not (member.isfile() or member.isdir()):
+                raise ValueError('REFUSING: bundle member %r is a link or special file' % name)
+            key = Path(name).as_posix().rstrip('/')
+            if key in seen:
+                raise ValueError('REFUSING: duplicate bundle member %r' % name)
+            seen.add(key)
         try:
             tar.extractall(extract_dir, filter='data')
         except TypeError:  # Python < 3.12 has no extraction filter
             tar.extractall(extract_dir)
 
 
-def install_bundle(bundle, only=None, dry_run=False):
+def _listing_problems(root):
+    """Check an extracted bundle against RELEASE-FILES.json, in both directions.
+
+    Runs in the already-installed code before anything from the bundle executes. Returns
+    (problems, listing_present)."""
+    path = root / RELEASE_LISTING
+    if not path.is_file():
+        return [], False
+    try:
+        data = json.loads(path.read_text())
+        files = data['files']
+        if data.get('format') != RELEASE_FORMAT or not isinstance(files, dict):
+            raise ValueError('unsupported format')
+    except (ValueError, KeyError, OSError, AttributeError) as error:
+        return ['%s is unreadable: %s' % (RELEASE_LISTING, error)], True
+    problems = []
+    for rel, digest in sorted(files.items()):
+        if rel.startswith('/') or '..' in Path(rel).parts:
+            problems.append('listed path is unsafe: %r' % rel)
+            continue
+        item = root / rel
+        if item.is_symlink() or not item.is_file():
+            problems.append('listed file is missing: %s' % rel)
+        elif sha256(item) != digest:
+            problems.append('%s does not match %s' % (rel, RELEASE_LISTING))
+    for item in sorted(root.rglob('*')):
+        rel = item.relative_to(root).as_posix()
+        if item.is_symlink() or (item.is_file() and rel != RELEASE_LISTING and rel not in files):
+            problems.append('unlisted file in the bundle: %s' % rel)
+    return problems, True
+
+
+def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False):
     """Verify a bundle and run the installer inside it."""
     bundle = Path(bundle)
     if not bundle.is_file():
@@ -1251,8 +1318,8 @@ def install_bundle(bundle, only=None, dry_run=False):
             return 1
         print('sha256 : verified (%s)' % actual[:12])
     else:
-        print('note   : no .sha256 beside the bundle; the payload hashes in the '
-              'bundled manifest are still enforced')
+        print('note   : no .sha256 beside the bundle: integrity is checked only against the bundle\'s '
+              'own manifest (self-consistency), not an independent checksum')
     with tempfile.TemporaryDirectory(prefix='luna-bundle-') as work:
         extract_dir = Path(work) / 'unpacked'
         extract_dir.mkdir()
@@ -1285,7 +1352,23 @@ def install_bundle(bundle, only=None, dry_run=False):
             for problem in problems:
                 print('  - %s' % problem, file=sys.stderr)
             return 1
-        print('bundle : %s (Luna %s, manifest verified)' % (bundle.name, version))
+        listing_problems, listed = _listing_problems(root)
+        if listing_problems:
+            print('REFUSING: the bundle contents do not match its file list:', file=sys.stderr)
+            for problem in listing_problems:
+                print('  - %s' % problem, file=sys.stderr)
+            return 1
+        if not listed:
+            # Old format: scripts/luna.py (which runs next) is not covered by any hash.
+            if not allow_legacy:
+                print('REFUSING: this bundle predates %s, so scripts/luna.py, which would run next, '
+                      'is not verified. If you trust where it came from, repeat with '
+                      '--allow-legacy-bundle.' % RELEASE_LISTING, file=sys.stderr)
+                return 1
+            print('WARNING: legacy bundle: scripts/luna.py is NOT covered by any hash; '
+                  'continuing because --allow-legacy-bundle was given', file=sys.stderr)
+        print('bundle : %s (Luna %s, manifest verified%s)'
+              % (bundle.name, version, '' if listed else ', legacy: luna.py unverified'))
         # Add-on updates must not undo a deliberate client update from Health.
         command = [sys.executable, str(script), 'install', '--force']
         for name in only or []:
@@ -9017,6 +9100,8 @@ def build_parser():
             child.add_argument('--url', help='install from a bundle URL (a .sha256 beside it is verified)')
             child.add_argument('--latest', action='store_true',
                                help='download the newest release asset (needs gh)')
+            child.add_argument('--allow-legacy-bundle', action='store_true',
+                               help='accept a pre-RELEASE-FILES.json bundle whose scripts/luna.py is unhashed')
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
         if name in ('verify', 'vendor'):
             child.add_argument('--sources', action='store_true',

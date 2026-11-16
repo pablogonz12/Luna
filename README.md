@@ -71,6 +71,17 @@ On the source machine, `luna release --publish` builds the bundle, writes its
 with the bundled installer, so no checkout is needed. A tampered bundle is
 refused and nothing is installed.
 
+Bundle format: every file in the bundle is listed with its sha256 in
+`RELEASE-FILES.json`, and the installed `luna` checks that list in both
+directions (a changed, missing or unlisted file, a duplicate member or a
+link is refused) before it runs anything from the bundle, including the
+bundled `scripts/luna.py`. Older bundles without the list are refused unless
+you pass `--allow-legacy-bundle`. With `--latest` the bundle is also checked
+against its `.sha256` sidecar; `--bundle`/`--url` without one are checked only
+against the bundle's own list (self-consistency). This is integrity, not
+authenticity: someone who can publish a bundle can write a matching list. A
+signature would be needed for that and is not implemented.
+
 ## Two machines, one library
 
 Playtime hours, preferences, artwork and Steam's own `localconfig.vdf`
