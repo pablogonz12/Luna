@@ -943,6 +943,10 @@ def gui_put_steam_back(close=None):
 def gui_verify(options, sleep=time.sleep):
     """`luna gui verify`: exit 0 pass, 1 any failure, 5 (EXIT_SKIPPED) it could not run.
     When --launch started Steam, Steam is closed again at the end unless --keep-steam."""
+    if getattr(options, 'json', False):
+        code, summary = gui_verify_data(options, sleep)
+        print(json.dumps(summary, sort_keys=True))
+        return code
     launched = []
     try:
         return gui_verify_run(options, sleep, launched)
@@ -951,24 +955,48 @@ def gui_verify(options, sleep=time.sleep):
             gui_put_steam_back()
 
 
-def gui_verify_run(options, sleep, launched):
+def gui_verify_data(options, sleep=time.sleep):
+    """Run the verify and return (exit code, summary dict) with the human output swallowed.
+    summary: result pass|fail|skipped, reason (skips), screen, failures [str], panels {name: {state, hits, samples}}."""
+    summary = {}
+    launched = []
+    sink = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(io.StringIO()):
+            code = gui_verify_run(options, sleep, launched, summary)
+    finally:
+        if launched and not getattr(options, 'keep_steam', False):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                gui_put_steam_back()
+    summary.setdefault('result', {EXIT_OK: 'pass', EXIT_SKIPPED: 'skipped'}.get(code, 'fail'))
+    summary['code'] = code
+    return code, summary
+
+
+def gui_verify_run(options, sleep, launched, summary=None):
+    summary = summary if summary is not None else {}
     reason = gui_unavailable_reason(need_accessible=False)
     if reason and not (getattr(options, 'launch', False) and reason.startswith('Steam is not running')):
         print('GUI checks skipped: %s' % reason)
+        summary.update(result='skipped', reason=reason)
         return EXIT_SKIPPED
     running, accessible = gui_steam_state()
     if not running:
         ok, message = gui_launch_accessible()
         print(message, file=sys.stdout if ok else sys.stderr)
         if not ok:
+            summary.update(result='fail', failures=[message])
             return 1
         launched.append(True)
     elif not accessible:
-        print('GUI checks skipped: Steam was not started in accessible mode; close it and run: luna gui launch')
+        reason = 'Steam was not started in accessible mode; close it and run: luna gui launch'
+        print('GUI checks skipped: %s' % reason)
+        summary.update(result='skipped', reason=reason)
         return EXIT_SKIPPED
     tree = gui_wait_for_window(getattr(options, 'wait', 90), sleep=sleep)
     if tree is None:
         print('FAIL: no Steam window with an accessible tree appeared', file=sys.stderr)
+        summary.update(result='fail', failures=['no Steam window with an accessible tree appeared'])
         return 1
     titles = gui_titles(gui_windows())
     screen = gui_classify(tree, titles)
@@ -995,6 +1023,9 @@ def gui_verify_run(options, sleep, launched):
             if item['state'] != 'found':
                 failures.append('%s panel: %s%s' % (name, item['state'],
                                                     ' (%s)' % item['reason'] if item.get('reason') else ''))
+    summary.update(result='fail' if failures else 'pass', screen=screen, failures=failures,
+                   panels={name: {'state': item.get('state'), 'hits': item.get('hits'), 'samples': item.get('samples')}
+                           for name, item in panels.items()})
     stamp = time.strftime('%Y%m%d-%H%M%S')
     shots = Path(getattr(options, 'screenshots', None) or luna_tools_dir() / 'gui-shots')
     shot, note = gui_capture(shots, 'gui-verify-%s.png' % stamp,
@@ -1019,7 +1050,8 @@ def gui_verify_run(options, sleep, launched):
     return 1 if failures else EXIT_OK
 
 
-def gui_status(options):
+def gui_status_info(options):
+    """The `luna gui status --json` dict for this machine (read-only)."""
     env = gui_session_env()
     tool = gui_find_tool(GUI_TOOL)
     running, accessible = gui_steam_state()
@@ -1042,6 +1074,12 @@ def gui_status(options):
             age = time.time() - started if started else None
             logon = gui_logon_evidence(started - 2) if started else ('unknown', '')
             info['screen'], info['signal'] = gui_judge_screen(raw, info['windows'], age, getattr(options, 'login_grace', GUI_LOGIN_GRACE), logon)
+    return info
+
+
+def gui_status(options):
+    info = gui_status_info(options)
+    running, accessible = info['steamRunning'], info['accessible']
     if getattr(options, 'json', False):
         print(json.dumps(info, indent=2, sort_keys=True))
         return EXIT_OK

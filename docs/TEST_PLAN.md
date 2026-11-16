@@ -71,7 +71,9 @@ ends in normal mode (`gui status` accessible: no).
 evidence (Library order and sort, add-on panels, the HowLongToBeat-sorted Home grid
 read over CDP when that sort is active (otherwise skipped, never a failure; the sort
 is never toggled), sidecar survival, shutdown and relaunch times); `library --save/--compare --common` remains for manual use. Not
-covered: fleet hosts (no graphical session over SSH), other compositors than niri.
+covered: other compositors than niri. Fleet hosts: `luna fleet gui [--verify]` is built and
+hermetically tested (`tests/test_fleet.py`, mocked ssh), but NOT yet confirmed against a real
+remote host with a running accessible Steam (and `gui` session discovery over non-interactive SSH is unproven).
 
 ## Evidence requirements
 

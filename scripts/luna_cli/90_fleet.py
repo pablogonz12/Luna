@@ -312,6 +312,241 @@ def fleet_status(hosts, as_json):
     return 1 if bad else EXIT_OK
 
 
+# ---------------------------------------------------------------- fleet gui
+# `luna fleet gui`: ask every machine what its Steam client looks like through the
+# existing `luna gui` layer there. Read-only by default (`gui status --json`); --verify
+# also runs `gui verify --json` (it navigates the UI and takes a window screenshot) on
+# hosts whose Steam is running in accessible mode. Nothing here launches, restarts or
+# stops Steam, and remote output is untrusted: size-capped, JSON-typed, never evaluated.
+
+FLEET_GUI_MAX_OUTPUT = 65536
+FLEET_GUI_SCRIPT = r'''
+p="$HOME/.local/share/Lumen/sls-luna/luna.py"
+if [ ! -f "$p" ]; then echo NOLUNA; exit 0; fi
+out=$(python3 "$p" gui status --json 2>/dev/null); rc=$?
+echo "GUIRC $rc"
+printf 'GUI %s\n' "$(printf '%s' "$out" | tr -d '\n' | head -c 65537)"
+'''
+FLEET_GUI_VERIFY_SCRIPT = r'''
+p="$HOME/.local/share/Lumen/sls-luna/luna.py"
+if [ ! -f "$p" ]; then echo NOLUNA; exit 0; fi
+out=$(python3 "$p" gui verify --json 2>/dev/null); rc=$?
+echo "VERIFYRC $rc"
+printf 'VERIFY %s\n' "$(printf '%s' "$out" | tr -d '\n' | head -c 65537)"
+'''
+FLEET_GUI_VERIFY_TIMEOUT = 420
+
+
+def fleet_clean(value, limit=80):
+    """Untrusted text -> a short printable string (no control or escape characters)."""
+    if not isinstance(value, str):
+        return ''
+    return ''.join(c if c.isprintable() else '?' for c in value)[:limit]
+
+
+def fleet_bool(value):
+    return value if isinstance(value, bool) else None
+
+
+def fleet_gui_blockers(windows):
+    """Open windows other than the main Steam window and the sign-in window."""
+    return [t for t in windows if t.strip().lower() != 'steam' and 'sign in to steam' not in t.lower()]
+
+
+def fleet_gui_from_status(info):
+    """Validate a `gui status --json` dict into the fields of a fleet GUI record."""
+    windows = [fleet_clean(t) for t in (info.get('windows') if isinstance(info.get('windows'), list) else [])[:20]
+               if isinstance(t, str)]
+    backend = info.get('backend')
+    backend = {fleet_clean(k, 24): fleet_clean(v, 120) for k, v in list(backend.items())[:8] if isinstance(k, str)} \
+        if isinstance(backend, dict) else {}
+    tool = fleet_clean(info.get('tool'), 200)
+    record = {'state': 'ok', 'agentDesktop': bool(tool) and tool != 'missing',
+              'steamRunning': fleet_bool(info.get('steamRunning')), 'accessible': fleet_bool(info.get('accessible')),
+              'screen': fleet_clean(info.get('screen'), 24) or '?', 'windows': windows,
+              'blockers': fleet_gui_blockers(windows), 'backend': backend}
+    if isinstance(info.get('signal'), str):
+        record['signal'] = fleet_clean(info['signal'], 160)
+    return record
+
+
+def fleet_gui_parse(code, out, err):
+    """Remote `fleet gui` script output -> record. state: ok | unreachable | no-luna | luna-too-old | bad-output."""
+    if code == 255:
+        return {'reachable': False, 'state': 'unreachable',
+                'error': fleet_clean((err.strip().splitlines() or ['ssh failed'])[-1], 160)}
+    record = {'reachable': True}
+    if len(out) > FLEET_GUI_MAX_OUTPUT:
+        record.update(state='bad-output', error='remote output larger than %d bytes was ignored' % FLEET_GUI_MAX_OUTPUT)
+        return record
+    gui_line, rc = None, None
+    for line in out.splitlines():
+        tag, _, rest = line.partition(' ')
+        if tag == 'NOLUNA':
+            record.update(installed=False, state='no-luna')
+            return record
+        if tag == 'GUIRC':
+            rc = rest.strip()
+        elif tag == 'GUI' and gui_line is None:
+            gui_line = rest
+    record['installed'] = True
+    if code != 0 and gui_line is None:
+        record.update(state='bad-output', error='remote script failed (exit %s)' % code)
+        return record
+    info = None
+    if gui_line and len(gui_line) <= FLEET_GUI_MAX_OUTPUT:
+        try:
+            info = json.loads(gui_line)
+        except ValueError:
+            info = None
+    if not isinstance(info, dict) or rc != '0':
+        record.update(state='luna-too-old', error='luna too old: run luna fleet install')
+        return record
+    record.update(fleet_gui_from_status(info))
+    return record
+
+
+def fleet_verify_parse(code, out):
+    """Remote `gui verify --json` output -> {'result': pass|fail|skipped, 'reason'?, 'failures': [...]}."""
+    if code == 255:
+        return {'result': 'fail', 'failures': ['ssh failed during verify']}
+    rc, line = None, None
+    for raw in out[:FLEET_GUI_MAX_OUTPUT].splitlines():
+        tag, _, rest = raw.partition(' ')
+        if tag == 'NOLUNA':
+            return {'result': 'fail', 'failures': ['Luna is not installed']}
+        if tag == 'VERIFYRC':
+            rc = rest.strip()
+        elif tag == 'VERIFY' and line is None:
+            line = rest
+    try:
+        data = json.loads(line) if line else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or rc not in ('0', '1', '5'):
+        return {'result': 'fail', 'failures': ['luna too old for `gui verify --json`: run luna fleet install']}
+    # the exit code is the verdict; the JSON only explains it
+    result = {'0': 'pass', '1': 'fail', '5': 'skipped'}[rc]
+    failures = [fleet_clean(f, 200) for f in (data.get('failures') if isinstance(data.get('failures'), list) else [])[:3]
+                if isinstance(f, str)]
+    verdict = {'result': result, 'failures': failures}
+    if result == 'skipped':
+        verdict['reason'] = fleet_clean(data.get('reason'), 200) or 'skipped'
+    elif result == 'fail' and not failures:
+        verdict['failures'] = ['verify failed (no detail)']
+    return verdict
+
+
+def fleet_gui_skip_reason(record):
+    """Why `gui verify` is not attempted on this record (None = go ahead)."""
+    if record.get('state') != 'ok':
+        return None
+    if not record.get('agentDesktop'):
+        return 'agent-desktop is not installed'
+    if not record.get('steamRunning'):
+        return 'Steam is not running (fleet gui never starts it)'
+    if not record.get('accessible'):
+        return 'Steam is not in accessible mode (fleet gui never restarts it)'
+    return None
+
+
+def fleet_gui_collect(host, verify, local_status=None, local_verify=None):
+    """GUI record for one host name, or for this machine when host is None."""
+    if host is None:
+        info = (local_status or gui_status_info)(argparse.Namespace(login_grace=GUI_LOGIN_GRACE))
+        record = {'reachable': True, 'installed': True, 'host': os.uname().nodename, 'local': True}
+        record.update(fleet_gui_from_status(info if isinstance(info, dict) else {}))
+    else:
+        code, out, err = fleet_ssh(host, FLEET_GUI_SCRIPT, timeout=60)
+        record = fleet_gui_parse(code, out, err)
+        record['host'], record['local'] = host, False
+    if verify and record.get('state') == 'ok':
+        reason = fleet_gui_skip_reason(record)
+        if reason:
+            record['verify'] = {'result': 'skipped', 'reason': reason, 'failures': []}
+        elif host is None:
+            code, summary = (local_verify or gui_verify_data)(argparse.Namespace(json=True))
+            record['verify'] = {'result': summary.get('result') if summary.get('result') in ('pass', 'fail', 'skipped') else 'fail',
+                                'failures': [fleet_clean(f, 200) for f in (summary.get('failures') or [])[:3]
+                                             if isinstance(f, str)]}
+            if record['verify']['result'] == 'skipped':
+                record['verify']['reason'] = fleet_clean(summary.get('reason'), 200) or 'skipped'
+        else:
+            code, out, _ = fleet_ssh(host, FLEET_GUI_VERIFY_SCRIPT, timeout=FLEET_GUI_VERIFY_TIMEOUT)
+            record['verify'] = fleet_verify_parse(code, out)
+    return record
+
+
+def fleet_gui_failed(record):
+    return (record.get('state') != 'ok') or (record.get('verify') or {}).get('result') == 'fail'
+
+
+def fleet_gui_notes(records):
+    notes = []
+    for record in records:
+        host, state = record['host'], record.get('state')
+        if state == 'unreachable':
+            notes.append('%s: unreachable (%s)' % (host, record.get('error', '?')))
+            continue
+        if state == 'no-luna':
+            notes.append('%s: Luna is not installed' % host)
+            continue
+        if state == 'luna-too-old':
+            notes.append('%s: luna too old for `gui` (run: luna fleet install %s)' % (host, host))
+            continue
+        if state != 'ok':
+            notes.append('%s: %s' % (host, record.get('error', 'unusable output')))
+            continue
+        if not record.get('agentDesktop'):
+            notes.append('%s: agent-desktop is missing (GUI checks need it)' % host)
+        if record.get('steamRunning') and record.get('accessible') is False:
+            notes.append('%s: Steam runs in normal mode; tree checks need accessible mode '
+                         '(close Steam, then `luna gui launch` there)' % host)
+        if record.get('screen') == 'login':
+            notes.append('%s: Steam is at the sign-in screen' % host)
+        if record.get('blockers'):
+            notes.append('%s: open window(s) in front of Steam: %s' % (host, ', '.join('"%s"' % t for t in record['blockers'])))
+        verify = record.get('verify') or {}
+        if verify.get('result') == 'fail':
+            notes.append('%s: gui verify FAILED: %s' % (host, '; '.join(verify.get('failures') or ['?'])))
+        elif verify.get('result') == 'skipped':
+            notes.append('%s: gui verify skipped: %s' % (host, verify.get('reason', '?')))
+    return notes
+
+
+def fleet_gui_row(record, verify):
+    labels = {'unreachable': 'UNREACHABLE', 'no-luna': 'no luna', 'luna-too-old': 'luna too old: run luna fleet install',
+              'bad-output': 'bad output'}
+    if record.get('state') != 'ok':
+        return [record['host'], labels.get(record.get('state'), '?')] + [''] * (7 if verify else 6)
+    backend = record.get('backend') or {}
+    row = [record['host'], 'ok', 'yes' if record.get('agentDesktop') else 'MISSING',
+           _fleet_yes(record.get('steamRunning')), _fleet_yes(record.get('accessible')), record.get('screen') or '?',
+           ('%d (blocked by %d)' % (len(record.get('windows') or []), len(record['blockers'])))
+           if record.get('blockers') else str(len(record.get('windows') or [])),
+           backend.get('name', '?')]
+    if verify:
+        result = (record.get('verify') or {}).get('result')
+        row.append({'pass': 'pass', 'fail': 'FAIL', 'skipped': 'skip'}.get(result, '-'))
+    return row
+
+
+def fleet_gui(hosts, as_json, verify):
+    records = [fleet_gui_collect(None, verify)] + [fleet_gui_collect(host, verify) for host in hosts]
+    notes = fleet_gui_notes(records)
+    if as_json:
+        print(json.dumps({'hosts': records, 'notes': notes, 'verify': verify}, indent=2, sort_keys=True))
+    else:
+        header = ['HOST', 'LUNA', 'AGENT', 'STEAM', 'ACCESSIBLE', 'SCREEN', 'WINDOWS', 'BACKEND'] + (['VERIFY'] if verify else [])
+        rows = [header] + [fleet_gui_row(record, verify) for record in records]
+        widths = [max(len(str(row[i])) for row in rows) for i in range(len(header))]
+        for row in rows:
+            print('  '.join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+        for note in notes:
+            print('note: %s' % note)
+    return 1 if any(fleet_gui_failed(r) for r in records) else EXIT_OK
+
+
 def fleet_push_cache(host, dry_run=False):
     """rsync the verified local Steam client cache to HOST when its build differs. (code, message)"""
     state = steam_state()
@@ -499,6 +734,8 @@ def cmd_fleet(options):
             return EXIT_REFUSED
     if action == 'status':
         return fleet_status(hosts or configured, options.json)
+    if action == 'gui':
+        return fleet_gui(hosts or configured, options.json, getattr(options, 'verify', False))
     for name in options.only:
         if name not in ADDONS:
             print('unknown add-on %r (known: %s)' % (name, ', '.join(ADDONS)), file=sys.stderr)

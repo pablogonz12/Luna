@@ -5,6 +5,11 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **`luna fleet gui [HOST...] [--json] [--verify]`**: one table of every machine's Steam client state
+  (agent-desktop, running, accessible mode, screen, blocker windows, backend) from the remote `luna gui status --json`.
+  Read-only; never starts/stops Steam. `--verify` (opt-in) also runs the new `luna gui verify --json`
+  (exit codes 0/1/5 unchanged) where Steam is already accessible. Old remote Luna -> "luna too old" row.
+  Exit 1 for unreachable/no or old Luna/failed verify; skips exit 0.
 - **Signed releases.** `luna release` signs the bundle (OpenSSH ed25519, `<bundle>.sig`) when a key exists;
   `luna update` verifies it against a local trust file before unpacking. New `luna signing status|init|trust|untrust`,
   `luna update --allow-unsigned`, `luna fleet install --trust-signing-key`; fleet copies the `.sig`. Once a key is

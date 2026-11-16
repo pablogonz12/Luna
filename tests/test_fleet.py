@@ -373,5 +373,196 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(parser.parse_args(['probe', '--json']).json)
 
 
+
+GUI_OK = {'tool': '/usr/bin/agent-desktop', 'session': {'WAYLAND_DISPLAY': 'wayland-1'}, 'steamRunning': True,
+          'accessible': True, 'screen': 'main', 'windows': ['Steam'], 'backend': {'name': 'niri', 'windows': 'niri'}}
+
+
+def gui_out(info=None, rc=0, raw=None):
+    body = raw if raw is not None else json.dumps(info if info is not None else GUI_OK, indent=2)
+    return 0, 'GUIRC %d\nGUI %s\n' % (rc, body.replace('\n', '')), ''
+
+
+def verify_out(rc, data):
+    return 0, 'VERIFYRC %d\nVERIFY %s\n' % (rc, json.dumps(data)), ''
+
+
+class FleetGuiTests(FleetTestCase):
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(luna, 'gui_status_info', return_value=dict(GUI_OK, steamRunning=False,
+                                                                                accessible=False, screen='n/a'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def gui(self, answers, verify=False, **kw):
+        """Run `fleet gui` with canned ssh answers {host: {script: result}} or {host: result}."""
+        calls = []
+
+        def fake(host, script, timeout=120):
+            calls.append((host, script))
+            answer = answers[host]
+            if isinstance(answer, dict):
+                return answer[script]
+            return answer
+        with mock.patch.object(luna, 'fleet_ssh', side_effect=fake):
+            code, out, err = self.run_cmd(options(fleet_action='gui', json=True, verify=verify,
+                                                  hosts=list(answers), **kw))
+        return code, json.loads(out), calls
+
+    def test_good_host_and_local_steam_not_running(self):
+        code, data, _ = self.gui({'h1': gui_out()})
+        by = {r['host']: r for r in data['hosts']}
+        self.assertEqual(code, 0)  # a stopped local Steam is a state, not a failure
+        local = [r for r in data['hosts'] if r['local']][0]
+        self.assertFalse(local['steamRunning'])
+        r = by['h1']
+        self.assertEqual((r['state'], r['agentDesktop'], r['steamRunning'], r['accessible'], r['screen']),
+                         ('ok', True, True, True, 'main'))
+        self.assertEqual(r['backend']['name'], 'niri')
+        self.assertEqual(r['blockers'], [])
+        self.assertNotIn('verify', r)
+
+    def test_unreachable_host(self):
+        code, data, _ = self.gui({'h1': (255, '', 'ssh: connect to host: timed out\n')})
+        self.assertEqual(code, 1)
+        self.assertEqual(data['hosts'][1]['state'], 'unreachable')
+        self.assertIn('h1: unreachable', '\n'.join(data['notes']))
+
+    def test_old_remote_luna_is_a_row_not_a_crash(self):
+        for answer in [(0, 'GUIRC 2\nGUI \n', ''), gui_out(raw='usage: luna [-h] ...', rc=0),
+                       gui_out(raw='[1, 2]'), (0, 'GUI {"tool": 1}\n', '')]:
+            code, data, _ = self.gui({'h1': answer})
+            self.assertEqual(data['hosts'][1]['state'], 'luna-too-old', answer)
+            self.assertEqual(code, 1)
+            self.assertIn('luna fleet install h1', '\n'.join(data['notes']))
+
+    def test_no_luna(self):
+        code, data, _ = self.gui({'h1': (0, 'NOLUNA\n', '')})
+        self.assertEqual((code, data['hosts'][1]['state']), (1, 'no-luna'))
+
+    def test_oversized_and_garbage_output(self):
+        big = (0, 'GUIRC 0\nGUI ' + 'x' * (luna.FLEET_GUI_MAX_OUTPUT + 10) + '\n', '')
+        code, data, _ = self.gui({'h1': big})
+        self.assertEqual((code, data['hosts'][1]['state']), (1, 'bad-output'))
+        code, data, _ = self.gui({'h1': (0, '\x1b[31mgarbage\x00\n', '')})
+        self.assertEqual(data['hosts'][1]['state'], 'luna-too-old')
+
+    def test_untrusted_fields_are_typed_and_sanitised(self):
+        evil = dict(GUI_OK, steamRunning='yes', accessible=1, screen='main\x1b[2J', windows=['Steam', 'Ev\x1bil', 7],
+                    backend='nope', tool=['x'])
+        _, data, _ = self.gui({'h1': gui_out(evil)})
+        r = data['hosts'][1]
+        self.assertIsNone(r['steamRunning'])
+        self.assertIsNone(r['accessible'])
+        self.assertNotIn('\x1b', json.dumps(r, ensure_ascii=False))
+        self.assertFalse(r['agentDesktop'])
+        self.assertEqual(r['backend'], {})
+
+    def test_steam_not_running_and_not_accessible_skip_verify_with_a_reason(self):
+        answers = {'down': gui_out(dict(GUI_OK, steamRunning=False, accessible=False, screen='n/a', windows=[])),
+                   'normal': gui_out(dict(GUI_OK, accessible=False))}
+        code, data, calls = self.gui(answers, verify=True)
+        by = {r['host']: r for r in data['hosts']}
+        self.assertEqual(code, 0)  # skips alone do not fail
+        self.assertEqual(by['down']['verify']['result'], 'skipped')
+        self.assertIn('not running', by['down']['verify']['reason'])
+        self.assertIn('accessible', by['normal']['verify']['reason'])
+        self.assertIn('normal mode', '\n'.join(data['notes']))
+        self.assertFalse(any(s == luna.FLEET_GUI_VERIFY_SCRIPT for _, s in calls))
+
+    def test_missing_agent_desktop_login_and_blockers_notes(self):
+        answers = {'a': gui_out(dict(GUI_OK, tool='missing')),
+                   'b': gui_out(dict(GUI_OK, screen='login', windows=['Sign in to Steam'])),
+                   'c': gui_out(dict(GUI_OK, windows=['Steam', 'Friends List', 'Settings']))}
+        code, data, _ = self.gui(answers)
+        notes = '\n'.join(data['notes'])
+        self.assertEqual(code, 0)
+        self.assertIn('a: agent-desktop is missing', notes)
+        self.assertIn('b: Steam is at the sign-in screen', notes)
+        self.assertIn('c: open window(s) in front of Steam: "Friends List", "Settings"', notes)
+        self.assertEqual({r['host']: r['blockers'] for r in data['hosts']}['b'], [])
+
+    def test_verify_pass_fail_skip_mapping(self):
+        v = luna.FLEET_GUI_VERIFY_SCRIPT
+        cases = [(verify_out(0, {'result': 'pass'}), 'pass', 0),
+                 (verify_out(1, {'result': 'fail', 'failures': ['luna panel: missing', 'b', 'c', 'd']}), 'fail', 1),
+                 (verify_out(5, {'result': 'skipped', 'reason': 'GUI checks off'}), 'skipped', 0),
+                 ((0, 'VERIFYRC 2\nVERIFY \n', ''), 'fail', 1),  # old luna: no --json
+                 (verify_out(7, {'result': 'pass'}), 'fail', 1)]  # a bogus code never reads as a pass
+        for answer, result, code in cases:
+            got, data, _ = self.gui({'h1': {luna.FLEET_GUI_SCRIPT: gui_out(), v: answer}}, verify=True)
+            verdict = data['hosts'][1]['verify']
+            self.assertEqual((verdict['result'], got), (result, code), answer)
+            if result == 'fail':
+                self.assertLessEqual(len(verdict['failures']), 3)
+                self.assertTrue(verdict['failures'])
+            if result == 'skipped':
+                self.assertEqual(verdict['reason'], 'GUI checks off')
+
+    def test_local_verify_uses_the_local_function(self):
+        local = dict(GUI_OK)
+        summary = {'result': 'fail', 'failures': ['sgdb panel: missing']}
+        with mock.patch.object(luna, 'gui_status_info', return_value=local), \
+             mock.patch.object(luna, 'gui_verify_data', return_value=(1, summary)) as verify, \
+             mock.patch.object(luna, 'fleet_ssh') as ssh:
+            code, out, _ = self.run_cmd(options(fleet_action='gui', json=True, verify=True))
+        data = json.loads(out)
+        self.assertEqual(code, 1)
+        self.assertEqual(data['hosts'][0]['verify']['failures'], ['sgdb panel: missing'])
+        verify.assert_called_once()
+        ssh.assert_not_called()
+
+    def test_text_table_has_verify_column_only_when_asked(self):
+        with mock.patch.object(luna, 'fleet_ssh', return_value=gui_out()):
+            _, plain, _ = self.run_cmd(options(fleet_action='gui', hosts=['h1']))
+        with mock.patch.object(luna, 'fleet_ssh', side_effect=lambda h, s, timeout=120:
+                               verify_out(0, {}) if s == luna.FLEET_GUI_VERIFY_SCRIPT else gui_out()):
+            _, withv, _ = self.run_cmd(options(fleet_action='gui', hosts=['h1'], verify=True))
+        self.assertNotIn('VERIFY', plain)
+        self.assertIn('VERIFY', withv)
+        self.assertIn('pass', withv)
+
+    def test_json_shape(self):
+        _, data, _ = self.gui({'h1': gui_out()})
+        self.assertEqual(sorted(data), ['hosts', 'notes', 'verify'])
+        self.assertFalse(data['verify'])
+        for key in ('host', 'local', 'reachable', 'state', 'agentDesktop', 'steamRunning', 'accessible',
+                    'screen', 'windows', 'blockers', 'backend'):
+            self.assertIn(key, data['hosts'][1])
+
+    def test_remote_scripts_never_start_or_stop_steam_or_change_mode(self):
+        for script in (luna.FLEET_GUI_SCRIPT, luna.FLEET_GUI_VERIFY_SCRIPT):
+            for forbidden in ('gui launch', '--launch', 'steam -', 'steam.sh', 'pkill', 'kill', 'shutdown',
+                              'steam://', 'restart', 'systemctl', 'setsid', 'nohup', 'rm '):
+                self.assertNotIn(forbidden, script)
+        self.assertIn('gui status --json', luna.FLEET_GUI_SCRIPT)
+        self.assertIn('gui verify --json', luna.FLEET_GUI_VERIFY_SCRIPT)
+
+    def test_host_only_reaches_ssh_as_argv_after_double_dash(self):
+        with mock.patch.object(luna.subprocess, 'run') as run:
+            run.return_value = mock.Mock(returncode=0, stdout='NOLUNA\n', stderr='')
+            self.run_cmd(options(fleet_action='gui', hosts=['laptop']))
+        command = run.call_args[0][0]
+        self.assertEqual(command[command.index('--') + 1], 'laptop')
+        self.assertNotIn('laptop', run.call_args[1]['input'])
+
+    def test_invalid_host_is_refused(self):
+        code, _, err = self.run_cmd(options(fleet_action='gui', hosts=['a;b']))
+        self.assertEqual(code, luna.EXIT_REFUSED)
+
+
+class GuiVerifyJsonTests(unittest.TestCase):
+    def test_json_summary_for_a_skip_keeps_exit_code_5(self):
+        with mock.patch.object(luna, 'gui_unavailable_reason', return_value='Steam is not running'):
+            code, summary = luna.gui_verify_data(argparse.Namespace(json=True))
+        self.assertEqual((code, summary['result'], summary['reason']), (5, 'skipped', 'Steam is not running'))
+        out = io.StringIO()
+        with mock.patch.object(luna, 'gui_unavailable_reason', return_value='Steam is not running'), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(luna.gui_verify(argparse.Namespace(json=True)), 5)
+        self.assertEqual(json.loads(out.getvalue())['result'], 'skipped')  # stdout is one JSON document
+
+
 if __name__ == '__main__':
     unittest.main()

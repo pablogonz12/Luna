@@ -63,7 +63,7 @@ def build_parser():
                                     'read the Library list order, watch an element appear/vanish, or run the Steam restart-cycle '
                                     'check. Exit codes of verify/library/launch: '
                                     '0 pass, 1 failure, 5 skipped (the check could not run)')
-            child.add_argument('--json', action='store_true', help='with status/library: machine-readable output')
+            child.add_argument('--json', action='store_true', help='with status/library/verify: machine-readable output')
             child.add_argument('--launch', action='store_true',
                                help='with verify: start Steam in accessible mode first if it is not running')
             child.add_argument('--wait', type=int, default=90, metavar='SECONDS',
@@ -162,10 +162,13 @@ def build_parser():
         if name == 'probe':
             child.add_argument('--json', action='store_true', help='one-line JSON (used by luna fleet)')
         if name == 'fleet':
-            child.add_argument('fleet_action', choices=['add', 'remove', 'list', 'status', 'push-cache', 'install'],
+            child.add_argument('fleet_action', choices=['add', 'remove', 'list', 'status', 'gui', 'push-cache', 'install'],
                                help='fleet action')
             child.add_argument('hosts', nargs='*', help='ssh host name(s) from ~/.ssh/config or user@host')
-            child.add_argument('--json', action='store_true', help='with status: machine-readable output')
+            child.add_argument('--json', action='store_true', help='with status/gui: machine-readable output')
+            child.add_argument('--verify', action='store_true',
+                               help='with gui: also run `luna gui verify` on hosts whose Steam is running in '
+                                    'accessible mode (navigates the remote UI, takes a window screenshot)')
             child.add_argument('--dry-run', action='store_true', help='with install/push-cache: report only')
             child.add_argument('--restart-steam', action='store_true',
                                help='with install: close Steam gracefully first and relaunch it afterwards')

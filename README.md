@@ -151,6 +151,8 @@ required; connections run with `BatchMode` and a connect timeout):
 ```
 luna fleet status [--json]           version, luna.py hash, add-on match/drift,
                                      Steam pin, packages, update block, Steam running
+luna fleet gui [HOST...] [--json] [--verify]
+                                     what each machine's Steam client looks like (see below)
 luna fleet push-cache laptop         rsync the verified Steam client cache if the build differs
 luna fleet install [laptop] [--only NAME] [--restart-steam] [--dry-run] [--force]
 ```
@@ -160,6 +162,21 @@ remote `luna update --bundle`. It refuses a host where Steam or Lumen is running
 unless `--restart-steam` (graceful `steam -shutdown`, install, relaunch), and
 refuses drifted payloads (or an older Luna that cannot report them) unless
 `--force`. The config lives in `~/.config/luna/fleet.json`.
+
+`fleet gui` asks this machine and every host (or just the HOSTs named) what the running Steam
+looks like, by running `luna gui status --json` there (`luna gui verify --json` with
+`--verify`) and printing one table (or JSON): Luna state, agent-desktop present, Steam running,
+accessible mode, screen (`starting`/`login`/`main`), open windows in front of Steam, backend.
+Notes call out sign-in screens, blocker windows, missing agent-desktop and normal-mode Steam.
+It never launches, restarts or stops Steam and never switches a machine to accessible mode:
+a host with Steam stopped or in normal mode is reported as such, and its verify is a skip
+with the reason. `--verify` is opt-in because it navigates the remote UI and takes a window
+screenshot (what `luna gui verify` always does; it runs only where Steam already runs in
+accessible mode). A remote Luna that predates `gui` shows `luna too old: run luna fleet install`.
+Remote output is untrusted (size-capped, type-checked, control characters stripped).
+Exit code: 1 if any host is unreachable, has no Luna, has a Luna too old to answer, sends
+unusable output or fails `--verify`; skips alone (Steam stopped, normal mode, verify skipped) exit 0.
+Built and tested hermetically; see `docs/TEST_PLAN.md` for whether it was confirmed on a real host.
 
 ### Games across machines
 
@@ -466,11 +483,9 @@ warning (exit stays 0), never killed. `luna gui` prints `starting` while it cann
 After `install`/`update` on a terminal, one line points at `luna gui verify`; it is
 printed only when the GUI layer could run and never starts Steam.
 
-**Not done, and why:** running the GUI checks across the fleet. `luna fleet` only
-sends fixed scripts over non-interactive SSH, which has no graphical session
-(no `WAYLAND_DISPLAY`, D-Bus or AT-SPI bus), so `luna gui` there would only print
-"skipped". No remote GUI mechanism was built, and none of this was tested on a
-second machine.
+Across the fleet: `luna fleet gui` (see the fleet section). It relies on `luna gui`
+resolving the graphical session itself on each host; whether that works over a real
+non-interactive SSH login is recorded in `docs/TEST_PLAN.md`.
 
 ## How Luna fits into the stack
 
