@@ -94,7 +94,8 @@ a machine-local trust file before it unpacks or runs anything.
 luna signing init                  # release machine: create ~/.config/luna/luna-release-ed25519 (0600, no passphrase) and trust it
 luna signing status                # key fingerprint(s), whether a key exists here, and this machine's policy
 luna signing trust KEYFILE|TEXT    # other machine: trust the release machine's PUBLIC key (…ed25519.pub)
-luna signing untrust KEY|SHA256:…  # stop trusting a key
+luna signing untrust KEY|SHA256:…  # stop trusting a key (the LAST key: enforcement stays on, see below)
+luna signing disable               # deliberately stop checking signatures on this machine
 luna fleet install HOST --trust-signing-key   # opt-in: after the install, make HOST trust this machine's public key
 ```
 
@@ -104,6 +105,37 @@ luna fleet install HOST --trust-signing-key   # opt-in: after the install, make 
 | signature present, bad / other key / other bundle / wrong namespace / symlink / oversized | installs with a note (not checked) | **refused, even with `--allow-unsigned`** |
 | no signature | installs with a note (authenticity not checked) | **refused** unless `--allow-unsigned` (warns) |
 | `ssh-keygen` missing | installs with a note | refused unless `--allow-unsigned` |
+| enforcement was switched on here, but no usable trusted key is found (trust file deleted, emptied, or another `LUNA_SIGNING_DIR`/`XDG_CONFIG_HOME`/`HOME`) | n/a | **refused, even with `--allow-unsigned`**; names the expected trust file and `luna signing disable` |
+
+**Enforcement does not depend on the trust file existing.** The first `luna signing init|trust`
+records `signing-policy.json` (`enforce: true`, the trust file path) in two places: `<Lumen>/sls-luna/`
+and a HOME-independent anchor, `~/.local/share/Lumen/sls-luna/` of the account's passwd home
+(`LUNA_ANCHOR_HOME` overrides it, used by tests). Any copy saying "enforce" wins; an unreadable copy
+refuses. A machine that has keys but no marker gets one on its next `luna signing` or `luna update`.
+`untrust` of the last key keeps enforcing (and says so); only `luna signing disable` turns it off, and
+`trust`/`init` turn it back on.
+
+### Rollback protection
+
+A validly signed but old bundle is a way to reinstall a vulnerable release. While enforcing, `luna update`
+reads the bundle version (`addons.luna.plugin_version`, which must be plain `x.y.z`) from the verified,
+extracted bundle before anything from it runs, and refuses a version lower than `min_version` in
+`update-state.json` (same two directories; the higher copy wins). An equal version is allowed. The mark is
+raised only by the installed parent, after the bundle installer exits 0 and only for a bundle whose signature
+was verified; an unsigned install, a dry run or a failed install never raises it. A damaged state file means
+refuse (never reset): inspect it, then delete or fix it by hand. `luna update --allow-downgrade` installs an
+older bundle anyway (prints a WARNING and does not lower the mark); the unattended autoupdate never uses it,
+and `luna fleet install --allow-downgrade` forwards it to hosts only when you give it (a host with an older
+Luna does not know the flag and will refuse). `luna signing status` shows "minimum bundle version".
+
+### `luna update` hardening
+
+`--dry-run` verifies the bundle and prints the plan from the installed code; it never executes anything
+from the bundle. `--url` accepts https only (plain http only for 127.0.0.1/localhost, so tests can use a
+local server), follows redirects only to https, refuses `user:pass@`, streams the download with a size cap
+(bundle 64 MiB, `.sha256` 4 KiB, `.sig` 8 KiB) and refuses an oversized or empty/malformed `.sha256`. The
+autoupdate accepts only a `vX.Y.Z` tag and only a bundle whose own version equals it; the update lock is a
+kernel `flock`, so a crashed update never wedges it and a live one is never stolen.
 
 Files live in `~/.config/luna/` (`$XDG_CONFIG_HOME`, or `$LUNA_SIGNING_DIR`):
 `luna-release-ed25519(.pub)` and `release-signers` (the trust file). The trust
@@ -115,11 +147,14 @@ unsigned release without `--allow-unsigned`. `--allow-legacy-bundle` is unchange
 Honest limits: the private key is unencrypted on the release machine (anyone
 who can read it can sign); the very first install of Luna is not covered (the
 bundle you bootstrap with is trusted by you, not by a signature); the trust
-file is the anchor, so whoever can edit `~/.config/luna/release-signers` on a
-machine controls what it accepts; a machine with no trusted key stays
-unauthenticated; an old, validly signed bundle can be replayed (no rollback
-protection); `--allow-unsigned` and `--allow-legacy-bundle` are deliberate
-holes.
+file is the anchor, so whoever can write as your user (edit `release-signers`, the
+marker copies and `update-state.json`) controls what the machine accepts: the markers make
+silent loss of the trust file or a different environment fail closed, not a hostile same-user
+process; an environment that points at a *different but valid* trust file is only warned about;
+the anchor still follows `LUNA_ANCHOR_HOME`/`LUMEN_DIR`/`HOME` overrides; a machine that never
+trusted a key stays unauthenticated and has no rollback protection; `update --latest` is not tag-checked
+(only autoupdate is); loopback http is allowed for `--url`; `--allow-unsigned`,
+`--allow-downgrade` and `--allow-legacy-bundle` are deliberate holes.
 
 ## Two machines, one library
 

@@ -15,6 +15,17 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
   `luna update --allow-unsigned`, `luna fleet install --trust-signing-key`; fleet copies the `.sig`. Once a key is
   trusted, unsigned bundles are refused and invalid/untrusted signatures are always refused. See README, "Release signing".
 
+- **Update/signing hardening (security review).** Signature enforcement is now remembered in
+  `signing-policy.json` (two locations) so a missing trust file or another environment refuses instead of
+  silently accepting unsigned bundles; `luna signing disable` is the deliberate off switch and untrusting the last
+  key keeps enforcing. `luna update --dry-run` executes nothing from the bundle. `--url`: https only (loopback http
+  allowed), https-only redirects, streamed download with size caps. Empty/malformed `.sha256`, non-object manifest or
+  file list now refuse cleanly; `cmd_autoupdate` records any exception; fleet remote-script values are all validated
+  (`fullmatch` host, remote temp dir, bundle/add-on names, int timeout, key blob); autoupdate requires a `vX.Y.Z` tag
+  and a bundle of that version; the manifest check walks the bundle's own add-ons; the update lock is `flock`.
+  **Rollback protection:** `update-state.json` `min_version`; `luna update --allow-downgrade` and
+  `luna fleet install --allow-downgrade`. See README, "Release signing".
+
 - `luna update` verifies every bundle file (incl. `scripts/luna.py`) against `RELEASE-FILES.json` before running it; legacy bundles need `--allow-legacy-bundle`.
 
 ## Unreleased

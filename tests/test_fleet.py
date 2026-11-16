@@ -225,7 +225,7 @@ class PushCacheTests(FleetTestCase):
 
 
 class InstallTests(FleetTestCase):
-    def install(self, remote, opts, bundle=Path('/tmp/luna-1.0.tar.gz')):
+    def install(self, remote, opts, bundle=Path('/tmp/luna-1.0.tar.gz'), mktemp='/tmp/luna-fleet.AbC123\n'):
         calls = []
 
         def fake_ssh(host, script, timeout=120):
@@ -233,13 +233,96 @@ class InstallTests(FleetTestCase):
             if script == luna.FLEET_STATUS_SCRIPT:
                 return remote
             if script == luna.FLEET_MKTEMP_SCRIPT:
-                return 0, '/tmp/luna-fleet.abc\n', ''
+                return 0, mktemp, ''
             return 0, 'done\n', ''
         with mock.patch.object(luna, 'fleet_ssh', side_effect=fake_ssh), \
                 mock.patch.object(luna.subprocess, 'run',
                                   return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
             result = luna.fleet_install_host('h', bundle, opts)
         return result, calls, run
+
+    # -- review finding 5: nothing unvalidated reaches a remote script ----------
+    def test_a_hostile_remote_temp_dir_is_refused_before_anything_is_sent(self):
+        for hostile in ("/tmp/a'b'c/luna-fleet.AbC123", "/tmp/../etc/luna-fleet.AbC123", '/tmp/luna-fleet.abc',
+                        '/tmp/luna-fleet.AbC123; rm -rf ~', '/tmp/luna-fleet.AbC123\n/etc', 'luna-fleet.AbC123',
+                        '/tmp/luna fleet/luna-fleet.AbC123', '/tmp/luna-fleet.AbC12$', '/', '/tmp/x/../luna-fleet.AbC123',
+                        '/tmp/luna-fleet.AbC123/extra'):
+            mktemp = hostile if '\n' in hostile else hostile + '\n'
+            (ok, message), calls, run = self.install(remote_out(probe=probe()), options(), mktemp=mktemp)
+            self.assertFalse(ok, hostile)
+            self.assertIn('temp dir', message, hostile)
+            self.assertFalse(any(c.startswith('rm -rf') for c in calls), hostile)
+            self.assertEqual(calls, [luna.FLEET_STATUS_SCRIPT, luna.FLEET_MKTEMP_SCRIPT], hostile)
+            run.assert_not_called()
+        # the last output line wins when the remote profile prints noise first
+        (ok, message), _, _ = self.install(remote_out(probe=probe()), options(),
+                                           mktemp='welcome\n/home/u/tmp/luna-fleet.AbC123\n')
+        self.assertTrue(ok, message)
+
+    def test_host_names_may_not_carry_a_trailing_newline(self):
+        for bad in ('laptop\n', 'u@laptop\n', 'laptop\n\n'):
+            self.assertFalse(luna.fleet_valid_host(bad), repr(bad))
+            self.assertIsNone(luna.FLEET_HOST_RE.fullmatch(bad), repr(bad))
+
+    def test_the_bundle_name_and_add_on_names_are_checked_before_use(self):
+        (ok, message), calls, run = self.install(remote_out(probe=probe()), options(),
+                                                 bundle=Path("/tmp/luna-1.0';touch x;'.tar.gz"))
+        self.assertFalse(ok)
+        self.assertIn('bundle name', message)
+        self.assertFalse(any('update --bundle' in c for c in calls))
+        (ok, message), calls, _ = self.install(remote_out(probe=probe()), options(only=["sgdb';touch x;'"]))
+        self.assertFalse(ok)
+        self.assertIn('add-on', message)
+        self.assertFalse(any('update --bundle' in c for c in calls))
+
+    def test_every_remote_script_value_is_a_validated_literal(self):
+        (ok, _), calls, _ = self.install(remote_out(probe=probe()), options(only=['sgdb', 'luna'], stop_timeout=5))
+        self.assertTrue(ok)
+        update = [c for c in calls if 'update --bundle' in c][0]
+        self.assertEqual(update.count('\n'), 1)
+        self.assertIn("--bundle '/tmp/luna-fleet.AbC123/luna-1.0.tar.gz'", update)
+
+    def test_the_stop_timeout_is_forced_to_an_int(self):
+        (ok, _), calls, _ = self.install(remote_out(steam=True, probe=probe()),
+                                         options(restart_steam=True, stop_timeout='5; reboot'))
+        stop = [c for c in calls if 'steam -shutdown' in c]
+        self.assertTrue(not ok or all('reboot' not in c for c in stop))
+        self.assertFalse(any('reboot' in c for c in calls))
+
+    def test_trust_key_blob_is_checked_again_at_the_last_moment(self):
+        with mock.patch.object(luna, 'signing_parse_pubkey', return_value=("AAAA'; touch /tmp/x; '", '')), \
+                mock.patch.object(luna, 'fleet_ssh') as ssh:
+            ok, message = luna.fleet_trust_signing_key('h')
+        self.assertFalse(ok)
+        ssh.assert_not_called()
+
+    # -- rollback protection -----------------------------------------------------
+    def test_allow_downgrade_is_forwarded_only_when_the_user_gave_it(self):
+        (ok, _), calls, _ = self.install(remote_out(probe=probe()), options())
+        self.assertTrue(ok)
+        self.assertFalse(any('--allow-downgrade' in c for c in calls))
+        (ok, _), calls, _ = self.install(remote_out(probe=probe()), options(allow_downgrade=True))
+        self.assertTrue(ok)
+        update = [c for c in calls if 'update --bundle' in c]
+        self.assertEqual(len(update), 1)
+        self.assertIn('--allow-downgrade', update[0])
+        (ok, message), _, _ = self.install(remote_out(probe=probe()), options(allow_downgrade=True, dry_run=True), bundle=None)
+        self.assertIn('--allow-downgrade', message)
+
+    def test_a_downgrade_refusal_on_the_host_is_reported(self):
+        def fake_ssh(host, script, timeout=120):
+            if script == luna.FLEET_STATUS_SCRIPT:
+                return remote_out(probe=probe())
+            if script == luna.FLEET_MKTEMP_SCRIPT:
+                return 0, '/tmp/luna-fleet.AbC123\n', ''
+            if 'update --bundle' in script:
+                return 1, '', 'REFUSING: bundle 0.1.0 is older than 0.2.0\n'
+            return 0, '', ''
+        with mock.patch.object(luna, 'fleet_ssh', side_effect=fake_ssh), \
+                mock.patch.object(luna.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
+            ok, message = luna.fleet_install_host('h', Path('/tmp/luna-1.0.tar.gz'), options())
+        self.assertFalse(ok)
+        self.assertIn('older than', message)
 
     def test_refuses_when_steam_running(self):
         (ok, message), calls, run = self.install(remote_out(steam=True, probe=probe()), options())
@@ -327,13 +410,13 @@ class InstallTests(FleetTestCase):
             if script == luna.FLEET_STATUS_SCRIPT:
                 return remote_out(steam=True, probe=probe())
             if script == luna.FLEET_MKTEMP_SCRIPT:
-                return 0, '/tmp/luna-fleet.abc\n', ''
+                return 0, '/tmp/luna-fleet.AbC123\n', ''
             if 'steam -shutdown' in script:
                 return 1, '', ''
             return 0, '', ''
         with mock.patch.object(luna, 'fleet_ssh', side_effect=fake_ssh), \
                 mock.patch.object(luna.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
-            ok, message = luna.fleet_install_host('h', Path('/tmp/b.tar.gz'), options(restart_steam=True))
+            ok, message = luna.fleet_install_host('h', Path('/tmp/luna-b.tar.gz'), options(restart_steam=True))
         self.assertFalse(ok)
         self.assertFalse(any('update --bundle' in c for c in calls))
         self.assertIn(luna.FLEET_START_STEAM_SCRIPT, calls)

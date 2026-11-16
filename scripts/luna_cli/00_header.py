@@ -37,9 +37,9 @@ Commands:
     luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256, + .sig when a release
                                         key exists) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
-                [--allow-legacy-bundle] [--allow-unsigned]
+                [--allow-legacy-bundle] [--allow-unsigned] [--allow-downgrade]
                                         verify (sha256, signature) and install a released bundle
-    luna signing status|init            release signing: OpenSSH ed25519 key under ~/.config/luna/;
+    luna signing status|init|disable    release signing: OpenSSH ed25519 key under ~/.config/luna/;
     luna signing trust|untrust KEY      the local trust file decides which signatures `update` accepts
     luna reconcile [--dry-run]          merge Syncthing sync-conflict copies of
                                         Steam's localconfig.vdf (newest timestamp wins)
@@ -78,7 +78,7 @@ Commands:
                                         of this machine and every host
     luna fleet push-cache HOST...       rsync the verified Steam client cache when HOST's differs
     luna fleet install [HOST...] [--only NAME] [--restart-steam] [--force] [--dry-run]
-                       [--trust-signing-key]
+                       [--trust-signing-key] [--allow-downgrade]
                                         push the release bundle; refuses while Steam runs
     luna games list [--json]            installed Steam games here (size, library, prefix, stplug-in lua)
     luna games diff [HOST] [--json]     which games are installed where; for those missing on HOST:

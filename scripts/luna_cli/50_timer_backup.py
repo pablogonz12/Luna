@@ -206,18 +206,25 @@ def cmd_autoupdate(options):
         if reasons:
             return record({'result': 'deferred', 'reason': reasons[0]})
 
+        # The tag reaches `gh release download` and names the version the bundle must carry:
+        # pending.json is writable by anything running as the user, so it is validated first.
+        if not isinstance(target, str) or not re.fullmatch(r'v?[0-9]+\.[0-9]+\.[0-9]+', target):
+            return record({'result': 'error', 'reason': 'refusing a release tag that is not vX.Y.Z: %.40r' % (target,)})
         work = Path(tempfile.mkdtemp(prefix='luna-autoupdate-'))
         try:
             bundle, error = download_release(target, work)
             if bundle is None:
                 return record({'result': 'error', 'reason': error, 'version': target})
-            code = install_bundle(bundle)
+            # Never --allow-downgrade here: an unattended update must not roll back.
+            code = install_bundle(bundle, expect_version=target.lstrip('v'))
         finally:
             shutil.rmtree(work, ignore_errors=True)
         if code == 0 and pending_path.exists():
             pending_path.unlink()
         return record({'result': 'applied' if code == 0 else 'failed',
                        'version': target, 'installedBefore': installed, 'exit': code})
+    except Exception as error:  # noqa: BLE001 - the timer must always leave a trace of why it failed
+        return record({'result': 'failed', 'reason': str(error) or error.__class__.__name__})
     finally:
         _release_lock(lock_path)
 

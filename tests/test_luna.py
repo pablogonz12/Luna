@@ -11,6 +11,9 @@ import json
 import os
 os.environ.setdefault('LUNA_GUI_CHECKS', '0')  # hermetic: tests never probe the real desktop (test_gui_check manages it itself)
 os.environ.setdefault('LUNA_LIVE_CHECKS', '0')  # hermetic: tests never contact a real Steam (test_live_probe uses a fake endpoint)
+import tempfile as _tempfile
+# hermetic: the signing-enforcement anchor lives under the passwd home by default; tests never touch it.
+os.environ.setdefault('LUNA_ANCHOR_HOME', _tempfile.mkdtemp(prefix='luna-anchor-default-'))
 import shutil
 import subprocess
 import sys
@@ -65,6 +68,7 @@ def stub_bin(home, running=''):
     # `release download` copies $LUNA_TEST_BUNDLE to the requested --dir.
     gh = directory / 'gh'
     gh.write_text('''#!/bin/sh
+[ -z "${LUNA_TEST_GHLOG:-}" ] || echo "$*" >> "$LUNA_TEST_GHLOG"
 case "$1 $2" in
   "release view")
     tag="${LUNA_TEST_TAG:-v9.9.9}"
@@ -118,6 +122,7 @@ class LunaTestCase(unittest.TestCase):
                         XDG_RUNTIME_DIR=str(self.home / 'run'),
                         XDG_CONFIG_HOME=str(self.home / '.config'),
                         LUNA_SIGNING_DIR=str(self.home / '.config/luna'),  # never the real signing key
+                        LUNA_ANCHOR_HOME=str(self.temp / 'anchor'),  # never the real enforcement anchor
                         PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', ''))
 
     def tearDown(self):
@@ -777,6 +782,222 @@ class LunaTestCase(unittest.TestCase):
         result = self.luna('update', '--bundle', str(bundle), '--dry-run')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('already running', result.stderr + result.stdout)
+
+    # -- security review: update hardening ---------------------------------
+    def module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('luna_mod_%d' % id(self), str(HERE / 'scripts' / 'luna.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def repack(self, edit, tag='repack'):
+        """Release a bundle, let `edit(files)` change {relative path: bytes}, then rewrite the
+        file list and the sidecar so only deliberate content differences remain."""
+        out = self.temp / ('dist-' + tag)
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        with tarfile.open(bundle) as tar:
+            root = tar.getnames()[0].split('/')[0]
+            files = {m.name[len(root) + 1:]: tar.extractfile(m).read() for m in tar.getmembers() if m.isfile()}
+        edit(files)
+        files.pop('RELEASE-FILES.json', None)
+        listing = {rel: hashlib.sha256(data).hexdigest() for rel, data in files.items()}
+        files['RELEASE-FILES.json'] = json.dumps({'format': 2, 'files': listing}).encode()
+        with tarfile.open(bundle, 'w:gz') as tar:
+            for rel, data in sorted(files.items()):
+                info = tarfile.TarInfo('%s/%s' % (root, rel))
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        Path(str(bundle) + '.sha256').write_text(
+            '%s  %s\n' % (hashlib.sha256(bundle.read_bytes()).hexdigest(), bundle.name))
+        return bundle
+
+    def assert_clean_refusal(self, result):
+        text = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, text)
+        self.assertIn('REFUSING', text)
+        self.assertNotIn('Traceback', text)
+        self.assertFalse(self.addons.exists(), 'nothing may be installed from a refused bundle')
+        return text
+
+    def test_dry_run_executes_nothing_from_the_bundle(self):
+        canary = self.temp / 'canary'
+
+        def edit(files):
+            files['scripts/luna.py'] = b'import os, pathlib\npathlib.Path(os.environ["LUNA_CANARY"]).write_text("ran")\n'
+        bundle = self.repack(edit)
+        result = self.luna('update', '--bundle', str(bundle), '--dry-run', env=dict(self.env, LUNA_CANARY=str(canary)))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('DRY RUN', result.stdout)
+        self.assertFalse(canary.exists(), '--dry-run executed code from the bundle')
+        real = self.luna('update', '--bundle', str(bundle), env=dict(self.env, LUNA_CANARY=str(canary)))
+        self.assertTrue(canary.exists(), 'the real update is the one that runs the bundle installer')
+
+    def test_update_refuses_an_empty_sidecar_cleanly(self):
+        out = self.temp / 'dist-empty-sidecar'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        for content in ('', '\n  \n', 'nothex\n'):
+            Path(str(bundle) + '.sha256').write_text(content)
+            self.assert_clean_refusal(self.luna('update', '--bundle', str(bundle), '--dry-run'))
+
+    def test_update_refuses_a_wrongly_shaped_manifest_or_listing_cleanly(self):
+        def with_file(name, data):
+            def edit(files):
+                files[name] = data
+            return edit
+        cases = [('vendor/MANIFEST.json', b'[]'), ('vendor/MANIFEST.json', b'{"addons": []}'),
+                 ('vendor/MANIFEST.json', b'{"addons": {"luna": []}}'),
+                 ('vendor/MANIFEST.json', b'{"addons": {"luna": {"plugin_version": "0.0.1", "files": []}}}'),
+                 ('vendor/MANIFEST.json', b'"text"')]
+        for index, (name, data) in enumerate(cases):
+            bundle = self.repack(with_file(name, data), tag='shape%d' % index)
+            self.assert_clean_refusal(self.luna('update', '--bundle', str(bundle), '--dry-run'))
+        # a listing that is not an object, and one with non-text digests (written after repack's own)
+        bundle = self.repack(lambda files: None, tag='listing')
+        with tarfile.open(bundle) as tar:
+            members = [(m, tar.extractfile(m).read()) for m in tar.getmembers() if m.isfile()]
+        for index, replacement in enumerate((b'[]', b'{"format": 2, "files": []}', b'{"format": 2, "files": {"a": 5}}')):
+            with tarfile.open(bundle, 'w:gz') as tar:
+                for info, data in members:
+                    if info.name.endswith('/RELEASE-FILES.json'):
+                        data = replacement
+                        info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
+            Path(str(bundle) + '.sha256').write_text(
+                '%s  %s\n' % (hashlib.sha256(bundle.read_bytes()).hexdigest(), bundle.name))
+            self.assert_clean_refusal(self.luna('update', '--bundle', str(bundle), '--dry-run'))
+
+    def test_autoupdate_records_a_failure_on_any_exception(self):
+        from unittest import mock
+        self.assertEqual(self.luna('install').returncode, 0)
+        plugin = self.addons / 'luna' / 'plugin.json'
+        stale = json.loads(plugin.read_text())
+        stale['version'] = '0.0.1'
+        plugin.write_text(json.dumps(stale))
+        (self.data / 'luna.json').write_text(json.dumps({'version': 1, 'auto_update': 'install'}))
+        bundle, env = self.bundle_and_env()
+        module = self.module()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch.object(module, 'install_bundle', side_effect=RuntimeError('boom')), \
+                mock.patch.object(module, 'refuse_reasons', return_value=[]):
+            import contextlib
+            with contextlib.redirect_stdout(out):
+                module.cmd_autoupdate(__import__('argparse').Namespace(verbose=True))
+        last = json.loads((self.home / '.local/share/Lumen/sls-luna/autoupdate.json').read_text())
+        self.assertEqual(last['result'], 'failed', last)
+        self.assertIn('boom', last.get('reason', ''))
+
+    def test_autoupdate_never_passes_allow_downgrade(self):
+        from unittest import mock
+        self.assertEqual(self.luna('install').returncode, 0)
+        plugin = self.addons / 'luna' / 'plugin.json'
+        stale = json.loads(plugin.read_text())
+        stale['version'] = '0.0.1'
+        plugin.write_text(json.dumps(stale))
+        (self.data / 'luna.json').write_text(json.dumps({'version': 1, 'auto_update': 'install'}))
+        bundle, env = self.bundle_and_env()
+        module = self.module()
+        import contextlib
+        with mock.patch.dict(os.environ, env), mock.patch.object(module, 'install_bundle', return_value=0) as install, \
+                mock.patch.object(module, 'refuse_reasons', return_value=[]), contextlib.redirect_stdout(io.StringIO()):
+            module.cmd_autoupdate(__import__('argparse').Namespace(verbose=False))
+        self.assertTrue(install.called)
+        self.assertFalse(install.call_args[1].get('allow_downgrade'), install.call_args)
+
+    def pending_autoupdate(self, tag):
+        if not self.addons.exists():
+            self.assertEqual(self.luna('install').returncode, 0)
+        tools = self.home / '.local/share/Lumen/sls-luna'
+        (tools / 'pending.json').write_text(json.dumps({'tag': tag, 'requestedAt': 1}))
+        ghlog = self.temp / 'gh.log'
+        bundle, env = self.bundle_and_env({'LUNA_TEST_GHLOG': str(ghlog)})
+        result = self.luna('autoupdate', '--verbose', env=env)
+        last = json.loads((tools / 'autoupdate.json').read_text())
+        return result, last, (ghlog.read_text() if ghlog.exists() else '')
+
+    def test_autoupdate_rejects_a_malformed_pending_tag_before_gh(self):
+        for tag in ('--repo=evil/x', 'v1.0', 'v1.0.0;rm', 'v1.0.0\n--x', '../v1.0.0', 'latest'):
+            result, last, ghlog = self.pending_autoupdate(tag)
+            self.assertEqual(last['result'], 'error', (tag, last))
+            self.assertIn('tag', last['reason'])
+            self.assertNotIn('release download', ghlog, tag)
+
+    def test_autoupdate_requires_the_bundle_version_to_equal_the_tag(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        plugin = self.addons / 'luna' / 'plugin.json'
+        stale = json.loads(plugin.read_text())
+        stale['version'] = '0.0.1'
+        plugin.write_text(json.dumps(stale))
+        result, last, _ = self.pending_autoupdate('v0.0.9')  # the stub serves the real bundle whatever the tag
+        self.assertEqual(last['result'], 'failed', last)
+        self.assertEqual(last['version'], 'v0.0.9')
+        self.assertIn('tag', result.stderr + result.stdout)
+        self.assertEqual(json.loads(plugin.read_text())['version'], '0.0.1', 'a mismatching bundle must not install')
+
+    def test_update_accepts_a_bundle_that_drops_an_addon_and_refuses_bad_names(self):
+        def drop(files):
+            manifest = json.loads(files['vendor/MANIFEST.json'])
+            del manifest['addons']['presence']
+            files['vendor/MANIFEST.json'] = json.dumps(manifest).encode()
+            for rel in [r for r in files if r.startswith('addons/presence/')]:
+                del files[rel]
+        bundle = self.repack(drop, tag='drop')
+        result = self.luna('update', '--bundle', str(bundle), '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        def evil(files):
+            manifest = json.loads(files['vendor/MANIFEST.json'])
+            manifest['addons']['../evil'] = {'files': {'x': {'sha256': '0' * 64, 'source_path': 'x'}}}
+            files['vendor/MANIFEST.json'] = json.dumps(manifest).encode()
+        text = self.assert_clean_refusal(self.luna('update', '--bundle', str(self.repack(evil, tag='evil')), '--dry-run'))
+        self.assertIn('add-on name', text)
+
+        def traversal(files):
+            manifest = json.loads(files['vendor/MANIFEST.json'])
+            manifest['addons']['presence']['files']['plugin.json']['source_path'] = '../../vendor/MANIFEST.json'
+            files['vendor/MANIFEST.json'] = json.dumps(manifest).encode()
+        self.assert_clean_refusal(self.luna('update', '--bundle', str(self.repack(traversal, tag='trav')), '--dry-run'))
+
+        def no_luna(files):
+            manifest = json.loads(files['vendor/MANIFEST.json'])
+            del manifest['addons']['luna']
+            files['vendor/MANIFEST.json'] = json.dumps(manifest).encode()
+        self.assert_clean_refusal(self.luna('update', '--bundle', str(self.repack(no_luna, tag='noluna')), '--dry-run'))
+
+    def test_update_lock_is_a_real_lock_not_a_pid_guess(self):
+        import fcntl
+        self.assertEqual(self.luna('install').returncode, 0)
+        lock = self.home / '.local/share/Lumen/sls-luna/update.lock'
+        out = self.temp / 'dist-flock'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        # Another holder whose recorded pid is dead and whose timestamp is ancient: the old code stole it.
+        holder = open(str(lock), 'w')
+        self.addCleanup(holder.close)
+        holder.write(json.dumps({'pid': 424242, 'at': 1}))
+        holder.flush()
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        result = self.luna('update', '--bundle', str(bundle), '--dry-run')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('already running', result.stderr + result.stdout)
+        self.assertTrue(lock.exists(), 'a refused update must leave the holder\'s lock alone')
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        self.assertEqual(self.luna('update', '--bundle', str(bundle), '--dry-run').returncode, 0)
+
+    def test_release_never_removes_a_lock_somebody_else_holds(self):
+        import fcntl
+        module = self.module()
+        with __import__('unittest').mock.patch.dict(os.environ, self.env):
+            lock = Path(os.environ['HOME']) / 'l.lock'
+            self.assertEqual(module._acquire_lock(lock), (True, ''))
+            os.unlink(str(lock))  # a stale-lock stealer replaced our file...
+            other = open(str(lock), 'w')
+            self.addCleanup(other.close)
+            fcntl.flock(other, fcntl.LOCK_EX)
+            module._release_lock(lock)  # ...and our late release must not delete theirs
+            self.assertTrue(lock.exists())
 
     def test_full_uninstall_disables_the_timer(self):
         self.assertEqual(self.luna('install').returncode, 0)

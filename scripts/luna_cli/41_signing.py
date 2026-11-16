@@ -199,53 +199,209 @@ def signing_sign(bundle):
     return fingerprint, ''
 
 
+POLICY_NAME = 'signing-policy.json'
+STATE_NAME = 'update-state.json'
+BUNDLE_VERSION_RE = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+')
+
+
+def signing_anchor_dir():
+    """A second, HOME-independent home for the enforcement marker and the version floor.
+
+    It follows the account database (not $HOME), so a timer, an ssh session or a shell with a
+    different HOME/XDG/LUNA_SIGNING_DIR still finds the marker. LUNA_ANCHOR_HOME overrides it (tests)."""
+    base = os.environ.get('LUNA_ANCHOR_HOME')
+    if not base:
+        try:
+            import pwd
+            base = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError):
+            base = str(home())
+    return Path(base) / '.local' / 'share' / 'Lumen' / 'sls-luna'
+
+
+def signing_state_dirs():
+    dirs = []
+    for candidate in (luna_tools_dir(), signing_anchor_dir()):
+        if candidate not in dirs:
+            dirs.append(candidate)
+    return dirs
+
+
+def _read_state_file(path):
+    """('missing', None) | ('ok', dict) | ('corrupt', why)."""
+    try:
+        with open(str(path), 'rb') as handle:
+            data = handle.read(65537)
+    except FileNotFoundError:
+        return 'missing', None
+    except OSError as error:
+        return 'corrupt', 'cannot read it: %s' % error
+    if len(data) > 65536:
+        return 'corrupt', 'it is implausibly large'
+    try:
+        value = json.loads(data.decode('utf-8'))
+    except ValueError as error:
+        return 'corrupt', 'it is not valid JSON (%s)' % error
+    if not isinstance(value, dict):
+        return 'corrupt', 'it is not a JSON object'
+    return 'ok', value
+
+
+def signing_marker_read():
+    """The enforcement marker, read from every location. Returns (state, trust_file, problem):
+    state is 'on', 'off', 'none' or 'corrupt'. Any corrupt copy means corrupt; any enforce:true
+    wins over a stale false."""
+    states, trust_file = [], ''
+    for directory in signing_state_dirs():
+        path = directory / POLICY_NAME
+        kind, value = _read_state_file(path)
+        if kind == 'missing':
+            continue
+        if kind == 'corrupt' or not isinstance(value.get('enforce'), bool):
+            why = value if kind == 'corrupt' else 'it has no boolean "enforce"'
+            return 'corrupt', '', 'the signing enforcement marker %s is unusable (%s)' % (path, why)
+        states.append(value['enforce'])
+        if value['enforce'] and not trust_file and isinstance(value.get('trustFile'), str):
+            trust_file = value['trustFile']
+    if not states:
+        return 'none', '', ''
+    if any(states):
+        return 'on', trust_file, ''
+    return 'off', '', ''
+
+
+def signing_marker_write(enforce):
+    data = {'format': 1, 'enforce': bool(enforce), 'trustFile': str(signers_path()),
+            'note': 'managed by `luna signing`; while enforce is true Luna refuses to update '
+                    'when no trusted key can be found'}
+    wrote = 0
+    for directory in signing_state_dirs():
+        try:
+            write_json_file(directory / POLICY_NAME, data)
+            wrote += 1
+        except OSError:
+            pass
+    return wrote
+
+
+def signing_policy(keys):
+    """(enforcing, problem, trust_file, marker_state). Heals a keyed machine that has no marker."""
+    marker, trust_file, problem = signing_marker_read()
+    if marker == 'none' and keys:
+        signing_marker_write(True)
+        marker, trust_file = 'on', str(signers_path())
+    if marker == 'corrupt':
+        return True, problem, '', marker
+    if marker == 'on':
+        return True, '', trust_file or str(signers_path()), marker
+    if marker == 'off':
+        return False, '', '', marker
+    return bool(keys), '', '', marker
+
+
+def update_floor_read():
+    """(highest min_version string or None, problem). A damaged copy is a problem, never a reset."""
+    best = None
+    for directory in signing_state_dirs():
+        path = directory / STATE_NAME
+        kind, value = _read_state_file(path)
+        if kind == 'missing':
+            continue
+        version = value.get('min_version') if kind == 'ok' else None
+        if kind == 'corrupt' or not isinstance(version, str) or not BUNDLE_VERSION_RE.fullmatch(version):
+            why = value if kind == 'corrupt' else 'min_version is not a plain x.y.z version'
+            return None, ('%s is unusable (%s). Luna will not guess; inspect it and delete or fix '
+                          'the file by hand' % (path, why))
+        if best is None or version_tuple(version) > version_tuple(best):
+            best = version
+    return best, ''
+
+
+def version_tuple(version):
+    return tuple(int(part) for part in version.split('.'))
+
+
+def update_floor_raise(version):
+    """Raise (never lower) the floor in every location."""
+    current, problem = update_floor_read()
+    if problem or not BUNDLE_VERSION_RE.fullmatch(version):
+        return False
+    if current is not None and version_tuple(current) >= version_tuple(version):
+        return True
+    for directory in signing_state_dirs():
+        try:
+            write_json_file(directory / STATE_NAME, {'format': 1, 'min_version': version})
+        except OSError:
+            pass
+    return True
+
+
 def check_bundle_signature(staged, sig_path, allow_unsigned):
-    """Authenticity gate, run before anything is unpacked. True means: go on."""
+    """Authenticity gate, run before anything is unpacked.
+
+    None means refused. Otherwise {'verified': bool, 'enforcing': bool}."""
     keys, _junk, load_error = signers_load()
     state, sig_bytes, reason = signing_read_sig(sig_path)
-    enforcing = bool(keys) or bool(load_error)
+    enforcing, marker_problem, expected_file, _marker = signing_policy(keys)
+    if marker_problem:
+        print('REFUSING: %s. This is refused even with --allow-unsigned. Repair it by hand, or run '
+              '`luna signing trust PUBKEYFILE` (re-enable) or `luna signing disable`.' % marker_problem,
+              file=sys.stderr)
+        return None
     if load_error:
         print('REFUSING: the trust file is unusable: %s' % load_error, file=sys.stderr)
-        return False
+        return None
+    if enforcing and not keys:
+        print('REFUSING: this machine enforces release signatures, but there is no usable trusted key. '
+              'Expected trust file: %s (it is missing, empty or in another environment: check '
+              'LUNA_SIGNING_DIR / XDG_CONFIG_HOME / HOME). This is refused even with --allow-unsigned. '
+              'To trust a key again: luna signing trust PUBKEYFILE. To deliberately stop checking '
+              'signatures: luna signing disable' % (expected_file or signers_path()), file=sys.stderr)
+        return None
+    if keys and expected_file and expected_file != str(signers_path()):
+        print('WARNING: the trust file in use (%s) is not the one that enabled enforcement (%s)'
+              % (signers_path(), expected_file), file=sys.stderr)
+    verdict = {'verified': False, 'enforcing': enforcing}
     if state == 'bad':
         print('REFUSING: the bundle has a signature file that cannot be used (%s). '
               'This is refused even with --allow-unsigned.' % reason, file=sys.stderr)
-        return False
+        return None
     if state == 'absent':
         if not enforcing:
             print('note   : authenticity NOT checked: the bundle is unsigned and no trusted release key is '
                   'configured on this machine. To enable it: luna signing trust PUBKEYFILE '
                   '(the release machine creates one with `luna signing init`)')
-            return True
+            return verdict
         if allow_unsigned:
             print('WARNING: the bundle is UNSIGNED; continuing because --allow-unsigned was given',
                   file=sys.stderr)
-            return True
+            return verdict
         print('REFUSING: the bundle has no signature (.sig) but this machine trusts release key(s) '
               '(%s). If you accept an unsigned bundle, repeat with --allow-unsigned.'
               % ', '.join(signing_fingerprint(k) for k in keys), file=sys.stderr)
-        return False
+        return None
     # A signature is present.
     if not keys:
         print('note   : the bundle is signed, but authenticity is NOT checked: no trusted release key is '
               'configured here. Enable it with: luna signing trust PUBKEYFILE')
-        return True
+        return verdict
     if not shutil.which('ssh-keygen'):
         if allow_unsigned:
             print('WARNING: ssh-keygen is missing, so the signature cannot be verified; continuing because '
                   '--allow-unsigned was given', file=sys.stderr)
-            return True
+            return verdict
         print('REFUSING: this machine trusts release keys but ssh-keygen is not installed, so the '
               'signature cannot be verified. Install openssh, or repeat with --allow-unsigned.',
               file=sys.stderr)
-        return False
+        return None
     fingerprint, error = signing_verify(staged, sig_bytes, keys)
     if error:
         print('REFUSING: the bundle signature is not valid for a trusted key (%s). '
               'This is refused even with --allow-unsigned.' % error, file=sys.stderr)
-        return False
+        return None
     print('signed : verified, signer %s (namespace %s)' % (fingerprint, SIGN_NAMESPACE))
-    return True
+    verdict['verified'] = True
+    return verdict
 
 
 def _signing_read_key_arg(arg):
@@ -286,14 +442,40 @@ def cmd_signing(options):
             print('  trusted      : %s%s' % (signing_fingerprint(item), '  (this machine\'s own key)' if item == blob else ''))
         if junk and keys:
             print('  ignored      : %d line(s) in the trust file are not valid key lines' % junk)
+        enforcing, marker_problem, expected_file, marker = signing_policy(keys)
+        print('marker         : %s' % {'on': 'enforcement recorded (%s)' % ', '.join(
+                  str(d / POLICY_NAME) for d in signing_state_dirs()),
+                  'off': 'enforcement deliberately disabled (luna signing disable)',
+                  'none': 'none (no key has ever been trusted here)',
+                  'corrupt': 'UNUSABLE'}[marker])
+        if marker_problem:
+            print('  PROBLEM      : %s' % marker_problem)
+        if keys and expected_file and expected_file != str(signers_path()):
+            print('  WARNING      : enforcement was enabled for the trust file %s, not this one' % expected_file)
+        floor, floor_problem = update_floor_read()
+        if floor_problem:
+            print('  PROBLEM      : %s' % floor_problem)
+        print('minimum bundle version: %s' % (floor or 'none yet (raised by the first signed, verified update)'))
         if error:
             print('policy         : REFUSING every update until the trust file is fixed')
-        elif keys:
+        elif marker_problem:
+            print('policy         : REFUSING every update until the marker is repaired')
+        elif enforcing and not keys:
+            print('policy         : ENFORCING, but NO usable trusted key: every update is refused until '
+                  'luna signing trust PUBKEYFILE (expected trust file %s) or luna signing disable'
+                  % (expected_file or signers_path()))
+        elif enforcing:
             print('policy         : ENFORCING: unsigned or wrongly signed bundles are refused '
                   '(--allow-unsigned overrides only the missing-signature case)')
         else:
             print('policy         : not enforcing: unsigned bundles are accepted (authenticity unchecked); '
                   'luna signing trust PUBKEYFILE turns it on')
+        return EXIT_OK
+    if action == 'disable':
+        signing_marker_write(False)
+        print('disabled : signature enforcement is OFF on this machine (unsigned bundles are accepted, '
+              'authenticity unchecked). Trusted keys, if any, stay in %s but are not consulted. '
+              'luna signing trust PUBKEYFILE turns enforcement back on' % signers_path())
         return EXIT_OK
     if action == 'init':
         key, pub = signing_key_path(), signing_pub_path()
@@ -318,6 +500,7 @@ def cmd_signing(options):
         if error:
             print('key created, but the trust file is unusable: %s' % error, file=sys.stderr)
             return 1
+        signing_marker_write(True)  # the marker first: a crash must never leave keys without it
         if blob not in keys:
             signers_save(keys + [blob])
         print('created  : %s (private, mode 600, no passphrase)' % key)
@@ -347,8 +530,10 @@ def cmd_signing(options):
                 return EXIT_REFUSED
         if action == 'trust':
             if blob in keys:
+                signing_marker_write(True)
                 print('already trusted: %s' % signing_fingerprint(blob))
                 return EXIT_OK
+            signing_marker_write(True)
             signers_save(keys + [blob])
             print('trusted  : %s (%s)' % (signing_fingerprint(blob), signers_path()))
             print('from now on `luna update` here refuses bundles without a valid signature from a trusted key')
@@ -360,6 +545,10 @@ def cmd_signing(options):
         signers_save(remaining)
         print('untrusted: %s' % signing_fingerprint(blob))
         if not remaining:
-            print('note     : no trusted keys left: unsigned bundles are accepted again (authenticity unchecked)')
+            if signing_marker_read()[0] == 'none':
+                signing_marker_write(True)
+            print('note     : no trusted keys left, but this machine is STILL ENFORCING: every update is '
+                  'refused until you trust a key again (luna signing trust PUBKEYFILE) or deliberately '
+                  'stop checking with: luna signing disable')
         return EXIT_OK
     return EXIT_REFUSED

@@ -39,9 +39,9 @@ Commands:
     luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256, + .sig when a release
                                         key exists) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
-                [--allow-legacy-bundle] [--allow-unsigned]
+                [--allow-legacy-bundle] [--allow-unsigned] [--allow-downgrade]
                                         verify (sha256, signature) and install a released bundle
-    luna signing status|init            release signing: OpenSSH ed25519 key under ~/.config/luna/;
+    luna signing status|init|disable    release signing: OpenSSH ed25519 key under ~/.config/luna/;
     luna signing trust|untrust KEY      the local trust file decides which signatures `update` accepts
     luna reconcile [--dry-run]          merge Syncthing sync-conflict copies of
                                         Steam's localconfig.vdf (newest timestamp wins)
@@ -80,7 +80,7 @@ Commands:
                                         of this machine and every host
     luna fleet push-cache HOST...       rsync the verified Steam client cache when HOST's differs
     luna fleet install [HOST...] [--only NAME] [--restart-steam] [--force] [--dry-run]
-                       [--trust-signing-key]
+                       [--trust-signing-key] [--allow-downgrade]
                                         push the release bundle; refuses while Steam runs
     luna games list [--json]            installed Steam games here (size, library, prefix, stplug-in lua)
     luna games diff [HOST] [--json]     which games are installed where; for those missing on HOST:
@@ -1027,22 +1027,51 @@ def repo_revision():
     return ''
 
 
-def _manifest_problems(manifest, root):
-    """Payload bytes vs manifest pins, for a checkout or an extracted bundle."""
+ADDON_NAME_RE = re.compile(r'[a-z][a-z0-9_-]{0,31}')
+
+
+def _unsafe_rel(rel):
+    return (not isinstance(rel, str) or not rel or rel.startswith('/') or '\\' in rel or '\x00' in rel
+            or any(part in ('', '.', '..') for part in rel.split('/')))
+
+
+def _manifest_problems(manifest, root, require=()):
+    """Payload bytes vs manifest pins, for a checkout or an extracted bundle.
+
+    Walks the manifest's OWN add-ons (names strictly validated), so a bundle may drop an add-on;
+    `require` names the add-ons that must be present (the release side asks for all of them)."""
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('addons'), dict):
+        return ['the manifest is not an object with an "addons" object']
     problems = []
-    for name in ADDONS:
-        entry = manifest.get('addons', {}).get(name)
-        if not entry:
+    addons = manifest['addons']
+    for name in require:
+        if name not in addons:
             problems.append('manifest has no entry for %s' % name)
+    for name, entry in addons.items():
+        if not isinstance(name, str) or not ADDON_NAME_RE.fullmatch(name):
+            problems.append('the manifest has an invalid add-on name: %.40r' % (name,))
+            continue
+        if not isinstance(entry, dict) or not isinstance(entry.get('files', {}), dict):
+            problems.append('manifest entry for add-on %s has the wrong shape' % name)
             continue
         for rel, meta in entry.get('files', {}).items():
-            path = root / 'addons' / name / meta['source_path']
+            source = meta.get('source_path') if isinstance(meta, dict) else None
+            if _unsafe_rel(source) or not isinstance(meta.get('sha256'), str):
+                problems.append('manifest entry %s/%s has an unsafe path or no sha256' % (name, rel))
+                continue
+            path = root / 'addons' / name / source
             if not path.is_file():
                 problems.append('missing payload %s/%s' % (name, rel))
                 continue
             if sha256(path) != meta['sha256']:
                 problems.append('payload %s/%s does not match the manifest' % (name, rel))
-    for rel, meta in manifest.get('shared', {}).items():
+    shared = manifest.get('shared', {})
+    if not isinstance(shared, dict):
+        return problems + ['the manifest "shared" section is not an object']
+    for rel, meta in shared.items():
+        if _unsafe_rel(rel) or not isinstance(meta, dict) or not isinstance(meta.get('sha256'), str):
+            problems.append('shared entry %.60r has an unsafe path or no sha256' % (rel,))
+            continue
         path = root / rel
         if not path.is_file():
             problems.append('missing shared file %s' % rel)
@@ -1072,7 +1101,7 @@ def _release_listing(entries):
 def cmd_release(options):
     """Build a bundle another machine can install with `luna update`."""
     manifest = load_manifest()  # fail early when the pins are missing
-    problems = _manifest_problems(manifest, ROOT)
+    problems = _manifest_problems(manifest, ROOT, require=ADDONS)
     if problems:
         print('REFUSING to release: the working tree does not match the manifest:')
         for problem in problems:
@@ -1155,16 +1184,94 @@ def cmd_release(options):
     return EXIT_OK
 
 
-def _fetch_small(url, dest, limit):
-    """Download at most `limit` bytes to `dest`; on any failure or overflow leave nothing (or garbage
-    of limit+1 bytes, which signing_read_sig refuses as oversized)."""
+URL_BUNDLE_MAX = 64 * 1024 * 1024   # a real bundle is ~165 KB
+URL_SIDECAR_MAX = 4096              # one hex digest and a file name
+URL_LOOPBACK = ('127.0.0.1', 'localhost', '::1')
+
+
+class UrlRefused(Exception):
+    """A URL or redirect the policy refuses (the message is printed as is)."""
+
+
+class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but only to https: never file://, ftp:// or a downgrade to http://."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme.lower() != 'https':
+            raise UrlRefused('REFUSING: the server redirected to a non-https address (%.80s); a redirect '
+                             'may only lead to https' % newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def url_check(url):
+    """(ok, why) for the address given to --url: https, or http to this machine's loopback only."""
     try:
-        with urllib.request.urlopen(url, timeout=60) as response:
-            data = response.read(limit + 1)
-    except Exception:  # noqa: BLE001 - absent or unreachable counts as "no file"
-        return False
-    Path(dest).write_bytes(data)
-    return True
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        parts.port  # noqa: B018 - raises ValueError on a malformed port
+    except ValueError:
+        return False, 'REFUSING: --url is not a valid address; it must be https'
+    scheme = parts.scheme.lower()
+    if '@' in parts.netloc or not host:
+        return False, 'REFUSING: --url must be a plain https address without user:password@'
+    if scheme == 'https' or (scheme == 'http' and host.lower() in URL_LOOPBACK):
+        return True, ''
+    return False, ('REFUSING: --url must be https (plain http is accepted only for 127.0.0.1/localhost, '
+                   'for local testing); got %.60s' % url)
+
+
+class _TooBig(Exception):
+    pass
+
+
+def url_download(url, dest, limit):
+    """Stream `url` to `dest`, at most `limit` bytes. Returns (ok, why); on failure nothing is left."""
+    ok, why = url_check(url)
+    if not ok:
+        return False, why
+    opener = urllib.request.build_opener(HttpsOnlyRedirect)
+    too_big = 'REFUSING: the download is larger than the %d byte limit' % limit
+    try:
+        with opener.open(url, timeout=60) as response:
+            declared = response.headers.get('Content-Length', '')
+            if declared.isdigit() and int(declared) > limit:
+                raise _TooBig()
+            written = 0
+            with open(str(dest), 'wb') as out:
+                while True:
+                    block = response.read(65536)
+                    if not block:
+                        break
+                    written += len(block)
+                    if written > limit:
+                        raise _TooBig()
+                    out.write(block)
+    except _TooBig:
+        with contextlib.suppress(OSError):
+            Path(dest).unlink()
+        return False, too_big
+    except UrlRefused as error:
+        with contextlib.suppress(OSError):
+            Path(dest).unlink()
+        return False, str(error)
+    except Exception as error:  # noqa: BLE001 - any network failure is a refusal to continue
+        with contextlib.suppress(OSError):
+            Path(dest).unlink()
+        if isinstance(error, urllib.error.HTTPError) and 300 <= error.code < 400:
+            # urllib itself declined to follow it (file://, ftp:// ...) before our handler saw it
+            return False, 'REFUSING: the server sent a redirect that is not allowed (only https): %s' % error
+        return False, 'download failed: %s' % error
+    return True, ''
+
+
+def _fetch_small(url, dest, limit):
+    """Optional small file (.sig). Absent or unreachable counts as "no file"; an oversized one is
+    stored as limit+1 bytes, which signing_read_sig refuses as implausibly large."""
+    ok, why = url_download(url, dest, limit)
+    if not ok and 'larger than' in why:
+        Path(dest).write_bytes(b'x' * (limit + 1))
+        return True
+    return ok
 
 
 def cmd_update(options):
@@ -1190,16 +1297,17 @@ def cmd_update(options):
                 return 1
         elif options.url:
             bundle = temp_dir / 'luna-bundle.tar.gz'
-            try:
-                urllib.request.urlretrieve(options.url, bundle)
-            except Exception as error:  # noqa: BLE001 - report the URL failure
-                print('download failed: %s' % error, file=sys.stderr)
-                return 1
-            try:
-                urllib.request.urlretrieve(options.url + '.sha256', str(bundle) + '.sha256')
-            except Exception:  # noqa: BLE001 - the sidecar is optional for --url
-                pass
-            if not Path(str(bundle) + '.sha256').is_file():
+            ok, why = url_download(options.url, bundle, URL_BUNDLE_MAX)
+            if not ok:
+                print(why, file=sys.stderr)
+                return EXIT_REFUSED if why.startswith('REFUSING') else 1
+            sidecar = Path(str(bundle) + '.sha256')
+            ok, why = url_download(options.url + '.sha256', sidecar, URL_SIDECAR_MAX)
+            if not ok and (why.startswith('REFUSING') or 'larger than' in why):
+                print('REFUSING: the checksum file (.sha256) beside the URL cannot be used: %s'
+                      % why.replace('REFUSING: ', ''), file=sys.stderr)
+                return EXIT_REFUSED
+            if not sidecar.is_file():
                 print('warning: no .sha256 beside the URL; only the bundle\'s own manifest can be '
                       'checked (self-consistency, not independent). Prefer --latest.', file=sys.stderr)
             # A missing, blocked or failed .sig is indistinguishable from "unsigned": the policy
@@ -1210,7 +1318,8 @@ def cmd_update(options):
             return 2
         return install_bundle(bundle, only=options.only, dry_run=options.dry_run,
                               allow_legacy=getattr(options, 'allow_legacy_bundle', False),
-                              allow_unsigned=getattr(options, 'allow_unsigned', False))
+                              allow_unsigned=getattr(options, 'allow_unsigned', False),
+                              allow_downgrade=getattr(options, 'allow_downgrade', False))
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         _release_lock(lock_path)
@@ -1315,10 +1424,14 @@ def _listing_problems(root):
         return [], False
     try:
         data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError('not a JSON object')
         files = data['files']
         if data.get('format') != RELEASE_FORMAT or not isinstance(files, dict):
             raise ValueError('unsupported format')
-    except (ValueError, KeyError, OSError, AttributeError) as error:
+        if not all(isinstance(rel, str) and isinstance(digest, str) for rel, digest in files.items()):
+            raise ValueError('paths and digests must be text')
+    except (ValueError, KeyError, OSError, AttributeError, TypeError) as error:
         return ['%s is unreadable: %s' % (RELEASE_LISTING, error)], True
     problems = []
     for rel, digest in sorted(files.items()):
@@ -1337,7 +1450,8 @@ def _listing_problems(root):
     return problems, True
 
 
-def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False, allow_unsigned=False):
+def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False, allow_unsigned=False,
+                   allow_downgrade=False, expect_version=None):
     """Verify a bundle and run the installer inside it.
 
     The bundle is first copied into a private directory, and the checksum, the
@@ -1354,13 +1468,25 @@ def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False, allow_u
         except OSError as error:
             print('REFUSING: cannot read the bundle: %s' % error, file=sys.stderr)
             return 1
-        return _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
+        return _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned,
+                               allow_downgrade, expect_version)
 
 
-def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned):
+def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned,
+                    allow_downgrade=False, expect_version=None):
     checksum_file = Path(str(bundle) + '.sha256')
     if checksum_file.is_file():
-        expected = checksum_file.read_text().split()[0].strip().lower()
+        try:
+            tokens = checksum_file.read_text().split()
+        except (OSError, ValueError) as error:
+            print('REFUSING: the checksum file %s cannot be read: %s' % (checksum_file.name, error),
+                  file=sys.stderr)
+            return 1
+        expected = tokens[0].strip().lower() if tokens else ''
+        if not re.fullmatch(r'[0-9a-f]{64}', expected):
+            print('REFUSING: the checksum file %s is empty or does not start with a sha256 digest'
+                  % checksum_file.name, file=sys.stderr)
+            return 1
         actual = sha256(staged)
         if expected != actual:
             print('REFUSING: sha256 mismatch (bundle %s, sidecar %s)'
@@ -1371,7 +1497,8 @@ def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
         print('note   : no .sha256 beside the bundle: integrity is checked only against the bundle\'s '
               'own manifest (self-consistency), not an independent checksum')
     # Authenticity: decided by the INSTALLED code and the machine-local trust file, before unpacking.
-    if not check_bundle_signature(staged, Path(str(bundle) + '.sig'), allow_unsigned):
+    verdict = check_bundle_signature(staged, Path(str(bundle) + '.sig'), allow_unsigned)
+    if verdict is None:
         return 1
     with tempfile.TemporaryDirectory(prefix='luna-bundle-') as work:
         extract_dir = Path(work) / 'unpacked'
@@ -1387,21 +1514,27 @@ def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
         if not script.is_file():
             print('REFUSING: the bundle does not contain scripts/luna.py', file=sys.stderr)
             return 1
-        version = '?'
         bundled_manifest = root / 'vendor' / 'MANIFEST.json'
         if not bundled_manifest.is_file():
             print('REFUSING: the bundle does not contain vendor/MANIFEST.json', file=sys.stderr)
             return 1
         try:
             manifest = json.loads(bundled_manifest.read_text())
-            version = str((manifest.get('addons', {}).get('luna') or {})
-                          .get('plugin_version', '?'))
-        except ValueError:
+        except (ValueError, OSError):
             print('REFUSING: the bundled manifest is not valid JSON', file=sys.stderr)
+            return 1
+        luna_entry = manifest.get('addons', {}).get('luna') if isinstance(manifest, dict) and \
+            isinstance(manifest.get('addons'), dict) else None
+        if not isinstance(luna_entry, dict):
+            print('REFUSING: the bundled manifest has the wrong shape (no add-ons.luna entry)', file=sys.stderr)
+            return 1
+        version = luna_entry.get('plugin_version')
+        if not isinstance(version, str) or not BUNDLE_VERSION_RE.fullmatch(version):
+            print('REFUSING: the bundle version %.40r is not a plain x.y.z version' % (version,), file=sys.stderr)
             return 1
         problems = _manifest_problems(manifest, root)
         if problems:
-            print('REFUSING: the bundle contents do not match its own manifest:')
+            print('REFUSING: the bundle contents do not match its own manifest:', file=sys.stderr)
             for problem in problems:
                 print('  - %s' % problem, file=sys.stderr)
             return 1
@@ -1420,6 +1553,26 @@ def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
                 return 1
             print('WARNING: legacy bundle: scripts/luna.py is NOT covered by any hash; '
                   'continuing because --allow-legacy-bundle was given', file=sys.stderr)
+        if expect_version is not None and version != expect_version:
+            print('REFUSING: the bundle version %s does not match the release tag (%s); '
+                  'a tag may only ship its own version' % (version, expect_version), file=sys.stderr)
+            return 1
+        if verdict['enforcing']:
+            # Rollback protection: only while enforcing (an unauthenticated mark would be a denial-of-service lever).
+            floor, floor_problem = update_floor_read()
+            if floor_problem:
+                print('REFUSING: the update state file is unusable: %s' % floor_problem, file=sys.stderr)
+                return 1
+            if floor is not None and version_tuple(version) < version_tuple(floor):
+                if not allow_downgrade:
+                    print('REFUSING: bundle version %s is older than %s, which this machine already installed '
+                          'from a verified bundle (a rollback to a vulnerable release is the attack this '
+                          'stops). To go back deliberately: --allow-downgrade' % (version, floor),
+                          file=sys.stderr)
+                    return 1
+                print('WARNING: installing bundle version %s, older than the minimum %s; continuing because '
+                      '--allow-downgrade was given (the minimum is not lowered)' % (version, floor),
+                      file=sys.stderr)
         print('bundle : %s (Luna %s, manifest verified%s)'
               % (bundle.name, version, '' if listed else ', legacy: luna.py unverified'))
         # Add-on updates must not undo a deliberate client update from Health.
@@ -1427,8 +1580,14 @@ def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
         for name in only or []:
             command += ['--only', name]
         if dry_run:
-            command.append('--dry-run')
+            # Nothing from the bundle runs here: the plan comes from the installed code only.
+            print('DRY RUN: verified bundle %s (Luna %s); a real update would run the bundled installer '
+                  '`luna.py install --force%s`. Nothing from the bundle was executed and nothing was written.'
+                  % (bundle.name, version, ''.join(' --only ' + name for name in only or [])))
+            return EXIT_OK
         result = subprocess.run(command, env=dict(os.environ, LUNA_KEEP_STEAM_CLIENT='1'))
+        if result.returncode == 0 and verdict['verified']:
+            update_floor_raise(version)
         return result.returncode
 
 
@@ -1472,59 +1631,76 @@ def _update_lock():
 LOCK_TTL = 3600
 
 
-def _acquire_lock(lock_path):
-    """Claim the update lock; clear it when stale (dead owner or too old).
+_LOCK_FDS = {}
 
-    Returns (True, '') on success or (False, reason). A kill -9 between
-    acquire and release must never wedge updates forever.
-    """
+
+def _acquire_lock(lock_path):
+    """Claim the update lock with flock(2) on a file that stays open for the whole update.
+
+    The kernel drops the lock when the process dies, so a kill -9 can never wedge updates and a
+    live holder can never be robbed (no pid guessing). Returns (True, '') or (False, reason).
+    A lock file left by an older Luna (pid + time, no flock) is still honoured while its pid lives."""
+    busy = 'another update is already running (%s)' % lock_path
+    key = str(lock_path)
+    if key in _LOCK_FDS:
+        return False, busy
     try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        pass
-    except OSError:
+        import fcntl
+    except ImportError:  # pragma: no cover - not POSIX
         return True, ''
-    else:
+    for _attempt in range(5):
         try:
-            os.write(fd, json.dumps(
-                {'pid': os.getpid(), 'at': int(time.time())}).encode())
-        finally:
+            fd = os.open(key, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            return True, ''  # cannot create a lock here: do not block the update
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
             os.close(fd)
-        return True, ''
-    try:
-        info = json.loads(lock_path.read_text())
-        owner, started = int(info.get('pid') or 0), int(info.get('at') or 0)
-    except (OSError, ValueError, TypeError, AttributeError):
-        owner, started = 0, 0
-    alive = False
-    if owner > 0:
+            return False, busy
         try:
-            os.kill(owner, 0)
-            alive = True
-        except (OSError, ProcessLookupError, PermissionError):
-            alive = False
-    if alive and time.time() - started < LOCK_TTL:
-        return False, 'another update is already running (%s)' % lock_path
-    try:
-        lock_path.unlink()
-    except OSError:
-        pass
-    try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except (FileExistsError, OSError):
-        return False, 'another update is already running (%s)' % lock_path
-    try:
-        os.write(fd, json.dumps({'pid': os.getpid(), 'at': int(time.time())}).encode())
-    finally:
-        os.close(fd)
-    return True, ''
+            same = os.fstat(fd).st_ino == os.stat(key).st_ino
+        except OSError:
+            same = False
+        if not same:  # the file was replaced while we waited: lock the new one
+            os.close(fd)
+            continue
+        try:
+            owner, started = 0, 0
+            try:
+                info = json.loads(os.pread(fd, 4096, 0).decode('utf-8', 'replace') or '{}')
+                owner, started = int(info.get('pid') or 0), int(info.get('at') or 0)
+            except (ValueError, TypeError, AttributeError):
+                pass
+            if owner > 0 and owner != os.getpid() and time.time() - started < LOCK_TTL:
+                try:
+                    os.kill(owner, 0)
+                    os.close(fd)
+                    return False, busy
+                except OSError:
+                    pass
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, json.dumps({'pid': os.getpid(), 'at': int(time.time())}).encode(), 0)
+        except OSError:
+            pass
+        _LOCK_FDS[key] = fd
+        return True, ''
+    return False, busy
 
 
 def _release_lock(lock_path):
+    """Drop our lock. The file is removed only if it is still the one WE locked."""
+    fd = _LOCK_FDS.pop(str(lock_path), None)
+    if fd is None:
+        return
     try:
-        lock_path.unlink()
+        if os.fstat(fd).st_ino == os.stat(str(lock_path)).st_ino:
+            lock_path.unlink()
     except OSError:
         pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 CLI_LAUNCHER = '''#!/bin/sh
@@ -1780,53 +1956,209 @@ def signing_sign(bundle):
     return fingerprint, ''
 
 
+POLICY_NAME = 'signing-policy.json'
+STATE_NAME = 'update-state.json'
+BUNDLE_VERSION_RE = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+')
+
+
+def signing_anchor_dir():
+    """A second, HOME-independent home for the enforcement marker and the version floor.
+
+    It follows the account database (not $HOME), so a timer, an ssh session or a shell with a
+    different HOME/XDG/LUNA_SIGNING_DIR still finds the marker. LUNA_ANCHOR_HOME overrides it (tests)."""
+    base = os.environ.get('LUNA_ANCHOR_HOME')
+    if not base:
+        try:
+            import pwd
+            base = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError):
+            base = str(home())
+    return Path(base) / '.local' / 'share' / 'Lumen' / 'sls-luna'
+
+
+def signing_state_dirs():
+    dirs = []
+    for candidate in (luna_tools_dir(), signing_anchor_dir()):
+        if candidate not in dirs:
+            dirs.append(candidate)
+    return dirs
+
+
+def _read_state_file(path):
+    """('missing', None) | ('ok', dict) | ('corrupt', why)."""
+    try:
+        with open(str(path), 'rb') as handle:
+            data = handle.read(65537)
+    except FileNotFoundError:
+        return 'missing', None
+    except OSError as error:
+        return 'corrupt', 'cannot read it: %s' % error
+    if len(data) > 65536:
+        return 'corrupt', 'it is implausibly large'
+    try:
+        value = json.loads(data.decode('utf-8'))
+    except ValueError as error:
+        return 'corrupt', 'it is not valid JSON (%s)' % error
+    if not isinstance(value, dict):
+        return 'corrupt', 'it is not a JSON object'
+    return 'ok', value
+
+
+def signing_marker_read():
+    """The enforcement marker, read from every location. Returns (state, trust_file, problem):
+    state is 'on', 'off', 'none' or 'corrupt'. Any corrupt copy means corrupt; any enforce:true
+    wins over a stale false."""
+    states, trust_file = [], ''
+    for directory in signing_state_dirs():
+        path = directory / POLICY_NAME
+        kind, value = _read_state_file(path)
+        if kind == 'missing':
+            continue
+        if kind == 'corrupt' or not isinstance(value.get('enforce'), bool):
+            why = value if kind == 'corrupt' else 'it has no boolean "enforce"'
+            return 'corrupt', '', 'the signing enforcement marker %s is unusable (%s)' % (path, why)
+        states.append(value['enforce'])
+        if value['enforce'] and not trust_file and isinstance(value.get('trustFile'), str):
+            trust_file = value['trustFile']
+    if not states:
+        return 'none', '', ''
+    if any(states):
+        return 'on', trust_file, ''
+    return 'off', '', ''
+
+
+def signing_marker_write(enforce):
+    data = {'format': 1, 'enforce': bool(enforce), 'trustFile': str(signers_path()),
+            'note': 'managed by `luna signing`; while enforce is true Luna refuses to update '
+                    'when no trusted key can be found'}
+    wrote = 0
+    for directory in signing_state_dirs():
+        try:
+            write_json_file(directory / POLICY_NAME, data)
+            wrote += 1
+        except OSError:
+            pass
+    return wrote
+
+
+def signing_policy(keys):
+    """(enforcing, problem, trust_file, marker_state). Heals a keyed machine that has no marker."""
+    marker, trust_file, problem = signing_marker_read()
+    if marker == 'none' and keys:
+        signing_marker_write(True)
+        marker, trust_file = 'on', str(signers_path())
+    if marker == 'corrupt':
+        return True, problem, '', marker
+    if marker == 'on':
+        return True, '', trust_file or str(signers_path()), marker
+    if marker == 'off':
+        return False, '', '', marker
+    return bool(keys), '', '', marker
+
+
+def update_floor_read():
+    """(highest min_version string or None, problem). A damaged copy is a problem, never a reset."""
+    best = None
+    for directory in signing_state_dirs():
+        path = directory / STATE_NAME
+        kind, value = _read_state_file(path)
+        if kind == 'missing':
+            continue
+        version = value.get('min_version') if kind == 'ok' else None
+        if kind == 'corrupt' or not isinstance(version, str) or not BUNDLE_VERSION_RE.fullmatch(version):
+            why = value if kind == 'corrupt' else 'min_version is not a plain x.y.z version'
+            return None, ('%s is unusable (%s). Luna will not guess; inspect it and delete or fix '
+                          'the file by hand' % (path, why))
+        if best is None or version_tuple(version) > version_tuple(best):
+            best = version
+    return best, ''
+
+
+def version_tuple(version):
+    return tuple(int(part) for part in version.split('.'))
+
+
+def update_floor_raise(version):
+    """Raise (never lower) the floor in every location."""
+    current, problem = update_floor_read()
+    if problem or not BUNDLE_VERSION_RE.fullmatch(version):
+        return False
+    if current is not None and version_tuple(current) >= version_tuple(version):
+        return True
+    for directory in signing_state_dirs():
+        try:
+            write_json_file(directory / STATE_NAME, {'format': 1, 'min_version': version})
+        except OSError:
+            pass
+    return True
+
+
 def check_bundle_signature(staged, sig_path, allow_unsigned):
-    """Authenticity gate, run before anything is unpacked. True means: go on."""
+    """Authenticity gate, run before anything is unpacked.
+
+    None means refused. Otherwise {'verified': bool, 'enforcing': bool}."""
     keys, _junk, load_error = signers_load()
     state, sig_bytes, reason = signing_read_sig(sig_path)
-    enforcing = bool(keys) or bool(load_error)
+    enforcing, marker_problem, expected_file, _marker = signing_policy(keys)
+    if marker_problem:
+        print('REFUSING: %s. This is refused even with --allow-unsigned. Repair it by hand, or run '
+              '`luna signing trust PUBKEYFILE` (re-enable) or `luna signing disable`.' % marker_problem,
+              file=sys.stderr)
+        return None
     if load_error:
         print('REFUSING: the trust file is unusable: %s' % load_error, file=sys.stderr)
-        return False
+        return None
+    if enforcing and not keys:
+        print('REFUSING: this machine enforces release signatures, but there is no usable trusted key. '
+              'Expected trust file: %s (it is missing, empty or in another environment: check '
+              'LUNA_SIGNING_DIR / XDG_CONFIG_HOME / HOME). This is refused even with --allow-unsigned. '
+              'To trust a key again: luna signing trust PUBKEYFILE. To deliberately stop checking '
+              'signatures: luna signing disable' % (expected_file or signers_path()), file=sys.stderr)
+        return None
+    if keys and expected_file and expected_file != str(signers_path()):
+        print('WARNING: the trust file in use (%s) is not the one that enabled enforcement (%s)'
+              % (signers_path(), expected_file), file=sys.stderr)
+    verdict = {'verified': False, 'enforcing': enforcing}
     if state == 'bad':
         print('REFUSING: the bundle has a signature file that cannot be used (%s). '
               'This is refused even with --allow-unsigned.' % reason, file=sys.stderr)
-        return False
+        return None
     if state == 'absent':
         if not enforcing:
             print('note   : authenticity NOT checked: the bundle is unsigned and no trusted release key is '
                   'configured on this machine. To enable it: luna signing trust PUBKEYFILE '
                   '(the release machine creates one with `luna signing init`)')
-            return True
+            return verdict
         if allow_unsigned:
             print('WARNING: the bundle is UNSIGNED; continuing because --allow-unsigned was given',
                   file=sys.stderr)
-            return True
+            return verdict
         print('REFUSING: the bundle has no signature (.sig) but this machine trusts release key(s) '
               '(%s). If you accept an unsigned bundle, repeat with --allow-unsigned.'
               % ', '.join(signing_fingerprint(k) for k in keys), file=sys.stderr)
-        return False
+        return None
     # A signature is present.
     if not keys:
         print('note   : the bundle is signed, but authenticity is NOT checked: no trusted release key is '
               'configured here. Enable it with: luna signing trust PUBKEYFILE')
-        return True
+        return verdict
     if not shutil.which('ssh-keygen'):
         if allow_unsigned:
             print('WARNING: ssh-keygen is missing, so the signature cannot be verified; continuing because '
                   '--allow-unsigned was given', file=sys.stderr)
-            return True
+            return verdict
         print('REFUSING: this machine trusts release keys but ssh-keygen is not installed, so the '
               'signature cannot be verified. Install openssh, or repeat with --allow-unsigned.',
               file=sys.stderr)
-        return False
+        return None
     fingerprint, error = signing_verify(staged, sig_bytes, keys)
     if error:
         print('REFUSING: the bundle signature is not valid for a trusted key (%s). '
               'This is refused even with --allow-unsigned.' % error, file=sys.stderr)
-        return False
+        return None
     print('signed : verified, signer %s (namespace %s)' % (fingerprint, SIGN_NAMESPACE))
-    return True
+    verdict['verified'] = True
+    return verdict
 
 
 def _signing_read_key_arg(arg):
@@ -1867,14 +2199,40 @@ def cmd_signing(options):
             print('  trusted      : %s%s' % (signing_fingerprint(item), '  (this machine\'s own key)' if item == blob else ''))
         if junk and keys:
             print('  ignored      : %d line(s) in the trust file are not valid key lines' % junk)
+        enforcing, marker_problem, expected_file, marker = signing_policy(keys)
+        print('marker         : %s' % {'on': 'enforcement recorded (%s)' % ', '.join(
+                  str(d / POLICY_NAME) for d in signing_state_dirs()),
+                  'off': 'enforcement deliberately disabled (luna signing disable)',
+                  'none': 'none (no key has ever been trusted here)',
+                  'corrupt': 'UNUSABLE'}[marker])
+        if marker_problem:
+            print('  PROBLEM      : %s' % marker_problem)
+        if keys and expected_file and expected_file != str(signers_path()):
+            print('  WARNING      : enforcement was enabled for the trust file %s, not this one' % expected_file)
+        floor, floor_problem = update_floor_read()
+        if floor_problem:
+            print('  PROBLEM      : %s' % floor_problem)
+        print('minimum bundle version: %s' % (floor or 'none yet (raised by the first signed, verified update)'))
         if error:
             print('policy         : REFUSING every update until the trust file is fixed')
-        elif keys:
+        elif marker_problem:
+            print('policy         : REFUSING every update until the marker is repaired')
+        elif enforcing and not keys:
+            print('policy         : ENFORCING, but NO usable trusted key: every update is refused until '
+                  'luna signing trust PUBKEYFILE (expected trust file %s) or luna signing disable'
+                  % (expected_file or signers_path()))
+        elif enforcing:
             print('policy         : ENFORCING: unsigned or wrongly signed bundles are refused '
                   '(--allow-unsigned overrides only the missing-signature case)')
         else:
             print('policy         : not enforcing: unsigned bundles are accepted (authenticity unchecked); '
                   'luna signing trust PUBKEYFILE turns it on')
+        return EXIT_OK
+    if action == 'disable':
+        signing_marker_write(False)
+        print('disabled : signature enforcement is OFF on this machine (unsigned bundles are accepted, '
+              'authenticity unchecked). Trusted keys, if any, stay in %s but are not consulted. '
+              'luna signing trust PUBKEYFILE turns enforcement back on' % signers_path())
         return EXIT_OK
     if action == 'init':
         key, pub = signing_key_path(), signing_pub_path()
@@ -1899,6 +2257,7 @@ def cmd_signing(options):
         if error:
             print('key created, but the trust file is unusable: %s' % error, file=sys.stderr)
             return 1
+        signing_marker_write(True)  # the marker first: a crash must never leave keys without it
         if blob not in keys:
             signers_save(keys + [blob])
         print('created  : %s (private, mode 600, no passphrase)' % key)
@@ -1928,8 +2287,10 @@ def cmd_signing(options):
                 return EXIT_REFUSED
         if action == 'trust':
             if blob in keys:
+                signing_marker_write(True)
                 print('already trusted: %s' % signing_fingerprint(blob))
                 return EXIT_OK
+            signing_marker_write(True)
             signers_save(keys + [blob])
             print('trusted  : %s (%s)' % (signing_fingerprint(blob), signers_path()))
             print('from now on `luna update` here refuses bundles without a valid signature from a trusted key')
@@ -1941,7 +2302,11 @@ def cmd_signing(options):
         signers_save(remaining)
         print('untrusted: %s' % signing_fingerprint(blob))
         if not remaining:
-            print('note     : no trusted keys left: unsigned bundles are accepted again (authenticity unchecked)')
+            if signing_marker_read()[0] == 'none':
+                signing_marker_write(True)
+            print('note     : no trusted keys left, but this machine is STILL ENFORCING: every update is '
+                  'refused until you trust a key again (luna signing trust PUBKEYFILE) or deliberately '
+                  'stop checking with: luna signing disable')
         return EXIT_OK
     return EXIT_REFUSED
 def cmd_check(options):
@@ -2152,18 +2517,25 @@ def cmd_autoupdate(options):
         if reasons:
             return record({'result': 'deferred', 'reason': reasons[0]})
 
+        # The tag reaches `gh release download` and names the version the bundle must carry:
+        # pending.json is writable by anything running as the user, so it is validated first.
+        if not isinstance(target, str) or not re.fullmatch(r'v?[0-9]+\.[0-9]+\.[0-9]+', target):
+            return record({'result': 'error', 'reason': 'refusing a release tag that is not vX.Y.Z: %.40r' % (target,)})
         work = Path(tempfile.mkdtemp(prefix='luna-autoupdate-'))
         try:
             bundle, error = download_release(target, work)
             if bundle is None:
                 return record({'result': 'error', 'reason': error, 'version': target})
-            code = install_bundle(bundle)
+            # Never --allow-downgrade here: an unattended update must not roll back.
+            code = install_bundle(bundle, expect_version=target.lstrip('v'))
         finally:
             shutil.rmtree(work, ignore_errors=True)
         if code == 0 and pending_path.exists():
             pending_path.unlink()
         return record({'result': 'applied' if code == 0 else 'failed',
                        'version': target, 'installedBefore': installed, 'exit': code})
+    except Exception as error:  # noqa: BLE001 - the timer must always leave a trace of why it failed
+        return record({'result': 'failed', 'reason': str(error) or error.__class__.__name__})
     finally:
         _release_lock(lock_path)
 
@@ -4240,7 +4612,11 @@ def cmd_launchers(options):
 # every connection is BatchMode with a connect timeout, so a dead host cannot
 # hang the command or prompt for a password.
 
-FLEET_HOST_RE = re.compile(r'^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9._-]*$')
+FLEET_HOST_RE = re.compile(r'(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9._-]*')  # use fullmatch: `$` also matches before a trailing newline
+# What `mktemp -d "${TMPDIR:-/tmp}/luna-fleet.XXXXXX"` may answer; it goes into single-quoted remote scripts.
+FLEET_REMOTE_DIR_RE = re.compile(r'/[A-Za-z0-9._/-]+/luna-fleet\.[A-Za-z0-9]{6,}')
+FLEET_BUNDLE_NAME_RE = re.compile(r'luna-[A-Za-z0-9._-]+\.tar\.gz')
+FLEET_BLOB_RE = re.compile(r'[A-Za-z0-9+/]{68}')
 FLEET_SSH_OPTS = ('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
                   '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3')
 FLEET_REMOTE_LUNA = '$HOME/.local/share/Lumen/sls-luna/luna.py'
@@ -4256,7 +4632,7 @@ def fleet_config_path():
 
 
 def fleet_valid_host(host):
-    return isinstance(host, str) and len(host) <= 253 and bool(FLEET_HOST_RE.match(host))
+    return isinstance(host, str) and len(host) <= 253 and bool(FLEET_HOST_RE.fullmatch(host))
 
 
 def fleet_load_hosts():
@@ -4857,6 +5233,8 @@ def fleet_trust_signing_key(host):
     blob, why = signing_parse_pubkey(pub.read_text() if pub.is_file() else '')
     if blob is None:
         return False, 'no usable local release public key (%s); run luna signing init' % why
+    if not FLEET_BLOB_RE.fullmatch(str(blob)):  # checked again here: it is pasted into a remote shell line
+        return False, 'the local release public key is not a plain ssh-ed25519 key; run luna signing init'
     # blob is validated base64 [A-Za-z0-9+/]{68}: safe inside single quotes.
     script = 'python3 "%s" signing trust \'ssh-ed25519 %s\'\n' % (FLEET_REMOTE_LUNA, blob)
     code, out, err = fleet_ssh(host, script, timeout=60)
@@ -4879,10 +5257,23 @@ def fleet_install_host(host, bundle, options):
     if drifted and not options.force:
         return False, 'REFUSED: installed payloads differ from their pins (%s); inspect them or pass --force' % ', '.join(drifted)
     running = bool(record.get('steamRunning')) or bool(record.get('lumenRunning'))
+    # Everything below ends up inside a remote shell line: validate it before it is used.
+    for name in options.only:
+        if name not in ADDONS:
+            return False, 'REFUSED: %.40r is not a known add-on (%s)' % (name, ', '.join(ADDONS))
+    try:
+        stop_timeout = int(options.stop_timeout)
+        if not 1 <= stop_timeout <= 3600:
+            raise ValueError('out of range')
+    except (TypeError, ValueError):
+        return False, 'REFUSED: --stop-timeout must be a whole number of seconds (1-3600)'
+    if bundle is not None and not FLEET_BUNDLE_NAME_RE.fullmatch(Path(bundle).name):
+        return False, 'REFUSED: unusable bundle name %.60r (expected luna-*.tar.gz, letters digits . _ -)' % Path(bundle).name
     if running and not options.restart_steam:
         return False, 'REFUSED: Steam/Lumen is running there; close it or pass --restart-steam'
     if options.dry_run:
-        steps = ['copy bundle', 'luna update --bundle' + ''.join(' --only ' + n for n in options.only)]
+        steps = ['copy bundle', 'luna update --bundle' + ''.join(' --only ' + n for n in options.only)
+                 + (' --allow-downgrade' if getattr(options, 'allow_downgrade', False) else '')]
         if getattr(options, 'trust_signing_key', False):
             steps.append('luna signing trust (this machine\'s release public key)')
         if running:
@@ -4892,7 +5283,9 @@ def fleet_install_host(host, bundle, options):
         return False, 'no bundle'
     code, out, err = fleet_ssh(host, FLEET_MKTEMP_SCRIPT, timeout=30)
     remote_dir = out.strip().splitlines()[-1] if out.strip() else ''
-    if code != 0 or not remote_dir.startswith('/'):
+    if code != 0 or not FLEET_REMOTE_DIR_RE.fullmatch(remote_dir) or '..' in remote_dir.split('/'):
+        if code == 0:
+            return False, 'could not create a usable temp dir there (unexpected answer %.60r); nothing was sent' % remote_dir
         return False, 'could not create a temp dir there: %s' % (err.strip() or out.strip() or code)
     stopped = False
     try:
@@ -4904,15 +5297,17 @@ def fleet_install_host(host, bundle, options):
         if result.returncode != 0:
             return False, 'scp failed: %s' % ((result.stderr.strip().splitlines() or ['?'])[-1])
         if running:
-            code, _, _ = fleet_ssh(host, FLEET_STOP_STEAM_SCRIPT % options.stop_timeout,
-                                   timeout=options.stop_timeout + 60)
+            code, _, _ = fleet_ssh(host, FLEET_STOP_STEAM_SCRIPT % stop_timeout,
+                                   timeout=stop_timeout + 60)
             stopped = True
             if code != 0:
-                return False, 'Steam did not exit within %ds; nothing was installed' % options.stop_timeout
+                return False, 'Steam did not exit within %ds; nothing was installed' % stop_timeout
         remote_bundle = '%s/%s' % (remote_dir, Path(bundle).name)
         update = ['python3', '"%s"' % FLEET_REMOTE_LUNA, 'update', '--bundle', "'%s'" % remote_bundle]
         for name in options.only:
             update += ['--only', name]
+        if getattr(options, 'allow_downgrade', False):
+            update.append('--allow-downgrade')
         code, out, err = fleet_ssh(host, ' '.join(update) + '\n', timeout=900)
         tail = (out + err).strip().splitlines()[-1:] or ['']
         if code != 0:
@@ -10018,6 +10413,9 @@ def build_parser():
             child.add_argument('--trust-signing-key', action='store_true',
                                help='with install: after a successful install, make the host trust this '
                                     'machine\'s release public key (luna signing trust over ssh)')
+            child.add_argument('--allow-downgrade', action='store_true',
+                               help='with install: let the host accept a bundle older than the newest '
+                                    'verified version it already installed (forwarded only when given)')
         if name == 'games':
             child.add_argument('games_action', choices=['list', 'diff', 'install'], help='games action')
             child.add_argument('games_args', nargs='*', metavar='HOST/APPID',
@@ -10060,11 +10458,17 @@ def build_parser():
             child.add_argument('--allow-unsigned', action='store_true',
                                help='install a bundle that has no signature although this machine trusts a '
                                     'release key (an invalid or untrusted signature is always refused)')
-            child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+            child.add_argument('--allow-downgrade', action='store_true',
+                               help='accept a bundle older than the newest verified version already installed '
+                                    '(rollback protection); the minimum is not lowered')
+            child.add_argument('--dry-run', action='store_true',
+                               help='verify the bundle and print the plan from the installed code; '
+                                    'nothing from the bundle is executed')
         if name == 'signing':
-            child.add_argument('signing_action', choices=['status', 'init', 'trust', 'untrust'],
+            child.add_argument('signing_action', choices=['status', 'init', 'trust', 'untrust', 'disable'],
                                help='status; init (create this machine\'s release key and trust it); '
-                                    'trust PUBKEY_OR_FILE; untrust PUBKEY_OR_FILE_OR_FINGERPRINT')
+                                    'trust PUBKEY_OR_FILE; untrust PUBKEY_OR_FILE_OR_FINGERPRINT; '
+                                    'disable (deliberately stop enforcing signatures)')
             child.add_argument('key', nargs='?', help='trust/untrust: ssh-ed25519 public key text, a file, '
                                                       '- for stdin; untrust also takes SHA256:FINGERPRINT')
         if name in ('verify', 'vendor'):

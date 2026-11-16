@@ -5,7 +5,11 @@
 # every connection is BatchMode with a connect timeout, so a dead host cannot
 # hang the command or prompt for a password.
 
-FLEET_HOST_RE = re.compile(r'^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9._-]*$')
+FLEET_HOST_RE = re.compile(r'(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9._-]*')  # use fullmatch: `$` also matches before a trailing newline
+# What `mktemp -d "${TMPDIR:-/tmp}/luna-fleet.XXXXXX"` may answer; it goes into single-quoted remote scripts.
+FLEET_REMOTE_DIR_RE = re.compile(r'/[A-Za-z0-9._/-]+/luna-fleet\.[A-Za-z0-9]{6,}')
+FLEET_BUNDLE_NAME_RE = re.compile(r'luna-[A-Za-z0-9._-]+\.tar\.gz')
+FLEET_BLOB_RE = re.compile(r'[A-Za-z0-9+/]{68}')
 FLEET_SSH_OPTS = ('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
                   '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3')
 FLEET_REMOTE_LUNA = '$HOME/.local/share/Lumen/sls-luna/luna.py'
@@ -21,7 +25,7 @@ def fleet_config_path():
 
 
 def fleet_valid_host(host):
-    return isinstance(host, str) and len(host) <= 253 and bool(FLEET_HOST_RE.match(host))
+    return isinstance(host, str) and len(host) <= 253 and bool(FLEET_HOST_RE.fullmatch(host))
 
 
 def fleet_load_hosts():
@@ -622,6 +626,8 @@ def fleet_trust_signing_key(host):
     blob, why = signing_parse_pubkey(pub.read_text() if pub.is_file() else '')
     if blob is None:
         return False, 'no usable local release public key (%s); run luna signing init' % why
+    if not FLEET_BLOB_RE.fullmatch(str(blob)):  # checked again here: it is pasted into a remote shell line
+        return False, 'the local release public key is not a plain ssh-ed25519 key; run luna signing init'
     # blob is validated base64 [A-Za-z0-9+/]{68}: safe inside single quotes.
     script = 'python3 "%s" signing trust \'ssh-ed25519 %s\'\n' % (FLEET_REMOTE_LUNA, blob)
     code, out, err = fleet_ssh(host, script, timeout=60)
@@ -644,10 +650,23 @@ def fleet_install_host(host, bundle, options):
     if drifted and not options.force:
         return False, 'REFUSED: installed payloads differ from their pins (%s); inspect them or pass --force' % ', '.join(drifted)
     running = bool(record.get('steamRunning')) or bool(record.get('lumenRunning'))
+    # Everything below ends up inside a remote shell line: validate it before it is used.
+    for name in options.only:
+        if name not in ADDONS:
+            return False, 'REFUSED: %.40r is not a known add-on (%s)' % (name, ', '.join(ADDONS))
+    try:
+        stop_timeout = int(options.stop_timeout)
+        if not 1 <= stop_timeout <= 3600:
+            raise ValueError('out of range')
+    except (TypeError, ValueError):
+        return False, 'REFUSED: --stop-timeout must be a whole number of seconds (1-3600)'
+    if bundle is not None and not FLEET_BUNDLE_NAME_RE.fullmatch(Path(bundle).name):
+        return False, 'REFUSED: unusable bundle name %.60r (expected luna-*.tar.gz, letters digits . _ -)' % Path(bundle).name
     if running and not options.restart_steam:
         return False, 'REFUSED: Steam/Lumen is running there; close it or pass --restart-steam'
     if options.dry_run:
-        steps = ['copy bundle', 'luna update --bundle' + ''.join(' --only ' + n for n in options.only)]
+        steps = ['copy bundle', 'luna update --bundle' + ''.join(' --only ' + n for n in options.only)
+                 + (' --allow-downgrade' if getattr(options, 'allow_downgrade', False) else '')]
         if getattr(options, 'trust_signing_key', False):
             steps.append('luna signing trust (this machine\'s release public key)')
         if running:
@@ -657,7 +676,9 @@ def fleet_install_host(host, bundle, options):
         return False, 'no bundle'
     code, out, err = fleet_ssh(host, FLEET_MKTEMP_SCRIPT, timeout=30)
     remote_dir = out.strip().splitlines()[-1] if out.strip() else ''
-    if code != 0 or not remote_dir.startswith('/'):
+    if code != 0 or not FLEET_REMOTE_DIR_RE.fullmatch(remote_dir) or '..' in remote_dir.split('/'):
+        if code == 0:
+            return False, 'could not create a usable temp dir there (unexpected answer %.60r); nothing was sent' % remote_dir
         return False, 'could not create a temp dir there: %s' % (err.strip() or out.strip() or code)
     stopped = False
     try:
@@ -669,15 +690,17 @@ def fleet_install_host(host, bundle, options):
         if result.returncode != 0:
             return False, 'scp failed: %s' % ((result.stderr.strip().splitlines() or ['?'])[-1])
         if running:
-            code, _, _ = fleet_ssh(host, FLEET_STOP_STEAM_SCRIPT % options.stop_timeout,
-                                   timeout=options.stop_timeout + 60)
+            code, _, _ = fleet_ssh(host, FLEET_STOP_STEAM_SCRIPT % stop_timeout,
+                                   timeout=stop_timeout + 60)
             stopped = True
             if code != 0:
-                return False, 'Steam did not exit within %ds; nothing was installed' % options.stop_timeout
+                return False, 'Steam did not exit within %ds; nothing was installed' % stop_timeout
         remote_bundle = '%s/%s' % (remote_dir, Path(bundle).name)
         update = ['python3', '"%s"' % FLEET_REMOTE_LUNA, 'update', '--bundle', "'%s'" % remote_bundle]
         for name in options.only:
             update += ['--only', name]
+        if getattr(options, 'allow_downgrade', False):
+            update.append('--allow-downgrade')
         code, out, err = fleet_ssh(host, ' '.join(update) + '\n', timeout=900)
         tail = (out + err).strip().splitlines()[-1:] or ['']
         if code != 0:

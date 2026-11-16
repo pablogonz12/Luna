@@ -155,22 +155,51 @@ def repo_revision():
     return ''
 
 
-def _manifest_problems(manifest, root):
-    """Payload bytes vs manifest pins, for a checkout or an extracted bundle."""
+ADDON_NAME_RE = re.compile(r'[a-z][a-z0-9_-]{0,31}')
+
+
+def _unsafe_rel(rel):
+    return (not isinstance(rel, str) or not rel or rel.startswith('/') or '\\' in rel or '\x00' in rel
+            or any(part in ('', '.', '..') for part in rel.split('/')))
+
+
+def _manifest_problems(manifest, root, require=()):
+    """Payload bytes vs manifest pins, for a checkout or an extracted bundle.
+
+    Walks the manifest's OWN add-ons (names strictly validated), so a bundle may drop an add-on;
+    `require` names the add-ons that must be present (the release side asks for all of them)."""
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('addons'), dict):
+        return ['the manifest is not an object with an "addons" object']
     problems = []
-    for name in ADDONS:
-        entry = manifest.get('addons', {}).get(name)
-        if not entry:
+    addons = manifest['addons']
+    for name in require:
+        if name not in addons:
             problems.append('manifest has no entry for %s' % name)
+    for name, entry in addons.items():
+        if not isinstance(name, str) or not ADDON_NAME_RE.fullmatch(name):
+            problems.append('the manifest has an invalid add-on name: %.40r' % (name,))
+            continue
+        if not isinstance(entry, dict) or not isinstance(entry.get('files', {}), dict):
+            problems.append('manifest entry for add-on %s has the wrong shape' % name)
             continue
         for rel, meta in entry.get('files', {}).items():
-            path = root / 'addons' / name / meta['source_path']
+            source = meta.get('source_path') if isinstance(meta, dict) else None
+            if _unsafe_rel(source) or not isinstance(meta.get('sha256'), str):
+                problems.append('manifest entry %s/%s has an unsafe path or no sha256' % (name, rel))
+                continue
+            path = root / 'addons' / name / source
             if not path.is_file():
                 problems.append('missing payload %s/%s' % (name, rel))
                 continue
             if sha256(path) != meta['sha256']:
                 problems.append('payload %s/%s does not match the manifest' % (name, rel))
-    for rel, meta in manifest.get('shared', {}).items():
+    shared = manifest.get('shared', {})
+    if not isinstance(shared, dict):
+        return problems + ['the manifest "shared" section is not an object']
+    for rel, meta in shared.items():
+        if _unsafe_rel(rel) or not isinstance(meta, dict) or not isinstance(meta.get('sha256'), str):
+            problems.append('shared entry %.60r has an unsafe path or no sha256' % (rel,))
+            continue
         path = root / rel
         if not path.is_file():
             problems.append('missing shared file %s' % rel)
@@ -200,7 +229,7 @@ def _release_listing(entries):
 def cmd_release(options):
     """Build a bundle another machine can install with `luna update`."""
     manifest = load_manifest()  # fail early when the pins are missing
-    problems = _manifest_problems(manifest, ROOT)
+    problems = _manifest_problems(manifest, ROOT, require=ADDONS)
     if problems:
         print('REFUSING to release: the working tree does not match the manifest:')
         for problem in problems:
@@ -283,16 +312,94 @@ def cmd_release(options):
     return EXIT_OK
 
 
-def _fetch_small(url, dest, limit):
-    """Download at most `limit` bytes to `dest`; on any failure or overflow leave nothing (or garbage
-    of limit+1 bytes, which signing_read_sig refuses as oversized)."""
+URL_BUNDLE_MAX = 64 * 1024 * 1024   # a real bundle is ~165 KB
+URL_SIDECAR_MAX = 4096              # one hex digest and a file name
+URL_LOOPBACK = ('127.0.0.1', 'localhost', '::1')
+
+
+class UrlRefused(Exception):
+    """A URL or redirect the policy refuses (the message is printed as is)."""
+
+
+class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but only to https: never file://, ftp:// or a downgrade to http://."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme.lower() != 'https':
+            raise UrlRefused('REFUSING: the server redirected to a non-https address (%.80s); a redirect '
+                             'may only lead to https' % newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def url_check(url):
+    """(ok, why) for the address given to --url: https, or http to this machine's loopback only."""
     try:
-        with urllib.request.urlopen(url, timeout=60) as response:
-            data = response.read(limit + 1)
-    except Exception:  # noqa: BLE001 - absent or unreachable counts as "no file"
-        return False
-    Path(dest).write_bytes(data)
-    return True
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        parts.port  # noqa: B018 - raises ValueError on a malformed port
+    except ValueError:
+        return False, 'REFUSING: --url is not a valid address; it must be https'
+    scheme = parts.scheme.lower()
+    if '@' in parts.netloc or not host:
+        return False, 'REFUSING: --url must be a plain https address without user:password@'
+    if scheme == 'https' or (scheme == 'http' and host.lower() in URL_LOOPBACK):
+        return True, ''
+    return False, ('REFUSING: --url must be https (plain http is accepted only for 127.0.0.1/localhost, '
+                   'for local testing); got %.60s' % url)
+
+
+class _TooBig(Exception):
+    pass
+
+
+def url_download(url, dest, limit):
+    """Stream `url` to `dest`, at most `limit` bytes. Returns (ok, why); on failure nothing is left."""
+    ok, why = url_check(url)
+    if not ok:
+        return False, why
+    opener = urllib.request.build_opener(HttpsOnlyRedirect)
+    too_big = 'REFUSING: the download is larger than the %d byte limit' % limit
+    try:
+        with opener.open(url, timeout=60) as response:
+            declared = response.headers.get('Content-Length', '')
+            if declared.isdigit() and int(declared) > limit:
+                raise _TooBig()
+            written = 0
+            with open(str(dest), 'wb') as out:
+                while True:
+                    block = response.read(65536)
+                    if not block:
+                        break
+                    written += len(block)
+                    if written > limit:
+                        raise _TooBig()
+                    out.write(block)
+    except _TooBig:
+        with contextlib.suppress(OSError):
+            Path(dest).unlink()
+        return False, too_big
+    except UrlRefused as error:
+        with contextlib.suppress(OSError):
+            Path(dest).unlink()
+        return False, str(error)
+    except Exception as error:  # noqa: BLE001 - any network failure is a refusal to continue
+        with contextlib.suppress(OSError):
+            Path(dest).unlink()
+        if isinstance(error, urllib.error.HTTPError) and 300 <= error.code < 400:
+            # urllib itself declined to follow it (file://, ftp:// ...) before our handler saw it
+            return False, 'REFUSING: the server sent a redirect that is not allowed (only https): %s' % error
+        return False, 'download failed: %s' % error
+    return True, ''
+
+
+def _fetch_small(url, dest, limit):
+    """Optional small file (.sig). Absent or unreachable counts as "no file"; an oversized one is
+    stored as limit+1 bytes, which signing_read_sig refuses as implausibly large."""
+    ok, why = url_download(url, dest, limit)
+    if not ok and 'larger than' in why:
+        Path(dest).write_bytes(b'x' * (limit + 1))
+        return True
+    return ok
 
 
 def cmd_update(options):
@@ -318,16 +425,17 @@ def cmd_update(options):
                 return 1
         elif options.url:
             bundle = temp_dir / 'luna-bundle.tar.gz'
-            try:
-                urllib.request.urlretrieve(options.url, bundle)
-            except Exception as error:  # noqa: BLE001 - report the URL failure
-                print('download failed: %s' % error, file=sys.stderr)
-                return 1
-            try:
-                urllib.request.urlretrieve(options.url + '.sha256', str(bundle) + '.sha256')
-            except Exception:  # noqa: BLE001 - the sidecar is optional for --url
-                pass
-            if not Path(str(bundle) + '.sha256').is_file():
+            ok, why = url_download(options.url, bundle, URL_BUNDLE_MAX)
+            if not ok:
+                print(why, file=sys.stderr)
+                return EXIT_REFUSED if why.startswith('REFUSING') else 1
+            sidecar = Path(str(bundle) + '.sha256')
+            ok, why = url_download(options.url + '.sha256', sidecar, URL_SIDECAR_MAX)
+            if not ok and (why.startswith('REFUSING') or 'larger than' in why):
+                print('REFUSING: the checksum file (.sha256) beside the URL cannot be used: %s'
+                      % why.replace('REFUSING: ', ''), file=sys.stderr)
+                return EXIT_REFUSED
+            if not sidecar.is_file():
                 print('warning: no .sha256 beside the URL; only the bundle\'s own manifest can be '
                       'checked (self-consistency, not independent). Prefer --latest.', file=sys.stderr)
             # A missing, blocked or failed .sig is indistinguishable from "unsigned": the policy
@@ -338,7 +446,8 @@ def cmd_update(options):
             return 2
         return install_bundle(bundle, only=options.only, dry_run=options.dry_run,
                               allow_legacy=getattr(options, 'allow_legacy_bundle', False),
-                              allow_unsigned=getattr(options, 'allow_unsigned', False))
+                              allow_unsigned=getattr(options, 'allow_unsigned', False),
+                              allow_downgrade=getattr(options, 'allow_downgrade', False))
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         _release_lock(lock_path)
@@ -443,10 +552,14 @@ def _listing_problems(root):
         return [], False
     try:
         data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError('not a JSON object')
         files = data['files']
         if data.get('format') != RELEASE_FORMAT or not isinstance(files, dict):
             raise ValueError('unsupported format')
-    except (ValueError, KeyError, OSError, AttributeError) as error:
+        if not all(isinstance(rel, str) and isinstance(digest, str) for rel, digest in files.items()):
+            raise ValueError('paths and digests must be text')
+    except (ValueError, KeyError, OSError, AttributeError, TypeError) as error:
         return ['%s is unreadable: %s' % (RELEASE_LISTING, error)], True
     problems = []
     for rel, digest in sorted(files.items()):
@@ -465,7 +578,8 @@ def _listing_problems(root):
     return problems, True
 
 
-def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False, allow_unsigned=False):
+def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False, allow_unsigned=False,
+                   allow_downgrade=False, expect_version=None):
     """Verify a bundle and run the installer inside it.
 
     The bundle is first copied into a private directory, and the checksum, the
@@ -482,13 +596,25 @@ def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False, allow_u
         except OSError as error:
             print('REFUSING: cannot read the bundle: %s' % error, file=sys.stderr)
             return 1
-        return _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
+        return _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned,
+                               allow_downgrade, expect_version)
 
 
-def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned):
+def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned,
+                    allow_downgrade=False, expect_version=None):
     checksum_file = Path(str(bundle) + '.sha256')
     if checksum_file.is_file():
-        expected = checksum_file.read_text().split()[0].strip().lower()
+        try:
+            tokens = checksum_file.read_text().split()
+        except (OSError, ValueError) as error:
+            print('REFUSING: the checksum file %s cannot be read: %s' % (checksum_file.name, error),
+                  file=sys.stderr)
+            return 1
+        expected = tokens[0].strip().lower() if tokens else ''
+        if not re.fullmatch(r'[0-9a-f]{64}', expected):
+            print('REFUSING: the checksum file %s is empty or does not start with a sha256 digest'
+                  % checksum_file.name, file=sys.stderr)
+            return 1
         actual = sha256(staged)
         if expected != actual:
             print('REFUSING: sha256 mismatch (bundle %s, sidecar %s)'
@@ -499,7 +625,8 @@ def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
         print('note   : no .sha256 beside the bundle: integrity is checked only against the bundle\'s '
               'own manifest (self-consistency), not an independent checksum')
     # Authenticity: decided by the INSTALLED code and the machine-local trust file, before unpacking.
-    if not check_bundle_signature(staged, Path(str(bundle) + '.sig'), allow_unsigned):
+    verdict = check_bundle_signature(staged, Path(str(bundle) + '.sig'), allow_unsigned)
+    if verdict is None:
         return 1
     with tempfile.TemporaryDirectory(prefix='luna-bundle-') as work:
         extract_dir = Path(work) / 'unpacked'
@@ -515,21 +642,27 @@ def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
         if not script.is_file():
             print('REFUSING: the bundle does not contain scripts/luna.py', file=sys.stderr)
             return 1
-        version = '?'
         bundled_manifest = root / 'vendor' / 'MANIFEST.json'
         if not bundled_manifest.is_file():
             print('REFUSING: the bundle does not contain vendor/MANIFEST.json', file=sys.stderr)
             return 1
         try:
             manifest = json.loads(bundled_manifest.read_text())
-            version = str((manifest.get('addons', {}).get('luna') or {})
-                          .get('plugin_version', '?'))
-        except ValueError:
+        except (ValueError, OSError):
             print('REFUSING: the bundled manifest is not valid JSON', file=sys.stderr)
+            return 1
+        luna_entry = manifest.get('addons', {}).get('luna') if isinstance(manifest, dict) and \
+            isinstance(manifest.get('addons'), dict) else None
+        if not isinstance(luna_entry, dict):
+            print('REFUSING: the bundled manifest has the wrong shape (no add-ons.luna entry)', file=sys.stderr)
+            return 1
+        version = luna_entry.get('plugin_version')
+        if not isinstance(version, str) or not BUNDLE_VERSION_RE.fullmatch(version):
+            print('REFUSING: the bundle version %.40r is not a plain x.y.z version' % (version,), file=sys.stderr)
             return 1
         problems = _manifest_problems(manifest, root)
         if problems:
-            print('REFUSING: the bundle contents do not match its own manifest:')
+            print('REFUSING: the bundle contents do not match its own manifest:', file=sys.stderr)
             for problem in problems:
                 print('  - %s' % problem, file=sys.stderr)
             return 1
@@ -548,6 +681,26 @@ def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
                 return 1
             print('WARNING: legacy bundle: scripts/luna.py is NOT covered by any hash; '
                   'continuing because --allow-legacy-bundle was given', file=sys.stderr)
+        if expect_version is not None and version != expect_version:
+            print('REFUSING: the bundle version %s does not match the release tag (%s); '
+                  'a tag may only ship its own version' % (version, expect_version), file=sys.stderr)
+            return 1
+        if verdict['enforcing']:
+            # Rollback protection: only while enforcing (an unauthenticated mark would be a denial-of-service lever).
+            floor, floor_problem = update_floor_read()
+            if floor_problem:
+                print('REFUSING: the update state file is unusable: %s' % floor_problem, file=sys.stderr)
+                return 1
+            if floor is not None and version_tuple(version) < version_tuple(floor):
+                if not allow_downgrade:
+                    print('REFUSING: bundle version %s is older than %s, which this machine already installed '
+                          'from a verified bundle (a rollback to a vulnerable release is the attack this '
+                          'stops). To go back deliberately: --allow-downgrade' % (version, floor),
+                          file=sys.stderr)
+                    return 1
+                print('WARNING: installing bundle version %s, older than the minimum %s; continuing because '
+                      '--allow-downgrade was given (the minimum is not lowered)' % (version, floor),
+                      file=sys.stderr)
         print('bundle : %s (Luna %s, manifest verified%s)'
               % (bundle.name, version, '' if listed else ', legacy: luna.py unverified'))
         # Add-on updates must not undo a deliberate client update from Health.
@@ -555,8 +708,14 @@ def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
         for name in only or []:
             command += ['--only', name]
         if dry_run:
-            command.append('--dry-run')
+            # Nothing from the bundle runs here: the plan comes from the installed code only.
+            print('DRY RUN: verified bundle %s (Luna %s); a real update would run the bundled installer '
+                  '`luna.py install --force%s`. Nothing from the bundle was executed and nothing was written.'
+                  % (bundle.name, version, ''.join(' --only ' + name for name in only or [])))
+            return EXIT_OK
         result = subprocess.run(command, env=dict(os.environ, LUNA_KEEP_STEAM_CLIENT='1'))
+        if result.returncode == 0 and verdict['verified']:
+            update_floor_raise(version)
         return result.returncode
 
 
@@ -600,59 +759,76 @@ def _update_lock():
 LOCK_TTL = 3600
 
 
-def _acquire_lock(lock_path):
-    """Claim the update lock; clear it when stale (dead owner or too old).
+_LOCK_FDS = {}
 
-    Returns (True, '') on success or (False, reason). A kill -9 between
-    acquire and release must never wedge updates forever.
-    """
+
+def _acquire_lock(lock_path):
+    """Claim the update lock with flock(2) on a file that stays open for the whole update.
+
+    The kernel drops the lock when the process dies, so a kill -9 can never wedge updates and a
+    live holder can never be robbed (no pid guessing). Returns (True, '') or (False, reason).
+    A lock file left by an older Luna (pid + time, no flock) is still honoured while its pid lives."""
+    busy = 'another update is already running (%s)' % lock_path
+    key = str(lock_path)
+    if key in _LOCK_FDS:
+        return False, busy
     try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        pass
-    except OSError:
+        import fcntl
+    except ImportError:  # pragma: no cover - not POSIX
         return True, ''
-    else:
+    for _attempt in range(5):
         try:
-            os.write(fd, json.dumps(
-                {'pid': os.getpid(), 'at': int(time.time())}).encode())
-        finally:
+            fd = os.open(key, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            return True, ''  # cannot create a lock here: do not block the update
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
             os.close(fd)
-        return True, ''
-    try:
-        info = json.loads(lock_path.read_text())
-        owner, started = int(info.get('pid') or 0), int(info.get('at') or 0)
-    except (OSError, ValueError, TypeError, AttributeError):
-        owner, started = 0, 0
-    alive = False
-    if owner > 0:
+            return False, busy
         try:
-            os.kill(owner, 0)
-            alive = True
-        except (OSError, ProcessLookupError, PermissionError):
-            alive = False
-    if alive and time.time() - started < LOCK_TTL:
-        return False, 'another update is already running (%s)' % lock_path
-    try:
-        lock_path.unlink()
-    except OSError:
-        pass
-    try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except (FileExistsError, OSError):
-        return False, 'another update is already running (%s)' % lock_path
-    try:
-        os.write(fd, json.dumps({'pid': os.getpid(), 'at': int(time.time())}).encode())
-    finally:
-        os.close(fd)
-    return True, ''
+            same = os.fstat(fd).st_ino == os.stat(key).st_ino
+        except OSError:
+            same = False
+        if not same:  # the file was replaced while we waited: lock the new one
+            os.close(fd)
+            continue
+        try:
+            owner, started = 0, 0
+            try:
+                info = json.loads(os.pread(fd, 4096, 0).decode('utf-8', 'replace') or '{}')
+                owner, started = int(info.get('pid') or 0), int(info.get('at') or 0)
+            except (ValueError, TypeError, AttributeError):
+                pass
+            if owner > 0 and owner != os.getpid() and time.time() - started < LOCK_TTL:
+                try:
+                    os.kill(owner, 0)
+                    os.close(fd)
+                    return False, busy
+                except OSError:
+                    pass
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, json.dumps({'pid': os.getpid(), 'at': int(time.time())}).encode(), 0)
+        except OSError:
+            pass
+        _LOCK_FDS[key] = fd
+        return True, ''
+    return False, busy
 
 
 def _release_lock(lock_path):
+    """Drop our lock. The file is removed only if it is still the one WE locked."""
+    fd = _LOCK_FDS.pop(str(lock_path), None)
+    if fd is None:
+        return
     try:
-        lock_path.unlink()
+        if os.fstat(fd).st_ino == os.stat(str(lock_path)).st_ino:
+            lock_path.unlink()
     except OSError:
         pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 CLI_LAUNCHER = '''#!/bin/sh

@@ -177,6 +177,9 @@ def build_parser():
             child.add_argument('--trust-signing-key', action='store_true',
                                help='with install: after a successful install, make the host trust this '
                                     'machine\'s release public key (luna signing trust over ssh)')
+            child.add_argument('--allow-downgrade', action='store_true',
+                               help='with install: let the host accept a bundle older than the newest '
+                                    'verified version it already installed (forwarded only when given)')
         if name == 'games':
             child.add_argument('games_action', choices=['list', 'diff', 'install'], help='games action')
             child.add_argument('games_args', nargs='*', metavar='HOST/APPID',
@@ -219,11 +222,17 @@ def build_parser():
             child.add_argument('--allow-unsigned', action='store_true',
                                help='install a bundle that has no signature although this machine trusts a '
                                     'release key (an invalid or untrusted signature is always refused)')
-            child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+            child.add_argument('--allow-downgrade', action='store_true',
+                               help='accept a bundle older than the newest verified version already installed '
+                                    '(rollback protection); the minimum is not lowered')
+            child.add_argument('--dry-run', action='store_true',
+                               help='verify the bundle and print the plan from the installed code; '
+                                    'nothing from the bundle is executed')
         if name == 'signing':
-            child.add_argument('signing_action', choices=['status', 'init', 'trust', 'untrust'],
+            child.add_argument('signing_action', choices=['status', 'init', 'trust', 'untrust', 'disable'],
                                help='status; init (create this machine\'s release key and trust it); '
-                                    'trust PUBKEY_OR_FILE; untrust PUBKEY_OR_FILE_OR_FINGERPRINT')
+                                    'trust PUBKEY_OR_FILE; untrust PUBKEY_OR_FILE_OR_FINGERPRINT; '
+                                    'disable (deliberately stop enforcing signatures)')
             child.add_argument('key', nargs='?', help='trust/untrust: ssh-ed25519 public key text, a file, '
                                                       '- for stdin; untrust also takes SHA256:FINGERPRINT')
         if name in ('verify', 'vendor'):

@@ -2,10 +2,11 @@
 """Release signing: `luna release` signs, `luna update` verifies against a local trust file.
 
 Hermetic: a disposable HOME, throwaway ed25519 keys generated inside the temp dir, no
-network (--url uses file://). Nothing reads ~/.ssh or the real ~/.config/luna.
+network (--url talks to a throwaway server on 127.0.0.1). Nothing reads ~/.ssh or the real ~/.config/luna.
 """
 import hashlib
 import io
+import json
 import os
 os.environ.setdefault('LUNA_GUI_CHECKS', '0')  # hermetic: tests never probe the real desktop (test_gui_check manages it itself)
 os.environ.setdefault('LUNA_LIVE_CHECKS', '0')  # hermetic: tests never contact a real Steam (test_live_probe uses a fake endpoint)
@@ -17,10 +18,19 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_luna import HERE, LUNA, UPSTREAM, stub_bin
 
 KEYGEN = shutil.which('ssh-keygen')
+
+
+def load_luna():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('luna_signing_mod', str(LUNA))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @unittest.skipUnless(KEYGEN, 'ssh-keygen is not installed')
@@ -32,7 +42,7 @@ class SigningTestCase(unittest.TestCase):
     def setUpClass(cls):
         cls.base_dir = Path(tempfile.mkdtemp(prefix='luna-sign-base-'))
         env = dict(os.environ, HOME=str(cls.base_dir), XDG_CONFIG_HOME=str(cls.base_dir / 'cfg'),
-                   LUNA_SIGNING_DIR=str(cls.base_dir / 'nokey'))
+                   LUNA_SIGNING_DIR=str(cls.base_dir / 'nokey'), LUNA_ANCHOR_HOME=str(cls.base_dir / 'anchor'))
         out = cls.base_dir / 'dist'
         done = subprocess.run([sys.executable, str(LUNA), 'release', '--out', str(out)],
                               capture_output=True, text=True, env=env)
@@ -62,6 +72,7 @@ class SigningTestCase(unittest.TestCase):
                         XDG_RUNTIME_DIR=str(self.home / 'run'),
                         XDG_CONFIG_HOME=str(self.home / '.config'),
                         LUNA_SIGNING_DIR=str(self.cfg),
+                        LUNA_ANCHOR_HOME=str(self.temp / 'anchor'),
                         PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', ''))
         self.keys = self.temp / 'keys'
         self.keys.mkdir()
@@ -286,7 +297,7 @@ class SigningTestCase(unittest.TestCase):
         self.trust(key)
         bundle = self.bundle()
         self.sign(bundle, key)
-        url = bundle.as_uri()
+        url = self.serve(self.dist) + '/' + bundle.name
         ok = self.luna('update', '--url', url, '--dry-run')
         self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
         self.assertIn('signed : verified', ok.stdout)
@@ -373,8 +384,302 @@ class SigningTestCase(unittest.TestCase):
         self.assertNotIn(self.fingerprint(b), self.luna('signing', 'status').stdout)
         last = self.luna('signing', 'untrust', str(a) + '.pub')
         self.assertEqual(last.returncode, 0, last.stderr)
-        self.assertIn('unsigned bundles are accepted again', last.stdout)
+        # Review finding 1: emptying the trust file must never silently turn enforcement off.
+        self.assertIn('STILL ENFORCING', last.stdout)
+        self.assertIn('signing disable', last.stdout)
+        self.assertIn('ENFORCING', self.luna('signing', 'status').stdout)
+        self.assertEqual(self.luna('signing', 'disable').returncode, 0)
         self.assertIn('not enforcing', self.luna('signing', 'status').stdout)
+
+    # -- review finding 1: enforcement must not depend on the environment -----
+    def tools(self, home=None):
+        return Path(home or self.home) / '.local/share/Lumen/sls-luna'
+
+    def anchor_tools(self):
+        return self.temp / 'anchor/.local/share/Lumen/sls-luna'
+
+    def test_trust_records_an_enforcement_marker_in_both_places(self):
+        self.trust(self.genkey('a'))
+        for directory in (self.tools(), self.anchor_tools()):
+            data = json.loads((directory / 'signing-policy.json').read_text())
+            self.assertIs(data['enforce'], True)
+            self.assertEqual(data['trustFile'], str(self.cfg / 'release-signers'))
+        self.assertIn('marker', self.luna('signing', 'status').stdout)
+
+    def test_a_different_environment_cannot_switch_enforcement_off(self):
+        self.trust(self.genkey('a'))
+        bundle = self.bundle()
+        expected = str(self.cfg / 'release-signers')
+        variants = {
+            'other LUNA_SIGNING_DIR': dict(self.env, LUNA_SIGNING_DIR=str(self.temp / 'elsewhere')),
+            'other XDG_CONFIG_HOME': {k: v for k, v in dict(self.env, XDG_CONFIG_HOME=str(self.temp / 'x')).items()
+                                      if k != 'LUNA_SIGNING_DIR'},
+        }
+        for label, env in variants.items():
+            text = self.refused(bundle, 'trust file', env=env)
+            self.assertIn(expected, text, label)
+            self.assertIn('signing disable', text, label)
+        # a brand new HOME (a timer or ssh session with a different environment) is caught by the anchor
+        other_home = self.temp / 'otherhome'
+        other_home.mkdir()
+        env = {k: v for k, v in dict(self.env, HOME=str(other_home), XDG_CONFIG_HOME=str(other_home / 'c')).items()
+               if k != 'LUNA_SIGNING_DIR'}
+        self.assertIn(expected, self.refused(bundle, 'trust file', env=env))
+        # and the trust file simply being deleted
+        (self.cfg / 'release-signers').unlink()
+        self.assertIn(expected, self.refused(bundle, 'trust file'))
+        self.refused(bundle, 'trust file', '--allow-unsigned')
+
+    def test_a_machine_with_keys_but_no_marker_heals_itself(self):
+        key = self.genkey('a')
+        self.trust(key)
+        for directory in (self.tools(), self.anchor_tools()):
+            (directory / 'signing-policy.json').unlink()
+        self.assertIn('ENFORCING', self.luna('signing', 'status').stdout)
+        for directory in (self.tools(), self.anchor_tools()):
+            self.assertTrue((directory / 'signing-policy.json').is_file())
+            (directory / 'signing-policy.json').unlink()
+        bundle = self.bundle()
+        self.sign(bundle, key)
+        self.assertEqual(self.update(bundle).returncode, 0)  # update heals it as well
+        self.assertTrue((self.tools() / 'signing-policy.json').is_file())
+
+    def test_a_marker_that_is_unreadable_fails_closed(self):
+        self.trust(self.genkey('a'))
+        (self.tools() / 'signing-policy.json').write_text('{not json')
+        self.refused(self.bundle(), 'enforcement marker')
+
+    def test_untrusting_the_last_key_keeps_enforcing_until_disabled(self):
+        a = self.genkey('a')
+        self.trust(a)
+        last = self.luna('signing', 'untrust', str(a) + '.pub')
+        self.assertEqual(last.returncode, 0, last.stderr)
+        text = self.refused(self.bundle(), 'no usable trusted key')
+        self.assertIn('signing disable', text)
+        disabled = self.luna('signing', 'disable')
+        self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        self.assertEqual(self.update(self.bundle()).returncode, 0)
+        for directory in (self.tools(), self.anchor_tools()):
+            self.assertIs(json.loads((directory / 'signing-policy.json').read_text())['enforce'], False)
+        self.trust(a)  # trusting a key again turns enforcement back on
+        self.assertIn('ENFORCING', self.luna('signing', 'status').stdout)
+        self.refused(self.bundle(), 'no signature')
+
+    def test_init_also_records_the_marker(self):
+        self.assertEqual(self.luna('signing', 'init').returncode, 0)
+        self.assertIs(json.loads((self.anchor_tools() / 'signing-policy.json').read_text())['enforce'], True)
+
+    # -- review finding 3: --url hardening ---------------------------------
+    def serve(self, directory):
+        import functools
+        import http.server
+        import threading
+
+        class Handler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                targets = {'/redir-file': 'file:///etc/hostname', '/redir-http': 'http://203.0.113.9/x.tar.gz',
+                           '/redir-ftp': 'ftp://203.0.113.9/x.tar.gz'}
+                if self.path in targets:
+                    self.send_response(302)
+                    self.send_header('Location', targets[self.path])
+                    self.end_headers()
+                    return
+                super().do_GET()
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Handler, directory=str(directory)))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return 'http://127.0.0.1:%d' % server.server_address[1]
+
+    def test_url_refuses_every_scheme_but_https_and_loopback_http(self):
+        bundle = self.bundle()
+        for url in (bundle.as_uri(), 'ftp://127.0.0.1/x.tar.gz', 'http://example.invalid/x.tar.gz',
+                    'https://user:pw@example.invalid/x.tar.gz', 'gopher://example.invalid/x', '//example.invalid/x',
+                    'http://127.0.0.1.example.invalid/x.tar.gz'):
+            result = self.luna('update', '--url', url, '--dry-run')
+            self.assertNotEqual(result.returncode, 0, url)
+            self.assertIn('REFUSING', result.stderr, url)
+            self.assertIn('https', result.stderr, url)
+            self.assertNotIn('Traceback', result.stderr)
+
+    def test_url_follows_redirects_only_to_https(self):
+        base = self.serve(self.dist)
+        for path in ('/redir-file', '/redir-http', '/redir-ftp'):
+            result = self.luna('update', '--url', base + path, '--dry-run')
+            self.assertNotEqual(result.returncode, 0, path)
+            self.assertIn('redirect', result.stderr, path)
+            self.assertIn('REFUSING', result.stderr, path)
+
+    def test_download_has_a_size_cap_and_streams(self):
+        module = load_luna()
+        base = self.serve(self.dist)
+        payload = self.dist / 'big.bin'
+        payload.write_bytes(b'x' * 5000)
+        dest = self.temp / 'out.bin'
+        ok, why = module.url_download(base + '/big.bin', dest, 4000)
+        self.assertFalse(ok)
+        self.assertIn('larger than', why)
+        self.assertFalse(dest.exists(), 'an oversized download leaves nothing behind')
+        ok, why = module.url_download(base + '/big.bin', dest, 5000)
+        self.assertTrue(ok, why)
+        self.assertEqual(dest.stat().st_size, 5000)
+        # the optional small files have their own small caps
+        self.assertLessEqual(module.URL_SIDECAR_MAX, 8192)
+        self.assertLessEqual(module.SIG_MAX_BYTES, 8192)
+        self.assertLessEqual(module.URL_BUNDLE_MAX, 256 * 1024 * 1024)
+        self.assertGreater(module.URL_BUNDLE_MAX, 10 * 1024 * 1024)
+
+    def test_an_oversized_sidecar_is_refused_not_ignored(self):
+        bundle = self.bundle()
+        Path(str(bundle) + '.sha256').write_text('0' * 100000)
+        result = self.luna('update', '--url', self.serve(self.dist) + '/' + bundle.name, '--dry-run')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('REFUSING', result.stderr)
+        self.assertIn('.sha256', result.stderr)
+
+    def test_redirect_handler_allows_https_only(self):
+        import urllib.request
+        module = load_luna()
+        handler = module.HttpsOnlyRedirect()
+        request = urllib.request.Request('https://example.invalid/a')
+        self.assertIsNotNone(handler.redirect_request(request, None, 302, 'Found', {}, 'https://other.invalid/b'))
+        for bad in ('http://other.invalid/b', 'file:///etc/passwd', 'ftp://other.invalid/b', 'http://127.0.0.1/b'):
+            with self.assertRaises(module.UrlRefused):
+                handler.redirect_request(request, None, 302, 'Found', {}, bad)
+
+    # -- rollback protection ---------------------------------------------------
+    def base_version(self):
+        with tarfile.open(self.base_bundle) as tar:
+            member = next(m for m in tar.getmembers() if m.name.endswith('/vendor/MANIFEST.json'))
+            return json.loads(tar.extractfile(member).read())['addons']['luna']['plugin_version']
+
+    def retag(self, version):
+        """A copy of the base bundle whose bundle version is `version` (file list and sidecar refreshed)."""
+        with tarfile.open(self.base_bundle) as tar:
+            members = [(m, tar.extractfile(m).read() if m.isfile() else None) for m in tar.getmembers()]
+        root = members[0][0].name.split('/')[0]
+        files = {m.name[len(root) + 1:]: data for m, data in members if m.isfile()}
+        manifest = json.loads(files['vendor/MANIFEST.json'])
+        manifest['addons']['luna']['plugin_version'] = version
+        files['vendor/MANIFEST.json'] = json.dumps(manifest).encode()
+        listing = json.loads(files['RELEASE-FILES.json'])
+        listing['files']['vendor/MANIFEST.json'] = hashlib.sha256(files['vendor/MANIFEST.json']).hexdigest()
+        files['RELEASE-FILES.json'] = json.dumps(listing).encode()
+        target = self.dist / ('luna-retag-%s.tar.gz' % version)
+        with tarfile.open(target, 'w:gz') as tar:
+            for rel, data in sorted(files.items()):
+                info = tarfile.TarInfo('%s/%s' % (root, rel))
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        self.write_sidecar(target)
+        return target
+
+    def bumped(self, step=1):
+        major, minor, patch = (int(x) for x in self.base_version().split('.'))
+        return '%d.%d.%d' % (major, minor, patch + step)
+
+    def mark(self, home=None):
+        path = self.tools(home) / 'update-state.json'
+        return json.loads(path.read_text())['min_version'] if path.is_file() else None
+
+    def signed(self, version, key):
+        bundle = self.retag(version)
+        self.sign(bundle, key)
+        return bundle
+
+    def test_rollback_is_refused_equal_is_allowed_newer_raises_the_mark(self):
+        key = self.genkey('a')
+        self.trust(key)
+        newer = self.signed(self.bumped(), key)
+        first = self.luna('update', '--bundle', str(newer))
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(self.mark(), self.bumped())
+        self.assertEqual(json.loads((self.anchor_tools() / 'update-state.json').read_text())['min_version'], self.bumped())
+        older = self.signed(self.base_version(), key)
+        refused = self.luna('update', '--bundle', str(older))
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIn('REFUSING', refused.stderr)
+        self.assertIn('older than', refused.stderr)
+        self.assertIn('--allow-downgrade', refused.stderr)
+        dry = self.luna('update', '--bundle', str(older), '--dry-run')
+        self.assertNotEqual(dry.returncode, 0, 'the dry run must predict the refusal')
+        self.assertEqual(self.mark(), self.bumped())
+        equal = self.luna('update', '--bundle', str(self.signed(self.bumped(), key)))  # a rebuild
+        self.assertEqual(equal.returncode, 0, equal.stdout + equal.stderr)
+        newest = self.signed(self.bumped(2), key)
+        self.assertEqual(self.luna('update', '--bundle', str(newest)).returncode, 0)
+        self.assertEqual(self.mark(), self.bumped(2))
+
+    def test_allow_downgrade_installs_but_never_lowers_the_mark(self):
+        key = self.genkey('a')
+        self.trust(key)
+        self.assertEqual(self.luna('update', '--bundle', str(self.signed(self.bumped(), key))).returncode, 0)
+        older = self.signed(self.base_version(), key)
+        done = self.luna('update', '--bundle', str(older), '--allow-downgrade')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('WARNING', done.stderr)
+        self.assertEqual(self.mark(), self.bumped())
+
+    def test_an_unsigned_install_never_raises_the_mark(self):
+        key = self.genkey('a')
+        self.trust(key)
+        unsigned = self.retag(self.bumped(9))
+        done = self.luna('update', '--bundle', str(unsigned), '--allow-unsigned')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIsNone(self.mark())
+        self.assertEqual(self.luna('update', '--bundle', str(self.signed(self.bumped(), key)), '--dry-run').returncode, 0)
+        self.assertIsNone(self.mark(), 'a dry run never writes the mark')
+
+    def test_the_mark_is_written_only_after_the_installer_exits_zero(self):
+        key = self.genkey('a')
+        self.trust(key)
+        bundle = self.signed(self.bumped(), key)
+        module = load_luna()
+        fake_verify = mock.patch.object(module, 'signing_verify', return_value=('SHA256:test', ''))
+        with mock.patch.dict(os.environ, self.env), fake_verify:  # the installer is faked, so is ssh-keygen
+            with mock.patch.object(module.subprocess, 'run', return_value=subprocess.CompletedProcess([], 3)):
+                self.assertEqual(module.install_bundle(bundle), 3)
+            self.assertIsNone(self.mark(), 'a failed installer must not raise the mark')
+            with mock.patch.object(module.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+                self.assertEqual(module.install_bundle(bundle), 0)
+            self.assertEqual(self.mark(), self.bumped())
+
+    def test_a_corrupt_state_file_refuses_while_enforcing_only(self):
+        key = self.genkey('a')
+        state = self.tools() / 'update-state.json'
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text('{"min_version": "garbage"')
+        # not enforcing: nothing to protect, nothing to refuse
+        self.assertEqual(self.update(self.retag(self.bumped())).returncode, 0)
+        self.trust(key)
+        for content in ('{"min_version": "garbage"', '{"min_version": "1.2"}', '[]', '{"min_version": 7}'):
+            state.write_text(content)
+            text = self.refused(self.signed(self.bumped(), key), 'update-state.json')
+            self.assertIn('REFUSING', text)
+            self.assertEqual(state.read_text(), content, 'a damaged state file is never silently reset')
+
+    def test_a_machine_that_does_not_enforce_may_install_older_bundles(self):
+        newer = self.retag(self.bumped(3))
+        self.assertEqual(self.luna('update', '--bundle', str(newer)).returncode, 0)
+        self.assertIsNone(self.mark())
+        self.assertEqual(self.luna('update', '--bundle', str(self.retag(self.base_version()))).returncode, 0)
+
+    def test_the_bundle_version_must_be_plain_numbers(self):
+        for version in ('1.0.0-rc1', '1.0', 'v1.0.0', '1.0.0\n', '01.a.0', '1.0.0.0'):
+            bundle = self.retag(version)
+            text = self.refused(bundle, 'bundle version')
+            self.assertIn('x.y.z', text)
+
+    def test_trust_signing_key_is_unaffected_and_status_shows_the_floor(self):
+        key = self.genkey('a')
+        self.trust(key)
+        self.assertEqual(self.luna('update', '--bundle', str(self.signed(self.bumped(), key))).returncode, 0)
+        self.assertIn('minimum bundle version: %s' % self.bumped(), self.luna('signing', 'status').stdout)
 
     def test_trust_refuses_things_that_are_not_one_ed25519_public_key(self):
         a, b = self.genkey('a'), self.genkey('b')
