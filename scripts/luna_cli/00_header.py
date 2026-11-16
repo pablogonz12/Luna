@@ -34,10 +34,13 @@ Commands:
                                         ~/.local/share/game-saves (symlink in place; nothing deleted)
     luna saves status [--json]          link health, broken links, Syncthing conflicts
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
-    luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256) for other machines
+    luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256, + .sig when a release
+                                        key exists) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
-                [--allow-legacy-bundle]
-                                        verify and install a released bundle
+                [--allow-legacy-bundle] [--allow-unsigned]
+                                        verify (sha256, signature) and install a released bundle
+    luna signing status|init            release signing: OpenSSH ed25519 key under ~/.config/luna/;
+    luna signing trust|untrust KEY      the local trust file decides which signatures `update` accepts
     luna reconcile [--dry-run]          merge Syncthing sync-conflict copies of
                                         Steam's localconfig.vdf (newest timestamp wins)
     luna backup [--out DIR]             snapshot Luna user data (playtime ledgers,
@@ -75,6 +78,7 @@ Commands:
                                         of this machine and every host
     luna fleet push-cache HOST...       rsync the verified Steam client cache when HOST's differs
     luna fleet install [HOST...] [--only NAME] [--restart-steam] [--force] [--dry-run]
+                       [--trust-signing-key]
                                         push the release bundle; refuses while Steam runs
     luna games list [--json]            installed Steam games here (size, library, prefix, stplug-in lua)
     luna games diff [HOST] [--json]     which games are installed where; for those missing on HOST:

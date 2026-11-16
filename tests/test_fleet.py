@@ -48,7 +48,8 @@ class FleetTestCase(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix='luna-fleet-test-')
         self.addCleanup(temp.cleanup)
         self.config = Path(temp.name) / 'fleet.json'
-        patcher = mock.patch.dict(os.environ, {'LUNA_FLEET_CONFIG': str(self.config)})
+        patcher = mock.patch.dict(os.environ, {'LUNA_FLEET_CONFIG': str(self.config),
+                                               'LUNA_SIGNING_DIR': str(Path(temp.name) / 'signing')})
         patcher.start()
         self.addCleanup(patcher.stop)
         doctor = mock.patch.object(luna, 'doctor_findings', return_value=[])
@@ -266,6 +267,45 @@ class InstallTests(FleetTestCase):
         self.assertTrue(any(c.startswith('rm -rf') for c in calls))
         self.assertFalse(any(c == luna.FLEET_START_STEAM_SCRIPT for c in calls))
         self.assertEqual(run.call_args[0][0][0], 'scp')
+
+    def test_copies_the_signature_only_when_it_exists(self):
+        with tempfile.TemporaryDirectory(prefix='luna-fleet-sig-') as work:
+            bundle = Path(work) / 'luna-1.0.tar.gz'
+            bundle.write_bytes(b'x')
+            (_, _), _, run = self.install(remote_out(probe=probe()), options(), bundle=bundle)
+            self.assertNotIn(str(bundle) + '.sig', run.call_args[0][0])
+            Path(str(bundle) + '.sig').write_bytes(b'sig')
+            (ok, message), _, run = self.install(remote_out(probe=probe()), options(), bundle=bundle)
+            self.assertTrue(ok, message)
+            scp = run.call_args[0][0]
+            self.assertIn(str(bundle) + '.sig', scp)
+            self.assertIn(str(bundle) + '.sha256', scp)
+
+    def test_trust_signing_key_is_opt_in_and_sends_only_the_public_key(self):
+        import base64
+        blob = base64.b64encode(luna.SIGN_BLOB_PREFIX + bytes(range(32))).decode()
+        with tempfile.TemporaryDirectory(prefix='luna-fleet-key-') as work:
+            (Path(work) / (luna.SIGN_KEY_NAME + '.pub')).write_text('ssh-ed25519 %s luna-release\n' % blob)
+            (Path(work) / luna.SIGN_KEY_NAME).write_text('PRIVATE-DO-NOT-SEND')
+            with mock.patch.dict(os.environ, {'LUNA_SIGNING_DIR': work}):
+                (_, _), plain, _ = self.install(remote_out(probe=probe()), options())
+                (ok, message), calls, _ = self.install(remote_out(probe=probe()),
+                                                       options(trust_signing_key=True))
+        self.assertFalse(any('signing trust' in c for c in plain))
+        self.assertTrue(ok, message)
+        trust = [c for c in calls if 'signing trust' in c]
+        self.assertEqual(len(trust), 1)
+        self.assertIn(blob, trust[0])
+        self.assertNotIn('PRIVATE', ''.join(calls))
+        self.assertLess(max(i for i, c in enumerate(calls) if 'update --bundle' in c),
+                        calls.index(trust[0]))
+
+    def test_trust_signing_key_without_a_local_key_fails_visibly(self):
+        with tempfile.TemporaryDirectory(prefix='luna-fleet-nokey-') as work, \
+                mock.patch.dict(os.environ, {'LUNA_SIGNING_DIR': work}):
+            (ok, message), _, _ = self.install(remote_out(probe=probe()), options(trust_signing_key=True))
+        self.assertFalse(ok)
+        self.assertIn('NOT trusted', message)
 
     def test_restart_steam_stops_installs_relaunches(self):
         (ok, message), calls, _ = self.install(remote_out(steam=True, probe=probe()),

@@ -244,6 +244,20 @@ def cmd_release(options):
     checksum.write_text('%s  %s\n' % (digest, bundle.name))
     print('bundle : %s' % bundle)
     print('sha256 : %s' % digest)
+    sig_file = Path(str(bundle) + '.sig')
+    if os.path.lexists(str(sig_file)):
+        sig_file.unlink()  # a stale signature of an earlier build of this version must not linger
+    signed = False
+    if signing_key_path().is_file():
+        fingerprint, sign_error = signing_sign(bundle)
+        if sign_error:
+            print('REFUSING to release: the bundle could not be signed: %s' % sign_error, file=sys.stderr)
+            return 1
+        signed = True
+        print('signed : %s (%s)' % (fingerprint, sig_file.name))
+    else:
+        print('signed : NO (no release key at %s; the bundle is unsigned. Create one: luna signing init)'
+              % signing_key_path())
     print('version: %s (%s)' % (version, ', '.join('%s %s' % (n, addon_version(n)) for n in ADDONS)))
     if options.publish:
         gh = shutil.which('gh')
@@ -252,10 +266,11 @@ def cmd_release(options):
             return 1
         tag = 'v%s' % version
         view = subprocess.run([gh, 'release', 'view', tag], capture_output=True, text=True)
+        assets = [str(bundle), str(checksum)] + ([str(sig_file)] if signed else [])
         if view.returncode == 0:
-            args = [gh, 'release', 'upload', tag, str(bundle), str(checksum), '--clobber']
+            args = [gh, 'release', 'upload', tag] + assets + ['--clobber']
         else:
-            args = [gh, 'release', 'create', tag, str(bundle), str(checksum),
+            args = [gh, 'release', 'create', tag] + assets + [
                     '--title', 'Luna %s' % version,
                     '--notes', ('Luna %s: pinned payloads plus scripts/luna.py.\n\n'
                                 'Install on another machine: `luna update --latest` (needs gh).'
@@ -266,6 +281,18 @@ def cmd_release(options):
             return 1
         print('published: %s' % tag)
     return EXIT_OK
+
+
+def _fetch_small(url, dest, limit):
+    """Download at most `limit` bytes to `dest`; on any failure or overflow leave nothing (or garbage
+    of limit+1 bytes, which signing_read_sig refuses as oversized)."""
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            data = response.read(limit + 1)
+    except Exception:  # noqa: BLE001 - absent or unreachable counts as "no file"
+        return False
+    Path(dest).write_bytes(data)
+    return True
 
 
 def cmd_update(options):
@@ -303,11 +330,15 @@ def cmd_update(options):
             if not Path(str(bundle) + '.sha256').is_file():
                 print('warning: no .sha256 beside the URL; only the bundle\'s own manifest can be '
                       'checked (self-consistency, not independent). Prefer --latest.', file=sys.stderr)
+            # A missing, blocked or failed .sig is indistinguishable from "unsigned": the policy
+            # in check_bundle_signature then refuses it wherever a trusted key is configured.
+            _fetch_small(options.url + '.sig', str(bundle) + '.sig', SIG_MAX_BYTES)
         else:
             print('Point at a bundle: --bundle FILE, --url URL or --latest', file=sys.stderr)
             return 2
         return install_bundle(bundle, only=options.only, dry_run=options.dry_run,
-                              allow_legacy=getattr(options, 'allow_legacy_bundle', False))
+                              allow_legacy=getattr(options, 'allow_legacy_bundle', False),
+                              allow_unsigned=getattr(options, 'allow_unsigned', False))
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         _release_lock(lock_path)
@@ -434,16 +465,31 @@ def _listing_problems(root):
     return problems, True
 
 
-def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False):
-    """Verify a bundle and run the installer inside it."""
+def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False, allow_unsigned=False):
+    """Verify a bundle and run the installer inside it.
+
+    The bundle is first copied into a private directory, and the checksum, the
+    signature and the extraction all use that one copy, so the bytes that were
+    verified are the bytes that get unpacked."""
     bundle = Path(bundle)
     if not bundle.is_file():
         print('bundle not found: %s' % bundle, file=sys.stderr)
         return 2
+    with tempfile.TemporaryDirectory(prefix='luna-stage-') as stage:
+        staged = Path(stage) / 'bundle.tar.gz'
+        try:
+            shutil.copyfile(str(bundle), str(staged))
+        except OSError as error:
+            print('REFUSING: cannot read the bundle: %s' % error, file=sys.stderr)
+            return 1
+        return _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
+
+
+def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned):
     checksum_file = Path(str(bundle) + '.sha256')
     if checksum_file.is_file():
         expected = checksum_file.read_text().split()[0].strip().lower()
-        actual = sha256(bundle)
+        actual = sha256(staged)
         if expected != actual:
             print('REFUSING: sha256 mismatch (bundle %s, sidecar %s)'
                   % (actual[:12], expected[:12]), file=sys.stderr)
@@ -452,11 +498,14 @@ def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False):
     else:
         print('note   : no .sha256 beside the bundle: integrity is checked only against the bundle\'s '
               'own manifest (self-consistency), not an independent checksum')
+    # Authenticity: decided by the INSTALLED code and the machine-local trust file, before unpacking.
+    if not check_bundle_signature(staged, Path(str(bundle) + '.sig'), allow_unsigned):
+        return 1
     with tempfile.TemporaryDirectory(prefix='luna-bundle-') as work:
         extract_dir = Path(work) / 'unpacked'
         extract_dir.mkdir()
         try:
-            _safe_extract(bundle, extract_dir)
+            _safe_extract(staged, extract_dir)
         except (tarfile.TarError, ValueError, OSError) as error:
             print('REFUSING: cannot safely unpack the bundle: %s' % error, file=sys.stderr)
             return 1
@@ -522,6 +571,7 @@ def download_release(tag, work):
         result = subprocess.run([gh, 'release', 'download', tag,
                                  '--pattern', 'luna-*.tar.gz',
                                  '--pattern', 'luna-*.tar.gz.sha256',
+                                 '--pattern', 'luna-*.tar.gz.sig',
                                  '--dir', str(work), '--clobber', '-R', LUNA_REPO],
                                 capture_output=True, text=True, timeout=GH_DOWNLOAD_TIMEOUT)
     except subprocess.TimeoutExpired:

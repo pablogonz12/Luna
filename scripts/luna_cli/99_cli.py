@@ -7,6 +7,7 @@ def build_parser():
                           ('install', cmd_install), ('uninstall', cmd_uninstall),
                           ('verify', cmd_verify), ('vendor', cmd_vendor),
                           ('release', cmd_release), ('update', cmd_update),
+                          ('signing', cmd_signing),
                           ('check', cmd_check), ('autoupdate', cmd_autoupdate),
                           ('reconcile', cmd_reconcile),
                           ('backup', cmd_backup), ('restore', cmd_restore),
@@ -170,6 +171,9 @@ def build_parser():
                                help='with install: close Steam gracefully first and relaunch it afterwards')
             child.add_argument('--force', action='store_true',
                                help='with install: overwrite drifted payloads (and old Luna builds)')
+            child.add_argument('--trust-signing-key', action='store_true',
+                               help='with install: after a successful install, make the host trust this '
+                                    'machine\'s release public key (luna signing trust over ssh)')
         if name == 'games':
             child.add_argument('games_action', choices=['list', 'diff', 'install'], help='games action')
             child.add_argument('games_args', nargs='*', metavar='HOST/APPID',
@@ -209,7 +213,16 @@ def build_parser():
                                help='download the newest release asset (needs gh)')
             child.add_argument('--allow-legacy-bundle', action='store_true',
                                help='accept a pre-RELEASE-FILES.json bundle whose scripts/luna.py is unhashed')
+            child.add_argument('--allow-unsigned', action='store_true',
+                               help='install a bundle that has no signature although this machine trusts a '
+                                    'release key (an invalid or untrusted signature is always refused)')
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+        if name == 'signing':
+            child.add_argument('signing_action', choices=['status', 'init', 'trust', 'untrust'],
+                               help='status; init (create this machine\'s release key and trust it); '
+                                    'trust PUBKEY_OR_FILE; untrust PUBKEY_OR_FILE_OR_FINGERPRINT')
+            child.add_argument('key', nargs='?', help='trust/untrust: ssh-ed25519 public key text, a file, '
+                                                      '- for stdin; untrust also takes SHA256:FINGERPRINT')
         if name in ('verify', 'vendor'):
             child.add_argument('--sources', action='store_true',
                                help='also compare against local source checkouts')

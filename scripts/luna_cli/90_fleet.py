@@ -378,6 +378,23 @@ def fleet_build_bundle(out_dir):
     return bundles[-1], ''
 
 
+def fleet_trust_signing_key(host):
+    """Opt-in (--trust-signing-key): make `host` trust this machine's release public key. (ok, message)
+
+    Run AFTER the install, so it works whether or not the host had a signing-aware Luna before.
+    This is a trust-on-first-use step carried by your own ssh login; only the public key leaves."""
+    pub = signing_pub_path()
+    blob, why = signing_parse_pubkey(pub.read_text() if pub.is_file() else '')
+    if blob is None:
+        return False, 'no usable local release public key (%s); run luna signing init' % why
+    # blob is validated base64 [A-Za-z0-9+/]{68}: safe inside single quotes.
+    script = 'python3 "%s" signing trust \'ssh-ed25519 %s\'\n' % (FLEET_REMOTE_LUNA, blob)
+    code, out, err = fleet_ssh(host, script, timeout=60)
+    if code != 0:
+        return False, (err.strip() or out.strip() or 'exit %d' % code).splitlines()[-1]
+    return True, 'trusts release key %s' % signing_fingerprint(blob)
+
+
 def fleet_install_host(host, bundle, options):
     """Install the bundle on one host. Returns (ok, message)."""
     code, out, err = fleet_ssh(host, FLEET_STATUS_SCRIPT)
@@ -396,6 +413,8 @@ def fleet_install_host(host, bundle, options):
         return False, 'REFUSED: Steam/Lumen is running there; close it or pass --restart-steam'
     if options.dry_run:
         steps = ['copy bundle', 'luna update --bundle' + ''.join(' --only ' + n for n in options.only)]
+        if getattr(options, 'trust_signing_key', False):
+            steps.append('luna signing trust (this machine\'s release public key)')
         if running:
             steps = ['stop Steam (steam -shutdown, wait)'] + steps + ['relaunch Steam']
         return True, 'dry-run: would ' + ', '.join(steps)
@@ -407,8 +426,10 @@ def fleet_install_host(host, bundle, options):
         return False, 'could not create a temp dir there: %s' % (err.strip() or out.strip() or code)
     stopped = False
     try:
-        copy = ['scp', '-q'] + list(FLEET_SSH_OPTS) + ['--', str(bundle), str(bundle) + '.sha256',
-                                                        '%s:%s/' % (host, remote_dir)]
+        sources = [str(bundle), str(bundle) + '.sha256']
+        if os.path.lexists(str(bundle) + '.sig'):
+            sources.append(str(bundle) + '.sig')  # the host verifies it against ITS trust file
+        copy = ['scp', '-q'] + list(FLEET_SSH_OPTS) + ['--'] + sources + ['%s:%s/' % (host, remote_dir)]
         result = subprocess.run(copy, capture_output=True, text=True)
         if result.returncode != 0:
             return False, 'scp failed: %s' % ((result.stderr.strip().splitlines() or ['?'])[-1])
@@ -426,7 +447,13 @@ def fleet_install_host(host, bundle, options):
         tail = (out + err).strip().splitlines()[-1:] or ['']
         if code != 0:
             return False, 'install failed (%d): %s' % (code, tail[0])
-        return True, 'installed' + (' (Steam restarted)' if stopped else '')
+        note = 'installed' + (' (Steam restarted)' if stopped else '')
+        if getattr(options, 'trust_signing_key', False):
+            trusted, detail = fleet_trust_signing_key(host)
+            if not trusted:
+                return False, note + ', but the release key was NOT trusted there: ' + detail
+            note += '; ' + detail
+        return True, note
     finally:
         fleet_ssh(host, 'rm -rf -- \'%s\'\n' % remote_dir, timeout=30)
         if stopped:

@@ -1,0 +1,254 @@
+{
+ "version": "2.6",
+ "ok": true,
+ "command": "snapshot",
+ "data": {
+  "app": "steamwebhelper",
+  "complete": true,
+  "tree": {
+   "role": "root",
+   "children": [
+    {
+     "role": "window",
+     "children": [
+      {
+       "role": "webarea",
+       "name": "Steam"
+      }
+     ]
+    },
+    {
+     "available_actions": [
+      "RightClick"
+     ],
+     "children": [
+      {
+       "available_actions": [
+        "RightClick"
+       ],
+       "children": [
+        {
+         "available_actions": [
+          "RightClick",
+          "SetFocus"
+         ],
+         "children": [
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Select",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_2uiDecKkKjAq7nimy3uLhG",
+                "_1n7Wloe5jZ6fSuvV18NNWI",
+                "contextMenuItem"
+               ],
+               "name": "Steam Support",
+               "ref_id": "@sj8sxnkbc97ow:e3",
+               "role": "menuitem",
+               "subrole": "menuitem"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_21GPYlKBCLsHQpTsHw_RL_"
+               ],
+               "ref_id": "@sj8sxnkbc97ow:e4",
+               "role": "separator"
+              },
+              {
+               "available_actions": [
+                "Select",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_2uiDecKkKjAq7nimy3uLhG",
+                "_1n7Wloe5jZ6fSuvV18NNWI",
+                "contextMenuItem"
+               ],
+               "name": "Privacy Policy",
+               "ref_id": "@sj8sxnkbc97ow:e5",
+               "role": "menuitem",
+               "subrole": "menuitem"
+              },
+              {
+               "available_actions": [
+                "Select",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_2uiDecKkKjAq7nimy3uLhG",
+                "_1n7Wloe5jZ6fSuvV18NNWI",
+                "contextMenuItem"
+               ],
+               "name": "Legal Information",
+               "ref_id": "@sj8sxnkbc97ow:e6",
+               "role": "menuitem",
+               "subrole": "menuitem"
+              },
+              {
+               "available_actions": [
+                "Select",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_2uiDecKkKjAq7nimy3uLhG",
+                "_1n7Wloe5jZ6fSuvV18NNWI",
+                "contextMenuItem"
+               ],
+               "name": "Steam Subscriber Agreement",
+               "ref_id": "@sj8sxnkbc97ow:e7",
+               "role": "menuitem",
+               "subrole": "menuitem"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_21GPYlKBCLsHQpTsHw_RL_"
+               ],
+               "ref_id": "@sj8sxnkbc97ow:e8",
+               "role": "separator"
+              },
+              {
+               "available_actions": [
+                "Select",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_2uiDecKkKjAq7nimy3uLhG",
+                "_1n7Wloe5jZ6fSuvV18NNWI",
+                "contextMenuItem"
+               ],
+               "name": "System Report",
+               "ref_id": "@sj8sxnkbc97ow:e9",
+               "role": "menuitem",
+               "subrole": "menuitem"
+              },
+              {
+               "available_actions": [
+                "Select",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_2uiDecKkKjAq7nimy3uLhG",
+                "_1n7Wloe5jZ6fSuvV18NNWI",
+                "contextMenuItem"
+               ],
+               "name": "System Information",
+               "ref_id": "@sj8sxnkbc97ow:e10",
+               "role": "menuitem",
+               "subrole": "menuitem"
+              },
+              {
+               "available_actions": [
+                "Select",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_2uiDecKkKjAq7nimy3uLhG",
+                "_1n7Wloe5jZ6fSuvV18NNWI",
+                "contextMenuItem"
+               ],
+               "name": "Steam Runtime Diagnostics",
+               "ref_id": "@sj8sxnkbc97ow:e11",
+               "role": "menuitem",
+               "subrole": "menuitem"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_21GPYlKBCLsHQpTsHw_RL_"
+               ],
+               "ref_id": "@sj8sxnkbc97ow:e12",
+               "role": "separator"
+              },
+              {
+               "available_actions": [
+                "Select",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_2jXHP0742MyApMUVUM8IFn",
+                "_2uiDecKkKjAq7nimy3uLhG",
+                "_1n7Wloe5jZ6fSuvV18NNWI",
+                "contextMenuItem"
+               ],
+               "name": "About Steam",
+               "ref_id": "@sj8sxnkbc97ow:e13",
+               "role": "menuitem",
+               "subrole": "menuitem"
+              }
+             ],
+             "dom_classes": [
+              "PP7LM0Ow1K5qkR8WElLpt",
+              "visible",
+              "ready",
+              "_2yAm5LY_eu-Vg_52l0HFlM"
+             ],
+             "name": "Steam Support Privacy Policy Legal Information Steam Subscriber Agreement System Report System Information Steam Runtime Diagnostics About Steam",
+             "ref_id": "@sj8sxnkbc97ow:e2",
+             "role": "group",
+             "states": [
+              "focused"
+             ]
+            }
+           ],
+           "native_id": {
+            "kind": "ax_dom_identifier",
+            "value": "popup_target"
+           },
+           "ref_id": "@sj8sxnkbc97ow:e1",
+           "role": "group",
+           "states": [
+            "offscreen"
+           ]
+          }
+         ],
+         "name": "Help Root Menu",
+         "role": "webarea",
+         "states": [
+          "offscreen"
+         ]
+        }
+       ],
+       "role": "group"
+      }
+     ],
+     "role": "window"
+    }
+   ]
+  }
+ }
+}

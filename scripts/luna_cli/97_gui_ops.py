@@ -191,8 +191,97 @@ def gui_read_order(open_library=True, attempts=1, sleep=time.sleep):
     return {'source': 'unavailable', 'why': why, 'names': [], 'total': None, 'sort': None}
 
 
+GUI_HOME_LINK = ('link', 'Home', True)   # confirmed live: the Home link of the main window
+
+
+def gui_hltb_off(why, state='unavailable'):
+    return {'state': state, 'views': [], 'why': why, 'sorts': {}}
+
+
+def gui_read_hltb(open_home=True, sleep=time.sleep):
+    """The HowLongToBeat-sorted grid as rendered, for the restart comparison. Read-only: the
+    sort is never switched on. Returns {'state', 'views', 'why', 'sorts'}: 'active' (views:
+    [{'kind','id','count','appids','names'}]), 'inactive' (collection views are mounted and
+    none uses the HowLongToBeat sort) or 'unavailable' (CDP cannot read the page, or no
+    collection view is mounted). The Home shelves only exist while Home is showing, so when no
+    sorted view is mounted and a tree is available, Home is opened with one navigation click
+    (it is the page Steam starts on, and nothing is changed)."""
+    try:
+        grid = live_hltb_grid()
+    except Exception as error:  # LiveProbeError and anything unexpected
+        return gui_hltb_off('CDP: %s' % error)
+    if not grid['active'] and open_home:
+        try:
+            tree, _ = gui_snapshot()
+            link = (gui_find_nodes(tree, *GUI_HOME_LINK) or [None])[0] if tree else None
+            if link is not None and gui_click_node(link).get('ok'):
+                for _ in range(6):
+                    sleep(1)
+                    grid = live_hltb_grid()
+                    if grid['active']:
+                        break
+        except Exception:
+            pass
+    if grid['active']:
+        return {'state': 'active', 'views': grid['views'], 'why': '', 'sorts': grid['sorts']}
+    if grid['mounted']:
+        return gui_hltb_off('%d collection views are mounted, none sorted by HowLongToBeat (sort values: %s)'
+                            % (grid['mounted'], ', '.join(sorted(grid['sorts'])) or 'none'), 'inactive')
+    return gui_hltb_off('no collection view is mounted (the Home page is not showing)')
+
+
+def gui_hltb_summary(item):
+    """One cell for the report: what was read."""
+    if not item or item.get('state') != 'active':
+        return 'not active, skipped' if item and item.get('state') == 'inactive' else \
+            'unavailable (%s)' % ((item or {}).get('why') or 'not read')
+    return '; '.join('%s: %d games' % (v['kind'], v['count']) for v in item['views'])
+
+
+def gui_hltb_ids(item):
+    return [(v['kind'], v['id'], v['appids']) for v in (item or {}).get('views') or []]
+
+
+def gui_compare_hltb(before, after, limit=5):
+    """(row, difference or None). `row` is (what, before, after, 'same'|'DIFFERENT'|'n/a').
+    Compared only when the sort was active before the restart; otherwise the sub-check is
+    reported as skipped and never fails. Differences name the counts and the first `limit`
+    positions where the rendered order differs."""
+    what = 'HLTB sorted grid'
+    before, after = before or gui_hltb_off('not read'), after or gui_hltb_off('not read')
+    if before.get('state') != 'active':
+        return (what, gui_hltb_summary(before), gui_hltb_summary(after), 'n/a'), None
+    if after.get('state') != 'active':
+        return ((what, gui_hltb_summary(before), gui_hltb_summary(after), 'DIFFERENT'),
+                'HLTB sorted grid was active before the restart, not after (%s)' % (after.get('why') or after.get('state')))
+    problems = []
+    for view in before['views']:
+        twin = next((v for v in after['views'] if (v['kind'], v['id']) == (view['kind'], view['id'])), None)
+        if twin is None and len(before['views']) == 1 == len(after['views']):
+            twin = after['views'][0]
+        if twin is None:
+            problems.append('%s view missing after the restart' % view['kind'])
+            continue
+        if view['appids'] == twin['appids']:
+            continue
+        positions = []
+        for index in range(max(len(view['appids']), len(twin['appids']))):
+            left = view['appids'][index] if index < len(view['appids']) else None
+            right = twin['appids'][index] if index < len(twin['appids']) else None
+            if left != right:
+                label = lambda ids, names, i: ('%s (%s)' % (names[i] or '?', ids[i]) if i < len(ids) else 'nothing')  # noqa: E731
+                positions.append((index + 1, label(view['appids'], view['names'], index),
+                                  label(twin['appids'], twin['names'], index)))
+        problems.append('%s: %d games before, %d after, %d positions differ; first: %s' % (
+            view['kind'], view['count'], twin['count'], len(positions),
+            '; '.join('#%d %s -> %s' % item for item in positions[:limit])))
+    row = (what, gui_hltb_summary(before), gui_hltb_summary(after), 'DIFFERENT' if problems else 'same')
+    return row, ('HLTB sorted grid differs: ' + ' | '.join(problems)) if problems else None
+
+
 def gui_read_state(sleep=time.sleep, grace=GUI_LOGIN_GRACE):
-    """Everything compared across the restart: screen, add-on panels, Library order."""
+    """Everything compared across the restart: screen, add-on panels, Library order, and the
+    HowLongToBeat-sorted grid."""
     try:
         tree, _ = gui_snapshot()
     except Exception:
@@ -210,6 +299,7 @@ def gui_read_state(sleep=time.sleep, grace=GUI_LOGIN_GRACE):
                   gui_rendered(gui_addons_with_panel(), sleep=sleep).items()}
     return {'screen': screen, 'signal': signal, 'panels': panels, 'order': gui_read_order(attempts=3, sleep=sleep) if screen == 'main' else
             {'source': 'unavailable', 'why': 'not on the main screen', 'names': [], 'total': None, 'sort': None},
+            'hltb': gui_read_hltb(sleep=sleep) if screen == 'main' else gui_hltb_off('not on the main screen'),
             'download': gui_active_download(tree)}
 
 
@@ -242,6 +332,10 @@ def gui_compare_states(before, after, warnings=None):
         row('screen', before['screen'], after['screen'])
         for name in sorted(set(before['panels']) | set(after['panels'])):
             row('panel: %s' % name, before['panels'].get(name, 'n/a'), after['panels'].get(name, 'n/a'))
+    hltb_row, hltb_difference = gui_compare_hltb(before.get('hltb'), after.get('hltb'))
+    rows.append(hltb_row)
+    if hltb_difference:
+        differences.append(hltb_difference)
     left, right = before['order'], after['order']
     if left['source'] == 'unavailable' or right['source'] == 'unavailable':
         rows.append(('library order', left.get('why') or '%d rows' % len(left['names']),
@@ -410,16 +504,18 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
             return finish(1)
     elif running:  # normal mode: no tree, so only the CDP order can be recorded
         before = {'screen': 'n/a (normal mode)', 'panels': {},
-                  'order': gui_read_order(open_library=False), 'download': ''}
+                  'order': gui_read_order(open_library=False), 'hltb': gui_read_hltb(open_home=False), 'download': ''}
     else:
         before = {'screen': 'n/a (not running)', 'panels': {},
                   'order': {'source': 'unavailable', 'why': 'Steam was not running', 'names': [], 'total': None,
-                            'sort': None}, 'download': ''}
-    steps.append(('state before (%s)' % start_mode, 'screen %s, %d panels, library order: %s'
+                            'sort': None}, 'hltb': gui_hltb_off('Steam was not running'), 'download': ''}
+    before.setdefault('hltb', gui_hltb_off('not read'))
+    steps.append(('state before (%s)' % start_mode, 'screen %s, %d panels, library order: %s; HLTB grid: %s'
                   % (before['screen'], len(before['panels']), '%d rows via %s%s' % (len(before['order']['names']),
                                                                                  before['order']['source'],
                                                                                  ' (%s)' % before['order']['why'] if before['order'].get('why') else '')
-                     if before['order']['source'] != 'unavailable' else before['order'].get('why'))))
+                     if before['order']['source'] != 'unavailable' else before['order'].get('why'),
+                     gui_hltb_summary(before['hltb']))))
 
     # 3. shutdown through the project's own path
     if running:
@@ -479,17 +575,24 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
 
     # 6. after state, compare, evidence
     settle = clock() + getattr(options, 'settle', 90)
-    while True:  # the Lumen plugin and its Library order take a while to come up
+    previous = None
+    while True:  # the Lumen plugin, its Library order and the HowLongToBeat cache take a while to come up
         after = gui_read_state(sleep=sleep)
+        after.setdefault('hltb', gui_hltb_off('not read'))
         expected = {n for n, v in before['panels'].items() if v == 'found'}
+        # a sorted grid that was active before is only judged once it is up and unchanged
+        # between two reads (the cache can arrive after the first render and re-sort it)
+        hltb_now = gui_hltb_ids(after.get('hltb'))
+        hltb_ready = before['hltb']['state'] != 'active' or (after['hltb']['state'] == 'active' and hltb_now == previous)
+        previous = hltb_now
         ready = (after['screen'] == 'main' and expected <= {n for n, v in after['panels'].items() if v == 'found'}
-                 and (after['order']['source'] == 'cdp' or before['order']['source'] != 'cdp'))
+                 and (after['order']['source'] == 'cdp' or before['order']['source'] != 'cdp') and hltb_ready)
         if ready or clock() >= settle:
             break
         sleep(5)
-    steps.append(('state after', 'screen %s, %d panels, library order: %s' % (
+    steps.append(('state after', 'screen %s, %d panels, library order: %s; HLTB grid: %s' % (
         after['screen'], len(after['panels']), '%d rows via %s' % (len(after['order']['names']), after['order']['source'])
-        if after['order']['source'] != 'unavailable' else after['order'].get('why'))))
+        if after['order']['source'] != 'unavailable' else after['order'].get('why'), gui_hltb_summary(after['hltb']))))
     rows, differences = gui_compare_states(before, after, report['warnings'])
     report['rows'] = rows
     shots = Path(getattr(options, 'screenshots', None) or luna_tools_dir() / 'gui-shots')

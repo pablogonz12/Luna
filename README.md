@@ -78,9 +78,48 @@ link is refused) before it runs anything from the bundle, including the
 bundled `scripts/luna.py`. Older bundles without the list are refused unless
 you pass `--allow-legacy-bundle`. With `--latest` the bundle is also checked
 against its `.sha256` sidecar; `--bundle`/`--url` without one are checked only
-against the bundle's own list (self-consistency). This is integrity, not
-authenticity: someone who can publish a bundle can write a matching list. A
-signature would be needed for that and is not implemented.
+against the bundle's own list (self-consistency). The list and the
+`.sha256` are integrity only: someone who can publish a bundle can write
+matching ones. Authenticity comes from the signature below.
+
+### Release signing
+
+`luna release` signs the bundle tarball with a dedicated OpenSSH ed25519 key
+(`ssh-keygen -Y sign`, namespace `luna-release`) and writes a detached
+`<bundle>.sig` next to the bundle and its `.sha256` (`--publish` uploads all
+three). `luna update` verifies that signature, with the installed code, against
+a machine-local trust file before it unpacks or runs anything.
+
+```
+luna signing init                  # release machine: create ~/.config/luna/luna-release-ed25519 (0600, no passphrase) and trust it
+luna signing status                # key fingerprint(s), whether a key exists here, and this machine's policy
+luna signing trust KEYFILE|TEXT    # other machine: trust the release machine's PUBLIC key (…ed25519.pub)
+luna signing untrust KEY|SHA256:…  # stop trusting a key
+luna fleet install HOST --trust-signing-key   # opt-in: after the install, make HOST trust this machine's public key
+```
+
+| Bundle | no trusted key here | trusted key configured |
+|---|---|---|
+| valid signature, trusted key | installs, signer printed (checked) | installs, signer printed |
+| signature present, bad / other key / other bundle / wrong namespace / symlink / oversized | installs with a note (not checked) | **refused, even with `--allow-unsigned`** |
+| no signature | installs with a note (authenticity not checked) | **refused** unless `--allow-unsigned` (warns) |
+| `ssh-keygen` missing | installs with a note | refused unless `--allow-unsigned` |
+
+Files live in `~/.config/luna/` (`$XDG_CONFIG_HOME`, or `$LUNA_SIGNING_DIR`):
+`luna-release-ed25519(.pub)` and `release-signers` (the trust file). The trust
+file is local configuration: it is never shipped in a bundle and never written
+by `install`/`update`; only `luna signing` changes it. `~/.ssh` is never read.
+An old `luna` ignores the `.sig`; a new one with a trusted key refuses an old
+unsigned release without `--allow-unsigned`. `--allow-legacy-bundle` is unchanged.
+
+Honest limits: the private key is unencrypted on the release machine (anyone
+who can read it can sign); the very first install of Luna is not covered (the
+bundle you bootstrap with is trusted by you, not by a signature); the trust
+file is the anchor, so whoever can edit `~/.config/luna/release-signers` on a
+machine controls what it accepts; a machine with no trusted key stays
+unauthenticated; an old, validly signed bundle can be replayed (no rollback
+protection); `--allow-unsigned` and `--allow-legacy-bundle` are deliberate
+holes.
 
 ## Two machines, one library
 
@@ -405,6 +444,8 @@ end it with exit 0; `--fail-if-vanished` stops at the first vanish after the ele
 was seen and exits 1; a bad selector exits 2. A snapshot that cannot be read is
 never counted as a vanish.
 
+`restart-check` also compares the HowLongToBeat-sorted Home grid (skipped when that sort
+is not active; the sort is never toggled).
 `restart-check` is the one command that restarts Steam, once (twice with
 `--final normal` from accessible mode). It refuses (exit 3) while a game runs or a
 download is active unless `--force`; records the screen, the add-on panels and the

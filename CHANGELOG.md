@@ -5,7 +5,18 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **Signed releases.** `luna release` signs the bundle (OpenSSH ed25519, `<bundle>.sig`) when a key exists;
+  `luna update` verifies it against a local trust file before unpacking. New `luna signing status|init|trust|untrust`,
+  `luna update --allow-unsigned`, `luna fleet install --trust-signing-key`; fleet copies the `.sig`. Once a key is
+  trusted, unsigned bundles are refused and invalid/untrusted signatures are always refused. See README, "Release signing".
+
 - `luna update` verifies every bundle file (incl. `scripts/luna.py`) against `RELEASE-FILES.json` before running it; legacy bundles need `--allow-legacy-bundle`.
+
+## Unreleased
+
+- `luna gui restart-check` also compares the HowLongToBeat-sorted grid (read-only, over CDP,
+  Home shelf order) before and after the restart; skipped when that sort is not active.
+- `luna gui` no longer reports Steam's idle popup-menu webareas as open windows.
 
 ## Unreleased
 

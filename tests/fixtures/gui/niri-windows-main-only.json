@@ -1,0 +1,38 @@
+[
+ {
+  "id": 16,
+  "title": "Steam",
+  "app_id": "steam",
+  "pid": 7460,
+  "workspace_id": 1,
+  "is_focused": true,
+  "is_floating": false,
+  "is_urgent": false,
+  "layout": {
+   "pos_in_scrolling_layout": [
+    2,
+    1
+   ],
+   "tile_size": [
+    1020.0,
+    1226.428571428571
+   ],
+   "window_size": [
+    1016,
+    1222
+   ],
+   "tile_pos_in_workspace_view": [
+    624.2857142857143,
+    52.142857142857146
+   ],
+   "window_offset_in_tile": [
+    2.142857142857143,
+    2.142857142857143
+   ]
+  },
+  "focus_timestamp": {
+   "secs": 4744,
+   "nanos": 632756276
+  }
+ }
+]

@@ -344,6 +344,19 @@ class Classification(GuiFixture):
         self.assertEqual(luna.gui_secondary_windows(self.load('main-store.json')), [])
         self.assertEqual(luna.gui_secondary_windows(self.load('login-snapshot.json')), [])
 
+    def test_idle_popup_menu_windows_are_not_open_windows(self):
+        popup = self.load('popup-menu-idle.json')
+        self.assertTrue(luna.gui_find_nodes(popup, 'webarea', 'Help Root Menu'))
+        self.assertEqual(luna.gui_secondary_windows(popup), [])
+        self.assertEqual(luna.gui_secondary_windows(popup, ['Steam']), [])
+        self.assertEqual(luna.gui_dialogs(popup), [])
+        self.assertEqual(luna.gui_classify(popup), 'unknown')
+
+    def test_secondary_windows_must_also_be_niri_windows(self):
+        settings = self.load('secondary-window-settings.json')
+        self.assertEqual(luna.gui_secondary_windows(settings, ['Steam', 'Steam Settings']), ['Steam Settings'])
+        self.assertEqual(luna.gui_secondary_windows(settings, ['Steam']), [])
+
     def test_dialog_and_unknown(self):
         # NOT observed live: no real modal could be opened safely. This synthetic tree
         # only pins the assumption the code makes about the dialog/alert roles.
@@ -1328,6 +1341,16 @@ class Blockers(GuiFixture):
         self.assertIn('open Steam windows: "Steam", "Steam Settings"', text)
         self.assertIn('window "Steam Settings" is open (a normal window, not a modal', text)
 
+    def test_an_idle_popup_menu_is_not_reported_as_a_window(self):
+        # Observed live: Steam keeps 'Help Root Menu' etc. in the AT-SPI tree, but they
+        # are never real windows (niri lists only the main window).
+        self.install_agent()
+        self.install_tool('niri', '#!/bin/sh\ncat "%s"\n' % (FIXTURES / 'niri-windows-main-only.json'))
+        self.cfg['snapshots'] = [str(FIXTURES / 'popup-menu-idle.json')]
+        self.write_cfg()
+        with mock.patch.object(luna, 'gui_steam_state', return_value=(True, True)):
+            self.assertEqual(luna.gui_describe_blockers(), 'open Steam windows: "Steam"')
+
     def test_stays_within_budget(self):
         self.install_tool('agent-desktop', '#!/bin/sh\nsleep 10\n')
         self.install_tool('niri', '#!/bin/sh\nsleep 10\n')
@@ -1348,6 +1371,80 @@ class Blockers(GuiFixture):
         with mock.patch.object(luna, 'process_running', return_value=True), \
                 mock.patch.object(luna, 'live_sidecar', return_value=None):
             self.assertEqual(luna.gui_lumen_survivor(), ('?', '?'))
+
+
+def hltb_item(ids, kind='shelf', cid='uc-FIXTURE'):
+    return {'state': 'active', 'sorts': {}, 'why': '', 'views': [
+        {'kind': kind, 'id': cid, 'count': len(ids), 'appids': list(ids), 'names': ['G%d' % i for i in ids]}]}
+
+
+class HltbCompare(GuiFixture):
+    def test_same_order_is_same(self):
+        row, diff = luna.gui_compare_hltb(hltb_item([1, 2, 3]), hltb_item([1, 2, 3]))
+        self.assertEqual(row[3], 'same')
+        self.assertIsNone(diff)
+        self.assertIn('3 games', row[1])
+
+    def test_different_positions_are_named(self):
+        row, diff = luna.gui_compare_hltb(hltb_item([1, 2, 3, 4]), hltb_item([1, 3, 2, 4]))
+        self.assertEqual(row[3], 'DIFFERENT')
+        self.assertIn('2 positions differ', diff)
+        self.assertIn('#2 G2 (2) -> G3 (3)', diff)
+
+    def test_different_counts(self):
+        _, diff = luna.gui_compare_hltb(hltb_item([1, 2, 3]), hltb_item([1, 2]))
+        self.assertIn('3 games before, 2 after', diff)
+
+    def test_not_active_before_is_skipped_and_never_fails(self):
+        off = luna.gui_hltb_off('no collection view is mounted')
+        inactive = luna.gui_hltb_off('none sorted', 'inactive')
+        for before in (off, inactive, None):
+            row, diff = luna.gui_compare_hltb(before, hltb_item([1]))
+            self.assertEqual(row[3], 'n/a')
+            self.assertIsNone(diff)
+        self.assertIn('not active, skipped', luna.gui_hltb_summary(inactive))
+
+    def test_active_before_but_not_after_is_a_difference(self):
+        row, diff = luna.gui_compare_hltb(hltb_item([1]), luna.gui_hltb_off('Home is not showing'))
+        self.assertEqual(row[3], 'DIFFERENT')
+        self.assertIn('not after', diff)
+
+
+class HltbRead(GuiFixture):
+    GRID = {'mounted': 4, 'sorts': {'12': 1}, 'liveSort': '12', 'active': True, 'views': hltb_item([5, 6])['views']}
+    NONE = {'mounted': 0, 'sorts': {}, 'liveSort': None, 'active': False, 'views': []}
+
+    def test_active(self):
+        with mock.patch.object(luna, 'live_hltb_grid', return_value=self.GRID):
+            item = luna.gui_read_hltb()
+        self.assertEqual(item['state'], 'active')
+        self.assertEqual(item['views'][0]['appids'], [5, 6])
+
+    def test_cdp_failure_is_unavailable(self):
+        with mock.patch.object(luna, 'live_hltb_grid', side_effect=luna.LiveProbeError('no port')):
+            self.assertEqual(luna.gui_read_hltb()['state'], 'unavailable')
+
+    def test_mounted_but_unsorted_is_inactive(self):
+        grid = dict(self.NONE, mounted=3, sorts={'1': 3})
+        with mock.patch.object(luna, 'live_hltb_grid', return_value=grid):
+            item = luna.gui_read_hltb(open_home=False)
+        self.assertEqual(item['state'], 'inactive')
+
+    def test_opens_home_with_one_navigation_click(self):
+        link = {'role': 'link', 'name': 'Home'}
+        grids = iter([self.NONE, self.NONE, self.GRID])
+        with mock.patch.object(luna, 'live_hltb_grid', side_effect=lambda: next(grids)), \
+                mock.patch.object(luna, 'gui_snapshot', return_value=({'role': 'window', 'children': [link]}, '')), \
+                mock.patch.object(luna, 'gui_find_nodes', return_value=[link]), \
+                mock.patch.object(luna, 'gui_click_node', return_value={'ok': True}) as click:
+            item = luna.gui_read_hltb(sleep=lambda s: None)
+        self.assertEqual(item['state'], 'active')
+        click.assert_called_once_with(link)
+
+    def test_nothing_mounted_and_no_home_link_is_unavailable(self):
+        with mock.patch.object(luna, 'live_hltb_grid', return_value=self.NONE), \
+                mock.patch.object(luna, 'gui_snapshot', return_value=(None, '')):
+            self.assertEqual(luna.gui_read_hltb(sleep=lambda s: None)['state'], 'unavailable')
 
 
 if __name__ == '__main__':

@@ -79,6 +79,8 @@ case "$1 $2" in
     [ -n "${LUNA_TEST_BUNDLE:-}" ] || exit 4
     cp "$LUNA_TEST_BUNDLE" "$dir/luna-test.tar.gz" || exit 5
     [ -f "$LUNA_TEST_BUNDLE.sha256" ] && cp "$LUNA_TEST_BUNDLE.sha256" "$dir/luna-test.tar.gz.sha256"
+    [ -f "$LUNA_TEST_BUNDLE.sig" ] && cp "$LUNA_TEST_BUNDLE.sig" "$dir/luna-test.tar.gz.sig"
+    exit 0
     ;;
   *) exit 0 ;;
 esac
@@ -114,6 +116,8 @@ class LunaTestCase(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.home),
                         XDG_DATA_HOME=str(self.home / '.local/share'),
                         XDG_RUNTIME_DIR=str(self.home / 'run'),
+                        XDG_CONFIG_HOME=str(self.home / '.config'),
+                        LUNA_SIGNING_DIR=str(self.home / '.config/luna'),  # never the real signing key
                         PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', ''))
 
     def tearDown(self):

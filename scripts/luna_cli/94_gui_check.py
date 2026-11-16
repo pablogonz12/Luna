@@ -40,9 +40,11 @@ GUI_PANEL_SELECTORS = {
 GUI_LIBRARY_TABLE = ('table', 'grid', True)      # confirmed live; rows are `cell '<game name>'`
 GUI_LIBRARY_TOTAL = re.compile(r'^All Games \((?:\d+/)?(\d+)\)$')  # shelf header, e.g. 'All Games (9/1630)'
 GUI_LIBRARY_TAB = ('statictext', 'LIBRARY', True)  # confirmed live: click it to open the Library
-# Not verified: dialogs. Menu items refuse semantic activation (POLICY_DENIED), so no
-# real dialog was ever opened; separate windows (e.g. 'Friends List') show up as their own
-# AT-SPI window with `webarea '<title>'` and niri titles.
+# STILL UNVERIFIED: a modal dialog with an `alert`/`dialog` role. Re-tried live 2026-11-16: menu
+# items refuse semantic activation (POLICY_DENIED), `--headed`/`press` need a physical input
+# device that Wayland does not give agent-desktop, so no modal could be opened by navigation.
+# What IS confirmed: Steam's windows (Settings, Friends List, ...) are separate AT-SPI windows
+# with `webarea '<title>'` and niri titles, never a dialog role (see gui_secondary_windows).
 GUI_DIALOG_ROLES = ('alert', 'dialog', 'alertdialog')
 
 
@@ -258,14 +260,28 @@ def gui_dialogs(tree):
     return dialogs
 
 
-def gui_secondary_windows(tree):
+# Steam keeps its popup menus alive as AT-SPI windows with a named webarea ('Help Root Menu',
+# 'Account Menu', '... Supernav', ...). Observed live (2026-11-16): they exist from startup,
+# are never niri windows, and stay in the tree after a menu was opened and closed again, so
+# they say nothing about an open window.
+GUI_POPUP_NAME = re.compile(r'(Root Menu|Supernav|Account Menu|Notifications Menu)$')
+
+
+def gui_secondary_windows(tree, titles=None):
     """Titles of Steam's own secondary windows (Settings, Friends List, ...). Observed live:
     each is a separate AT-SPI window holding one `webarea '<title>'`; it has no dialog or
     alert role and no Close button of its own (the AT-SPI title is empty, niri has the
-    title). The main window's webarea is 'Steam' and the sign-in window's 'Sign in to Steam'."""
-    return [str(node.get('name')) for node in gui_walk(tree)
-            if node.get('role') == 'webarea' and node.get('name')
-            and node.get('name') not in ('Steam', 'Sign in to Steam')]
+    title). The main window's webarea is 'Steam' and the sign-in window's 'Sign in to Steam';
+    popup-menu webareas (GUI_POPUP_NAME) are never windows. When the compositor's window
+    `titles` are known (niri) only names that also appear there count: a real window is
+    always a niri window."""
+    found = [str(node.get('name')) for node in gui_walk(tree)
+             if node.get('role') == 'webarea' and node.get('name')
+             and node.get('name') not in ('Steam', 'Sign in to Steam')
+             and not GUI_POPUP_NAME.search(str(node.get('name')))]
+    if titles:
+        found = [name for name in found if any(name.strip().lower() == t.strip().lower() for t in titles)]
+    return found
 
 
 def gui_classify(tree, titles=()):
@@ -849,14 +865,16 @@ def gui_describe_blockers(budget=3.0):
         if not gui_have_session(env):
             return ''
         parts = []
-        titles = gui_titles(gui_windows(timeout=max(0.5, budget / 3), env=env))
+        windows = gui_windows(timeout=max(0.5, budget / 3), env=env)
+        titles = gui_titles(windows)
         if titles:
             parts.append('open Steam windows: %s' % ', '.join('"%s"' % t for t in titles))
         left = deadline - time.monotonic()
         if left > 0.8 and gui_find_tool(GUI_TOOL) and gui_steam_state()[1]:
             tree, _ = gui_snapshot(timeout=left, env=env, scope='all', deadline=deadline)
             if tree is not None:
-                for title in gui_secondary_windows(tree):
+                niri_titles = titles if any(w.get('source') == 'niri' for w in windows) else None
+                for title in gui_secondary_windows(tree, niri_titles):
                     parts.append('window "%s" is open (a normal window, not a modal; close it in Steam)' % title)
                 for dialog in gui_dialogs(tree):
                     parts.append('dialog "%s" with buttons: %s'

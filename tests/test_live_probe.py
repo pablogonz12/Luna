@@ -377,6 +377,43 @@ class Transport(LiveCase):
             self.assertEqual(luna.live_candidate_ports(), [server.port])
 
 
+HLTB_GRID = {'mounted': 8, 'sorts': {'1': 4, '4': 2, '12': 2}, 'live': '12', 'views': [
+    {'kind': 'shelf', 'id': 'uc-FIXTURE', 'count': 1263, 'total': 1263, 'rows': [
+        [832080, 'Back to the Moon'], [812810, 'missed messages.'], [3277530, 'Aeonic']]},
+    {'kind': 'shelf', 'id': 'uc-FIXTURE', 'count': 1263, 'total': 1263, 'rows': [
+        [832080, 'Back to the Moon'], [812810, 'missed messages.'], [3277530, 'Aeonic']]},
+]}
+
+
+class HltbGrid(LiveCase):
+    def test_reads_the_sorted_grid_and_dedupes_fibers(self):
+        server = self.fake()
+        server.answer = lambda expression: HLTB_GRID if expression == luna.LIVE_READ_EXPRESSIONS['hltb_grid'] else None
+        grid = luna.live_hltb_grid()
+        self.assertTrue(grid['active'])
+        self.assertEqual(len(grid['views']), 1)
+        self.assertEqual(grid['views'][0]['appids'], [832080, 812810, 3277530])
+        self.assertEqual(grid['liveSort'], '12')
+
+    def test_not_active_when_no_view_uses_the_sort(self):
+        server = self.fake()
+        server.answer = lambda expression: {'mounted': 4, 'sorts': {'1': 4}, 'live': '1', 'views': []}
+        grid = luna.live_hltb_grid()
+        self.assertFalse(grid['active'])
+        self.assertEqual(grid['views'], [])
+
+    def test_the_expression_is_read_only(self):
+        expression = luna.LIVE_READ_EXPRESSIONS['hltb_grid']
+        for word in ('setItem', 'removeItem', '.click(', 'dispatchEvent', 'fetch(', 'callServerMethod'):
+            self.assertNotIn(word, expression)
+
+    def test_unlisted_expression_is_refused(self):
+        self.fake()
+        with luna.LiveSession() as session:
+            with self.assertRaises(luna.LiveProbeError):
+                session.read('not_allowed')
+
+
 class LibraryOrder(LiveCase):
     def test_order_names_sections_and_sort_state(self):
         self.fake()

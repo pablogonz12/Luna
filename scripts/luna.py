@@ -36,10 +36,13 @@ Commands:
                                         ~/.local/share/game-saves (symlink in place; nothing deleted)
     luna saves status [--json]          link health, broken links, Syncthing conflicts
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
-    luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256) for other machines
+    luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256, + .sig when a release
+                                        key exists) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
-                [--allow-legacy-bundle]
-                                        verify and install a released bundle
+                [--allow-legacy-bundle] [--allow-unsigned]
+                                        verify (sha256, signature) and install a released bundle
+    luna signing status|init            release signing: OpenSSH ed25519 key under ~/.config/luna/;
+    luna signing trust|untrust KEY      the local trust file decides which signatures `update` accepts
     luna reconcile [--dry-run]          merge Syncthing sync-conflict copies of
                                         Steam's localconfig.vdf (newest timestamp wins)
     luna backup [--out DIR]             snapshot Luna user data (playtime ledgers,
@@ -77,6 +80,7 @@ Commands:
                                         of this machine and every host
     luna fleet push-cache HOST...       rsync the verified Steam client cache when HOST's differs
     luna fleet install [HOST...] [--only NAME] [--restart-steam] [--force] [--dry-run]
+                       [--trust-signing-key]
                                         push the release bundle; refuses while Steam runs
     luna games list [--json]            installed Steam games here (size, library, prefix, stplug-in lua)
     luna games diff [HOST] [--json]     which games are installed where; for those missing on HOST:
@@ -1112,6 +1116,20 @@ def cmd_release(options):
     checksum.write_text('%s  %s\n' % (digest, bundle.name))
     print('bundle : %s' % bundle)
     print('sha256 : %s' % digest)
+    sig_file = Path(str(bundle) + '.sig')
+    if os.path.lexists(str(sig_file)):
+        sig_file.unlink()  # a stale signature of an earlier build of this version must not linger
+    signed = False
+    if signing_key_path().is_file():
+        fingerprint, sign_error = signing_sign(bundle)
+        if sign_error:
+            print('REFUSING to release: the bundle could not be signed: %s' % sign_error, file=sys.stderr)
+            return 1
+        signed = True
+        print('signed : %s (%s)' % (fingerprint, sig_file.name))
+    else:
+        print('signed : NO (no release key at %s; the bundle is unsigned. Create one: luna signing init)'
+              % signing_key_path())
     print('version: %s (%s)' % (version, ', '.join('%s %s' % (n, addon_version(n)) for n in ADDONS)))
     if options.publish:
         gh = shutil.which('gh')
@@ -1120,10 +1138,11 @@ def cmd_release(options):
             return 1
         tag = 'v%s' % version
         view = subprocess.run([gh, 'release', 'view', tag], capture_output=True, text=True)
+        assets = [str(bundle), str(checksum)] + ([str(sig_file)] if signed else [])
         if view.returncode == 0:
-            args = [gh, 'release', 'upload', tag, str(bundle), str(checksum), '--clobber']
+            args = [gh, 'release', 'upload', tag] + assets + ['--clobber']
         else:
-            args = [gh, 'release', 'create', tag, str(bundle), str(checksum),
+            args = [gh, 'release', 'create', tag] + assets + [
                     '--title', 'Luna %s' % version,
                     '--notes', ('Luna %s: pinned payloads plus scripts/luna.py.\n\n'
                                 'Install on another machine: `luna update --latest` (needs gh).'
@@ -1134,6 +1153,18 @@ def cmd_release(options):
             return 1
         print('published: %s' % tag)
     return EXIT_OK
+
+
+def _fetch_small(url, dest, limit):
+    """Download at most `limit` bytes to `dest`; on any failure or overflow leave nothing (or garbage
+    of limit+1 bytes, which signing_read_sig refuses as oversized)."""
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            data = response.read(limit + 1)
+    except Exception:  # noqa: BLE001 - absent or unreachable counts as "no file"
+        return False
+    Path(dest).write_bytes(data)
+    return True
 
 
 def cmd_update(options):
@@ -1171,11 +1202,15 @@ def cmd_update(options):
             if not Path(str(bundle) + '.sha256').is_file():
                 print('warning: no .sha256 beside the URL; only the bundle\'s own manifest can be '
                       'checked (self-consistency, not independent). Prefer --latest.', file=sys.stderr)
+            # A missing, blocked or failed .sig is indistinguishable from "unsigned": the policy
+            # in check_bundle_signature then refuses it wherever a trusted key is configured.
+            _fetch_small(options.url + '.sig', str(bundle) + '.sig', SIG_MAX_BYTES)
         else:
             print('Point at a bundle: --bundle FILE, --url URL or --latest', file=sys.stderr)
             return 2
         return install_bundle(bundle, only=options.only, dry_run=options.dry_run,
-                              allow_legacy=getattr(options, 'allow_legacy_bundle', False))
+                              allow_legacy=getattr(options, 'allow_legacy_bundle', False),
+                              allow_unsigned=getattr(options, 'allow_unsigned', False))
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         _release_lock(lock_path)
@@ -1302,16 +1337,31 @@ def _listing_problems(root):
     return problems, True
 
 
-def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False):
-    """Verify a bundle and run the installer inside it."""
+def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False, allow_unsigned=False):
+    """Verify a bundle and run the installer inside it.
+
+    The bundle is first copied into a private directory, and the checksum, the
+    signature and the extraction all use that one copy, so the bytes that were
+    verified are the bytes that get unpacked."""
     bundle = Path(bundle)
     if not bundle.is_file():
         print('bundle not found: %s' % bundle, file=sys.stderr)
         return 2
+    with tempfile.TemporaryDirectory(prefix='luna-stage-') as stage:
+        staged = Path(stage) / 'bundle.tar.gz'
+        try:
+            shutil.copyfile(str(bundle), str(staged))
+        except OSError as error:
+            print('REFUSING: cannot read the bundle: %s' % error, file=sys.stderr)
+            return 1
+        return _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned)
+
+
+def _install_staged(bundle, staged, only, dry_run, allow_legacy, allow_unsigned):
     checksum_file = Path(str(bundle) + '.sha256')
     if checksum_file.is_file():
         expected = checksum_file.read_text().split()[0].strip().lower()
-        actual = sha256(bundle)
+        actual = sha256(staged)
         if expected != actual:
             print('REFUSING: sha256 mismatch (bundle %s, sidecar %s)'
                   % (actual[:12], expected[:12]), file=sys.stderr)
@@ -1320,11 +1370,14 @@ def install_bundle(bundle, only=None, dry_run=False, allow_legacy=False):
     else:
         print('note   : no .sha256 beside the bundle: integrity is checked only against the bundle\'s '
               'own manifest (self-consistency), not an independent checksum')
+    # Authenticity: decided by the INSTALLED code and the machine-local trust file, before unpacking.
+    if not check_bundle_signature(staged, Path(str(bundle) + '.sig'), allow_unsigned):
+        return 1
     with tempfile.TemporaryDirectory(prefix='luna-bundle-') as work:
         extract_dir = Path(work) / 'unpacked'
         extract_dir.mkdir()
         try:
-            _safe_extract(bundle, extract_dir)
+            _safe_extract(staged, extract_dir)
         except (tarfile.TarError, ValueError, OSError) as error:
             print('REFUSING: cannot safely unpack the bundle: %s' % error, file=sys.stderr)
             return 1
@@ -1390,6 +1443,7 @@ def download_release(tag, work):
         result = subprocess.run([gh, 'release', 'download', tag,
                                  '--pattern', 'luna-*.tar.gz',
                                  '--pattern', 'luna-*.tar.gz.sha256',
+                                 '--pattern', 'luna-*.tar.gz.sig',
                                  '--dir', str(work), '--clobber', '-R', LUNA_REPO],
                                 capture_output=True, text=True, timeout=GH_DOWNLOAD_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -1525,6 +1579,371 @@ def unit_paths():
     return unit_dir, unit_dir / 'luna-autoupdate.service', unit_dir / 'luna-autoupdate.timer'
 
 
+
+
+# --------------------------------------------------------------------------- release signing
+# `luna release` signs the bundle with a dedicated ed25519 key (OpenSSH
+# signatures, `ssh-keygen -Y sign`); `luna update` verifies the detached
+# `<bundle>.sig` against the machine-local trust file BEFORE anything is
+# unpacked or run. The trust file (release-signers) is local configuration: it
+# is never shipped in a bundle and never written by install/update. Only
+# `luna signing init|trust|untrust` change it. Nothing here touches ~/.ssh.
+
+SIGN_NAMESPACE = 'luna-release'
+SIGN_PRINCIPAL = 'luna-release'
+SIGN_KEY_NAME = 'luna-release-ed25519'
+SIGN_SIGNERS_NAME = 'release-signers'
+SIG_MAX_BYTES = 8192            # a real ed25519 signature is ~400 bytes
+SIGNERS_MAX_BYTES = 65536
+# ssh-ed25519 blob = string "ssh-ed25519" + string(32 bytes) = 51 bytes = 68 base64 chars.
+SIGN_BLOB_PREFIX = b'\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20'
+SIGN_KEY_RE = re.compile(r'^ssh-ed25519 ([A-Za-z0-9+/]{68})(?:[ \t]+\S.*)?$')
+SIGN_SIGNERS_RE = re.compile(r'^%s namespaces="%s" ssh-ed25519 ([A-Za-z0-9+/]{68})(?:[ \t]+\S.*)?$'
+                             % (SIGN_PRINCIPAL, SIGN_NAMESPACE))
+
+
+def signing_dir():
+    override = os.environ.get('LUNA_SIGNING_DIR')
+    if override:
+        return Path(override).expanduser()
+    base = os.environ.get('XDG_CONFIG_HOME') or str(home() / '.config')
+    return Path(base) / 'luna'
+
+
+def signing_key_path():
+    return signing_dir() / SIGN_KEY_NAME
+
+
+def signing_pub_path():
+    return signing_dir() / (SIGN_KEY_NAME + '.pub')
+
+
+def signers_path():
+    return signing_dir() / SIGN_SIGNERS_NAME
+
+
+def signing_blob_valid(blob):
+    try:
+        raw = base64.b64decode(blob, validate=True)
+    except ValueError:
+        return False
+    return len(raw) == 51 and raw.startswith(SIGN_BLOB_PREFIX)
+
+
+def signing_fingerprint(blob):
+    digest = hashlib.sha256(base64.b64decode(blob)).digest()
+    return 'SHA256:' + base64.b64encode(digest).decode().rstrip('=')
+
+
+def signing_parse_pubkey(text):
+    """The base64 blob of the single ed25519 public key in `text`, or (None, why)."""
+    blobs = []
+    for line in str(text).splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        match = SIGN_KEY_RE.match(line)
+        if not match or not signing_blob_valid(match.group(1)):
+            return None, 'not an ssh-ed25519 public key line: %.60r' % line
+        if match.group(1) not in blobs:
+            blobs.append(match.group(1))
+    if len(blobs) != 1:
+        return None, 'expected exactly one ssh-ed25519 public key, found %d' % len(blobs)
+    return blobs[0], ''
+
+
+def signers_load():
+    """(trusted blobs, unrecognised line count, error). Fails closed on an unreadable file."""
+    path = signers_path()
+    try:
+        with open(str(path), 'rb') as handle:
+            data = handle.read(SIGNERS_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return [], 0, ''
+    except OSError as error:
+        return [], 0, 'cannot read %s: %s' % (path, error)
+    if len(data) > SIGNERS_MAX_BYTES:
+        return [], 0, '%s is implausibly large' % path
+    keys, junk = [], 0
+    for line in data.decode('utf-8', 'replace').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        match = SIGN_SIGNERS_RE.match(line)
+        if match and signing_blob_valid(match.group(1)):
+            if match.group(1) not in keys:
+                keys.append(match.group(1))
+        else:
+            junk += 1  # never trusted: only our own canonical line shape counts
+    if junk and not keys:
+        return [], junk, '%s has content but no valid key line; refusing to guess' % path
+    return keys, junk, ''
+
+
+def signers_text(keys):
+    lines = ['# Luna release trust anchor (machine-local; managed by `luna signing`).',
+             '# Only these keys may sign bundles accepted by `luna update`.']
+    lines += ['%s namespaces="%s" ssh-ed25519 %s' % (SIGN_PRINCIPAL, SIGN_NAMESPACE, blob) for blob in keys]
+    return '\n'.join(lines) + '\n'
+
+
+def signers_save(keys):
+    path = signers_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '.', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(signers_text(keys))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def signing_read_sig(sig_path):
+    """('' | 'absent' | 'bad', bytes, reason) for the detached signature beside a bundle."""
+    try:
+        info = os.lstat(str(sig_path))
+    except FileNotFoundError:
+        return 'absent', b'', ''
+    except OSError as error:
+        return 'bad', b'', 'cannot stat the signature: %s' % error
+    if not stat.S_ISREG(info.st_mode):
+        return 'bad', b'', 'the signature is not a regular file (symlink or special file)'
+    if info.st_size > SIG_MAX_BYTES:
+        return 'bad', b'', 'the signature file is implausibly large (%d bytes)' % info.st_size
+    try:
+        fd = os.open(str(sig_path), os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
+        with os.fdopen(fd, 'rb') as handle:
+            data = handle.read(SIG_MAX_BYTES + 1)
+    except OSError as error:
+        return 'bad', b'', 'cannot read the signature: %s' % error
+    if len(data) > SIG_MAX_BYTES:
+        return 'bad', b'', 'the signature file is implausibly large'
+    return 'present', data, ''
+
+
+def signing_verify(bundle, sig_bytes, keys):
+    """Verify `sig_bytes` over the bundle against `keys`. Returns (fingerprint, error)."""
+    keygen = shutil.which('ssh-keygen')
+    if not keygen:
+        return '', 'ssh-keygen is not installed'
+    with tempfile.TemporaryDirectory(prefix='luna-sig-') as work:
+        sig_file = Path(work) / 'bundle.sig'
+        sig_file.write_bytes(sig_bytes)
+        signers = Path(work) / 'signers'
+        signers.write_text(signers_text(keys))  # rebuilt from validated keys only
+        try:
+            with open(str(bundle), 'rb') as handle:
+                result = subprocess.run([keygen, '-Y', 'verify', '-f', str(signers), '-I', SIGN_PRINCIPAL,
+                                         '-n', SIGN_NAMESPACE, '-s', str(sig_file)],
+                                        stdin=handle, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return '', 'ssh-keygen could not run: %s' % error
+    if result.returncode != 0:
+        detail = (result.stderr.strip() or result.stdout.strip() or 'verification failed').splitlines()[-1]
+        return '', detail
+    match = re.search(r'\b(SHA256:[A-Za-z0-9+/]+)', result.stdout)
+    trusted = {signing_fingerprint(blob) for blob in keys}
+    if not match or match.group(1) not in trusted:
+        return '', 'the signing key is not one of the trusted keys'
+    return match.group(1), ''
+
+
+def signing_sign(bundle):
+    """Sign the bundle with the release key. Returns (fingerprint, error)."""
+    key, pub = signing_key_path(), signing_pub_path()
+    keygen = shutil.which('ssh-keygen')
+    if not keygen:
+        return '', 'ssh-keygen is not installed'
+    blob, why = signing_parse_pubkey(pub.read_text() if pub.is_file() else '')
+    if blob is None:
+        return '', 'the public key %s is missing or unreadable (%s)' % (pub, why)
+    sig = Path(str(bundle) + '.sig')
+    with contextlib.suppress(OSError):
+        sig.unlink()
+    try:
+        result = subprocess.run([keygen, '-Y', 'sign', '-f', str(key), '-n', SIGN_NAMESPACE, str(bundle)],
+                                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return '', 'ssh-keygen could not run: %s' % error
+    if result.returncode != 0 or not sig.is_file():
+        return '', (result.stderr.strip() or 'signing failed').splitlines()[-1]
+    # Self-check against the matching public key so a bad signature is never published.
+    fingerprint, error = signing_verify(bundle, sig.read_bytes(), [blob])
+    if error:
+        with contextlib.suppress(OSError):
+            sig.unlink()
+        return '', 'the fresh signature did not verify: %s' % error
+    return fingerprint, ''
+
+
+def check_bundle_signature(staged, sig_path, allow_unsigned):
+    """Authenticity gate, run before anything is unpacked. True means: go on."""
+    keys, _junk, load_error = signers_load()
+    state, sig_bytes, reason = signing_read_sig(sig_path)
+    enforcing = bool(keys) or bool(load_error)
+    if load_error:
+        print('REFUSING: the trust file is unusable: %s' % load_error, file=sys.stderr)
+        return False
+    if state == 'bad':
+        print('REFUSING: the bundle has a signature file that cannot be used (%s). '
+              'This is refused even with --allow-unsigned.' % reason, file=sys.stderr)
+        return False
+    if state == 'absent':
+        if not enforcing:
+            print('note   : authenticity NOT checked: the bundle is unsigned and no trusted release key is '
+                  'configured on this machine. To enable it: luna signing trust PUBKEYFILE '
+                  '(the release machine creates one with `luna signing init`)')
+            return True
+        if allow_unsigned:
+            print('WARNING: the bundle is UNSIGNED; continuing because --allow-unsigned was given',
+                  file=sys.stderr)
+            return True
+        print('REFUSING: the bundle has no signature (.sig) but this machine trusts release key(s) '
+              '(%s). If you accept an unsigned bundle, repeat with --allow-unsigned.'
+              % ', '.join(signing_fingerprint(k) for k in keys), file=sys.stderr)
+        return False
+    # A signature is present.
+    if not keys:
+        print('note   : the bundle is signed, but authenticity is NOT checked: no trusted release key is '
+              'configured here. Enable it with: luna signing trust PUBKEYFILE')
+        return True
+    if not shutil.which('ssh-keygen'):
+        if allow_unsigned:
+            print('WARNING: ssh-keygen is missing, so the signature cannot be verified; continuing because '
+                  '--allow-unsigned was given', file=sys.stderr)
+            return True
+        print('REFUSING: this machine trusts release keys but ssh-keygen is not installed, so the '
+              'signature cannot be verified. Install openssh, or repeat with --allow-unsigned.',
+              file=sys.stderr)
+        return False
+    fingerprint, error = signing_verify(staged, sig_bytes, keys)
+    if error:
+        print('REFUSING: the bundle signature is not valid for a trusted key (%s). '
+              'This is refused even with --allow-unsigned.' % error, file=sys.stderr)
+        return False
+    print('signed : verified, signer %s (namespace %s)' % (fingerprint, SIGN_NAMESPACE))
+    return True
+
+
+def _signing_read_key_arg(arg):
+    if arg == '-':
+        return sys.stdin.read(SIGNERS_MAX_BYTES)
+    candidate = Path(arg).expanduser()
+    try:
+        if candidate.is_file():
+            if candidate.stat().st_size > SIGNERS_MAX_BYTES:
+                return ''
+            return candidate.read_text()
+    except OSError:
+        return ''
+    return arg
+
+
+def cmd_signing(options):
+    action = options.signing_action
+    arg = options.key
+    keygen = shutil.which('ssh-keygen')
+    if action == 'status':
+        keys, junk, error = signers_load()
+        key, pub = signing_key_path(), signing_pub_path()
+        print('signing dir    : %s' % signing_dir())
+        print('ssh-keygen     : %s' % (keygen or 'MISSING (cannot sign or verify)'))
+        blob, _ = signing_parse_pubkey(pub.read_text() if pub.is_file() else '')
+        if key.is_file() and blob:
+            mode = stat.S_IMODE(key.stat().st_mode)
+            print('signing key    : present, %s' % signing_fingerprint(blob))
+            print('  private key  : %s (mode %o%s)' % (key, mode, '' if not mode & 0o077 else ' - TOO OPEN, chmod 600'))
+            print('  public key   : %s' % pub)
+        else:
+            print('signing key    : none here (luna release writes unsigned bundles; create one: luna signing init)')
+        print('trust file     : %s' % signers_path())
+        if error:
+            print('  PROBLEM      : %s' % error)
+        for item in keys:
+            print('  trusted      : %s%s' % (signing_fingerprint(item), '  (this machine\'s own key)' if item == blob else ''))
+        if junk and keys:
+            print('  ignored      : %d line(s) in the trust file are not valid key lines' % junk)
+        if error:
+            print('policy         : REFUSING every update until the trust file is fixed')
+        elif keys:
+            print('policy         : ENFORCING: unsigned or wrongly signed bundles are refused '
+                  '(--allow-unsigned overrides only the missing-signature case)')
+        else:
+            print('policy         : not enforcing: unsigned bundles are accepted (authenticity unchecked); '
+                  'luna signing trust PUBKEYFILE turns it on')
+        return EXIT_OK
+    if action == 'init':
+        key, pub = signing_key_path(), signing_pub_path()
+        if os.path.lexists(str(key)) or os.path.lexists(str(pub)):
+            print('REFUSING: a signing key already exists (%s); it is never overwritten' % key, file=sys.stderr)
+            return EXIT_REFUSED
+        if not keygen:
+            print('REFUSING: ssh-keygen is not installed', file=sys.stderr)
+            return EXIT_REFUSED
+        signing_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
+        result = subprocess.run([keygen, '-q', '-t', 'ed25519', '-N', '', '-C', SIGN_PRINCIPAL, '-f', str(key)],
+                                capture_output=True, text=True)
+        if result.returncode != 0 or not key.is_file() or not pub.is_file():
+            print('ssh-keygen failed: %s' % (result.stderr.strip() or result.returncode), file=sys.stderr)
+            return 1
+        os.chmod(key, 0o600)
+        blob, why = signing_parse_pubkey(pub.read_text())
+        if blob is None:
+            print('the new public key is unreadable: %s' % why, file=sys.stderr)
+            return 1
+        keys, _junk, error = signers_load()
+        if error:
+            print('key created, but the trust file is unusable: %s' % error, file=sys.stderr)
+            return 1
+        if blob not in keys:
+            signers_save(keys + [blob])
+        print('created  : %s (private, mode 600, no passphrase)' % key)
+        print('public   : %s' % pub)
+        print('trusted  : %s (added to %s)' % (signing_fingerprint(blob), signers_path()))
+        print('next     : copy the public key to other machines and run: luna signing trust %s' % pub.name)
+        return EXIT_OK
+    if action in ('trust', 'untrust'):
+        if not arg:
+            print('usage: luna signing %s PUBKEY_OR_FILE%s' % (action, ' | SHA256:FINGERPRINT' if action == 'untrust' else ''),
+                  file=sys.stderr)
+            return EXIT_REFUSED
+        keys, _junk, error = signers_load()
+        if error:
+            print('REFUSING: the trust file is unusable: %s (fix or remove it by hand)' % error, file=sys.stderr)
+            return EXIT_REFUSED
+        if action == 'untrust' and arg.startswith('SHA256:'):
+            matches = [k for k in keys if signing_fingerprint(k) == arg]
+            if not matches:
+                print('no trusted key with fingerprint %s' % arg, file=sys.stderr)
+                return 1
+            blob = matches[0]
+        else:
+            blob, why = signing_parse_pubkey(_signing_read_key_arg(arg))
+            if blob is None:
+                print('REFUSING: %s' % why, file=sys.stderr)
+                return EXIT_REFUSED
+        if action == 'trust':
+            if blob in keys:
+                print('already trusted: %s' % signing_fingerprint(blob))
+                return EXIT_OK
+            signers_save(keys + [blob])
+            print('trusted  : %s (%s)' % (signing_fingerprint(blob), signers_path()))
+            print('from now on `luna update` here refuses bundles without a valid signature from a trusted key')
+            return EXIT_OK
+        if blob not in keys:
+            print('not trusted: %s' % signing_fingerprint(blob), file=sys.stderr)
+            return 1
+        remaining = [k for k in keys if k != blob]
+        signers_save(remaining)
+        print('untrusted: %s' % signing_fingerprint(blob))
+        if not remaining:
+            print('note     : no trusted keys left: unsigned bundles are accepted again (authenticity unchecked)')
+        return EXIT_OK
+    return EXIT_REFUSED
 def cmd_check(options):
     """Print the update check as JSON (the Luna menu reads it)."""
     write_heartbeat()
@@ -4194,6 +4613,23 @@ def fleet_build_bundle(out_dir):
     return bundles[-1], ''
 
 
+def fleet_trust_signing_key(host):
+    """Opt-in (--trust-signing-key): make `host` trust this machine's release public key. (ok, message)
+
+    Run AFTER the install, so it works whether or not the host had a signing-aware Luna before.
+    This is a trust-on-first-use step carried by your own ssh login; only the public key leaves."""
+    pub = signing_pub_path()
+    blob, why = signing_parse_pubkey(pub.read_text() if pub.is_file() else '')
+    if blob is None:
+        return False, 'no usable local release public key (%s); run luna signing init' % why
+    # blob is validated base64 [A-Za-z0-9+/]{68}: safe inside single quotes.
+    script = 'python3 "%s" signing trust \'ssh-ed25519 %s\'\n' % (FLEET_REMOTE_LUNA, blob)
+    code, out, err = fleet_ssh(host, script, timeout=60)
+    if code != 0:
+        return False, (err.strip() or out.strip() or 'exit %d' % code).splitlines()[-1]
+    return True, 'trusts release key %s' % signing_fingerprint(blob)
+
+
 def fleet_install_host(host, bundle, options):
     """Install the bundle on one host. Returns (ok, message)."""
     code, out, err = fleet_ssh(host, FLEET_STATUS_SCRIPT)
@@ -4212,6 +4648,8 @@ def fleet_install_host(host, bundle, options):
         return False, 'REFUSED: Steam/Lumen is running there; close it or pass --restart-steam'
     if options.dry_run:
         steps = ['copy bundle', 'luna update --bundle' + ''.join(' --only ' + n for n in options.only)]
+        if getattr(options, 'trust_signing_key', False):
+            steps.append('luna signing trust (this machine\'s release public key)')
         if running:
             steps = ['stop Steam (steam -shutdown, wait)'] + steps + ['relaunch Steam']
         return True, 'dry-run: would ' + ', '.join(steps)
@@ -4223,8 +4661,10 @@ def fleet_install_host(host, bundle, options):
         return False, 'could not create a temp dir there: %s' % (err.strip() or out.strip() or code)
     stopped = False
     try:
-        copy = ['scp', '-q'] + list(FLEET_SSH_OPTS) + ['--', str(bundle), str(bundle) + '.sha256',
-                                                        '%s:%s/' % (host, remote_dir)]
+        sources = [str(bundle), str(bundle) + '.sha256']
+        if os.path.lexists(str(bundle) + '.sig'):
+            sources.append(str(bundle) + '.sig')  # the host verifies it against ITS trust file
+        copy = ['scp', '-q'] + list(FLEET_SSH_OPTS) + ['--'] + sources + ['%s:%s/' % (host, remote_dir)]
         result = subprocess.run(copy, capture_output=True, text=True)
         if result.returncode != 0:
             return False, 'scp failed: %s' % ((result.stderr.strip().splitlines() or ['?'])[-1])
@@ -4242,7 +4682,13 @@ def fleet_install_host(host, bundle, options):
         tail = (out + err).strip().splitlines()[-1:] or ['']
         if code != 0:
             return False, 'install failed (%d): %s' % (code, tail[0])
-        return True, 'installed' + (' (Steam restarted)' if stopped else '')
+        note = 'installed' + (' (Steam restarted)' if stopped else '')
+        if getattr(options, 'trust_signing_key', False):
+            trusted, detail = fleet_trust_signing_key(host)
+            if not trusted:
+                return False, note + ', but the release key was NOT trusted there: ' + detail
+            note += '; ' + detail
+        return True, note
     finally:
         fleet_ssh(host, 'rm -rf -- \'%s\'\n' % remote_dir, timeout=30)
         if stopped:
@@ -6220,9 +6666,11 @@ GUI_PANEL_SELECTORS = {
 GUI_LIBRARY_TABLE = ('table', 'grid', True)      # confirmed live; rows are `cell '<game name>'`
 GUI_LIBRARY_TOTAL = re.compile(r'^All Games \((?:\d+/)?(\d+)\)$')  # shelf header, e.g. 'All Games (9/1630)'
 GUI_LIBRARY_TAB = ('statictext', 'LIBRARY', True)  # confirmed live: click it to open the Library
-# Not verified: dialogs. Menu items refuse semantic activation (POLICY_DENIED), so no
-# real dialog was ever opened; separate windows (e.g. 'Friends List') show up as their own
-# AT-SPI window with `webarea '<title>'` and niri titles.
+# STILL UNVERIFIED: a modal dialog with an `alert`/`dialog` role. Re-tried live 2026-11-16: menu
+# items refuse semantic activation (POLICY_DENIED), `--headed`/`press` need a physical input
+# device that Wayland does not give agent-desktop, so no modal could be opened by navigation.
+# What IS confirmed: Steam's windows (Settings, Friends List, ...) are separate AT-SPI windows
+# with `webarea '<title>'` and niri titles, never a dialog role (see gui_secondary_windows).
 GUI_DIALOG_ROLES = ('alert', 'dialog', 'alertdialog')
 
 
@@ -6438,14 +6886,28 @@ def gui_dialogs(tree):
     return dialogs
 
 
-def gui_secondary_windows(tree):
+# Steam keeps its popup menus alive as AT-SPI windows with a named webarea ('Help Root Menu',
+# 'Account Menu', '... Supernav', ...). Observed live (2026-11-16): they exist from startup,
+# are never niri windows, and stay in the tree after a menu was opened and closed again, so
+# they say nothing about an open window.
+GUI_POPUP_NAME = re.compile(r'(Root Menu|Supernav|Account Menu|Notifications Menu)$')
+
+
+def gui_secondary_windows(tree, titles=None):
     """Titles of Steam's own secondary windows (Settings, Friends List, ...). Observed live:
     each is a separate AT-SPI window holding one `webarea '<title>'`; it has no dialog or
     alert role and no Close button of its own (the AT-SPI title is empty, niri has the
-    title). The main window's webarea is 'Steam' and the sign-in window's 'Sign in to Steam'."""
-    return [str(node.get('name')) for node in gui_walk(tree)
-            if node.get('role') == 'webarea' and node.get('name')
-            and node.get('name') not in ('Steam', 'Sign in to Steam')]
+    title). The main window's webarea is 'Steam' and the sign-in window's 'Sign in to Steam';
+    popup-menu webareas (GUI_POPUP_NAME) are never windows. When the compositor's window
+    `titles` are known (niri) only names that also appear there count: a real window is
+    always a niri window."""
+    found = [str(node.get('name')) for node in gui_walk(tree)
+             if node.get('role') == 'webarea' and node.get('name')
+             and node.get('name') not in ('Steam', 'Sign in to Steam')
+             and not GUI_POPUP_NAME.search(str(node.get('name')))]
+    if titles:
+        found = [name for name in found if any(name.strip().lower() == t.strip().lower() for t in titles)]
+    return found
 
 
 def gui_classify(tree, titles=()):
@@ -7029,14 +7491,16 @@ def gui_describe_blockers(budget=3.0):
         if not gui_have_session(env):
             return ''
         parts = []
-        titles = gui_titles(gui_windows(timeout=max(0.5, budget / 3), env=env))
+        windows = gui_windows(timeout=max(0.5, budget / 3), env=env)
+        titles = gui_titles(windows)
         if titles:
             parts.append('open Steam windows: %s' % ', '.join('"%s"' % t for t in titles))
         left = deadline - time.monotonic()
         if left > 0.8 and gui_find_tool(GUI_TOOL) and gui_steam_state()[1]:
             tree, _ = gui_snapshot(timeout=left, env=env, scope='all', deadline=deadline)
             if tree is not None:
-                for title in gui_secondary_windows(tree):
+                niri_titles = titles if any(w.get('source') == 'niri' for w in windows) else None
+                for title in gui_secondary_windows(tree, niri_titles):
                     parts.append('window "%s" is open (a normal window, not a modal; close it in Steam)' % title)
                 for dialog in gui_dialogs(tree):
                     parts.append('dialog "%s" with buttons: %s'
@@ -7924,6 +8388,82 @@ LIVE_READ_EXPRESSIONS = {
         }
         return {found: true, rowCount: list.GetRowCount(), rows, storage: ls};
       })()''',
+    # The HowLongToBeat-sorted grid as the main window renders it, in rendered order and
+    # complete (not just the on-screen capsules). Two mounted shapes exist: the Home shelf
+    # (a class instance with m_fnSort whose carousel child receives `childElements`, one
+    # React element per game keyed `app_list_<appid>`, observed live 2026-11-16: 1263 for
+    # one collection while only ~10 capsules were in the DOM) and the collection grid (props
+    # `childSections` with eSortBy, which Luna's wrapper replaces by one sorted section).
+    # Only views whose eSortBy is Luna's value 12 are returned; every other mounted view
+    # is only counted. Reads fiber props and localStorage; assigns, calls and dispatches nothing.
+    'hltb_grid': '''(() => {
+        const SORT = 12;
+        const views = [], sorts = {}, seen = new Set();
+        let mounted = 0;
+        const nameFrom = element => {
+          let node = element;
+          for (let depth = 0; depth < 8 && node && node.props; depth++) {
+            const app = node.props.app || node.props.overview;
+            if (app && app.appid) return [Number(app.appid), String(app.display_name || '')];
+            node = Array.isArray(node.props.children) ? node.props.children[0] : node.props.children;
+          }
+          return null;
+        };
+        const kids = fiber => {
+          let found = null;
+          const walk = (f, budget) => {
+            for (; f && !found && budget.n < 4000; f = f.sibling) {
+              budget.n++;
+              const p = f.memoizedProps;
+              if (p && Array.isArray(p.childElements) && p.childElements.length > 0) { found = p.childElements; return; }
+              if (f.child) walk(f.child, budget);
+            }
+          };
+          walk(fiber.child, {n: 0});
+          return found;
+        };
+        for (const el of document.querySelectorAll('*')) {
+          const key = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+          if (!key) continue;
+          let fiber = el[key];
+          for (let depth = 0; fiber && depth < 60; depth++, fiber = fiber.return) {
+            if (seen.has(fiber)) break;
+            seen.add(fiber);
+            const p = fiber.memoizedProps, node = fiber.stateNode;
+            if (!p || typeof p !== 'object') continue;
+            const typeName = (fiber.type && (fiber.type.displayName || fiber.type.name)) || '';
+            if (p.showcase && typeof p.showcase.eSortBy === 'number' && p.collectionId !== undefined
+                && node && !(node instanceof Element) && typeof node.m_fnSort === 'function') {
+              mounted++;
+              sorts[p.showcase.eSortBy] = (sorts[p.showcase.eSortBy] || 0) + 1;
+              if (p.showcase.eSortBy !== SORT) continue;
+              const list = kids(fiber) || [];
+              const rows = [];
+              for (const child of list) {
+                const named = nameFrom(child);
+                const id = Number(String(child && child.key || '').replace(/^app_list_/, '')) || (named ? named[0] : 0);
+                rows.push([id, named ? named[1] : '']);
+              }
+              views.push({kind: 'shelf', id: String(p.collectionId), count: rows.length,
+                          total: Number(node.state && node.state.nItemsDisplayed) || null, rows});
+            } else if (typeName !== 'SlsLunaHltbGrid' && Array.isArray(p.childSections) && typeof p.eSortBy === 'number') {
+              mounted++;
+              sorts[p.eSortBy] = (sorts[p.eSortBy] || 0) + 1;
+              if (p.eSortBy !== SORT) continue;
+              const rows = [];
+              for (const section of p.childSections) {
+                for (const child of (section && section.children) || []) {
+                  const overview = (child && child.m_overview) || child || {};
+                  rows.push([Number(overview.appid) || 0, String(overview.display_name || overview.name || '')]);
+                }
+              }
+              views.push({kind: 'grid', id: String(p.collectionId || p.strCollectionId || ''), count: rows.length,
+                          total: null, rows});
+            }
+          }
+        }
+        return {mounted, sorts, live: localStorage.getItem('slsLunaSortLive'), views};
+      })()''',
 }
 
 
@@ -8300,6 +8840,36 @@ def live_library_order(session=None):
             'source': 'Library list component visibleRows (main window, read-only)', 'sort': sort}
 
 
+def live_hltb_grid(session=None):
+    """The HowLongToBeat-sorted grid(s) the main window renders right now, in rendered order.
+
+    Returns {'mounted': n, 'sorts': {value: views}, 'liveSort': str|None, 'active': bool,
+    'views': [{'kind', 'id', 'count', 'appids', 'names'}]} where `views` lists only views
+    whose sort is Luna's HowLongToBeat value, one per (kind, collection). `active` is False
+    when no mounted view uses it (a read-only fact; nothing is toggled to find out).
+    Raises LiveProbeError when the main-window page cannot be read."""
+    owner = session is None
+    session = session or LiveSession(title=LIVE_MAIN_TITLE)
+    try:
+        data = session.read('hltb_grid')
+    finally:
+        if owner:
+            session.close()
+    if not isinstance(data, dict):
+        raise LiveProbeError('the sorted grid could not be read')
+    views, taken = [], set()
+    for view in data.get('views') or []:
+        key = (view.get('kind'), view.get('id'))
+        if key in taken or not isinstance(view.get('rows'), list):
+            continue  # React keeps two fibers per mounted component
+        taken.add(key)
+        rows = [r for r in view['rows'] if isinstance(r, list) and len(r) >= 2]
+        views.append({'kind': str(view.get('kind')), 'id': str(view.get('id')), 'count': len(rows),
+                      'appids': [int(r[0] or 0) for r in rows], 'names': [str(r[1] or '') for r in rows]})
+    return {'mounted': int(data.get('mounted') or 0), 'sorts': dict(data.get('sorts') or {}),
+            'liveSort': data.get('live'), 'active': bool(views), 'views': views}
+
+
 def cmd_library_order(options):
     try:
         order = live_library_order()
@@ -8538,8 +9108,97 @@ def gui_read_order(open_library=True, attempts=1, sleep=time.sleep):
     return {'source': 'unavailable', 'why': why, 'names': [], 'total': None, 'sort': None}
 
 
+GUI_HOME_LINK = ('link', 'Home', True)   # confirmed live: the Home link of the main window
+
+
+def gui_hltb_off(why, state='unavailable'):
+    return {'state': state, 'views': [], 'why': why, 'sorts': {}}
+
+
+def gui_read_hltb(open_home=True, sleep=time.sleep):
+    """The HowLongToBeat-sorted grid as rendered, for the restart comparison. Read-only: the
+    sort is never switched on. Returns {'state', 'views', 'why', 'sorts'}: 'active' (views:
+    [{'kind','id','count','appids','names'}]), 'inactive' (collection views are mounted and
+    none uses the HowLongToBeat sort) or 'unavailable' (CDP cannot read the page, or no
+    collection view is mounted). The Home shelves only exist while Home is showing, so when no
+    sorted view is mounted and a tree is available, Home is opened with one navigation click
+    (it is the page Steam starts on, and nothing is changed)."""
+    try:
+        grid = live_hltb_grid()
+    except Exception as error:  # LiveProbeError and anything unexpected
+        return gui_hltb_off('CDP: %s' % error)
+    if not grid['active'] and open_home:
+        try:
+            tree, _ = gui_snapshot()
+            link = (gui_find_nodes(tree, *GUI_HOME_LINK) or [None])[0] if tree else None
+            if link is not None and gui_click_node(link).get('ok'):
+                for _ in range(6):
+                    sleep(1)
+                    grid = live_hltb_grid()
+                    if grid['active']:
+                        break
+        except Exception:
+            pass
+    if grid['active']:
+        return {'state': 'active', 'views': grid['views'], 'why': '', 'sorts': grid['sorts']}
+    if grid['mounted']:
+        return gui_hltb_off('%d collection views are mounted, none sorted by HowLongToBeat (sort values: %s)'
+                            % (grid['mounted'], ', '.join(sorted(grid['sorts'])) or 'none'), 'inactive')
+    return gui_hltb_off('no collection view is mounted (the Home page is not showing)')
+
+
+def gui_hltb_summary(item):
+    """One cell for the report: what was read."""
+    if not item or item.get('state') != 'active':
+        return 'not active, skipped' if item and item.get('state') == 'inactive' else \
+            'unavailable (%s)' % ((item or {}).get('why') or 'not read')
+    return '; '.join('%s: %d games' % (v['kind'], v['count']) for v in item['views'])
+
+
+def gui_hltb_ids(item):
+    return [(v['kind'], v['id'], v['appids']) for v in (item or {}).get('views') or []]
+
+
+def gui_compare_hltb(before, after, limit=5):
+    """(row, difference or None). `row` is (what, before, after, 'same'|'DIFFERENT'|'n/a').
+    Compared only when the sort was active before the restart; otherwise the sub-check is
+    reported as skipped and never fails. Differences name the counts and the first `limit`
+    positions where the rendered order differs."""
+    what = 'HLTB sorted grid'
+    before, after = before or gui_hltb_off('not read'), after or gui_hltb_off('not read')
+    if before.get('state') != 'active':
+        return (what, gui_hltb_summary(before), gui_hltb_summary(after), 'n/a'), None
+    if after.get('state') != 'active':
+        return ((what, gui_hltb_summary(before), gui_hltb_summary(after), 'DIFFERENT'),
+                'HLTB sorted grid was active before the restart, not after (%s)' % (after.get('why') or after.get('state')))
+    problems = []
+    for view in before['views']:
+        twin = next((v for v in after['views'] if (v['kind'], v['id']) == (view['kind'], view['id'])), None)
+        if twin is None and len(before['views']) == 1 == len(after['views']):
+            twin = after['views'][0]
+        if twin is None:
+            problems.append('%s view missing after the restart' % view['kind'])
+            continue
+        if view['appids'] == twin['appids']:
+            continue
+        positions = []
+        for index in range(max(len(view['appids']), len(twin['appids']))):
+            left = view['appids'][index] if index < len(view['appids']) else None
+            right = twin['appids'][index] if index < len(twin['appids']) else None
+            if left != right:
+                label = lambda ids, names, i: ('%s (%s)' % (names[i] or '?', ids[i]) if i < len(ids) else 'nothing')  # noqa: E731
+                positions.append((index + 1, label(view['appids'], view['names'], index),
+                                  label(twin['appids'], twin['names'], index)))
+        problems.append('%s: %d games before, %d after, %d positions differ; first: %s' % (
+            view['kind'], view['count'], twin['count'], len(positions),
+            '; '.join('#%d %s -> %s' % item for item in positions[:limit])))
+    row = (what, gui_hltb_summary(before), gui_hltb_summary(after), 'DIFFERENT' if problems else 'same')
+    return row, ('HLTB sorted grid differs: ' + ' | '.join(problems)) if problems else None
+
+
 def gui_read_state(sleep=time.sleep, grace=GUI_LOGIN_GRACE):
-    """Everything compared across the restart: screen, add-on panels, Library order."""
+    """Everything compared across the restart: screen, add-on panels, Library order, and the
+    HowLongToBeat-sorted grid."""
     try:
         tree, _ = gui_snapshot()
     except Exception:
@@ -8557,6 +9216,7 @@ def gui_read_state(sleep=time.sleep, grace=GUI_LOGIN_GRACE):
                   gui_rendered(gui_addons_with_panel(), sleep=sleep).items()}
     return {'screen': screen, 'signal': signal, 'panels': panels, 'order': gui_read_order(attempts=3, sleep=sleep) if screen == 'main' else
             {'source': 'unavailable', 'why': 'not on the main screen', 'names': [], 'total': None, 'sort': None},
+            'hltb': gui_read_hltb(sleep=sleep) if screen == 'main' else gui_hltb_off('not on the main screen'),
             'download': gui_active_download(tree)}
 
 
@@ -8589,6 +9249,10 @@ def gui_compare_states(before, after, warnings=None):
         row('screen', before['screen'], after['screen'])
         for name in sorted(set(before['panels']) | set(after['panels'])):
             row('panel: %s' % name, before['panels'].get(name, 'n/a'), after['panels'].get(name, 'n/a'))
+    hltb_row, hltb_difference = gui_compare_hltb(before.get('hltb'), after.get('hltb'))
+    rows.append(hltb_row)
+    if hltb_difference:
+        differences.append(hltb_difference)
     left, right = before['order'], after['order']
     if left['source'] == 'unavailable' or right['source'] == 'unavailable':
         rows.append(('library order', left.get('why') or '%d rows' % len(left['names']),
@@ -8757,16 +9421,18 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
             return finish(1)
     elif running:  # normal mode: no tree, so only the CDP order can be recorded
         before = {'screen': 'n/a (normal mode)', 'panels': {},
-                  'order': gui_read_order(open_library=False), 'download': ''}
+                  'order': gui_read_order(open_library=False), 'hltb': gui_read_hltb(open_home=False), 'download': ''}
     else:
         before = {'screen': 'n/a (not running)', 'panels': {},
                   'order': {'source': 'unavailable', 'why': 'Steam was not running', 'names': [], 'total': None,
-                            'sort': None}, 'download': ''}
-    steps.append(('state before (%s)' % start_mode, 'screen %s, %d panels, library order: %s'
+                            'sort': None}, 'hltb': gui_hltb_off('Steam was not running'), 'download': ''}
+    before.setdefault('hltb', gui_hltb_off('not read'))
+    steps.append(('state before (%s)' % start_mode, 'screen %s, %d panels, library order: %s; HLTB grid: %s'
                   % (before['screen'], len(before['panels']), '%d rows via %s%s' % (len(before['order']['names']),
                                                                                  before['order']['source'],
                                                                                  ' (%s)' % before['order']['why'] if before['order'].get('why') else '')
-                     if before['order']['source'] != 'unavailable' else before['order'].get('why'))))
+                     if before['order']['source'] != 'unavailable' else before['order'].get('why'),
+                     gui_hltb_summary(before['hltb']))))
 
     # 3. shutdown through the project's own path
     if running:
@@ -8826,17 +9492,24 @@ def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
 
     # 6. after state, compare, evidence
     settle = clock() + getattr(options, 'settle', 90)
-    while True:  # the Lumen plugin and its Library order take a while to come up
+    previous = None
+    while True:  # the Lumen plugin, its Library order and the HowLongToBeat cache take a while to come up
         after = gui_read_state(sleep=sleep)
+        after.setdefault('hltb', gui_hltb_off('not read'))
         expected = {n for n, v in before['panels'].items() if v == 'found'}
+        # a sorted grid that was active before is only judged once it is up and unchanged
+        # between two reads (the cache can arrive after the first render and re-sort it)
+        hltb_now = gui_hltb_ids(after.get('hltb'))
+        hltb_ready = before['hltb']['state'] != 'active' or (after['hltb']['state'] == 'active' and hltb_now == previous)
+        previous = hltb_now
         ready = (after['screen'] == 'main' and expected <= {n for n, v in after['panels'].items() if v == 'found'}
-                 and (after['order']['source'] == 'cdp' or before['order']['source'] != 'cdp'))
+                 and (after['order']['source'] == 'cdp' or before['order']['source'] != 'cdp') and hltb_ready)
         if ready or clock() >= settle:
             break
         sleep(5)
-    steps.append(('state after', 'screen %s, %d panels, library order: %s' % (
+    steps.append(('state after', 'screen %s, %d panels, library order: %s; HLTB grid: %s' % (
         after['screen'], len(after['panels']), '%d rows via %s' % (len(after['order']['names']), after['order']['source'])
-        if after['order']['source'] != 'unavailable' else after['order'].get('why'))))
+        if after['order']['source'] != 'unavailable' else after['order'].get('why'), gui_hltb_summary(after['hltb']))))
     rows, differences = gui_compare_states(before, after, report['warnings'])
     report['rows'] = rows
     shots = Path(getattr(options, 'screenshots', None) or luna_tools_dir() / 'gui-shots')
@@ -8900,6 +9573,7 @@ def build_parser():
                           ('install', cmd_install), ('uninstall', cmd_uninstall),
                           ('verify', cmd_verify), ('vendor', cmd_vendor),
                           ('release', cmd_release), ('update', cmd_update),
+                          ('signing', cmd_signing),
                           ('check', cmd_check), ('autoupdate', cmd_autoupdate),
                           ('reconcile', cmd_reconcile),
                           ('backup', cmd_backup), ('restore', cmd_restore),
@@ -9063,6 +9737,9 @@ def build_parser():
                                help='with install: close Steam gracefully first and relaunch it afterwards')
             child.add_argument('--force', action='store_true',
                                help='with install: overwrite drifted payloads (and old Luna builds)')
+            child.add_argument('--trust-signing-key', action='store_true',
+                               help='with install: after a successful install, make the host trust this '
+                                    'machine\'s release public key (luna signing trust over ssh)')
         if name == 'games':
             child.add_argument('games_action', choices=['list', 'diff', 'install'], help='games action')
             child.add_argument('games_args', nargs='*', metavar='HOST/APPID',
@@ -9102,7 +9779,16 @@ def build_parser():
                                help='download the newest release asset (needs gh)')
             child.add_argument('--allow-legacy-bundle', action='store_true',
                                help='accept a pre-RELEASE-FILES.json bundle whose scripts/luna.py is unhashed')
+            child.add_argument('--allow-unsigned', action='store_true',
+                               help='install a bundle that has no signature although this machine trusts a '
+                                    'release key (an invalid or untrusted signature is always refused)')
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+        if name == 'signing':
+            child.add_argument('signing_action', choices=['status', 'init', 'trust', 'untrust'],
+                               help='status; init (create this machine\'s release key and trust it); '
+                                    'trust PUBKEY_OR_FILE; untrust PUBKEY_OR_FILE_OR_FINGERPRINT')
+            child.add_argument('key', nargs='?', help='trust/untrust: ssh-ed25519 public key text, a file, '
+                                                      '- for stdin; untrust also takes SHA256:FINGERPRINT')
         if name in ('verify', 'vendor'):
             child.add_argument('--sources', action='store_true',
                                help='also compare against local source checkouts')

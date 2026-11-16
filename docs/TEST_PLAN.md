@@ -58,11 +58,19 @@ gates 7 and 8 (client build, Gamescope/mouse behaviour) or backend health. The
 selectors in `GUI_PANEL_SELECTORS` were confirmed on a live signed-in client (Luna entry
 `button 'Luna'`, overlay pages `heading 'Playtime'/'Presence'/'Compressor'`); the
 HowLongToBeat, SteamGridDB, Graphics, Health, Settings and About pages are confirmed
-too (`gui watch --addon KEY`). A real modal dialog was never observed, so the
+too (`gui watch --addon KEY`). A real modal dialog was never observed (menu items
+refuse clicks by policy and physical input is unavailable on Wayland), so the
 `alert`/`dialog` shape is **unverified** (a secondary window is a plain `webarea`).
+Confirmed live (2026-11): the `starting` -> `main` screen transition during auto-logon
+(the login form itself never appeared, so its tree is still unverified); Steam's popup
+menu webareas (`Help Root Menu`, `Supernav`, `Account Menu`, `Notifications Menu`)
+stay in the AT-SPI tree while idle and are NOT windows (cross-checked against niri
+titles); `gui launch` never restarts a running Steam; `restart-check --final normal`
+ends in normal mode (`gui status` accessible: no).
 `luna gui restart-check` now covers the restart part of gates 2-4 with before/after
-evidence (Library order and sort, add-on panels, sidecar survival, shutdown and
-relaunch times); `library --save/--compare --common` remains for manual use. Not
+evidence (Library order and sort, add-on panels, the HowLongToBeat-sorted Home grid
+read over CDP when that sort is active (otherwise skipped, never a failure; the sort
+is never toggled), sidecar survival, shutdown and relaunch times); `library --save/--compare --common` remains for manual use. Not
 covered: fleet hosts (no graphical session over SSH), other compositors than niri.
 
 ## Evidence requirements

@@ -333,6 +333,82 @@ LIVE_READ_EXPRESSIONS = {
         }
         return {found: true, rowCount: list.GetRowCount(), rows, storage: ls};
       })()''',
+    # The HowLongToBeat-sorted grid as the main window renders it, in rendered order and
+    # complete (not just the on-screen capsules). Two mounted shapes exist: the Home shelf
+    # (a class instance with m_fnSort whose carousel child receives `childElements`, one
+    # React element per game keyed `app_list_<appid>`, observed live 2026-11-16: 1263 for
+    # one collection while only ~10 capsules were in the DOM) and the collection grid (props
+    # `childSections` with eSortBy, which Luna's wrapper replaces by one sorted section).
+    # Only views whose eSortBy is Luna's value 12 are returned; every other mounted view
+    # is only counted. Reads fiber props and localStorage; assigns, calls and dispatches nothing.
+    'hltb_grid': '''(() => {
+        const SORT = 12;
+        const views = [], sorts = {}, seen = new Set();
+        let mounted = 0;
+        const nameFrom = element => {
+          let node = element;
+          for (let depth = 0; depth < 8 && node && node.props; depth++) {
+            const app = node.props.app || node.props.overview;
+            if (app && app.appid) return [Number(app.appid), String(app.display_name || '')];
+            node = Array.isArray(node.props.children) ? node.props.children[0] : node.props.children;
+          }
+          return null;
+        };
+        const kids = fiber => {
+          let found = null;
+          const walk = (f, budget) => {
+            for (; f && !found && budget.n < 4000; f = f.sibling) {
+              budget.n++;
+              const p = f.memoizedProps;
+              if (p && Array.isArray(p.childElements) && p.childElements.length > 0) { found = p.childElements; return; }
+              if (f.child) walk(f.child, budget);
+            }
+          };
+          walk(fiber.child, {n: 0});
+          return found;
+        };
+        for (const el of document.querySelectorAll('*')) {
+          const key = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+          if (!key) continue;
+          let fiber = el[key];
+          for (let depth = 0; fiber && depth < 60; depth++, fiber = fiber.return) {
+            if (seen.has(fiber)) break;
+            seen.add(fiber);
+            const p = fiber.memoizedProps, node = fiber.stateNode;
+            if (!p || typeof p !== 'object') continue;
+            const typeName = (fiber.type && (fiber.type.displayName || fiber.type.name)) || '';
+            if (p.showcase && typeof p.showcase.eSortBy === 'number' && p.collectionId !== undefined
+                && node && !(node instanceof Element) && typeof node.m_fnSort === 'function') {
+              mounted++;
+              sorts[p.showcase.eSortBy] = (sorts[p.showcase.eSortBy] || 0) + 1;
+              if (p.showcase.eSortBy !== SORT) continue;
+              const list = kids(fiber) || [];
+              const rows = [];
+              for (const child of list) {
+                const named = nameFrom(child);
+                const id = Number(String(child && child.key || '').replace(/^app_list_/, '')) || (named ? named[0] : 0);
+                rows.push([id, named ? named[1] : '']);
+              }
+              views.push({kind: 'shelf', id: String(p.collectionId), count: rows.length,
+                          total: Number(node.state && node.state.nItemsDisplayed) || null, rows});
+            } else if (typeName !== 'SlsLunaHltbGrid' && Array.isArray(p.childSections) && typeof p.eSortBy === 'number') {
+              mounted++;
+              sorts[p.eSortBy] = (sorts[p.eSortBy] || 0) + 1;
+              if (p.eSortBy !== SORT) continue;
+              const rows = [];
+              for (const section of p.childSections) {
+                for (const child of (section && section.children) || []) {
+                  const overview = (child && child.m_overview) || child || {};
+                  rows.push([Number(overview.appid) || 0, String(overview.display_name || overview.name || '')]);
+                }
+              }
+              views.push({kind: 'grid', id: String(p.collectionId || p.strCollectionId || ''), count: rows.length,
+                          total: null, rows});
+            }
+          }
+        }
+        return {mounted, sorts, live: localStorage.getItem('slsLunaSortLive'), views};
+      })()''',
 }
 
 
@@ -707,6 +783,36 @@ def live_library_order(session=None):
     return {'names': names, 'rendered': len(names), 'total': len(names), 'virtualized': False,
             'unique': len(set(names)), 'rows': len(data.get('rows') or []), 'sections': sections,
             'source': 'Library list component visibleRows (main window, read-only)', 'sort': sort}
+
+
+def live_hltb_grid(session=None):
+    """The HowLongToBeat-sorted grid(s) the main window renders right now, in rendered order.
+
+    Returns {'mounted': n, 'sorts': {value: views}, 'liveSort': str|None, 'active': bool,
+    'views': [{'kind', 'id', 'count', 'appids', 'names'}]} where `views` lists only views
+    whose sort is Luna's HowLongToBeat value, one per (kind, collection). `active` is False
+    when no mounted view uses it (a read-only fact; nothing is toggled to find out).
+    Raises LiveProbeError when the main-window page cannot be read."""
+    owner = session is None
+    session = session or LiveSession(title=LIVE_MAIN_TITLE)
+    try:
+        data = session.read('hltb_grid')
+    finally:
+        if owner:
+            session.close()
+    if not isinstance(data, dict):
+        raise LiveProbeError('the sorted grid could not be read')
+    views, taken = [], set()
+    for view in data.get('views') or []:
+        key = (view.get('kind'), view.get('id'))
+        if key in taken or not isinstance(view.get('rows'), list):
+            continue  # React keeps two fibers per mounted component
+        taken.add(key)
+        rows = [r for r in view['rows'] if isinstance(r, list) and len(r) >= 2]
+        views.append({'kind': str(view.get('kind')), 'id': str(view.get('id')), 'count': len(rows),
+                      'appids': [int(r[0] or 0) for r in rows], 'names': [str(r[1] or '') for r in rows]})
+    return {'mounted': int(data.get('mounted') or 0), 'sorts': dict(data.get('sorts') or {}),
+            'liveSort': data.get('live'), 'active': bool(views), 'views': views}
 
 
 def cmd_library_order(options):
