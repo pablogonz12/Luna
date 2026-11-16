@@ -1,0 +1,25 @@
+{
+ "available_actions": [
+  "RightClick"
+ ],
+ "children": [
+  {
+   "available_actions": [
+    "RightClick"
+   ],
+   "children": [
+    {
+     "available_actions": [
+      "RightClick"
+     ],
+     "role": "webarea",
+     "states": [
+      "focused"
+     ]
+    }
+   ],
+   "role": "group"
+  }
+ ],
+ "role": "window"
+}

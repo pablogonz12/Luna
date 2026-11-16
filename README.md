@@ -132,14 +132,34 @@ machines. A future opt-in `--copy` (rsync of the install directory) is a possibl
 
 ## GE-Proton
 
+**Rule: one GE-Proton version per machine.** Steam probes every registered
+compatibility tool against one shared prefix (`compatdata/0/pfx`), and a second GE
+version can overwrite the first one's Windows DLLs through that prefix's symlinks
+(details: [docs/PROTON_SINGLE_VERSION.md](docs/PROTON_SINGLE_VERSION.md)).
+
 GE-Proton lives in `~/.local/share/Steam/compatibilitytools.d`, which is not
-synced, so each machine installs its own. `luna proton status` lists the
-installed tools, the latest GitHub release (shown as `unknown` when offline) and
-games mapped to a tool this machine lacks. `luna proton install [VERSION|latest]`
-verifies the release's sha512, extracts beside the target and renames atomically;
-restart Steam afterwards. `luna proton remove VERSION` refuses while a game is
-mapped to it (`--force` overrides); `luna proton prune --keep N` keeps the newest
-N and never removes mapped tools. Luna only reads Steam's `config.vdf`.
+synced, so each machine installs its own.
+
+- `luna proton status [--json]` lists installed tools, the latest GitHub release
+  (`unknown` when offline), games mapped to a tool this machine lacks, and cheap
+  (hash-free) warnings: several GE versions installed, DLLs bulk-newer than the tool,
+  and prefix links that dangle or point into another tool.
+- `luna proton install [VERSION|latest] [--dry-run]` verifies the release's sha512,
+  extracts beside the target, records an integrity manifest and renames atomically.
+  It never removes the old version: it warns and points at `prune`. Restart Steam after.
+- `luna proton verify [VERSION]` hashes the install against its manifest
+  (`~/.local/share/Lumen/sls-luna/proton-manifests/NAME.json`: relative path ->
+  size + sha256, plus symlink targets) and reports changed / missing / extra files;
+  exit 1 on any mismatch. Installs from before manifests existed are never blessed from
+  disk: `verify VERSION --rebuild` re-downloads the release, checks its sha512, builds the
+  manifest from that tree and compares the install to it. `--against FILE` compares with a
+  `sha256sum`-format reference, read-only.
+- `luna proton remove VERSION [--force]` refuses while a game is mapped to it
+  (`--force` overrides that only).
+- `luna proton prune [--keep N] [--dry-run]` keeps the newest N (**default 1**) and never
+  removes a version a game is mapped to; if one stays, it tells you to remap and prune again.
+- `install`, `remove` and `prune` refuse while Steam, or a process running from the tool
+  directory, is up. `luna doctor` reports the same findings. Luna only reads `config.vdf`.
 
 ## Steam client versions
 
@@ -322,16 +342,21 @@ python3 scripts/luna.py doctor [--json] [--fix]
 `luna gui` looks at what the Steam client actually shows, through the
 `agent-desktop` accessibility CLI (AT-SPI). It is optional:
 without the tool, a graphical session or an accessible Steam every command prints
-`GUI checks skipped: <reason>` and exits 0.
+`GUI checks skipped: <reason>`. Exit codes of `verify`, `library`, `launch`: 0 = pass,
+1 = failure, **5 = skipped** (it could not run; not a pass and not a failure), so a
+script can tell "nothing was checked" from "checked and fine". `gui` / `gui status`
+only reports and always exits 0.
 
 ```bash
 python3 scripts/luna.py gui                    # tool, session, Steam, accessible mode, screen, window titles
 python3 scripts/luna.py gui launch             # start Steam with -cef-force-accessibility (never the normal launch)
 python3 scripts/luna.py gui verify [--launch] [--no-navigate] [--full-screen] [--report FILE] [--screenshots DIR] [--wait SECONDS] [--only NAME]
 python3 scripts/luna.py gui library [--open] [--json] [--save FILE] [--compare FILE [--common]]
+python3 scripts/luna.py gui watch (--role ROLE [--name NAME [--contains]] | --addon KEY) [--interval S] [--duration S] [--fail-if-vanished]
+python3 scripts/luna.py gui restart-check [--force] [--final accessible|normal|stopped] [--keep-steam] [--settle S]
 ```
 
-`verify` waits for a Steam window, refuses the sign-in screen ("sign in first"),
+`verify` waits for a Steam window, waits out the startup window and refuses a persistent sign-in screen ("sign in first"),
 then checks that each installed add-on's panel is found in the accessibility tree
 (sampled several times, so an element that appears and vanishes is reported
 `unstable`), takes a screenshot of the Steam window only (`niri msg action screenshot-window`, the
@@ -342,14 +367,58 @@ explicit `--full-screen` flag captures everything visible with `grim`) and write
 `LUNA_GUI_CHECKS=0` to disable the layer. The panel selectors were confirmed on a
 live signed-in client; the Luna entry point is `button 'Luna'` and the add-on pages
 are reached by one navigation click (the Luna overlay, closed again afterwards;
-`--no-navigate` checks only the entry point). The dialog shape used for blocker
-descriptions is still unverified. `library` reads the Library list in display order
+`--no-navigate` checks only the entry point). All six overlay pages
+(Playtime, Presence, Compressor, HowLongToBeat, SteamGridDB, Graphics) plus Health,
+Settings and About were confirmed the same way. Steam's secondary windows (Settings,
+Friends List) turned out to be ordinary windows (one `webarea` named after the
+window, no dialog role, no Close button), and blocker messages say so; a real
+modal dialog was never observed, so the `alert`/`dialog` handling is still
+unverified. `verify --launch` closes the Steam it started again (through the
+normal graceful shutdown, never a kill) unless `--keep-steam`; a Steam that was
+already running is never closed. The screenshot step saves and restores the
+clipboard (niri's `screenshot-window` overwrites it; needs `wl-clipboard`, else the
+report notes that the clipboard was not restored). Window listing and capture use
+the `niri` backend (tested) or a `generic` one (agent-desktop window list, no
+capture; other compositors are not guessed at, `luna gui` shows which is active). `library` reads the Library list in display order
 (a virtualized grid: only the rendered rows exist, ~54 of the whole library, so the
 result depends on the scroll position); `--save` writes it, `--compare` exits 1 on
 a difference, `--common` compares only the relative order of shared names. Steam
 exposes many AT-SPI windows, so Luna lists them and snapshots the main one. When Steam will not shut down, the
 messages also list the open Steam windows and any dialog buttons, and a Lumen
 sidecar that outlives Steam is reported with its pid and start time.
+
+`watch` samples the tree every `--interval` seconds (default 2) and prints a
+timestamped `APPEARED` / `VANISHED` line when the element changes, then a summary;
+it only reads, so open the page you want to watch yourself. Ctrl-C and `--duration`
+end it with exit 0; `--fail-if-vanished` stops at the first vanish after the element
+was seen and exits 1; a bad selector exits 2. A snapshot that cannot be read is
+never counted as a vanish.
+
+`restart-check` is the one command that restarts Steam, once (twice with
+`--final normal` from accessible mode). It refuses (exit 3) while a game runs or a
+download is active unless `--force`; records the screen, the add-on panels and the
+Library order (complete list and sort state over DevTools when it answers, else the
+visible rows); shuts Steam down through the normal graceful path, reports a Lumen
+sidecar that survived; relaunches in accessible mode, waits up to `--settle`
+seconds for the Library order, compares, and writes
+`gui-reports/gui-restart-<stamp>.md` with a window screenshot. Exit 0 = identical,
+1 = any difference or failure, 2 = bad `--final`, 3 = refused, 5 = skipped. It
+returns Steam to the mode it started in (`--final` overrides, `--keep-steam` leaves
+it accessible). "Sign in to Steam" is also Steam's startup window, so Luna tells three
+states apart: `starting` (window up, or a log-on in `connection_log.txt`), `login` (the
+window outlasted `--login-grace` seconds, default 120, with no log-on attempt) and `main`.
+Only `login` stops the check: nothing is typed and Steam is not restarted again. The report
+says which signal led to each conclusion. A Lumen sidecar that survives the shutdown is a
+warning (exit stays 0), never killed. `luna gui` prints `starting` while it cannot yet tell.
+
+After `install`/`update` on a terminal, one line points at `luna gui verify`; it is
+printed only when the GUI layer could run and never starts Steam.
+
+**Not done, and why:** running the GUI checks across the fleet. `luna fleet` only
+sends fixed scripts over non-interactive SSH, which has no graphical session
+(no `WAYLAND_DISPLAY`, D-Bus or AT-SPI bus), so `luna gui` there would only print
+"skipped". No remote GUI mechanism was built, and none of this was tested on a
+second machine.
 
 ## How Luna fits into the stack
 
@@ -418,7 +487,19 @@ appears next to Lumen's in the menu bar and holds every page.
 ```bash
 bash scripts/status.sh               # installed files vs. the pinned payloads
 python3 scripts/luna.py verify       # manifest, payload and drift checks
+python3 scripts/luna.py status --live   # also ask the RUNNING client (read-only)
 ```
+
+`status --live` reads Steam's DevTools port (found from Lumen's `cef_port`, else the
+`--remote-debugging-port` of `steamwebhelper`) and reports, per add-on, whether its
+backend answers and what it says about its own health, whether the `boot.lua` marker
+is reflected in the running process, and whether the Lumen sidecar started before the
+installed files changed (restart Steam if so). It only calls an allow-listed set of
+read-only RPCs, never clicks, and prints one clear line instead of failing when Steam
+is closed or the port is unavailable. The *rendered* column comes from the GUI layer
+(`n/a (<reason>)` when it is unavailable). `LUNA_LIVE_CHECKS=0` switches it off.
+`python3 scripts/luna.py library-order [--save FILE|--compare FILE|--json]` prints
+the whole Library list order as the client displays it (all rows, not just the visible ones).
 
 In the client, the Luna menu's **Health** page shows the installed versions
 against the pinned bundle, the `boot.lua` marker/backup state, the Lumen/Steam

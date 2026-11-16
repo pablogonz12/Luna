@@ -15,6 +15,7 @@ def build_parser():
                           ('probe', cmd_probe), ('fleet', cmd_fleet), ('games', cmd_games),
                           ('launchers', cmd_launchers),
                           ('doctor', cmd_doctor), ('gui', cmd_gui),
+                          ('library-order', cmd_library_order),
                           ('saves', cmd_saves),
                            ('timer', cmd_timer), ('hook', cmd_hook)):
         child = sub.add_parser(name)
@@ -44,11 +45,23 @@ def build_parser():
             child.add_argument('--json', action='store_true', help='machine-readable findings')
             child.add_argument('--fix', action='store_true',
                                help='apply only safe, reversible fixes (never sudo, never overwrites payloads)')
+        if name == 'status':
+            child.add_argument('--live', action='store_true',
+                               help='also probe the RUNNING Steam client (read-only, through its DevTools '
+                                    'port): backend health, boot.lua marker, stale Lumen sidecar')
+        if name == 'library-order':
+            child.add_argument('--json', action='store_true', help='machine-readable output')
+            child.add_argument('--save', metavar='FILE', help='write the complete order to FILE')
+            child.add_argument('--compare', metavar='FILE', help='compare with a saved order (exit 1 if different)')
+            child.add_argument('--limit', type=int, default=40, metavar='N',
+                               help='rows to print (default 40; 0 = all)')
         if name == 'gui':
             child.add_argument('gui_action', nargs='?', default='status',
-                               choices=['status', 'launch', 'verify', 'library'],
+                               choices=['status', 'launch', 'verify', 'library', 'watch', 'restart-check'],
                                help='status (default), launch Steam in accessible mode, verify add-on panels, '
-                                    'or read the Library list order')
+                                    'read the Library list order, watch an element appear/vanish, or run the Steam restart-cycle '
+                                    'check. Exit codes of verify/library/launch: '
+                                    '0 pass, 1 failure, 5 skipped (the check could not run)')
             child.add_argument('--json', action='store_true', help='with status/library: machine-readable output')
             child.add_argument('--launch', action='store_true',
                                help='with verify: start Steam in accessible mode first if it is not running')
@@ -65,6 +78,35 @@ def build_parser():
                                help='with library --compare: only the relative order of names in both lists')
             child.add_argument('--report', metavar='FILE', help='with verify: markdown report path')
             child.add_argument('--screenshots', metavar='DIR', help='with verify: screenshot directory')
+            child.add_argument('--keep-steam', action='store_true',
+                               help='with verify --launch / restart-check: leave Steam as it ends up instead of '
+                                    'returning it to the state it was in before')
+            child.add_argument('--force', action='store_true',
+                               help='with restart-check: continue although a game is running or a download is active')
+            child.add_argument('--final', choices=['accessible', 'normal', 'stopped'],
+                               help='with restart-check: how to leave Steam (default: the mode it started in; '
+                                    'normal costs one more restart)')
+            child.add_argument('--shutdown-timeout', type=int, default=90, metavar='SECONDS',
+                               help='with restart-check: wait this long for Steam to exit (default 90)')
+            child.add_argument('--relaunch-wait', type=int, default=240, metavar='SECONDS',
+                               help='with restart-check: wait this long for the relaunched window (default 240)')
+            child.add_argument('--settle', type=int, default=90, metavar='SECONDS',
+                               help='with restart-check: after the relaunch, wait up to this long for the Library order to come up (default 90)')
+            child.add_argument('--login-grace', type=int, default=GUI_LOGIN_GRACE, metavar='SECONDS',
+                               help='how long a "Sign in to Steam" window may stay up, with no log-on attempt in '
+                                    'connection_log, before it counts as the real sign-in form (default %d; Steam shows '
+                                    'the same window while it auto-logs-on, which took ~37 s)' % GUI_LOGIN_GRACE)
+            child.add_argument('--role', help='with watch: accessibility role to watch (e.g. button)')
+            child.add_argument('--name', help='with watch: element name (exact unless --contains)')
+            child.add_argument('--contains', action='store_true', help='with watch: --name matches as a substring')
+            child.add_argument('--addon', metavar='KEY',
+                               help='with watch: use the panel selector of an add-on/page key (e.g. playtime, hltb)')
+            child.add_argument('--interval', type=float, default=2.0, metavar='SECONDS',
+                               help='with watch: seconds between samples (default 2; min 0.2)')
+            child.add_argument('--duration', type=int, metavar='SECONDS',
+                               help='with watch: stop after this many seconds (default: until Ctrl-C)')
+            child.add_argument('--fail-if-vanished', action='store_true',
+                               help='with watch: stop and exit 1 when the element vanishes after having been seen')
             child.add_argument('--full-screen', action='store_true',
                                help='with verify: capture the WHOLE screen with grim (everything visible, '
                                     'including unrelated windows); default is the Steam window only')
@@ -104,13 +146,18 @@ def build_parser():
                                     'with unlock: launch Steam so it self-updates')
         if name == 'proton':
             child.add_argument('proton_action', nargs='?', default='status',
-                               choices=['status', 'install', 'remove', 'prune'],
+                               choices=['status', 'install', 'remove', 'prune', 'verify'],
                                help='what to do (default: status)')
             child.add_argument('proton_version', nargs='?', help='GE-Proton version (install: default latest)')
             child.add_argument('--json', action='store_true', help='with status: machine-readable output')
             child.add_argument('--dry-run', action='store_true', help='report only; change nothing')
-            child.add_argument('--force', action='store_true', help='with remove: even if games are mapped to it')
-            child.add_argument('--keep', type=int, default=2, help='with prune: newest GE-Proton to keep (default 2)')
+            child.add_argument('--force', action='store_true', help='with remove: even if games are mapped to it (never overrides a running Steam)')
+            child.add_argument('--keep', type=int, default=1, help='with prune: newest GE-Proton to keep (default 1)')
+            child.add_argument('--rebuild', action='store_true',
+                               help='with verify VERSION: create the manifest from a re-downloaded, sha512-verified '
+                                    'release, then check the install against it')
+            child.add_argument('--against', metavar='FILE',
+                               help='with verify VERSION: compare with a sha256sum-format reference file (read-only)')
         if name == 'probe':
             child.add_argument('--json', action='store_true', help='one-line JSON (used by luna fleet)')
         if name == 'fleet':

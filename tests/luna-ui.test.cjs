@@ -828,7 +828,10 @@ test('a pending HowLongToBeat fetch is polled until the record arrives',async()=
   menubarFixture(document,true);
   const {calls,overlay}=await openHltbPage(document,{hltb:hltbFixture(),fetchPending:3});
   findNode(rowFor(overlay,'Portal 2'),node=>node.textContent==='Fetch').onclick();
-  await new Promise(resolve=>setTimeout(resolve,80));
+  // Bounded wait on the condition itself (a fixed sleep was flaky under load).
+  const arrived=()=>/1\.0 h story/.test(textOf(document.getElementById('sls-luna-overlay')));
+  for(let waited=0;!arrived()&&waited<5000;waited+=10)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(arrived(),'the record never arrived within 5 s');
   const fetches=calls.filter(entry=>entry.fn==='SlsHltbFetch');
   assert.equal(fetches.length,4,'three pending answers, then the record');
   const text=textOf(document.getElementById('sls-luna-overlay'));

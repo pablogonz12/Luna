@@ -6,6 +6,7 @@ import json
 import contextlib
 import os
 os.environ.setdefault('LUNA_GUI_CHECKS', '0')  # hermetic: tests never probe the real desktop (test_gui_check manages it itself)
+os.environ.setdefault('LUNA_LIVE_CHECKS', '0')  # hermetic: tests never contact a real Steam (test_live_probe uses a fake endpoint)
 from pathlib import Path
 import subprocess
 import tempfile

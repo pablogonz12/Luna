@@ -63,7 +63,12 @@ Commands:
                                         download, sha512-verify and atomically install GE-Proton
                                         (restart Steam afterwards)
     luna proton remove VERSION [--force]  refuses while a game is mapped to it
-    luna proton prune [--keep N] [--dry-run]  keep the newest N (default 2); mapped tools are kept
+    luna proton prune [--keep N] [--dry-run]  keep the newest N (default 1); mapped tools are kept
+    luna proton verify [VERSION] [--rebuild|--against FILE]
+                                        hash the install against its manifest (changed/missing/extra,
+                                        exit 1 on mismatch); --rebuild makes the manifest from a
+                                        re-downloaded, sha512-verified release. install/remove/prune
+                                        refuse while Steam or a wine process from the tool runs
     luna fleet add|remove|list [HOST]   hosts managed over SSH (~/.config/luna/fleet.json)
     luna fleet status [--json]          Luna/Steam state and doctor warn/error counts (DOCTOR column)
                                         of this machine and every host
@@ -80,7 +85,9 @@ Commands:
                                         (Steam closed; never kills anything)
 """
 import argparse
+import base64
 import contextlib
+import gzip
 import hashlib
 import io
 import json
@@ -88,6 +95,7 @@ import lzma
 import os
 import re
 import shutil
+import socket
 import stat
 import struct
 import subprocess
@@ -155,5 +163,6 @@ EXIT_OK = 0
 EXIT_REFUSED = 2
 EXIT_NEEDS_FORCE = 3
 EXIT_PATCH = 4
+EXIT_SKIPPED = 5  # an optional check (luna gui) could not run: not a pass, not a failure
 
 

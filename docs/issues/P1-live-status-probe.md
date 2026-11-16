@@ -8,6 +8,15 @@ all look identical on disk.
 The add-on projects already have the pieces: a read-only CEF/DevTools client, the
 `SlsPlaytimeGet` payload and the `SlsPresenceContractProbe` RPC.
 
+## Status: implemented
+
+`luna status --live` (`scripts/luna_cli/96_live_probe.py`, covered by
+`tests/test_live_probe.py`), see [ARCHITECTURE](../ARCHITECTURE.md#live-probe-status---live-library-order).
+Every criterion below is met. Notes: there was no existing DevTools client to reuse, so a minimal stdlib
+one was written; the compressor add-on has no read-only health RPC (its getter can start a scan) and
+is reported as `n/a`; the *rendered* column never navigates, so add-on pages other than Luna's
+button show `n/a (navigation disabled)` until `luna gui verify`. Still open: nothing from this issue.
+
 ## Acceptance criteria
 
 - `status --live` reports, per add-on, whether its backend answers and what it

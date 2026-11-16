@@ -52,15 +52,18 @@ open or closed.
 `luna gui launch`) can now cover the panel-loading part of gates 2 and 3: after
 `install` and a restart it checks that the Luna button and the Playtime, Presence
 and Compressor panels are present and stable in Steam's accessibility tree, and
-writes a markdown report plus a screenshot of the Steam window only as evidence
+treats "Sign in to Steam" as the startup window until it persists past `--login-grace` (default 120 s) with no log-on in `connection_log.txt`; it writes a markdown report plus a screenshot of the Steam window only as evidence
 (niri `screenshot-window`; no full-screen capture unless `--full-screen` is passed). It does **not** cover
 gates 7 and 8 (client build, Gamescope/mouse behaviour) or backend health. The
 selectors in `GUI_PANEL_SELECTORS` were confirmed on a live signed-in client (Luna entry
 `button 'Luna'`, overlay pages `heading 'Playtime'/'Presence'/'Compressor'`); the
-HowLongToBeat, SteamGridDB, Graphics, Health, Settings and About pages are not covered
-and the dialog shape (`alert`/`dialog` with button children) is **unverified**. Run
-`luna gui library --save FILE` before a restart and `--compare FILE --common` after
-to check the Library sort order.
+HowLongToBeat, SteamGridDB, Graphics, Health, Settings and About pages are confirmed
+too (`gui watch --addon KEY`). A real modal dialog was never observed, so the
+`alert`/`dialog` shape is **unverified** (a secondary window is a plain `webarea`).
+`luna gui restart-check` now covers the restart part of gates 2-4 with before/after
+evidence (Library order and sort, add-on panels, sidecar survival, shutdown and
+relaunch times); `library --save/--compare --common` remains for manual use. Not
+covered: fleet hosts (no graphical session over SSH), other compositors than niri.
 
 ## Evidence requirements
 

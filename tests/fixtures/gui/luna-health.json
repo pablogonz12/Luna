@@ -1,0 +1,3244 @@
+{
+ "command": "snapshot",
+ "data": {
+  "app": "steamwebhelper",
+  "complete": true,
+  "tree": {
+   "available_actions": [
+    "RightClick"
+   ],
+   "children": [
+    {
+     "available_actions": [
+      "RightClick"
+     ],
+     "children": [
+      {
+       "available_actions": [
+        "RightClick",
+        "SetFocus"
+       ],
+       "children": [
+        {
+         "available_actions": [
+          "Click",
+          "RightClick"
+         ],
+         "children": [
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "GG9wVQz6PLlhGHlJyZh4E"
+               ],
+               "ref_id": "@s39acihbvxm30m:e4",
+               "role": "image"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Steam",
+               "ref_id": "@s39acihbvxm30m:e5",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e3",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s39acihbvxm30m:e2",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "View",
+               "ref_id": "@s39acihbvxm30m:e8",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e7",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s39acihbvxm30m:e6",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Friends",
+               "ref_id": "@s39acihbvxm30m:e11",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e10",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s39acihbvxm30m:e9",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Games",
+               "ref_id": "@s39acihbvxm30m:e14",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e13",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s39acihbvxm30m:e12",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Help",
+               "ref_id": "@s39acihbvxm30m:e17",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e16",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s39acihbvxm30m:e15",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Lumen",
+               "ref_id": "@s39acihbvxm30m:e20",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "lumen-auto-fix-pill-copy"
+             ],
+             "ref_id": "@s39acihbvxm30m:e19",
+             "role": "group"
+            }
+           ],
+           "description": "Lumen settings",
+           "name": "Lumen settings",
+           "native_id": {
+            "kind": "ax_dom_identifier",
+            "value": "lumen-moon-btn"
+           },
+           "ref_id": "@s39acihbvxm30m:e18",
+           "role": "button",
+           "subrole": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "description": "SLS Luna - settings for Playtime, Presence and Compressor",
+           "name": "Luna",
+           "native_id": {
+            "kind": "ax_dom_identifier",
+            "value": "sls-luna-btn"
+           },
+           "ref_id": "@s39acihbvxm30m:e21",
+           "role": "button",
+           "states": [
+            "focused"
+           ],
+           "subrole": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_34bQcTHo5QKzuujoEyU1tm"
+             ],
+             "ref_id": "@s39acihbvxm30m:e23",
+             "role": "image"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_1B_GY6Ybp1MERAoz73-3um"
+             ],
+             "ref_id": "@s39acihbvxm30m:e24",
+             "role": "image"
+            }
+           ],
+           "dom_classes": [
+            "_2Szzh5sKyGgnLUR870zbDE",
+            "_5wILZhsLODVwGfcJ0hKmJ",
+            "_1oEwirQksXfZ-3RWWslbAR"
+           ],
+           "ref_id": "@s39acihbvxm30m:e22",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_34bQcTHo5QKzuujoEyU1tm"
+               ],
+               "ref_id": "@s39acihbvxm30m:e27",
+               "role": "image"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e26",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_3mGEzzp18imtSzGPkduedi"
+           ],
+           "ref_id": "@s39acihbvxm30m:e25",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_3xUpb5DWXPFNcHHIcv-9pe",
+                "avatarStatus",
+                "right"
+               ],
+               "ref_id": "@s39acihbvxm30m:e30",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_3h-QRJGxnVOIExtHD1R0f2",
+                "avatar"
+               ],
+               "name": "To get missing image descriptions, open the context menu.",
+               "ref_id": "@s39acihbvxm30m:e31",
+               "role": "image",
+               "role_description": "Unlabeled image"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 001",
+                 "ref_id": "@s39acihbvxm30m:e33",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s39acihbvxm30m:e32",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_3x51wbt5DYyWC8JKwQ51ir"
+               ],
+               "ref_id": "@s39acihbvxm30m:e34",
+               "role": "image"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e29",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT"
+           ],
+           "ref_id": "@s39acihbvxm30m:e28",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_34bQcTHo5QKzuujoEyU1tm"
+             ],
+             "ref_id": "@s39acihbvxm30m:e36",
+             "role": "image"
+            }
+           ],
+           "dom_classes": [
+            "_2Szzh5sKyGgnLUR870zbDE",
+            "_3LKQ3S_yqrebeNLF6aeiog"
+           ],
+           "ref_id": "@s39acihbvxm30m:e35",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "title-area-highlight"
+               ],
+               "ref_id": "@s39acihbvxm30m:e39",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "dom_classes": [
+                  "SVGIcon_Button",
+                  "SVGIcon_X_Line"
+                 ],
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "Layer_2"
+                 },
+                 "ref_id": "@s39acihbvxm30m:e41",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "title-area-icon",
+                "closeButton",
+                "windowControlButton"
+               ],
+               "ref_id": "@s39acihbvxm30m:e40",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "dom_classes": [
+                  "SVGIcon_Button",
+                  "SVGIcon_Maximize"
+                 ],
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "base"
+                 },
+                 "ref_id": "@s39acihbvxm30m:e43",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "title-area-icon",
+                "maximizeButton",
+                "windowControlButton"
+               ],
+               "ref_id": "@s39acihbvxm30m:e42",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "dom_classes": [
+                  "SVGIcon_Button",
+                  "SVGIcon_Minimize"
+                 ],
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "base"
+                 },
+                 "ref_id": "@s39acihbvxm30m:e45",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "title-area-icon",
+                "minimizeButton",
+                "windowControlButton"
+               ],
+               "ref_id": "@s39acihbvxm30m:e44",
+               "role": "group"
+              }
+             ],
+             "dom_classes": [
+              "TitleBar",
+              "title-area"
+             ],
+             "ref_id": "@s39acihbvxm30m:e38",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "qP17eBPXkfezFfexZ4hC3"
+           ],
+           "ref_id": "@s39acihbvxm30m:e37",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "_25lBLzuVeYAUG279up4xP8",
+            "_1LYTHQzcI1u6tcxbbcc5V3"
+           ],
+           "ref_id": "@s39acihbvxm30m:e46",
+           "role": "image"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "_25lBLzuVeYAUG279up4xP8",
+            "_2cO0HdvLEGAdhosLekWsmo"
+           ],
+           "ref_id": "@s39acihbvxm30m:e47",
+           "role": "image"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "STORE",
+             "ref_id": "@s39acihbvxm30m:e49",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s39acihbvxm30m:e48",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "LIBRARY",
+             "ref_id": "@s39acihbvxm30m:e51",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s39acihbvxm30m:e50",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "COMMUNITY",
+             "ref_id": "@s39acihbvxm30m:e53",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s39acihbvxm30m:e52",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 002",
+             "ref_id": "@s39acihbvxm30m:e55",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s39acihbvxm30m:e54",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "ref_id": "@s39acihbvxm30m:e59",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "_3izqEKa-zuPIrUDSm1bRvf",
+                "_3KaB94Jl4r0hFkthDPJy09"
+               ],
+               "ref_id": "@s39acihbvxm30m:e58",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "ref_id": "@s39acihbvxm30m:e62",
+                   "role": "image"
+                  }
+                 ],
+                 "dom_classes": [
+                  "_3izqEKa-zuPIrUDSm1bRvf",
+                  "_3GFljPJsX8WvOJcPupy_RG",
+                  "Focusable"
+                 ],
+                 "ref_id": "@s39acihbvxm30m:e61",
+                 "role": "group"
+                },
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "name": "Text 003",
+                   "ref_id": "@s39acihbvxm30m:e64",
+                   "role": "statictext"
+                  }
+                 ],
+                 "dom_classes": [
+                  "MZPxEZcxAGtPDf1NYtouS"
+                 ],
+                 "ref_id": "@s39acihbvxm30m:e63",
+                 "role": "group"
+                }
+               ],
+               "dom_classes": [
+                "_2m_orETo6AghzAnc0sISCt"
+               ],
+               "ref_id": "@s39acihbvxm30m:e60",
+               "role": "group"
+              }
+             ],
+             "dom_classes": [
+              "UkR3sY319PuaUNuUWks2K"
+             ],
+             "ref_id": "@s39acihbvxm30m:e57",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "name": "SCROLL TO TOP",
+                   "ref_id": "@s39acihbvxm30m:e68",
+                   "role": "statictext"
+                  }
+                 ],
+                 "ref_id": "@s39acihbvxm30m:e67",
+                 "role": "group"
+                }
+               ],
+               "dom_classes": [
+                "_1J21tLst5SEhBPkVRT53UV"
+               ],
+               "ref_id": "@s39acihbvxm30m:e66",
+               "role": "group"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e65",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_1rDh5rXSFZJOqCa4UpnI4z"
+           ],
+           "ref_id": "@s39acihbvxm30m:e56",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_3Zx5iV3_8FmQXnVasZx_5z"
+             ],
+             "ref_id": "@s39acihbvxm30m:e70",
+             "role": "image"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Your Steam Client has been updated",
+               "ref_id": "@s39acihbvxm30m:e72",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2EXJTyc69b45nXI4h3RknI"
+             ],
+             "ref_id": "@s39acihbvxm30m:e71",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Thanks for participating in the beta. This beta has ended. Restart Steam to return to the current release.",
+               "ref_id": "@s39acihbvxm30m:e74",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "SwtQX-CurM3HPVJ9DPI1V"
+             ],
+             "ref_id": "@s39acihbvxm30m:e73",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Restart Steam",
+               "ref_id": "@s39acihbvxm30m:e76",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2ohOQgahhMYnIEfAQmv9B8"
+             ],
+             "ref_id": "@s39acihbvxm30m:e75",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Dismiss",
+               "ref_id": "@s39acihbvxm30m:e78",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2ohOQgahhMYnIEfAQmv9B8"
+             ],
+             "ref_id": "@s39acihbvxm30m:e77",
+             "role": "group"
+            }
+           ],
+           "ref_id": "@s39acihbvxm30m:e69",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Your Steam Client is already up to date - ",
+               "ref_id": "@s39acihbvxm30m:e81",
+               "role": "statictext"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick",
+                "SetFocus"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "View patch notes",
+                 "ref_id": "@s39acihbvxm30m:e83",
+                 "role": "statictext"
+                }
+               ],
+               "dom_classes": [
+                "_3om6pVKUdxdBkypYpSroHM"
+               ],
+               "name": "View patch notes",
+               "ref_id": "@s39acihbvxm30m:e82",
+               "role": "link"
+              }
+             ],
+             "dom_classes": [
+              "_2EXJTyc69b45nXI4h3RknI"
+             ],
+             "ref_id": "@s39acihbvxm30m:e80",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Close",
+               "ref_id": "@s39acihbvxm30m:e85",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2ohOQgahhMYnIEfAQmv9B8"
+             ],
+             "ref_id": "@s39acihbvxm30m:e84",
+             "role": "group"
+            }
+           ],
+           "ref_id": "@s39acihbvxm30m:e79",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "ref_id": "@s39acihbvxm30m:e87",
+             "role": "image"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Add a Game",
+               "ref_id": "@s39acihbvxm30m:e89",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_3OhUxFVlQYr9W5ThxstR8k"
+             ],
+             "ref_id": "@s39acihbvxm30m:e88",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2foCkpRXhqq0UGVE50BWqj"
+           ],
+           "ref_id": "@s39acihbvxm30m:e86",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "ref_id": "@s39acihbvxm30m:e92",
+               "role": "image"
+              }
+             ],
+             "dom_classes": [
+              "_1KrJ3sFAqPBN9mfpaNTU5F"
+             ],
+             "ref_id": "@s39acihbvxm30m:e91",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 004",
+               "ref_id": "@s39acihbvxm30m:e94",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_3wJnTtcTLEp0R7eQj_mK8Y"
+             ],
+             "ref_id": "@s39acihbvxm30m:e93",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "ip-YZhijAMZcuRoXBGiye"
+           ],
+           "ref_id": "@s39acihbvxm30m:e90",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Friends & Chat",
+               "ref_id": "@s39acihbvxm30m:e97",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_3OhUxFVlQYr9W5ThxstR8k"
+             ],
+             "ref_id": "@s39acihbvxm30m:e96",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "ref_id": "@s39acihbvxm30m:e98",
+             "role": "image"
+            }
+           ],
+           "dom_classes": [
+            "_1TdaAqMFadi0UTqilrkelR"
+           ],
+           "ref_id": "@s39acihbvxm30m:e95",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "window_resize_grip"
+           ],
+           "ref_id": "@s39acihbvxm30m:e99",
+           "role": "group"
+          }
+         ],
+         "dom_classes": [
+          "_1mfQu39T7gxcr0KSHso6_A"
+         ],
+         "native_id": {
+          "kind": "ax_dom_identifier",
+          "value": "popup_target"
+         },
+         "ref_id": "@s39acihbvxm30m:e1",
+         "role": "group"
+        },
+        {
+         "available_actions": [
+          "Click",
+          "RightClick"
+         ],
+         "children": [
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "LUNA",
+             "ref_id": "@s39acihbvxm30m:e102",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-side-title"
+           ],
+           "ref_id": "@s39acihbvxm30m:e101",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Playtime",
+             "ref_id": "@s39acihbvxm30m:e104",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s39acihbvxm30m:e103",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Presence",
+             "ref_id": "@s39acihbvxm30m:e106",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s39acihbvxm30m:e105",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Compressor",
+             "ref_id": "@s39acihbvxm30m:e108",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s39acihbvxm30m:e107",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "HowLongToBeat",
+             "ref_id": "@s39acihbvxm30m:e110",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s39acihbvxm30m:e109",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "SteamGridDB",
+             "ref_id": "@s39acihbvxm30m:e112",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s39acihbvxm30m:e111",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Graphics",
+             "ref_id": "@s39acihbvxm30m:e114",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s39acihbvxm30m:e113",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Health",
+             "ref_id": "@s39acihbvxm30m:e116",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab",
+            "active"
+           ],
+           "ref_id": "@s39acihbvxm30m:e115",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Settings",
+             "ref_id": "@s39acihbvxm30m:e118",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s39acihbvxm30m:e117",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "About",
+             "ref_id": "@s39acihbvxm30m:e120",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s39acihbvxm30m:e119",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "Account 00000",
+           "ref_id": "@s39acihbvxm30m:e121",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "Connected",
+           "ref_id": "@s39acihbvxm30m:e122",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Health (local diagnostics)",
+             "ref_id": "@s39acihbvxm30m:e124",
+             "role": "statictext"
+            }
+           ],
+           "name": "Health (local diagnostics)",
+           "ref_id": "@s39acihbvxm30m:e123",
+           "role": "heading"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-btn",
+            "secondary"
+           ],
+           "name": "Refresh",
+           "ref_id": "@s39acihbvxm30m:e125",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-x"
+           ],
+           "name": "\u2715",
+           "ref_id": "@s39acihbvxm30m:e126",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 005",
+               "ref_id": "@s39acihbvxm30m:e129",
+               "role": "statictext"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 006",
+                 "ref_id": "@s39acihbvxm30m:e131",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s39acihbvxm30m:e130",
+               "role": "statictext"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 007",
+               "ref_id": "@s39acihbvxm30m:e132",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e128",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 008",
+                 "ref_id": "@s39acihbvxm30m:e135",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s39acihbvxm30m:e134",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e133",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 009",
+               "ref_id": "@s39acihbvxm30m:e137",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-error"
+             ],
+             "ref_id": "@s39acihbvxm30m:e136",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 010",
+               "ref_id": "@s39acihbvxm30m:e139",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-error"
+             ],
+             "ref_id": "@s39acihbvxm30m:e138",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "6",
+               "ref_id": "@s39acihbvxm30m:e141",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e140",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 011",
+             "ref_id": "@s39acihbvxm30m:e142",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 012",
+               "ref_id": "@s39acihbvxm30m:e144",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e143",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 013",
+             "ref_id": "@s39acihbvxm30m:e145",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 014",
+               "ref_id": "@s39acihbvxm30m:e147",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e146",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 015",
+             "ref_id": "@s39acihbvxm30m:e148",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "1000000",
+               "ref_id": "@s39acihbvxm30m:e150",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e149",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 016",
+             "ref_id": "@s39acihbvxm30m:e151",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "4501",
+               "ref_id": "@s39acihbvxm30m:e153",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s39acihbvxm30m:e152",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 017",
+             "ref_id": "@s39acihbvxm30m:e154",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 018",
+                 "ref_id": "@s39acihbvxm30m:e157",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s39acihbvxm30m:e156",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e155",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 019",
+               "ref_id": "@s39acihbvxm30m:e159",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e158",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 020",
+               "ref_id": "@s39acihbvxm30m:e161",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e160",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 021",
+               "ref_id": "@s39acihbvxm30m:e163",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e162",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 022",
+               "ref_id": "@s39acihbvxm30m:e165",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e164",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 023",
+               "ref_id": "@s39acihbvxm30m:e167",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e166",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 024",
+               "ref_id": "@s39acihbvxm30m:e169",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e168",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 025",
+                 "ref_id": "@s39acihbvxm30m:e172",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s39acihbvxm30m:e171",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e170",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 026",
+               "ref_id": "@s39acihbvxm30m:e174",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e173",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 027",
+               "ref_id": "@s39acihbvxm30m:e176",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e175",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 028",
+               "ref_id": "@s39acihbvxm30m:e178",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e177",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 029",
+               "ref_id": "@s39acihbvxm30m:e180",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e179",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 030",
+               "ref_id": "@s39acihbvxm30m:e182",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e181",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 031",
+               "ref_id": "@s39acihbvxm30m:e184",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e183",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 032",
+               "ref_id": "@s39acihbvxm30m:e186",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e185",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Settings",
+                 "ref_id": "@s39acihbvxm30m:e189",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s39acihbvxm30m:e188",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e187",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 033",
+               "ref_id": "@s39acihbvxm30m:e191",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e190",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 034",
+                 "ref_id": "@s39acihbvxm30m:e194",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s39acihbvxm30m:e193",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e192",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 035",
+               "ref_id": "@s39acihbvxm30m:e196",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e195",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 036",
+               "ref_id": "@s39acihbvxm30m:e198",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e197",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 037",
+               "ref_id": "@s39acihbvxm30m:e200",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e199",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 038",
+               "ref_id": "@s39acihbvxm30m:e202",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e201",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 039",
+               "ref_id": "@s39acihbvxm30m:e204",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e203",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 040",
+               "ref_id": "@s39acihbvxm30m:e206",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e205",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 041",
+               "ref_id": "@s39acihbvxm30m:e208",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e207",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 042",
+               "ref_id": "@s39acihbvxm30m:e210",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e209",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 043",
+               "ref_id": "@s39acihbvxm30m:e212",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e211",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 044",
+               "ref_id": "@s39acihbvxm30m:e214",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e213",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 045",
+               "ref_id": "@s39acihbvxm30m:e216",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e215",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 046",
+               "ref_id": "@s39acihbvxm30m:e218",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e217",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 047",
+               "ref_id": "@s39acihbvxm30m:e220",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e219",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 048",
+               "ref_id": "@s39acihbvxm30m:e222",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e221",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 049",
+               "ref_id": "@s39acihbvxm30m:e224",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e223",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 050",
+               "ref_id": "@s39acihbvxm30m:e226",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e225",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 051",
+               "ref_id": "@s39acihbvxm30m:e228",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e227",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 052",
+               "ref_id": "@s39acihbvxm30m:e230",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e229",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 053",
+               "ref_id": "@s39acihbvxm30m:e232",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e231",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 054",
+               "ref_id": "@s39acihbvxm30m:e234",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e233",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 055",
+                 "ref_id": "@s39acihbvxm30m:e237",
+                 "role": "statictext",
+                 "states": [
+                  "offscreen"
+                 ]
+                }
+               ],
+               "ref_id": "@s39acihbvxm30m:e236",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e235",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 056",
+               "ref_id": "@s39acihbvxm30m:e239",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e238",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 057",
+               "ref_id": "@s39acihbvxm30m:e241",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e240",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 058",
+             "ref_id": "@s39acihbvxm30m:e242",
+             "role": "button",
+             "states": [
+              "disabled",
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "sls-luna-btn"
+             ],
+             "name": "Text 059",
+             "ref_id": "@s39acihbvxm30m:e243",
+             "role": "button",
+             "states": [
+              "disabled",
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 060",
+             "ref_id": "@s39acihbvxm30m:e244",
+             "role": "button",
+             "states": [
+              "disabled",
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "description": "Reinstalls the Lumen bridge when a base update wiped it (Steam must be closed)",
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 061",
+             "ref_id": "@s39acihbvxm30m:e245",
+             "role": "button",
+             "states": [
+              "disabled",
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 062",
+               "ref_id": "@s39acihbvxm30m:e247",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e246",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-subtab"
+             ],
+             "name": "Text 063",
+             "ref_id": "@s39acihbvxm30m:e248",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-subtab",
+              "active"
+             ],
+             "name": "Text 064",
+             "ref_id": "@s39acihbvxm30m:e249",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-subtab"
+             ],
+             "name": "Text 065",
+             "ref_id": "@s39acihbvxm30m:e250",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 066",
+               "ref_id": "@s39acihbvxm30m:e252",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e251",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 067",
+                 "ref_id": "@s39acihbvxm30m:e255",
+                 "role": "statictext",
+                 "states": [
+                  "offscreen"
+                 ]
+                }
+               ],
+               "ref_id": "@s39acihbvxm30m:e254",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e253",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 068",
+               "ref_id": "@s39acihbvxm30m:e257",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e256",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "description": "Update Steam to Valve\u2019s latest, pin and cache it, then reinstall Luna - applies when Steam is closed",
+             "dom_classes": [
+              "sls-luna-btn"
+             ],
+             "name": "Text 069",
+             "ref_id": "@s39acihbvxm30m:e258",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 070",
+             "ref_id": "@s39acihbvxm30m:e259",
+             "role": "button",
+             "states": [
+              "disabled",
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 071",
+               "ref_id": "@s39acihbvxm30m:e261",
+               "role": "statictext",
+               "states": [
+                "offscreen"
+               ]
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s39acihbvxm30m:e260",
+             "role": "paragraph",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 072",
+             "ref_id": "@s39acihbvxm30m:e262",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn"
+             ],
+             "name": "Text 073",
+             "ref_id": "@s39acihbvxm30m:e263",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "description": "Queues a package snapshot for the next closed-Steam window",
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 074",
+             "ref_id": "@s39acihbvxm30m:e264",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 075",
+             "ref_id": "@s39acihbvxm30m:e265",
+             "role": "button",
+             "states": [
+              "disabled",
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 076",
+             "ref_id": "@s39acihbvxm30m:e266",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-body"
+           ],
+           "ref_id": "@s39acihbvxm30m:e127",
+           "role": "group"
+          }
+         ],
+         "native_id": {
+          "kind": "ax_dom_identifier",
+          "value": "sls-luna-overlay"
+         },
+         "ref_id": "@s39acihbvxm30m:e100",
+         "role": "group"
+        }
+       ],
+       "name": "Steam",
+       "role": "webarea"
+      }
+     ],
+     "role": "group"
+    }
+   ],
+   "role": "window"
+  }
+ },
+ "ok": true,
+ "version": "2.6"
+}

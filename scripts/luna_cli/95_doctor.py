@@ -244,8 +244,10 @@ def _doctor_bridge():
                               % (hook['result'], hook.get('reason') or '?'), 'luna hook repair'))
     steam_up = process_running('steam') or process_running('steamwebhelper')
     if process_running('lumen') and not steam_up:
+        survivor = gui_lumen_survivor()
+        where = ' (pid %s, started %s)' % survivor if survivor and survivor[0] != '?' else ''
         found.append(_finding('lumen.sidecar', 'warn',
-                              'a Lumen sidecar is running without Steam; it keeps the old boot.lua in memory',
+                              'a Lumen sidecar is running without Steam%s; it keeps the old boot.lua in memory' % where,
                               'pkill -u $(id -u) -x lumen'))
     return found
 

@@ -5,6 +5,7 @@ import io
 import json
 import os
 os.environ.setdefault('LUNA_GUI_CHECKS', '0')  # hermetic: tests never probe the real desktop (test_gui_check manages it itself)
+os.environ.setdefault('LUNA_LIVE_CHECKS', '0')  # hermetic: tests never contact a real Steam (test_live_probe uses a fake endpoint)
 from pathlib import Path
 import tarfile
 import tempfile
@@ -79,6 +80,11 @@ class ProtonTest(unittest.TestCase):
         self.tools = self.steam / 'compatibilitytools.d'
         self.tools.mkdir()
         self.network = {}
+        self.proc = Path(self.temp.name) / 'proc'
+        self.proc.mkdir()
+        env = mock.patch.dict(os.environ, {'LUNA_PROC_DIR': str(self.proc)})
+        env.start()
+        self.addCleanup(env.stop)
 
     def tool(self, name):
         d = self.tools / name
@@ -221,9 +227,200 @@ class ProtonTest(unittest.TestCase):
     def test_doctor_and_probe(self):
         self.tool('GE-Proton9-1')
         found = luna._doctor_proton()
-        self.assertEqual([f['severity'] for f in found], ['warn'])
-        self.assertIn('luna proton install GE-Proton8-1', found[0]['fix'])
+        self.assertEqual([f['id'] for f in found], ['proton.no-manifest', 'proton.missing-tool'])
+        self.assertEqual([f['severity'] for f in found], ['info', 'warn'])  # info never fails doctor
+        self.assertIn('luna proton install GE-Proton8-1', found[1]['fix'])
         self.assertEqual(luna.proton_installed()[0]['version'], 'GE-Proton9-1')
+
+
+class ProtonSafetyTest(ProtonTest):
+    def full_tool(self, name, dlls=30, old=True):
+        d = self.tools / name
+        (d / 'files/lib/wine/x86_64-windows').mkdir(parents=True)
+        (d / 'version').write_text('1 %s\n' % name)
+        (d / 'proton').write_text('x')
+        stamp = (d / 'version').stat().st_mtime - 600
+        for i in range(dlls):
+            f = d / 'files/lib/wine/x86_64-windows' / ('m%d.dll' % i)
+            f.write_text('dll-%s-%d' % (name, i))
+            if old:
+                os.utime(str(f), (stamp, stamp))
+        return d
+
+    def prefix(self, links, owner=None):
+        compat = self.steam / 'steamapps/compatdata/0'
+        sysdir = compat / 'pfx/drive_c/windows/system32'
+        sysdir.mkdir(parents=True)
+        for name, target in links.items():
+            os.symlink(str(target), str(sysdir / name))
+        if owner:
+            (compat / 'config_info').write_text('1\n%s/%s/files/share\n' % (self.tools, owner))
+            (compat / 'version').write_text('1 %s\n' % owner)
+
+    def ids(self):
+        return [i['id'] for i in luna.proton_health()]
+
+    def test_install_writes_manifest_and_verify(self):
+        self.serve(self.tarball())
+        self.assertEqual(luna.proton_install('latest'), 0)
+        manifest = luna.proton_manifest_load(TAG)
+        self.assertEqual(list(manifest['files']), ['proton'])
+        self.assertEqual(manifest['files']['proton'][0], 10)
+        self.assertFalse((self.tools / TAG / 'luna-manifest.json').exists())  # outside the tool dir
+        self.assertEqual(luna.proton_verify(TAG), 0)
+        self.assertTrue(luna.proton_status_data()['tools'][0]['manifest'])
+
+    def test_verify_changed_missing_extra(self):
+        self.serve(self.tarball())
+        luna.proton_install('latest')
+        tool = self.tools / TAG
+        (tool / 'proton').write_text('#!/bin/sh\n!')            # same size would be 10; change content
+        (tool / 'proton').write_text('#!/bin/sh\nX')
+        (tool / 'new.txt').write_text('x')
+        (tool / '__pycache__').mkdir()
+        (tool / '__pycache__/a.pyc').write_text('x')               # ignored
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            self.assertEqual(luna.proton_verify(TAG), 1)
+        self.assertIn('1 changed, 0 missing, 1 extra', out.getvalue())
+        (tool / 'proton').unlink()
+        (tool / 'new.txt').unlink()
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            self.assertEqual(luna.proton_verify(TAG), 1)
+        self.assertIn('0 changed, 1 missing, 0 extra', out.getvalue())
+
+    def test_verify_without_manifest_never_blesses_disk_then_rebuild(self):
+        self.tool(TAG)
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            self.assertEqual(luna.proton_verify(TAG), 1)
+        self.assertIn('--rebuild', out.getvalue())
+        self.assertIsNone(luna.proton_manifest_load(TAG))
+        self.serve(self.tarball())                                  # the real release: proton is '#!/bin/sh\n'
+        with mock.patch('sys.stdout', io.StringIO()) as out2:
+            self.assertEqual(luna.proton_verify(TAG, rebuild=True), 1)  # disk differs from the verified source
+        self.assertIn('1 changed', out2.getvalue())
+        self.assertEqual(luna.proton_manifest_load(TAG)['source'], 'rebuild')
+        (self.tools / TAG / 'proton').write_bytes(b'#!/bin/sh\n')
+        (self.tools / TAG / 'version').unlink()
+        self.assertEqual(luna.proton_verify(TAG), 0)
+
+    def test_verify_against_reference_file(self):
+        self.serve(self.tarball())
+        luna.proton_install('latest')
+        ref = Path(self.temp.name) / 'ref.sha256'
+        ref.write_text('%s  %s/proton\n' % (hashlib.sha256(b'#!/bin/sh\n').hexdigest(), TAG))
+        self.assertEqual(luna.proton_verify(TAG, against=str(ref)), 0)
+        ref.write_text('%s  %s/proton\n' % ('0' * 64, TAG))
+        self.assertEqual(luna.proton_verify(TAG, against=str(ref)), 1)
+
+    def test_status_flags_bulk_newer_dlls_only(self):
+        self.full_tool('GE-Proton9-1')
+        self.assertEqual(luna.proton_health(), [])
+        for f in list((self.tools / 'GE-Proton9-1/files/lib/wine/x86_64-windows').iterdir())[:25]:
+            future = f.stat().st_mtime + 86400
+            os.utime(str(f), (future, future))
+        found = luna.proton_health()
+        self.assertEqual([i['id'] for i in found], ['proton.dll-mtimes'])
+        self.assertIn('25 of 30', found[0]['message'])
+        self.assertIn('luna proton verify', found[0]['fix'])
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            luna.proton_status(False)
+        self.assertIn('warning   : GE-Proton9-1: 25 of 30', out.getvalue())
+
+    def test_few_newer_dlls_are_not_flagged(self):
+        self.full_tool('GE-Proton9-1', dlls=400)
+        f = self.tools / 'GE-Proton9-1/files/lib/wine/x86_64-windows/m1.dll'
+        os.utime(str(f), (f.stat().st_mtime + 86400,) * 2)
+        self.assertEqual(luna.proton_health(), [])
+
+    def test_prefix_foreign_and_dangling_links(self):
+        self.full_tool('GE-Proton9-1')
+        other = self.tools / 'GE-Proton9-2'
+        other.mkdir()
+        (other / 'a.dll').write_text('x')
+        os.symlink(str(self.tools / 'GE-Proton9-1/files/lib/wine/x86_64-windows/m1.dll'), str(self.steam / 'ok-link'))
+        self.prefix({'good.dll': self.tools / 'GE-Proton9-1/files/lib/wine/x86_64-windows/m1.dll',
+                     'foreign.dll': other / 'a.dll',
+                     'gone.dll': self.tools / 'GE-Proton8-9/files/x.dll',
+                     'plain.dll': '/usr/lib/x.dll'}, owner='GE-Proton9-1')
+        found = {i['id']: i for i in luna.proton_prefix_findings()}
+        self.assertEqual(sorted(found), ['proton.prefix-dangling', 'proton.prefix-foreign'])
+        self.assertIn('GE-Proton8-9', found['proton.prefix-dangling']['message'])
+        self.assertIn('GE-Proton9-2', found['proton.prefix-foreign']['message'])
+
+    def test_clean_prefix_has_no_findings(self):
+        self.full_tool('GE-Proton9-1')
+        self.prefix({'good.dll': self.tools / 'GE-Proton9-1/files/lib/wine/x86_64-windows/m1.dll'},
+                    owner='GE-Proton9-1')
+        self.assertEqual(luna.proton_health(), [])
+
+    def test_multi_version_warning_in_status_install_doctor(self):
+        self.tool('GE-Proton9-1')
+        self.tool('GE-Proton9-2')
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            luna.proton_status(False)
+        self.assertIn('2 GE-Proton versions are installed', out.getvalue())
+        self.assertIn('luna proton prune', out.getvalue())
+        self.assertIn('proton.multi-version', [f['id'] for f in luna._doctor_proton()])
+        self.serve(self.tarball())
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            self.assertEqual(luna.proton_install('latest'), 0)
+        self.assertIn('WARNING', out.getvalue())
+        self.assertIn('was NOT removed', out.getvalue())
+        self.assertTrue((self.tools / 'GE-Proton9-1').exists())
+
+    def test_single_version_no_warning(self):
+        self.tool('GE-Proton9-2')
+        self.assertNotIn('proton.multi-version', self.ids())
+
+    def test_prune_default_is_one_and_pinned_survives(self):
+        parser = luna.build_parser()
+        self.assertEqual(parser.parse_args(['proton', 'prune']).keep, 1)
+        for n in ('GE-Proton9-1', 'GE-Proton9-2', 'GE-Proton9-3'):   # 9-1 is mapped by appid 100
+            self.tool(n)
+        self.assertEqual(luna.proton_prune(1), 0)
+        self.assertEqual(sorted(p.name for p in self.tools.iterdir()), ['GE-Proton9-1', 'GE-Proton9-3'])
+        self.assertEqual(luna.proton_prune(0), 0)                    # even keep 0 spares the pinned one
+        self.assertEqual([p.name for p in self.tools.iterdir()], ['GE-Proton9-1'])
+
+    def test_prune_refuses_when_config_unreadable(self):
+        self.tool('GE-Proton9-2')
+        self.tool('GE-Proton9-3')
+        with mock.patch.object(luna.os, 'access', return_value=False):
+            self.assertEqual(luna.proton_prune(1), luna.EXIT_REFUSED)
+        self.assertEqual(len(list(self.tools.iterdir())), 2)
+
+    def fake_proc(self, pid, comm, cmdline=''):
+        d = self.proc / str(pid)
+        d.mkdir()
+        (d / 'comm').write_text(comm + '\n')
+        (d / 'cmdline').write_bytes(cmdline.replace(' ', '\0').encode())
+
+    def test_refuse_while_steam_runs(self):
+        self.tool('GE-Proton9-2')
+        self.tool('GE-Proton9-3')
+        self.fake_proc(4242, 'steam')
+        self.assertEqual(luna.proton_remove('9-2'), luna.EXIT_REFUSED)
+        self.assertEqual(luna.proton_remove('9-2', force=True), luna.EXIT_REFUSED)
+        self.assertEqual(luna.proton_prune(1), luna.EXIT_REFUSED)
+        self.serve(self.tarball())
+        self.assertEqual(luna.proton_install('latest'), luna.EXIT_REFUSED)
+        self.assertEqual(len(list(self.tools.iterdir())), 2)
+        self.assertEqual(luna.proton_prune(1, dry_run=True), 0)       # dry run still allowed
+
+    def test_refuse_while_wine_runs_from_tool(self):
+        self.tool('GE-Proton9-2')
+        self.tool('GE-Proton9-3')
+        self.fake_proc(77, 'wineserver', '%s/GE-Proton9-2/files/bin/wineserver -f' % self.tools)
+        self.assertEqual(luna.proton_remove('9-2'), luna.EXIT_REFUSED)
+        self.assertEqual(luna.proton_prune(1), luna.EXIT_REFUSED)
+        self.assertTrue((self.tools / 'GE-Proton9-2').exists())
+        self.assertEqual(luna.proton_remove('9-3'), 0)
 
 
 if __name__ == '__main__':

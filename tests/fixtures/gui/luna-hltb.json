@@ -1,0 +1,5613 @@
+{
+ "command": "snapshot",
+ "data": {
+  "app": "steamwebhelper",
+  "complete": true,
+  "tree": {
+   "available_actions": [
+    "RightClick"
+   ],
+   "children": [
+    {
+     "available_actions": [
+      "RightClick"
+     ],
+     "children": [
+      {
+       "available_actions": [
+        "RightClick",
+        "SetFocus"
+       ],
+       "children": [
+        {
+         "available_actions": [
+          "Click",
+          "RightClick"
+         ],
+         "children": [
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "GG9wVQz6PLlhGHlJyZh4E"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e4",
+               "role": "image"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Steam",
+               "ref_id": "@s19t84rk64gwlt:e5",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e3",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e2",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "View",
+               "ref_id": "@s19t84rk64gwlt:e8",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e7",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e6",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Friends",
+               "ref_id": "@s19t84rk64gwlt:e11",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e10",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e9",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Games",
+               "ref_id": "@s19t84rk64gwlt:e14",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e13",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e12",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Help",
+               "ref_id": "@s19t84rk64gwlt:e17",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e16",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_2UyOBeiSdBayaFdRa39N2O"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e15",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Lumen",
+               "ref_id": "@s19t84rk64gwlt:e20",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "lumen-auto-fix-pill-copy"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e19",
+             "role": "group"
+            }
+           ],
+           "description": "Lumen settings",
+           "name": "Lumen settings",
+           "native_id": {
+            "kind": "ax_dom_identifier",
+            "value": "lumen-moon-btn"
+           },
+           "ref_id": "@s19t84rk64gwlt:e18",
+           "role": "button",
+           "subrole": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "description": "SLS Luna - settings for Playtime, Presence and Compressor",
+           "name": "Luna",
+           "native_id": {
+            "kind": "ax_dom_identifier",
+            "value": "sls-luna-btn"
+           },
+           "ref_id": "@s19t84rk64gwlt:e21",
+           "role": "button",
+           "states": [
+            "focused"
+           ],
+           "subrole": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_34bQcTHo5QKzuujoEyU1tm"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e23",
+             "role": "image"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_1B_GY6Ybp1MERAoz73-3um"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e24",
+             "role": "image"
+            }
+           ],
+           "dom_classes": [
+            "_2Szzh5sKyGgnLUR870zbDE",
+            "_5wILZhsLODVwGfcJ0hKmJ",
+            "_1oEwirQksXfZ-3RWWslbAR"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e22",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_34bQcTHo5QKzuujoEyU1tm"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e27",
+               "role": "image"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e26",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT",
+            "_3mGEzzp18imtSzGPkduedi"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e25",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_3xUpb5DWXPFNcHHIcv-9pe",
+                "avatarStatus",
+                "right"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e30",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_3h-QRJGxnVOIExtHD1R0f2",
+                "avatar"
+               ],
+               "name": "To get missing image descriptions, open the context menu.",
+               "ref_id": "@s19t84rk64gwlt:e31",
+               "role": "image",
+               "role_description": "Unlabeled image"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 001",
+                 "ref_id": "@s19t84rk64gwlt:e33",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s19t84rk64gwlt:e32",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "_3x51wbt5DYyWC8JKwQ51ir"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e34",
+               "role": "image"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e29",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2Lu3d-5qLmW4i19ysTt2jT"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e28",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_34bQcTHo5QKzuujoEyU1tm"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e36",
+             "role": "image"
+            }
+           ],
+           "dom_classes": [
+            "_2Szzh5sKyGgnLUR870zbDE",
+            "_3LKQ3S_yqrebeNLF6aeiog"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e35",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "title-area-highlight"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e39",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "dom_classes": [
+                  "SVGIcon_Button",
+                  "SVGIcon_X_Line"
+                 ],
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "Layer_2"
+                 },
+                 "ref_id": "@s19t84rk64gwlt:e41",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "title-area-icon",
+                "closeButton",
+                "windowControlButton"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e40",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "dom_classes": [
+                  "SVGIcon_Button",
+                  "SVGIcon_Maximize"
+                 ],
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "base"
+                 },
+                 "ref_id": "@s19t84rk64gwlt:e43",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "title-area-icon",
+                "maximizeButton",
+                "windowControlButton"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e42",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "dom_classes": [
+                  "SVGIcon_Button",
+                  "SVGIcon_Minimize"
+                 ],
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "base"
+                 },
+                 "ref_id": "@s19t84rk64gwlt:e45",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "title-area-icon",
+                "minimizeButton",
+                "windowControlButton"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e44",
+               "role": "group"
+              }
+             ],
+             "dom_classes": [
+              "TitleBar",
+              "title-area"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e38",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "qP17eBPXkfezFfexZ4hC3"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e37",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "_25lBLzuVeYAUG279up4xP8",
+            "_1LYTHQzcI1u6tcxbbcc5V3"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e46",
+           "role": "image"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "_25lBLzuVeYAUG279up4xP8",
+            "_2cO0HdvLEGAdhosLekWsmo"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e47",
+           "role": "image"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "STORE",
+             "ref_id": "@s19t84rk64gwlt:e49",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e48",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "LIBRARY",
+             "ref_id": "@s19t84rk64gwlt:e51",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e50",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "COMMUNITY",
+             "ref_id": "@s19t84rk64gwlt:e53",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e52",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 002",
+             "ref_id": "@s19t84rk64gwlt:e55",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "_19axKcqYRuaJ8vdYKYmtTQ"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e54",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "ref_id": "@s19t84rk64gwlt:e59",
+                 "role": "image"
+                }
+               ],
+               "dom_classes": [
+                "_3izqEKa-zuPIrUDSm1bRvf",
+                "_3KaB94Jl4r0hFkthDPJy09"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e58",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "ref_id": "@s19t84rk64gwlt:e62",
+                   "role": "image"
+                  }
+                 ],
+                 "dom_classes": [
+                  "_3izqEKa-zuPIrUDSm1bRvf",
+                  "_3GFljPJsX8WvOJcPupy_RG",
+                  "Focusable"
+                 ],
+                 "ref_id": "@s19t84rk64gwlt:e61",
+                 "role": "group"
+                },
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "name": "Text 003",
+                   "ref_id": "@s19t84rk64gwlt:e64",
+                   "role": "statictext"
+                  }
+                 ],
+                 "dom_classes": [
+                  "MZPxEZcxAGtPDf1NYtouS"
+                 ],
+                 "ref_id": "@s19t84rk64gwlt:e63",
+                 "role": "group"
+                }
+               ],
+               "dom_classes": [
+                "_2m_orETo6AghzAnc0sISCt"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e60",
+               "role": "group"
+              }
+             ],
+             "dom_classes": [
+              "UkR3sY319PuaUNuUWks2K"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e57",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "name": "SCROLL TO TOP",
+                   "ref_id": "@s19t84rk64gwlt:e68",
+                   "role": "statictext"
+                  }
+                 ],
+                 "ref_id": "@s19t84rk64gwlt:e67",
+                 "role": "group"
+                }
+               ],
+               "dom_classes": [
+                "_1J21tLst5SEhBPkVRT53UV"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e66",
+               "role": "group"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e65",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_1rDh5rXSFZJOqCa4UpnI4z"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e56",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "_3Zx5iV3_8FmQXnVasZx_5z"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e70",
+             "role": "image"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Your Steam Client has been updated",
+               "ref_id": "@s19t84rk64gwlt:e72",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2EXJTyc69b45nXI4h3RknI"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e71",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Thanks for participating in the beta. This beta has ended. Restart Steam to return to the current release.",
+               "ref_id": "@s19t84rk64gwlt:e74",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "SwtQX-CurM3HPVJ9DPI1V"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e73",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Restart Steam",
+               "ref_id": "@s19t84rk64gwlt:e76",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2ohOQgahhMYnIEfAQmv9B8"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e75",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Dismiss",
+               "ref_id": "@s19t84rk64gwlt:e78",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2ohOQgahhMYnIEfAQmv9B8"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e77",
+             "role": "group"
+            }
+           ],
+           "ref_id": "@s19t84rk64gwlt:e69",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Your Steam Client is already up to date - ",
+               "ref_id": "@s19t84rk64gwlt:e81",
+               "role": "statictext"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick",
+                "SetFocus"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "View patch notes",
+                 "ref_id": "@s19t84rk64gwlt:e83",
+                 "role": "statictext"
+                }
+               ],
+               "dom_classes": [
+                "_3om6pVKUdxdBkypYpSroHM"
+               ],
+               "name": "View patch notes",
+               "ref_id": "@s19t84rk64gwlt:e82",
+               "role": "link"
+              }
+             ],
+             "dom_classes": [
+              "_2EXJTyc69b45nXI4h3RknI"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e80",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Close",
+               "ref_id": "@s19t84rk64gwlt:e85",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_2ohOQgahhMYnIEfAQmv9B8"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e84",
+             "role": "group"
+            }
+           ],
+           "ref_id": "@s19t84rk64gwlt:e79",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e87",
+             "role": "image"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Add a Game",
+               "ref_id": "@s19t84rk64gwlt:e89",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_3OhUxFVlQYr9W5ThxstR8k"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e88",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "_2foCkpRXhqq0UGVE50BWqj"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e86",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "ref_id": "@s19t84rk64gwlt:e92",
+               "role": "image"
+              }
+             ],
+             "dom_classes": [
+              "_1KrJ3sFAqPBN9mfpaNTU5F"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e91",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 004",
+               "ref_id": "@s19t84rk64gwlt:e94",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_3wJnTtcTLEp0R7eQj_mK8Y"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e93",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "ip-YZhijAMZcuRoXBGiye"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e90",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Friends & Chat",
+               "ref_id": "@s19t84rk64gwlt:e97",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "_3OhUxFVlQYr9W5ThxstR8k"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e96",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e98",
+             "role": "image"
+            }
+           ],
+           "dom_classes": [
+            "_1TdaAqMFadi0UTqilrkelR"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e95",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "window_resize_grip"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e99",
+           "role": "group"
+          }
+         ],
+         "dom_classes": [
+          "_1mfQu39T7gxcr0KSHso6_A"
+         ],
+         "native_id": {
+          "kind": "ax_dom_identifier",
+          "value": "popup_target"
+         },
+         "ref_id": "@s19t84rk64gwlt:e1",
+         "role": "group"
+        },
+        {
+         "available_actions": [
+          "Click",
+          "RightClick"
+         ],
+         "children": [
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "LUNA",
+             "ref_id": "@s19t84rk64gwlt:e102",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-side-title"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e101",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Playtime",
+             "ref_id": "@s19t84rk64gwlt:e104",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e103",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Presence",
+             "ref_id": "@s19t84rk64gwlt:e106",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e105",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Compressor",
+             "ref_id": "@s19t84rk64gwlt:e108",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e107",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "HowLongToBeat",
+             "ref_id": "@s19t84rk64gwlt:e110",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab",
+            "active"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e109",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "SteamGridDB",
+             "ref_id": "@s19t84rk64gwlt:e112",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e111",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Graphics",
+             "ref_id": "@s19t84rk64gwlt:e114",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e113",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Health",
+             "ref_id": "@s19t84rk64gwlt:e116",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e115",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Settings",
+             "ref_id": "@s19t84rk64gwlt:e118",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e117",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "About",
+             "ref_id": "@s19t84rk64gwlt:e120",
+             "role": "statictext"
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-tab"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e119",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "Account 00000",
+           "ref_id": "@s19t84rk64gwlt:e121",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "name": "Connected",
+           "ref_id": "@s19t84rk64gwlt:e122",
+           "role": "statictext"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "HowLongToBeat",
+             "ref_id": "@s19t84rk64gwlt:e124",
+             "role": "statictext"
+            }
+           ],
+           "name": "HowLongToBeat",
+           "ref_id": "@s19t84rk64gwlt:e123",
+           "role": "heading"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-btn",
+            "secondary"
+           ],
+           "name": "Refresh",
+           "ref_id": "@s19t84rk64gwlt:e125",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "dom_classes": [
+            "sls-luna-x"
+           ],
+           "name": "\u2715",
+           "ref_id": "@s19t84rk64gwlt:e126",
+           "role": "button"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 005",
+               "ref_id": "@s19t84rk64gwlt:e129",
+               "role": "statictext"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 006",
+                 "ref_id": "@s19t84rk64gwlt:e131",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s19t84rk64gwlt:e130",
+               "role": "statictext"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 007",
+               "ref_id": "@s19t84rk64gwlt:e132",
+               "role": "statictext"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "name": "Text 008",
+                 "ref_id": "@s19t84rk64gwlt:e134",
+                 "role": "statictext"
+                }
+               ],
+               "ref_id": "@s19t84rk64gwlt:e133",
+               "role": "statictext"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 009",
+               "ref_id": "@s19t84rk64gwlt:e135",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sls-luna-note"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e128",
+             "role": "paragraph"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "3570",
+               "ref_id": "@s19t84rk64gwlt:e137",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e136",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 010",
+             "ref_id": "@s19t84rk64gwlt:e138",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "931",
+               "ref_id": "@s19t84rk64gwlt:e140",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e139",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 011",
+             "ref_id": "@s19t84rk64gwlt:e141",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "22",
+               "ref_id": "@s19t84rk64gwlt:e143",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e142",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 012",
+             "ref_id": "@s19t84rk64gwlt:e144",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "4196",
+               "ref_id": "@s19t84rk64gwlt:e146",
+               "role": "statictext"
+              }
+             ],
+             "ref_id": "@s19t84rk64gwlt:e145",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 013",
+             "ref_id": "@s19t84rk64gwlt:e147",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 014",
+               "ref_id": "@s19t84rk64gwlt:e149",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "name"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e148",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "name": "Text 015",
+               "ref_id": "@s19t84rk64gwlt:e151",
+               "role": "statictext"
+              }
+             ],
+             "dom_classes": [
+              "sub"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e150",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "sls-luna-switch",
+              "on"
+             ],
+             "ref_id": "@s19t84rk64gwlt:e152",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-search"
+             ],
+             "name": "Text 016",
+             "ref_id": "@s19t84rk64gwlt:e153",
+             "role": "textfield"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn"
+             ],
+             "name": "Text 017",
+             "ref_id": "@s19t84rk64gwlt:e154",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 001 (#1001)",
+             "ref_id": "@s19t84rk64gwlt:e155",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 018",
+             "ref_id": "@s19t84rk64gwlt:e156",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 019",
+             "ref_id": "@s19t84rk64gwlt:e157",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 002 (#1002)",
+             "ref_id": "@s19t84rk64gwlt:e158",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 020",
+             "ref_id": "@s19t84rk64gwlt:e159",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 021",
+             "ref_id": "@s19t84rk64gwlt:e160",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 003 (#1003)",
+             "ref_id": "@s19t84rk64gwlt:e161",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 022",
+             "ref_id": "@s19t84rk64gwlt:e162",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 023",
+             "ref_id": "@s19t84rk64gwlt:e163",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 004 (#1004)",
+             "ref_id": "@s19t84rk64gwlt:e164",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 024",
+             "ref_id": "@s19t84rk64gwlt:e165",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 025",
+             "ref_id": "@s19t84rk64gwlt:e166",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 005 (#1005)",
+             "ref_id": "@s19t84rk64gwlt:e167",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 026",
+             "ref_id": "@s19t84rk64gwlt:e168",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 027",
+             "ref_id": "@s19t84rk64gwlt:e169",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 006 (#1006)",
+             "ref_id": "@s19t84rk64gwlt:e170",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 028",
+             "ref_id": "@s19t84rk64gwlt:e171",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 029",
+             "ref_id": "@s19t84rk64gwlt:e172",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 007 (#1007)",
+             "ref_id": "@s19t84rk64gwlt:e173",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 030",
+             "ref_id": "@s19t84rk64gwlt:e174",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 031",
+             "ref_id": "@s19t84rk64gwlt:e175",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 008 (#1008)",
+             "ref_id": "@s19t84rk64gwlt:e176",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 032",
+             "ref_id": "@s19t84rk64gwlt:e177",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 033",
+             "ref_id": "@s19t84rk64gwlt:e178",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 009 (#1009)",
+             "ref_id": "@s19t84rk64gwlt:e179",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 034",
+             "ref_id": "@s19t84rk64gwlt:e180",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 035",
+             "ref_id": "@s19t84rk64gwlt:e181",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 010 (#1010)",
+             "ref_id": "@s19t84rk64gwlt:e182",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 036",
+             "ref_id": "@s19t84rk64gwlt:e183",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 037",
+             "ref_id": "@s19t84rk64gwlt:e184",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 011 (#1011)",
+             "ref_id": "@s19t84rk64gwlt:e185",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 038",
+             "ref_id": "@s19t84rk64gwlt:e186",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 039",
+             "ref_id": "@s19t84rk64gwlt:e187",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 012 (#1012)",
+             "ref_id": "@s19t84rk64gwlt:e188",
+             "role": "statictext"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 040",
+             "ref_id": "@s19t84rk64gwlt:e189",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 041",
+             "ref_id": "@s19t84rk64gwlt:e190",
+             "role": "button"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 013 (#1013)",
+             "ref_id": "@s19t84rk64gwlt:e191",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 042",
+             "ref_id": "@s19t84rk64gwlt:e192",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 043",
+             "ref_id": "@s19t84rk64gwlt:e193",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 014 (#1014)",
+             "ref_id": "@s19t84rk64gwlt:e194",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 044",
+             "ref_id": "@s19t84rk64gwlt:e195",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 045",
+             "ref_id": "@s19t84rk64gwlt:e196",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 015 (#1015)",
+             "ref_id": "@s19t84rk64gwlt:e197",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 046",
+             "ref_id": "@s19t84rk64gwlt:e198",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 047",
+             "ref_id": "@s19t84rk64gwlt:e199",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 016 (#1016)",
+             "ref_id": "@s19t84rk64gwlt:e200",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 048",
+             "ref_id": "@s19t84rk64gwlt:e201",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 049",
+             "ref_id": "@s19t84rk64gwlt:e202",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 017 (#1017)",
+             "ref_id": "@s19t84rk64gwlt:e203",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 050",
+             "ref_id": "@s19t84rk64gwlt:e204",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 051",
+             "ref_id": "@s19t84rk64gwlt:e205",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 018 (#1018)",
+             "ref_id": "@s19t84rk64gwlt:e206",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 052",
+             "ref_id": "@s19t84rk64gwlt:e207",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 053",
+             "ref_id": "@s19t84rk64gwlt:e208",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 019 (#1019)",
+             "ref_id": "@s19t84rk64gwlt:e209",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 054",
+             "ref_id": "@s19t84rk64gwlt:e210",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 055",
+             "ref_id": "@s19t84rk64gwlt:e211",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 020 (#1020)",
+             "ref_id": "@s19t84rk64gwlt:e212",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 056",
+             "ref_id": "@s19t84rk64gwlt:e213",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 057",
+             "ref_id": "@s19t84rk64gwlt:e214",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 021 (#1021)",
+             "ref_id": "@s19t84rk64gwlt:e215",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 058",
+             "ref_id": "@s19t84rk64gwlt:e216",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 059",
+             "ref_id": "@s19t84rk64gwlt:e217",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 022 (#1022)",
+             "ref_id": "@s19t84rk64gwlt:e218",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 060",
+             "ref_id": "@s19t84rk64gwlt:e219",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 061",
+             "ref_id": "@s19t84rk64gwlt:e220",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 023 (#1023)",
+             "ref_id": "@s19t84rk64gwlt:e221",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 062",
+             "ref_id": "@s19t84rk64gwlt:e222",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 063",
+             "ref_id": "@s19t84rk64gwlt:e223",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e224",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 064",
+             "ref_id": "@s19t84rk64gwlt:e225",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 065",
+             "ref_id": "@s19t84rk64gwlt:e226",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 066",
+             "ref_id": "@s19t84rk64gwlt:e227",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 024 (#1024)",
+             "ref_id": "@s19t84rk64gwlt:e228",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 067",
+             "ref_id": "@s19t84rk64gwlt:e229",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 068",
+             "ref_id": "@s19t84rk64gwlt:e230",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e231",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 069",
+             "ref_id": "@s19t84rk64gwlt:e232",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 070",
+             "ref_id": "@s19t84rk64gwlt:e233",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 071",
+             "ref_id": "@s19t84rk64gwlt:e234",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 025 (#1025)",
+             "ref_id": "@s19t84rk64gwlt:e235",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 072",
+             "ref_id": "@s19t84rk64gwlt:e236",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 073",
+             "ref_id": "@s19t84rk64gwlt:e237",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e238",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 074",
+             "ref_id": "@s19t84rk64gwlt:e239",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 075",
+             "ref_id": "@s19t84rk64gwlt:e240",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 076",
+             "ref_id": "@s19t84rk64gwlt:e241",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 026 (#1026)",
+             "ref_id": "@s19t84rk64gwlt:e242",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 077",
+             "ref_id": "@s19t84rk64gwlt:e243",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 078",
+             "ref_id": "@s19t84rk64gwlt:e244",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e245",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 079",
+             "ref_id": "@s19t84rk64gwlt:e246",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 080",
+             "ref_id": "@s19t84rk64gwlt:e247",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 081",
+             "ref_id": "@s19t84rk64gwlt:e248",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 027 (#1027)",
+             "ref_id": "@s19t84rk64gwlt:e249",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 082",
+             "ref_id": "@s19t84rk64gwlt:e250",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 083",
+             "ref_id": "@s19t84rk64gwlt:e251",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e252",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 084",
+             "ref_id": "@s19t84rk64gwlt:e253",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 085",
+             "ref_id": "@s19t84rk64gwlt:e254",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 086",
+             "ref_id": "@s19t84rk64gwlt:e255",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 028 (#1028)",
+             "ref_id": "@s19t84rk64gwlt:e256",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 087",
+             "ref_id": "@s19t84rk64gwlt:e257",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 088",
+             "ref_id": "@s19t84rk64gwlt:e258",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e259",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 089",
+             "ref_id": "@s19t84rk64gwlt:e260",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 090",
+             "ref_id": "@s19t84rk64gwlt:e261",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 091",
+             "ref_id": "@s19t84rk64gwlt:e262",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 029 (#1029)",
+             "ref_id": "@s19t84rk64gwlt:e263",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 092",
+             "ref_id": "@s19t84rk64gwlt:e264",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 093",
+             "ref_id": "@s19t84rk64gwlt:e265",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e266",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 094",
+             "ref_id": "@s19t84rk64gwlt:e267",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 095",
+             "ref_id": "@s19t84rk64gwlt:e268",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 096",
+             "ref_id": "@s19t84rk64gwlt:e269",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 030 (#1030)",
+             "ref_id": "@s19t84rk64gwlt:e270",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 097",
+             "ref_id": "@s19t84rk64gwlt:e271",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 098",
+             "ref_id": "@s19t84rk64gwlt:e272",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e273",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 099",
+             "ref_id": "@s19t84rk64gwlt:e274",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 100",
+             "ref_id": "@s19t84rk64gwlt:e275",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 101",
+             "ref_id": "@s19t84rk64gwlt:e276",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 031 (#1031)",
+             "ref_id": "@s19t84rk64gwlt:e277",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 102",
+             "ref_id": "@s19t84rk64gwlt:e278",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 103",
+             "ref_id": "@s19t84rk64gwlt:e279",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e280",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 104",
+             "ref_id": "@s19t84rk64gwlt:e281",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 105",
+             "ref_id": "@s19t84rk64gwlt:e282",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 106",
+             "ref_id": "@s19t84rk64gwlt:e283",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 032 (#1032)",
+             "ref_id": "@s19t84rk64gwlt:e284",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 107",
+             "ref_id": "@s19t84rk64gwlt:e285",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 108",
+             "ref_id": "@s19t84rk64gwlt:e286",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e287",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 109",
+             "ref_id": "@s19t84rk64gwlt:e288",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 110",
+             "ref_id": "@s19t84rk64gwlt:e289",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 111",
+             "ref_id": "@s19t84rk64gwlt:e290",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 033 (#1033)",
+             "ref_id": "@s19t84rk64gwlt:e291",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 112",
+             "ref_id": "@s19t84rk64gwlt:e292",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 113",
+             "ref_id": "@s19t84rk64gwlt:e293",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e294",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 114",
+             "ref_id": "@s19t84rk64gwlt:e295",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 115",
+             "ref_id": "@s19t84rk64gwlt:e296",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 116",
+             "ref_id": "@s19t84rk64gwlt:e297",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 034 (#1034)",
+             "ref_id": "@s19t84rk64gwlt:e298",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 117",
+             "ref_id": "@s19t84rk64gwlt:e299",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 118",
+             "ref_id": "@s19t84rk64gwlt:e300",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e301",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 119",
+             "ref_id": "@s19t84rk64gwlt:e302",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 120",
+             "ref_id": "@s19t84rk64gwlt:e303",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 121",
+             "ref_id": "@s19t84rk64gwlt:e304",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 035 (#1035)",
+             "ref_id": "@s19t84rk64gwlt:e305",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 122",
+             "ref_id": "@s19t84rk64gwlt:e306",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 123",
+             "ref_id": "@s19t84rk64gwlt:e307",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e308",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 124",
+             "ref_id": "@s19t84rk64gwlt:e309",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 125",
+             "ref_id": "@s19t84rk64gwlt:e310",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 126",
+             "ref_id": "@s19t84rk64gwlt:e311",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 036 (#1036)",
+             "ref_id": "@s19t84rk64gwlt:e312",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 127",
+             "ref_id": "@s19t84rk64gwlt:e313",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 128",
+             "ref_id": "@s19t84rk64gwlt:e314",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e315",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 129",
+             "ref_id": "@s19t84rk64gwlt:e316",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 130",
+             "ref_id": "@s19t84rk64gwlt:e317",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 131",
+             "ref_id": "@s19t84rk64gwlt:e318",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 037 (#1037)",
+             "ref_id": "@s19t84rk64gwlt:e319",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 132",
+             "ref_id": "@s19t84rk64gwlt:e320",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 133",
+             "ref_id": "@s19t84rk64gwlt:e321",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e322",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 134",
+             "ref_id": "@s19t84rk64gwlt:e323",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 135",
+             "ref_id": "@s19t84rk64gwlt:e324",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 136",
+             "ref_id": "@s19t84rk64gwlt:e325",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 038 (#1038)",
+             "ref_id": "@s19t84rk64gwlt:e326",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 137",
+             "ref_id": "@s19t84rk64gwlt:e327",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 138",
+             "ref_id": "@s19t84rk64gwlt:e328",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e329",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 139",
+             "ref_id": "@s19t84rk64gwlt:e330",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 140",
+             "ref_id": "@s19t84rk64gwlt:e331",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 141",
+             "ref_id": "@s19t84rk64gwlt:e332",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 039 (#1039)",
+             "ref_id": "@s19t84rk64gwlt:e333",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 142",
+             "ref_id": "@s19t84rk64gwlt:e334",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 143",
+             "ref_id": "@s19t84rk64gwlt:e335",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e336",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 144",
+             "ref_id": "@s19t84rk64gwlt:e337",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 145",
+             "ref_id": "@s19t84rk64gwlt:e338",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 146",
+             "ref_id": "@s19t84rk64gwlt:e339",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 040 (#1040)",
+             "ref_id": "@s19t84rk64gwlt:e340",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 147",
+             "ref_id": "@s19t84rk64gwlt:e341",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 148",
+             "ref_id": "@s19t84rk64gwlt:e342",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e343",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 149",
+             "ref_id": "@s19t84rk64gwlt:e344",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 150",
+             "ref_id": "@s19t84rk64gwlt:e345",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 151",
+             "ref_id": "@s19t84rk64gwlt:e346",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 041 (#1041)",
+             "ref_id": "@s19t84rk64gwlt:e347",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 152",
+             "ref_id": "@s19t84rk64gwlt:e348",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 153",
+             "ref_id": "@s19t84rk64gwlt:e349",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e350",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 154",
+             "ref_id": "@s19t84rk64gwlt:e351",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 155",
+             "ref_id": "@s19t84rk64gwlt:e352",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 156",
+             "ref_id": "@s19t84rk64gwlt:e353",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 042 (#1042)",
+             "ref_id": "@s19t84rk64gwlt:e354",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 157",
+             "ref_id": "@s19t84rk64gwlt:e355",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 158",
+             "ref_id": "@s19t84rk64gwlt:e356",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e357",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 159",
+             "ref_id": "@s19t84rk64gwlt:e358",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 160",
+             "ref_id": "@s19t84rk64gwlt:e359",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 161",
+             "ref_id": "@s19t84rk64gwlt:e360",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 043 (#1043)",
+             "ref_id": "@s19t84rk64gwlt:e361",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 162",
+             "ref_id": "@s19t84rk64gwlt:e362",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 163",
+             "ref_id": "@s19t84rk64gwlt:e363",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e364",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 164",
+             "ref_id": "@s19t84rk64gwlt:e365",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 165",
+             "ref_id": "@s19t84rk64gwlt:e366",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 166",
+             "ref_id": "@s19t84rk64gwlt:e367",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 044 (#1044)",
+             "ref_id": "@s19t84rk64gwlt:e368",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 167",
+             "ref_id": "@s19t84rk64gwlt:e369",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 168",
+             "ref_id": "@s19t84rk64gwlt:e370",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e371",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 169",
+             "ref_id": "@s19t84rk64gwlt:e372",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 170",
+             "ref_id": "@s19t84rk64gwlt:e373",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 171",
+             "ref_id": "@s19t84rk64gwlt:e374",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 045 (#1045)",
+             "ref_id": "@s19t84rk64gwlt:e375",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 172",
+             "ref_id": "@s19t84rk64gwlt:e376",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 173",
+             "ref_id": "@s19t84rk64gwlt:e377",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e378",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 174",
+             "ref_id": "@s19t84rk64gwlt:e379",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 175",
+             "ref_id": "@s19t84rk64gwlt:e380",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 176",
+             "ref_id": "@s19t84rk64gwlt:e381",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 046 (#1046)",
+             "ref_id": "@s19t84rk64gwlt:e382",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 177",
+             "ref_id": "@s19t84rk64gwlt:e383",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 178",
+             "ref_id": "@s19t84rk64gwlt:e384",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e385",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 179",
+             "ref_id": "@s19t84rk64gwlt:e386",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 180",
+             "ref_id": "@s19t84rk64gwlt:e387",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 181",
+             "ref_id": "@s19t84rk64gwlt:e388",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 047 (#1047)",
+             "ref_id": "@s19t84rk64gwlt:e389",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 182",
+             "ref_id": "@s19t84rk64gwlt:e390",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 183",
+             "ref_id": "@s19t84rk64gwlt:e391",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e392",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 184",
+             "ref_id": "@s19t84rk64gwlt:e393",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 185",
+             "ref_id": "@s19t84rk64gwlt:e394",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 186",
+             "ref_id": "@s19t84rk64gwlt:e395",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 048 (#1048)",
+             "ref_id": "@s19t84rk64gwlt:e396",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 187",
+             "ref_id": "@s19t84rk64gwlt:e397",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 188",
+             "ref_id": "@s19t84rk64gwlt:e398",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e399",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 189",
+             "ref_id": "@s19t84rk64gwlt:e400",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 190",
+             "ref_id": "@s19t84rk64gwlt:e401",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 191",
+             "ref_id": "@s19t84rk64gwlt:e402",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 049 (#1049)",
+             "ref_id": "@s19t84rk64gwlt:e403",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 192",
+             "ref_id": "@s19t84rk64gwlt:e404",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 193",
+             "ref_id": "@s19t84rk64gwlt:e405",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e406",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 194",
+             "ref_id": "@s19t84rk64gwlt:e407",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 195",
+             "ref_id": "@s19t84rk64gwlt:e408",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 196",
+             "ref_id": "@s19t84rk64gwlt:e409",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Game 050 (#1050)",
+             "ref_id": "@s19t84rk64gwlt:e410",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 197",
+             "ref_id": "@s19t84rk64gwlt:e411",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "name": "Text 198",
+             "ref_id": "@s19t84rk64gwlt:e412",
+             "role": "statictext",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Refresh",
+             "ref_id": "@s19t84rk64gwlt:e413",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 199",
+             "ref_id": "@s19t84rk64gwlt:e414",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 200",
+             "ref_id": "@s19t84rk64gwlt:e415",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 201",
+             "ref_id": "@s19t84rk64gwlt:e416",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick",
+              "SetFocus"
+             ],
+             "dom_classes": [
+              "sls-luna-btn",
+              "secondary"
+             ],
+             "name": "Text 202",
+             "ref_id": "@s19t84rk64gwlt:e417",
+             "role": "button",
+             "states": [
+              "offscreen"
+             ]
+            }
+           ],
+           "dom_classes": [
+            "sls-luna-body"
+           ],
+           "ref_id": "@s19t84rk64gwlt:e127",
+           "role": "group"
+          }
+         ],
+         "native_id": {
+          "kind": "ax_dom_identifier",
+          "value": "sls-luna-overlay"
+         },
+         "ref_id": "@s19t84rk64gwlt:e100",
+         "role": "group"
+        }
+       ],
+       "name": "Steam",
+       "role": "webarea"
+      }
+     ],
+     "role": "group"
+    }
+   ],
+   "role": "window"
+  }
+ },
+ "ok": true,
+ "version": "2.6"
+}

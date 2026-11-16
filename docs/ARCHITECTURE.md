@@ -132,10 +132,42 @@ window-only niri `screenshot-window` PNG (skipped, not full-screen, without niri
 window id (the largest for `main`, all for blocker diagnosis). Add-on selectors live in
 one table, `GUI_PANEL_SELECTORS` (entry point `button 'Luna'`, pages reached through
 the overlay's `sls-luna-tab` groups, one navigation click); `gui_library_order()` reads
-the virtualized Library grid. `gui_rendered()` returns found/missing/unstable per add-on (reusable by a future
-`status --live`). Everything degrades to "GUI checks skipped: <reason>", and the
+the virtualized Library grid. `gui_rendered()` returns found/missing/unstable per add-on (used by the
+*rendered* column of `status --live`, with navigation off). Everything degrades to "GUI checks skipped: <reason>", and the
 shutdown diagnosis in the Steam paths is a silent, time-boxed (~3 s) best effort.
-No CDP/DevTools probe is used.
+`97_gui_ops.py` builds on it: `gui watch` (appear/vanish sampling) and
+`gui restart-check` (refusal checks, before/after state, graceful shutdown via
+`_close_steam_gracefully`, relaunch, report, final-state rule). The window backend is
+`niri` or `generic` (`gui_backend()`); screenshots save and restore the clipboard.
+Only restart-check's Library order reads the live probe's CDP layer (`live_library_order`),
+falling back to the accessibility tree; everything else uses no DevTools.
+
+## Live probe (`status --live`, `library-order`)
+
+`scripts/luna_cli/96_live_probe.py` talks to the running client through Steam's
+Chromium DevTools port. The repository had no CDP client (the add-ons run inside
+SharedJSContext and never speak CDP), so it carries a minimal stdlib one: HTTP
+discovery plus a WebSocket handshake and masked text frames. The port is found, never
+hardcoded: `$LUNA_CDP_PORT`, then Lumen's own `cef_port` file, then the
+`--remote-debugging-port=` argument of this user's `steamwebhelper` (read from /proc);
+the SharedJSContext page is chosen from `/json/list`. It is read-only by construction:
+`live_rpc()` refuses any RPC outside `LIVE_RPC_ALLOWLIST` (each name audited in its Lua
+backend; `SlsCompressorGet` is excluded because it can start a scan), and the only
+JavaScript evaluated is built by the module from constants (`LIVE_READ_EXPRESSIONS`).
+It reports: backend answers + self-reported health per add-on, the `boot.lua` marker
+reflected in the running process (backends answer, `Millennium.callServerMethod`
+and `window.__SlsLunaMenu` exist), and a sidecar older than the newest installed
+file (process start time from /proc vs mtimes of `boot.lua` and `sls-addons/**`).
+Steam closed, a dead port or a missing target print one line; exit status is unchanged.
+
+`live_library_order()` reads the Library *sidebar* list's own row model
+(`visibleRows` of the mounted list component, found through the React fiber of the
+virtualized grid in the main window): every row in display order, section headers and
+collapsed state included, not only the ~54 rendered rows. It proves the order of that
+list. It does not prove the HowLongToBeat sort (value 12), which applies to collection
+grids and Home shelves, not the sidebar; the Luna/stored sort state is returned beside
+the order so a before/after-restart comparison can include it. Tests use a fake
+DevTools server (`tests/test_live_probe.py`) and never contact a real Steam.
 
 ## Current safety boundaries
 

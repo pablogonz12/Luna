@@ -5,6 +5,8 @@
 set -euo pipefail
 # Hermetic: no test may probe the real desktop (tests/test_gui_check.py manages this itself).
 export LUNA_GUI_CHECKS=0
+# Likewise no test may reach a real Steam through its DevTools port (the live probe tests use a fake one).
+export LUNA_LIVE_CHECKS=0
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 

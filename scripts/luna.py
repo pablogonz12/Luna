@@ -65,7 +65,12 @@ Commands:
                                         download, sha512-verify and atomically install GE-Proton
                                         (restart Steam afterwards)
     luna proton remove VERSION [--force]  refuses while a game is mapped to it
-    luna proton prune [--keep N] [--dry-run]  keep the newest N (default 2); mapped tools are kept
+    luna proton prune [--keep N] [--dry-run]  keep the newest N (default 1); mapped tools are kept
+    luna proton verify [VERSION] [--rebuild|--against FILE]
+                                        hash the install against its manifest (changed/missing/extra,
+                                        exit 1 on mismatch); --rebuild makes the manifest from a
+                                        re-downloaded, sha512-verified release. install/remove/prune
+                                        refuse while Steam or a wine process from the tool runs
     luna fleet add|remove|list [HOST]   hosts managed over SSH (~/.config/luna/fleet.json)
     luna fleet status [--json]          Luna/Steam state and doctor warn/error counts (DOCTOR column)
                                         of this machine and every host
@@ -82,7 +87,9 @@ Commands:
                                         (Steam closed; never kills anything)
 """
 import argparse
+import base64
 import contextlib
+import gzip
 import hashlib
 import io
 import json
@@ -90,6 +97,7 @@ import lzma
 import os
 import re
 import shutil
+import socket
 import stat
 import struct
 import subprocess
@@ -157,6 +165,7 @@ EXIT_OK = 0
 EXIT_REFUSED = 2
 EXIT_NEEDS_FORCE = 3
 EXIT_PATCH = 4
+EXIT_SKIPPED = 5  # an optional check (luna gui) could not run: not a pass, not a failure
 
 
 # ---------------------------------------------------------------------------
@@ -959,6 +968,12 @@ def cmd_status(options):
     print('manifest   : %d add-on(s) pinned from %s'
           % (len(manifest.get('addons', {})), ', '.join(
               sorted({entry.get('source_repo', '?') for entry in manifest.get('addons', {}).values()}))))
+    if getattr(options, 'live', False):
+        # Read-only probe of the running client; see 96_live_probe.py.
+        try:
+            degraded = print_live_status(targets, installed) or degraded
+        except Exception as error:  # the probe must never turn status into a traceback
+            print('live       : unavailable - %s' % error)
     return 1 if degraded else EXIT_OK
 
 
@@ -1193,7 +1208,21 @@ def check_updates(force=False):
 
 
 def _safe_extract(bundle, extract_dir):
-    """Unpack without allowing absolute paths or parent-directory escapes."""
+    """Unpack without allowing absolute paths or parent-directory escapes.
+
+    A gzip bundle is first read to its end: tarfile stops at the tar end marker and never
+    reaches the gzip CRC trailer, so a damaged stream that still decodes would otherwise
+    extract silently (the bundled manifest only pins the add-ons and shared scripts, not
+    scripts/luna.py, which `update` then runs)."""
+    with open(str(bundle), 'rb') as probe:
+        gzipped = probe.read(2) == b'\x1f\x8b'
+    if gzipped:
+        try:
+            with gzip.open(str(bundle), 'rb') as stream:
+                while stream.read(1024 * 1024):
+                    pass
+        except (OSError, EOFError, zlib.error) as error:
+            raise ValueError('the bundle is corrupt (gzip stream check failed: %s)' % error) from error
     with tarfile.open(bundle) as tar:
         members = tar.getmembers()
         for member in members:
@@ -3391,6 +3420,9 @@ def cmd_install(options):
     print('bridge   : %s' % (addons_dir() / 'bridge.lua'))
     print('boot.lua : %s' % patcher('check').stdout.strip())
     print('\nRestart Steam (Steam -> Exit, then launch it again) to load the add-ons.')
+    hint = gui_install_hint()
+    if hint:
+        print(hint)
     return EXIT_OK
 
 
@@ -4983,6 +5015,413 @@ def proton_release(version='latest', force=False):
     return _proton_release_summary(_proton_json('%s/tags/%s' % (PROTON_API, re.sub(r'-(x86_64|aarch64)$', '', proton_normalize(version)))))
 
 
+# ------------------------------------------------------------------ safety
+#
+# Failure mode this section guards against (docs/PROTON_SINGLE_VERSION.md):
+# Steam runs a driver query once per registered compat tool, all with app id 0, so
+# every tool shares <steam>/steamapps/compatdata/0/pfx. That prefix holds ~600
+# symlinks per architecture straight into the DLLs of the tool that last set it up;
+# when a second GE-Proton version's wineboot updates it, it writes THROUGH those
+# links and overwrites the other version's Windows DLLs in place. Rule: one
+# GE-Proton version per machine. Nothing below hashes anything except `verify`.
+
+PROTON_MANIFEST_VERSION = 1
+PROTON_DLL_DIRS = ('files/lib/wine/x86_64-windows', 'files/lib/wine/i386-windows',
+                   'files/lib64/wine/x86_64-windows', 'files/lib64/wine/i386-windows')
+PROTON_MTIME_SLACK = 3600       # DLLs are built shortly BEFORE the `version` file is written
+PROTON_MTIME_MIN_FILES = 20
+PROTON_PREFIX_SYSDIRS = ('drive_c/windows/system32', 'drive_c/windows/syswow64')
+
+
+def proton_manifest_dir():
+    return luna_tools_dir() / 'proton-manifests'
+
+
+def proton_manifest_path(name):
+    return proton_manifest_dir() / (name + '.json')
+
+
+def proton_manifest_load(name):
+    data = read_json_file(proton_manifest_path(name))
+    if isinstance(data, dict) and data.get('version') == PROTON_MANIFEST_VERSION and isinstance(data.get('files'), dict):
+        return data
+    return None
+
+
+def proton_ge_tools(tools=None):
+    return [t for t in (proton_installed() if tools is None else tools) if t['name'].startswith(PROTON_PREFIX)]
+
+
+def proton_multi_warning(tools=None):
+    """One-paragraph warning when more than one GE-Proton is installed, else ''."""
+    ge = proton_ge_tools(tools)
+    if len(ge) < 2:
+        return ''
+    return ('%d GE-Proton versions are installed (%s). Steam probes every registered tool against one shared '
+            'prefix (compatdata/0/pfx) whose DLL symlinks point into whichever tool set it up last, so one '
+            "version's wineboot can overwrite the other's Windows DLLs in place. Keep one: "
+            'luna proton prune (or luna proton remove VERSION).' % (len(ge), ', '.join(t['name'] for t in ge)))
+
+
+def proton_busy_reason(path=None, proc=None):
+    """Why a tool directory must not be replaced or removed right now, or ''.
+    Steam up (it owns the shared prefix links) or any wine process running from `path`."""
+    proc = proc or live_proc_dir()
+    if live_steam_running(proc):
+        return 'Steam is running; close it completely first (its prefix links point into the tool directory)'
+    if path:
+        root = os.path.realpath(str(path))
+        try:
+            entries = [e for e in Path(proc).iterdir() if e.name.isdigit()]
+        except OSError:
+            return ''
+        uid = os.getuid()
+        for entry in entries:
+            try:
+                if entry.stat().st_uid != uid:
+                    continue
+                hit = os.path.realpath(os.readlink(str(entry / 'exe'))).startswith(root + os.sep) \
+                    if (entry / 'exe').is_symlink() else False
+                if not hit:
+                    hit = any(a.startswith(root + os.sep) or a == root for a in
+                              (entry / 'cmdline').read_bytes().decode('utf-8', 'replace').split('\0'))
+            except OSError:
+                continue
+            if hit:
+                return 'a process (pid %s) is running from %s; stop it first' % (entry.name, path)
+    return ''
+
+
+def _proton_progress(label, total):
+    """Throttled byte progress for hashing: \\r on a TTY, sparse lines otherwise."""
+    state = {'last': 0.0}
+    tty = sys.stdout.isatty()
+
+    def update(done, final=False):
+        now = time.monotonic()
+        if not final and now - state['last'] < (0.3 if tty else 5.0):
+            return
+        state['last'] = now
+        text = '%s of %s (%d%%)' % (_format_mb(done), _format_mb(total), 100 * done // total if total else 100)
+        if tty:
+            print('\r\033[Kproton    : %s  %s' % (label, text), end='\n' if final else '', flush=True)
+        else:
+            print('proton    :   %s  %s' % (label, text), flush=True)
+    return update
+
+
+def _proton_walk(root):
+    """({rel: size} regular files, {rel: link target}) under root; __pycache__ is ignored
+    (Proton's own python writes it on first run)."""
+    files, links = {}, {}
+    base = str(root)
+    for current, dirs, names in os.walk(base):
+        dirs[:] = sorted(d for d in dirs if d != '__pycache__')
+        for name in sorted(names + [d for d in dirs if os.path.islink(os.path.join(current, d))]):
+            full = os.path.join(current, name)
+            rel = os.path.relpath(full, base)
+            try:
+                if os.path.islink(full):
+                    links[rel] = os.readlink(full)
+                elif name.endswith('.pyc') and os.path.basename(current) == '__pycache__':
+                    continue
+                else:
+                    files[rel] = os.lstat(full).st_size
+            except OSError:
+                pass
+    return files, links
+
+
+def _proton_hash_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def proton_build_manifest(root, name, source, tag=''):
+    """Hash a tree (progress shown). Only ever call this on a tree that came from a
+    sha512-verified download, never on an install of unknown state."""
+    files, links = _proton_walk(root)
+    total = sum(files.values())
+    progress = _proton_progress('hashing %s' % name, total)
+    done, out = 0, {}
+    for rel in sorted(files):
+        out[rel] = [files[rel], _proton_hash_file(os.path.join(str(root), rel))]
+        done += files[rel]
+        progress(done)
+    progress(done, final=True)
+    return {'version': PROTON_MANIFEST_VERSION, 'name': name, 'tag': tag, 'source': source,
+            'createdAt': int(time.time()), 'files': out, 'links': links}
+
+
+def proton_compare(root, expected, expected_links=None, label='verifying'):
+    """Compare a tree with {rel: [size|None, sha256]} (+ optional {rel: link target}).
+    Returns {'changed': [], 'missing': [], 'extra': [], 'checked': n}."""
+    files, links = _proton_walk(root)
+    changed, missing = [], []
+    todo = [rel for rel in sorted(expected) if rel in files]
+    for rel in sorted(expected):
+        if rel not in files:
+            (changed if rel in links else missing).append(rel)
+    total = sum(files[r] for r in todo)
+    progress = _proton_progress('%s %s' % (label, os.path.basename(str(root))), total)
+    done = 0
+    for rel in todo:
+        size, sha = expected[rel][0], expected[rel][1]
+        if size is not None and size != files[rel]:
+            changed.append(rel)
+        else:
+            try:
+                if _proton_hash_file(os.path.join(str(root), rel)) != sha:
+                    changed.append(rel)
+            except OSError:
+                missing.append(rel)
+        done += files[rel]
+        progress(done)
+    progress(done, final=True)
+    extra = [rel for rel in files if rel not in expected and rel not in (expected_links or {})]
+    if expected_links is not None:
+        for rel, target in expected_links.items():
+            if rel not in links:
+                (changed if rel in files else missing).append(rel)
+            elif links[rel] != target:
+                changed.append(rel)
+        extra += [rel for rel in links if rel not in expected_links and rel not in expected]
+    return {'changed': sorted(set(changed)), 'missing': sorted(set(missing)),
+            'extra': sorted(set(extra)), 'checked': len(expected)}
+
+
+def _proton_report(name, result):
+    bad = result['changed'] or result['missing'] or result['extra']
+    if not bad:
+        print('verify    : %s OK (%d files match)' % (name, result['checked']))
+        return True
+    print('verify    : %s MISMATCH: %d changed, %d missing, %d extra (of %d files)'
+          % (name, len(result['changed']), len(result['missing']), len(result['extra']), result['checked']))
+    for kind in ('changed', 'missing', 'extra'):
+        for rel in result[kind][:5]:
+            print('            %-8s %s' % (kind, rel))
+        if len(result[kind]) > 5:
+            print('            %-8s ... and %d more' % (kind, len(result[kind]) - 5))
+    print('verify    : fix: luna proton remove %s --force && luna proton install %s  (Steam closed)'
+          % (name, name))
+    return False
+
+
+def _proton_read_reference(path):
+    """sha256sum-format file -> {rel: [None, sha]}; the leading <tool>/ component is dropped."""
+    out = {}
+    for line in Path(path).read_text(errors='replace').splitlines():
+        match = re.match(r'^([0-9a-fA-F]{64})\s[ *]?(.+)$', line)
+        if match:
+            rel = match.group(2)
+            rel = rel.split('/', 1)[1] if '/' in rel else rel
+            out[rel] = [None, match.group(1).lower()]
+    return out
+
+
+def proton_verify(version=None, rebuild=False, against=None):
+    """0 = every checked tool matches; 1 = mismatch, missing manifest or error."""
+    tools = proton_ge_tools()
+    if version:
+        try:
+            name = proton_normalize(version)
+        except ValueError as error:
+            print('verify    : %s' % error)
+            return 1
+        tools = [t for t in tools if t['name'] in _proton_arch_forms(name)]
+        if not tools:
+            print('verify    : %s is not installed' % name)
+            return 1
+    if not tools:
+        print('verify    : no GE-Proton installed')
+        return EXIT_OK
+    if (rebuild or against) and len(tools) != 1:
+        print('verify    : --rebuild/--against need exactly one VERSION')
+        return 1
+    ok = True
+    for tool in tools:
+        name = tool['name']
+        if against:
+            try:
+                reference = _proton_read_reference(against)
+            except OSError as error:
+                print('verify    : cannot read %s: %s' % (against, error))
+                return 1
+            result = proton_compare(tool['path'], reference, None)
+            # a reference lists regular files only: links in the tree are not "extra"
+            result['extra'] = [r for r in result['extra'] if not os.path.islink(os.path.join(tool['path'], r))]
+            ok = _proton_report(name, result) and ok
+            continue
+        if rebuild:
+            code = _proton_rebuild(tool)
+            ok = ok and code == EXIT_OK
+            continue
+        manifest = proton_manifest_load(name)
+        if not manifest:
+            print('verify    : %s has no manifest (installed before manifests existed, or by hand). '
+                  'It is never created from the current disk state; run: luna proton verify %s --rebuild '
+                  '(re-downloads and sha512-checks the release)' % (name, name))
+            ok = False
+            continue
+        ok = _proton_report(name, proton_compare(tool['path'], manifest['files'], manifest.get('links'))) and ok
+    return EXIT_OK if ok else 1
+
+
+def _proton_rebuild(tool):
+    """Create the manifest from a freshly downloaded, sha512-verified release, then check
+    the installed tree against it."""
+    name = tool['name']
+    try:
+        release = proton_release(re.sub(r'-(x86_64|aarch64)$', '', name), force=True)
+    except (OSError, ValueError) as error:
+        print('verify    : cannot reach the release API: %s' % error)
+        return 1
+    base = proton_tools_dir()
+    work = Path(tempfile.mkdtemp(prefix='.luna-proton-', dir=str(base)))
+    try:
+        top = _proton_fetch_verified(release, work)
+        if top is None:
+            return 1
+        if top.name not in _proton_arch_forms(name):
+            print('verify    : the release unpacks as %s, not %s; not recording a manifest' % (top.name, name))
+            return 1
+        manifest = proton_build_manifest(top, name, 'rebuild', release['tag'])
+    except (OSError, ValueError, tarfile.TarError) as error:
+        print('verify    : rebuild failed: %s' % error)
+        return 1
+    finally:
+        shutil.rmtree(str(work), ignore_errors=True)
+    try:
+        write_json_file(proton_manifest_path(name), manifest)
+    except OSError as error:
+        print('verify    : cannot write the manifest: %s' % error)
+        return 1
+    print('verify    : manifest for %s written from the verified release (%d files) -> %s'
+          % (name, len(manifest['files']), proton_manifest_path(name)))
+    result = proton_compare(tool['path'], manifest['files'], manifest['links'])
+    return EXIT_OK if _proton_report(name, result) else 1
+
+
+# ------------------------------------------------------------ cheap heuristics
+
+def _proton_dll_finding(tool):
+    base = Path(tool['path'])
+    try:
+        ref = (base / 'version').stat().st_mtime + PROTON_MTIME_SLACK
+    except OSError:
+        return None
+    total = newer = 0
+    dirs = []
+    for rel in PROTON_DLL_DIRS:
+        count = 0
+        try:
+            with os.scandir(str(base / rel)) as entries:
+                for entry in entries:
+                    if not entry.name.lower().endswith(('.dll', '.exe', '.sys', '.drv')):
+                        continue
+                    try:
+                        mtime = entry.stat(follow_symlinks=False).st_mtime
+                    except OSError:
+                        continue
+                    total += 1
+                    if mtime > ref:
+                        newer += 1
+                        count += 1
+        except OSError:
+            continue
+        if count:
+            dirs.append('%s (%d)' % (rel.split('wine/', 1)[-1], count))
+    if newer >= PROTON_MTIME_MIN_FILES and newer * 20 >= total:
+        return {'id': 'proton.dll-mtimes', 'severity': 'warn', 'tool': tool['name'],
+                'message': '%s: %d of %d Windows DLLs are newer than the tool itself in %s; a wineboot prefix '
+                           'update probably overwrote them with another version\'s' % (tool['name'], newer, total, ', '.join(dirs)),
+                'fix': 'luna proton verify %s (add --rebuild if it has no manifest), then reinstall it' % tool['name']}
+    return None
+
+
+def _proton_prefix_owner(compat):
+    """Tool names compatdata/0 says last set the prefix up (config_info paths, version text)."""
+    names = set()
+    try:
+        names |= set(re.findall(r'compatibilitytools\.d/([A-Za-z0-9._-]+)', (compat / 'config_info').read_text(errors='replace')))
+    except OSError:
+        pass
+    try:
+        text = (compat / 'version').read_text(errors='replace')
+        for tool in proton_installed():
+            if tool['name'] in text or (tool['version'] and tool['version'] in text.split()):
+                names.add(tool['name'])
+    except OSError:
+        pass
+    return names
+
+
+def proton_prefix_findings():
+    """Dangling or foreign symlinks in the shared compatdata/0 prefix (readlink only)."""
+    compat = steam_home() / 'steamapps/compatdata/0'
+    tools_dir = str(proton_tools_dir())
+    roots = {tools_dir, os.path.realpath(tools_dir)}
+    seen, dangling = {}, {}
+    for sysdir in PROTON_PREFIX_SYSDIRS:
+        folder = compat / 'pfx' / sysdir
+        try:
+            entries = list(os.scandir(str(folder)))
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_symlink():
+                continue
+            target = os.path.normpath(os.path.join(str(folder), os.readlink(entry.path)))
+            for root in roots:
+                if target.startswith(root + os.sep):
+                    tool = target[len(root) + 1:].split(os.sep)[0]
+                    seen[tool] = seen.get(tool, 0) + 1
+                    if not os.path.exists(target):
+                        dangling[tool] = dangling.get(tool, 0) + 1
+                    break
+    found = []
+    for tool, count in sorted(dangling.items()):
+        found.append({'id': 'proton.prefix-dangling', 'severity': 'warn', 'tool': tool,
+                      'message': '%d link(s) in the shared prefix compatdata/0/pfx point into %s, which %s'
+                                 % (count, tool, 'is missing files' if (proton_tools_dir() / tool).is_dir() else 'no longer exists'),
+                      'fix': 'close Steam, then luna proton verify; Steam repairs the prefix on its next start with the one installed tool'})
+    owner = _proton_prefix_owner(compat)
+    owner_forms = set()
+    for name in owner:
+        owner_forms |= _proton_arch_forms(name)
+    foreign = {t: c for t, c in seen.items() if t not in dangling and owner and t not in owner_forms}
+    mixed = len(seen) > 1 and not owner
+    for tool, count in sorted(foreign.items()):
+        found.append({'id': 'proton.prefix-foreign', 'severity': 'warn', 'tool': tool,
+                      'message': '%d link(s) in compatdata/0/pfx point into %s but the prefix was last set up by %s: '
+                                 'the next prefix update can overwrite %s\'s DLLs' % (count, tool, ', '.join(sorted(owner)), tool),
+                      'fix': 'keep one GE-Proton (luna proton prune), then luna proton verify'})
+    if mixed:
+        found.append({'id': 'proton.prefix-foreign', 'severity': 'warn', 'tool': '',
+                      'message': 'links in compatdata/0/pfx point into %d different tools (%s)' % (len(seen), ', '.join(sorted(seen))),
+                      'fix': 'keep one GE-Proton (luna proton prune), then luna proton verify'})
+    return found
+
+
+def proton_health(tools=None):
+    """Cheap, hash-free findings: [{id, severity, message, fix, tool}]."""
+    tools = proton_ge_tools(tools)
+    found = []
+    warning = proton_multi_warning(tools)
+    if warning:
+        found.append({'id': 'proton.multi-version', 'severity': 'warn', 'tool': '', 'message': warning,
+                      'fix': 'luna proton prune'})
+    for tool in tools:
+        item = _proton_dll_finding(tool)
+        if item:
+            found.append(item)
+    found.extend(proton_prefix_findings())
+    return found
+
+
 def proton_status_data():
     tools = proton_installed()
     try:
@@ -4992,12 +5431,14 @@ def proton_status_data():
     mappings = proton_mappings()
     newest = max((t['name'] for t in tools if t['name'].startswith(PROTON_PREFIX)),
                  key=proton_version_key, default='')
-    return {'tools': [{k: t[k] for k in ('name', 'version', 'size')} for t in tools],
+    return {'tools': [dict({k: t[k] for k in ('name', 'version', 'size')},
+                           manifest=proton_manifest_load(t['name']) is not None) for t in tools],
             'latest': latest,
             'updateAvailable': bool(latest != 'unknown' and
                                     (not newest or proton_version_key(latest) > proton_version_key(newest))),
             'mappedGames': sum(1 for _ in mappings),
             'missing': proton_missing_mappings(tools, mappings),
+            'warnings': proton_health(tools),
             'toolsDir': str(proton_tools_dir())}
 
 
@@ -5010,12 +5451,16 @@ def proton_status(as_json):
     if not data['tools']:
         print('installed : none')
     for tool in data['tools']:
-        print('installed : %-28s %-16s %s' % (tool['name'], tool['version'], _format_mb(tool['size'])))
+        print('installed : %-28s %-16s %s%s' % (tool['name'], tool['version'], _format_mb(tool['size']),
+                                                '' if tool['manifest'] or not tool['name'].startswith(PROTON_PREFIX)
+                                                else '  (no manifest: luna proton verify %s --rebuild)' % tool['name']))
     note = '  (update available: luna proton install)' if data['updateAvailable'] else ''
     print('latest    : %s%s' % (data['latest'], note))
     for name, apps in sorted(data['missing'].items()):
         print('missing   : %s is mapped by %d game(s) (appid %s); run: luna proton install %s'
               % (name, len(apps), ', '.join(sorted(apps)[:6]), name))
+    for item in data['warnings']:
+        print('warning   : %s\n            fix: %s' % (item['message'], item['fix']))
     return EXIT_OK
 
 
@@ -5074,6 +5519,49 @@ def _proton_download(url, destination, total=0, label=None):
         time.sleep(delay)
 
 
+def _proton_fetch_verified(release, work):
+    """Download the release tarball into `work`, check its sha512 and unpack it.
+    Returns the single extracted top-level directory, or None (reason printed)."""
+    tag = release['tag']
+    asset = release.get('base') or tag
+    try:
+        with _proton_open(_proton_request(release['sumUrl'])) as source:
+            text = source.read(65536).decode('utf-8', 'replace')
+    except (OSError, urllib.error.URLError) as error:
+        print('proton    : cannot fetch checksum: %s' % error)
+        return None
+    expected = next((line.split()[0].lower() for line in text.splitlines()
+                     if line.split() and line.split()[-1].lstrip('*') == asset + '.tar.gz'), '')
+    if not re.fullmatch(r'[0-9a-f]{128}', expected):
+        print('proton    : no valid sha512 for %s.tar.gz in the checksum file' % asset)
+        return None
+    tarball = work / (asset + '.tar.gz')
+    actual = _proton_download(release['tarUrl'], tarball, release['tarSize'], tag)
+    if actual != expected:
+        print('proton    : SHA512 mismatch for %s; nothing installed' % tag)
+        return None
+    print('proton    : sha512 verified; extracting')
+    extract = work / 'x'
+    extract.mkdir()
+    with tarfile.open(str(tarball), 'r:gz') as archive:
+        _proton_safe_extract(archive, str(extract))
+    tops = [p for p in extract.iterdir()]
+    if len(tops) != 1 or not tops[0].is_dir() or tops[0].name not in (tag, asset):
+        print('proton    : unexpected archive layout (expected a single %s/ directory)' % asset)
+        return None
+    return tops[0]
+
+
+def _proton_space_ok(release, base):
+    need = max(release['tarSize'], 300 * 1024 ** 2) * 4  # tarball + extracted tree + slack
+    probe = base if base.exists() else base.parent
+    free = shutil.disk_usage(str(probe)).free
+    if free < need:
+        print('proton    : not enough free space in %s: %s free, ~%s needed' % (probe, _format_mb(free), _format_mb(need)))
+        return False
+    return True
+
+
 def proton_install(version='latest', dry_run=False):
     try:
         release = proton_release(version, force=True)
@@ -5090,54 +5578,44 @@ def proton_install(version='latest', dry_run=False):
     if present:
         print('proton    : %s is already installed (%s); nothing to do' % (tag, base / present))
         return EXIT_OK
-    need = max(release['tarSize'], 300 * 1024 ** 2) * 4  # tarball + extracted tree + slack
-    base.mkdir(parents=True, exist_ok=True) if not dry_run else None
-    probe = base if base.exists() else base.parent
-    free = shutil.disk_usage(str(probe)).free
-    if free < need:
-        print('proton    : not enough free space in %s: %s free, ~%s needed' % (probe, _format_mb(free), _format_mb(need)))
+    if not dry_run:
+        busy = proton_busy_reason()
+        if busy:
+            print('proton    : refusing to install: %s' % busy)
+            return EXIT_REFUSED
+        base.mkdir(parents=True, exist_ok=True)
+    if not _proton_space_ok(release, base):
         return 1
     if dry_run:
         print('proton    : would install %s (%s) into %s' % (tag, _format_mb(release['tarSize']), base))
         print('proton    : would verify against %s' % release['sumUrl'])
+        print('proton    : would record an integrity manifest in %s' % proton_manifest_dir())
         return EXIT_OK
     work = Path(tempfile.mkdtemp(prefix='.luna-proton-', dir=str(base)))
     try:
-        try:
-            with _proton_open(_proton_request(release['sumUrl'])) as source:
-                text = source.read(65536).decode('utf-8', 'replace')
-        except (OSError, urllib.error.URLError) as error:
-            print('proton    : cannot fetch checksum: %s' % error)
+        top = _proton_fetch_verified(release, work)
+        if top is None:
             return 1
-        expected = next((line.split()[0].lower() for line in text.splitlines()
-                         if line.split() and line.split()[-1].lstrip('*') == asset + '.tar.gz'), '')
-        if not re.fullmatch(r'[0-9a-f]{128}', expected):
-            print('proton    : no valid sha512 for %s.tar.gz in the checksum file' % asset)
+        if (base / top.name).exists():
+            print('proton    : %s appeared meanwhile; leaving it alone' % top.name)
             return 1
-        tarball = work / (asset + '.tar.gz')
-        actual = _proton_download(release['tarUrl'], tarball, release['tarSize'], tag)
-        if actual != expected:
-            print('proton    : SHA512 mismatch for %s; nothing installed' % tag)
-            return 1
-        print('proton    : sha512 verified; extracting')
-        extract = work / 'x'
-        extract.mkdir()
-        with tarfile.open(str(tarball), 'r:gz') as archive:
-            _proton_safe_extract(archive, str(extract))
-        tops = [p for p in extract.iterdir()]
-        if len(tops) != 1 or not tops[0].is_dir() or tops[0].name not in (tag, asset):
-            print('proton    : unexpected archive layout (expected a single %s/ directory)' % asset)
-            return 1
-        if (base / tops[0].name).exists():
-            print('proton    : %s appeared meanwhile; leaving it alone' % tops[0].name)
-            return 1
-        os.rename(str(tops[0]), str(base / tops[0].name))
+        manifest = proton_build_manifest(top, top.name, 'install', tag)  # from the sha512-verified tree
+        os.rename(str(top), str(base / top.name))
+        name = top.name
     except (OSError, ValueError, tarfile.TarError) as error:
         print('proton    : install failed: %s' % error)
         return 1
     finally:
         shutil.rmtree(str(work), ignore_errors=True)
+    try:
+        write_json_file(proton_manifest_path(name), manifest)
+    except OSError as error:
+        print('proton    : installed, but the integrity manifest could not be written: %s' % error)
     print('proton    : installed %s; restart Steam to see it in the compatibility list' % tag)
+    warning = proton_multi_warning()
+    if warning:
+        print('proton    : WARNING: %s' % warning)
+        print('proton    : the old version was NOT removed; run: luna proton prune')
     return EXIT_OK
 
 
@@ -5159,21 +5637,41 @@ def proton_remove(version, force=False, dry_run=False):
     if dry_run:
         print('proton    : would remove %s' % name)
         return EXIT_OK
+    busy = proton_busy_reason(tool['path'])
+    if busy:
+        print('proton    : refusing to remove %s: %s' % (name, busy))
+        return EXIT_REFUSED
     shutil.rmtree(tool['path'])
+    try:
+        proton_manifest_path(tool['name']).unlink()
+    except OSError:
+        pass
     print('proton    : removed %s' % name)
     return EXIT_OK
 
 
 def proton_prune(keep, dry_run=False):
+    """Remove all but the newest `keep` GE-Proton. A version any game is mapped to is
+    never removed here (only `remove --force` does that)."""
     if keep < 0:
         print('proton    : --keep must be >= 0')
         return 1
+    config = steam_home() / 'config/config.vdf'
+    if config.exists() and not os.access(str(config), os.R_OK):
+        print('proton    : cannot read %s, so mapped versions cannot be protected; nothing pruned' % config)
+        return EXIT_REFUSED
     mappings = proton_mappings()
-    ge = [t for t in proton_installed() if t['name'].startswith(PROTON_PREFIX)]
+    ge = proton_ge_tools()
     victims = ge[keep:]
     if not victims:
         print('proton    : nothing to prune (%d GE-Proton installed, keeping %d)' % (len(ge), keep))
         return EXIT_OK
+    if not dry_run:
+        busy = proton_busy_reason()
+        if busy:
+            print('proton    : refusing to prune: %s' % busy)
+            return EXIT_REFUSED
+    refused = False
     for tool in victims:
         apps = proton_mapped_to(tool, mappings)
         if apps:
@@ -5181,9 +5679,22 @@ def proton_prune(keep, dry_run=False):
         elif dry_run:
             print('proton    : would remove %s' % tool['name'])
         else:
+            busy = proton_busy_reason(tool['path'])
+            if busy:
+                print('proton    : not removing %s: %s' % (tool['name'], busy))
+                refused = True
+                continue
             shutil.rmtree(tool['path'])
+            try:
+                proton_manifest_path(tool['name']).unlink()
+            except OSError:
+                pass
             print('proton    : removed %s' % tool['name'])
-    return EXIT_OK
+    warning = proton_multi_warning()
+    if warning and not dry_run:
+        print('proton    : WARNING: a mapped version is still installed next to the newest one. '
+              'Remap those games to the newest tool in Steam, then run: luna proton prune')
+    return EXIT_REFUSED if refused else EXIT_OK
 
 
 def cmd_proton(options):
@@ -5197,11 +5708,20 @@ def cmd_proton(options):
             print('proton    : remove needs a VERSION')
             return 1
         return proton_remove(options.proton_version, options.force, options.dry_run)
+    if action == 'verify':
+        return proton_verify(options.proton_version, options.rebuild, options.against)
     return proton_prune(options.keep, options.dry_run)
 
 
 def _doctor_proton():
     found = []
+    for item in proton_health():
+        found.append(_finding(item['id'], item['severity'], item['message'], item['fix']))
+    for tool in proton_ge_tools():
+        if not proton_manifest_load(tool['name']):
+            found.append(_finding('proton.no-manifest', 'info',
+                                  '%s has no integrity manifest, so corruption cannot be proven' % tool['name'],
+                                  'luna proton verify %s --rebuild' % tool['name']))
     for name, apps in sorted(proton_missing_mappings().items()):
         found.append(_finding('proton.missing-tool', 'warn',
                               '%d game(s) are mapped to %s, which is not installed on this machine'
@@ -5604,6 +6124,14 @@ GUI_PANEL_SELECTORS = {
     'playtime': {'nav': 'Playtime', 'panel': ('heading', 'Playtime', True)},       # confirmed live
     'presence': {'nav': 'Presence', 'panel': ('heading', 'Presence', True)},       # confirmed live
     'compressor': {'nav': 'Compressor', 'panel': ('heading', 'Compressor', True)},  # confirmed live
+    'sgdb': {'nav': 'SteamGridDB', 'panel': ('heading', 'SteamGridDB artwork', True)},   # confirmed live
+    'graphics': {'nav': 'Graphics', 'panel': ('heading', 'Graphics (read-only)', True)},  # confirmed live
+    # Pages of the Luna core add-on (not add-ons of their own): checked by `gui watch`,
+    # never by verify, since ADDONS does not list them.
+    'hltb': {'nav': 'HowLongToBeat', 'panel': ('heading', 'HowLongToBeat', True)},       # confirmed live
+    'health': {'nav': 'Health', 'panel': ('heading', 'Health (local diagnostics)', True)},  # confirmed live
+    'settings': {'nav': 'Settings', 'panel': ('heading', 'Settings', True)},             # confirmed live
+    'about': {'nav': 'About', 'panel': ('heading', 'About SLS Luna', True)},             # confirmed live
 }
 # Library list: a ReactVirtualized grid, so only the rendered rows exist in the tree.
 GUI_LIBRARY_TABLE = ('table', 'grid', True)      # confirmed live; rows are `cell '<game name>'`
@@ -5686,12 +6214,32 @@ def gui_run(args, timeout=GUI_TIMEOUT, env=None):
             'error': ('%s %s' % (code or 'error', message or '')).strip()[:200]}
 
 
+def gui_desktop_name(env=None):
+    env = env or os.environ
+    return (env.get('XDG_CURRENT_DESKTOP') or env.get('XDG_SESSION_DESKTOP') or env.get('DESKTOP_SESSION')
+            or 'this desktop')
+
+
+def gui_backend(env=None):
+    """Which window backend is in use. Two exist: 'niri' (tested: real window titles and
+    window-only capture) and 'generic' (agent-desktop list-windows, no capture). No other
+    compositor is guessed at: there, capture says "not supported on <desktop>: <why>"."""
+    env = env or gui_session_env()
+    if shutil.which('niri') and env.get('NIRI_SOCKET'):
+        return {'name': 'niri', 'windows': 'niri msg --json windows',
+                'capture': 'niri msg action screenshot-window', 'note': ''}
+    why = 'niri is not installed' if not shutil.which('niri') else 'no NIRI_SOCKET (not a niri session)'
+    return {'name': 'generic', 'windows': 'agent-desktop list-windows (window titles are empty)',
+            'capture': None,
+            'note': 'not supported on %s: window-only screenshots need niri (%s)' % (gui_desktop_name(os.environ), why)}
+
+
 def gui_windows(timeout=GUI_TIMEOUT, env=None):
     """Open Steam windows as [{'title', 'source'}]. niri first (real titles),
     agent-desktop as the fallback (titles are empty strings there)."""
     env = env or gui_session_env()
     niri = shutil.which('niri')
-    if niri and env.get('NIRI_SOCKET'):
+    if gui_backend(env)['name'] == 'niri':
         try:
             result = subprocess.run([niri, 'msg', '--json', 'windows'], capture_output=True,
                                     text=True, timeout=timeout, env=env)
@@ -5807,6 +6355,16 @@ def gui_dialogs(tree):
     return dialogs
 
 
+def gui_secondary_windows(tree):
+    """Titles of Steam's own secondary windows (Settings, Friends List, ...). Observed live:
+    each is a separate AT-SPI window holding one `webarea '<title>'`; it has no dialog or
+    alert role and no Close button of its own (the AT-SPI title is empty, niri has the
+    title). The main window's webarea is 'Steam' and the sign-in window's 'Sign in to Steam'."""
+    return [str(node.get('name')) for node in gui_walk(tree)
+            if node.get('role') == 'webarea' and node.get('name')
+            and node.get('name') not in ('Steam', 'Sign in to Steam')]
+
+
 def gui_classify(tree, titles=()):
     """'login', 'main', 'dialog' or 'unknown'."""
     if any('sign in to steam' in t.lower() for t in titles):
@@ -5821,6 +6379,118 @@ def gui_classify(tree, titles=()):
     if gui_find_nodes(tree, 'statictext', 'LIBRARY') and gui_find_nodes(tree, 'statictext', 'STORE'):
         return 'main'
     return 'unknown'
+
+
+# A "Sign in to Steam" window is NOT proof that the user has to sign in: Steam shows the same
+# window while it auto-logs-on at startup (observed live: ~37 s from process start to the
+# logon response, the main window "Steam" after that). 'login' is therefore only concluded
+# once the window has outlasted this grace period with no log-on attempt in connection_log.
+GUI_LOGIN_GRACE = 120
+GUI_LOG_STAMP = re.compile(r'^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]')
+
+
+def gui_log_epoch(line):
+    match = GUI_LOG_STAMP.match(line)
+    if not match:
+        return None
+    try:
+        return time.mktime(time.strptime(match.group(1), '%Y-%m-%d %H:%M:%S'))
+    except (ValueError, OverflowError):
+        return None
+
+
+def gui_log_tail(name, limit=200000):
+    try:
+        path = steam_home() / 'logs' / name
+        with open(path, 'rb') as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - limit))
+            return handle.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return []
+
+
+def gui_logon_evidence(since, lines=None):
+    """(state, line) from Steam's connection_log.txt for events after `since` (epoch):
+    'logged-on', 'logging-on' (a log-on was started or is connecting), 'none' (nothing
+    since: the client is not trying to log on) or 'unknown' (no log). The last event wins."""
+    lines = gui_log_tail('connection_log.txt') if lines is None else lines
+    if not lines:
+        return 'unknown', ''
+    state, shown = 'none', ''
+    for line in lines:
+        when = gui_log_epoch(line)
+        if when is None or when < since:
+            continue
+        if 'LogOff()' in line or '[Logged Off' in line and 'ConnectionDisconnected' in line:
+            state, shown = 'none', line
+        elif ('RecvMsgClientLogOnResponse' in line and "'OK'" in line) or '[Logged On' in line:
+            state, shown = 'logged-on', line
+        elif ('LogOn() called' in line or '[Connecting' in line) and state != 'logged-on':
+            state, shown = 'logging-on', line
+    return state, shown[:160]
+
+
+def gui_process_started(proc='/proc'):
+    """Epoch start time of this user's oldest Steam client process, or None."""
+    root, uid, best = Path(proc), os.getuid(), None
+    try:
+        btime = next(int(line.split()[1]) for line in (root / 'stat').read_text().splitlines() if line.startswith('btime '))
+        entries = list(root.iterdir())
+    except (OSError, StopIteration, ValueError):
+        return None
+    try:
+        hertz = os.sysconf('SC_CLK_TCK')
+    except (ValueError, OSError):
+        hertz = 100
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            argv = (entry / 'cmdline').read_bytes().split(b'\0')
+            if os.path.basename(argv[0].decode('utf-8', 'replace')) not in ('steam', 'steam.sh'):
+                continue
+            text = (entry / 'stat').read_text()
+            started = btime + int(text[text.rindex(')') + 2:].split()[19]) / float(hertz)
+        except (OSError, ValueError, IndexError):
+            continue
+        best = started if best is None else min(best, started)
+    return best
+
+
+def gui_judge_screen(raw, titles, age, grace, logon):
+    """(screen, signal): 'main', 'dialog', 'starting', 'login' or 'unknown', and the evidence
+    behind the call. `raw` is gui_classify() (or, without a tree, the window titles),
+    `age` the seconds since the Steam process started (None = unknown), `logon` the
+    gui_logon_evidence() pair. A sign-in window is 'starting' until it has persisted for
+    `grace` seconds without any log-on attempt; only then is it the real form."""
+    if raw in ('main', 'dialog'):
+        return raw, 'main window present (%s)' % ('window titled "Steam"' if 'Steam' in titles else 'accessibility tree')
+    if raw == 'login':
+        state, line = logon
+        if state == 'logged-on':
+            return 'starting', 'sign-in window is up but connection_log shows the log-on succeeded: %s' % line
+        if state == 'logging-on':
+            return 'starting', 'sign-in window is up and connection_log shows a log-on in progress: %s' % line
+        if age is None:
+            return 'starting', 'sign-in window is up; Steam start time unknown, so it cannot be told from the startup window'
+        if age < grace:
+            return 'starting', ('sign-in window up at %.0f s after start (grace %.0f s); no log-on attempt in connection_log '
+                                'yet (log-on: %s)' % (age, grace, state))
+        return 'login', ('sign-in window persisted: Steam up %.0f s (> grace %.0f s) and connection_log shows no '
+                         'log-on attempt (%s)' % (age, grace, state))
+    return raw, 'no recognisable Steam window'
+
+
+def gui_exit_hint(since):
+    """Why did Steam go away? What its own logs say about the time after `since`."""
+    for name, marker in (('console_log.txt', 'StartShutdown'), ('bootstrap_log.txt', '] Shutdown')):
+        hits = [line for line in gui_log_tail(name, 100000) if marker in line and (gui_log_epoch(line) or 0) >= since]
+        if hits:
+            return '%s logged a clean shutdown request: "%s" (something asked Steam to exit; not a crash)' % (name, hits[-1][:100])
+    return 'no shutdown line in console_log.txt or bootstrap_log.txt after the launch: a crash or a kill'
 
 
 def gui_steam_state(proc='/proc'):
@@ -5887,6 +6557,63 @@ def gui_main_window_id(env):
     return best[2], best[3]
 
 
+GUI_CLIP_PREFER = ('text/plain;charset=utf-8', 'image/png')
+
+
+def gui_clip_tools():
+    return shutil.which('wl-paste'), shutil.which('wl-copy')
+
+
+def gui_clip_types(env):
+    """MIME types on the clipboard: a list ([] = empty), or None when it cannot be read."""
+    paste = shutil.which('wl-paste')
+    try:
+        result = subprocess.run([paste, '--list-types'], capture_output=True, timeout=5, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode == 0:
+        return result.stdout.decode('utf-8', 'replace').split()
+    return [] if b'nothing is copied' in result.stderr.lower() else None
+
+
+def gui_clipboard_save(env):
+    """(saved, note). saved is {'type', 'data'} or {'empty': True}, or None when it cannot
+    be kept (then `note` says why). niri's screenshot-window overwrites the clipboard."""
+    paste, copy = gui_clip_tools()
+    if not paste or not copy:
+        return None, 'clipboard not restored: wl-clipboard (wl-paste/wl-copy) is not installed'
+    types = gui_clip_types(env)
+    if types is None:
+        return None, 'clipboard not restored: wl-paste could not read it'
+    if not types:
+        return {'empty': True}, ''
+    kind = next((t for t in GUI_CLIP_PREFER if t in types), types[0])
+    try:
+        result = subprocess.run([paste, '--no-newline', '--type', kind], capture_output=True, timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None, 'clipboard not restored: wl-paste failed'
+    if result.returncode != 0:
+        return None, 'clipboard not restored: wl-paste failed'
+    return {'type': kind, 'data': result.stdout}, ''
+
+
+def gui_clipboard_restore(saved, env, sleep=time.sleep):
+    """Put `saved` back once niri's image has landed on the clipboard. Returns a note
+    ('' when restored)."""
+    copy = shutil.which('wl-copy')
+    for _ in range(8):  # niri sets the clipboard a moment after the file appears
+        if 'image/png' in (gui_clip_types(env) or []):
+            break
+        sleep(0.2)
+    command = [copy, '--clear'] if saved.get('empty') else [copy, '--type', saved['type']]
+    try:  # wl-copy forks to serve the data: no inherited pipes, or run() would wait for it
+        subprocess.run(command, input=None if saved.get('empty') else saved['data'], timeout=10, env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return 'clipboard not restored: wl-copy failed'
+    return ''
+
+
 def gui_capture(directory, name, full_screen=False):
     """Screenshot as evidence. (path or None, note).
 
@@ -5910,10 +6637,14 @@ def gui_capture(directory, name, full_screen=False):
         if result.returncode != 0 or not target.is_file():
             return None, 'grim failed: %s' % (result.stderr.strip()[:120] or 'exit %d' % result.returncode)
         return target, 'saved (full screen)'
+    backend = gui_backend(env)
+    if backend['name'] != 'niri':
+        return None, 'no window-only screenshot: %s (use --full-screen to capture the whole screen)' % backend['note']
     main = gui_main_window_id(env)
     if main is None:
         return None, 'no window-only screenshot: niri or its Steam window is unavailable (use --full-screen to capture the whole screen)'
     window_id, window_size = main
+    saved, clip_note = gui_clipboard_save(env)
     try:
         result = subprocess.run([shutil.which('niri'), 'msg', 'action', 'screenshot-window', '--id', str(window_id),
                                  '--path', str(target.resolve())], capture_output=True, text=True,
@@ -5925,10 +6656,27 @@ def gui_capture(directory, name, full_screen=False):
     deadline = time.monotonic() + 5  # the action is asynchronous
     while time.monotonic() < deadline and not (target.is_file() and target.stat().st_size > 0):
         time.sleep(0.2)
+    if saved is not None:
+        clip_note = gui_clipboard_restore(saved, env)
     size = gui_png_size(target) if target.is_file() else None
+    extra = '; ' + clip_note if clip_note else ''
     if size is None:
-        return None, 'niri did not write a PNG to %s' % target
-    return target, 'saved, window only, %dx%d px (niri window %dx%d)' % (size + tuple(window_size))
+        return None, 'niri did not write a PNG to %s%s' % (target, extra)
+    return target, 'saved, window only, %dx%d px (niri window %dx%d)%s' % (size + tuple(window_size) + (extra,))
+
+
+def gui_install_hint(stream=None):
+    """One line printed after a successful install/update, or ''. Only on a terminal (never
+    from the unattended updater or a pipe) and only when the GUI layer could run here. It
+    never starts or restarts Steam: it only points at the commands."""
+    stream = stream or sys.stdout
+    try:
+        if not (gui_enabled() and stream.isatty() and gui_find_tool(GUI_TOOL) and gui_have_session(gui_session_env())):
+            return ''
+    except Exception:
+        return ''
+    return ('Optional check once Steam is back: luna gui verify (add-on panels; Steam must run in accessible mode, '
+            'see luna gui launch) or luna status --live.')
 
 
 def gui_unavailable_reason(need_accessible=True):
@@ -6102,7 +6850,7 @@ def gui_library(options):
     reason = gui_unavailable_reason()
     if reason:
         print('GUI checks skipped: %s' % reason)
-        return EXIT_OK
+        return EXIT_SKIPPED
     def read():  # depth 20 reaches the shelf headers that carry the total
         return gui_snapshot(depth=20)
     tree, error = read()
@@ -6205,6 +6953,8 @@ def gui_describe_blockers(budget=3.0):
         if left > 0.8 and gui_find_tool(GUI_TOOL) and gui_steam_state()[1]:
             tree, _ = gui_snapshot(timeout=left, env=env, scope='all', deadline=deadline)
             if tree is not None:
+                for title in gui_secondary_windows(tree):
+                    parts.append('window "%s" is open (a normal window, not a modal; close it in Steam)' % title)
                 for dialog in gui_dialogs(tree):
                     parts.append('dialog "%s" with buttons: %s'
                                  % (dialog['name'] or '?', ', '.join(dialog['buttons']) or 'none'))
@@ -6214,19 +6964,16 @@ def gui_describe_blockers(budget=3.0):
 
 
 def gui_lumen_survivor():
-    """(pid, started) of a Lumen sidecar still alive, or None. Reuses
-    process_running('lumen'), the detection the preflight and doctor use."""
+    """(pid, started) of a Lumen sidecar still alive, or None. process_running('lumen') is
+    the detection the preflight and doctor use; pid and start time come from the one
+    /proc reader (live_sidecar in 96_live_probe.py)."""
     try:
         if not process_running('lumen'):
             return None
-        result = subprocess.run(['pgrep', '-u', str(os.getuid()), '-x', 'lumen'],
-                                capture_output=True, text=True, timeout=5)
-        pid = (result.stdout.split() or ['?'])[0]
-        started = '?'
-        if pid.isdigit():
-            ps = subprocess.run(['ps', '-o', 'lstart=', '-p', pid], capture_output=True, text=True, timeout=5)
-            started = ps.stdout.strip() or '?'
-        return pid, started
+        sidecar = live_sidecar()
+        if not sidecar:
+            return ('?', '?')
+        return str(sidecar['pid']), live_stamp(sidecar['started'])
     except Exception:
         return ('?', '?')
 
@@ -6257,31 +7004,65 @@ def gui_report_markdown(report):
     return '\n'.join(lines)
 
 
+def gui_put_steam_back(close=None):
+    """Close the Steam this command launched in accessible mode (final-state rule: it was
+    not running before, so it is not left running, and accessible mode does not linger).
+    Goes through the project's own graceful shutdown; never kills. True when it is gone."""
+    print('Steam was started by this command in accessible mode: closing it again '
+          '(use --keep-steam to leave it running)')
+    close = close or _close_steam_gracefully
+    if close():
+        return True
+    blockers = gui_describe_blockers()
+    print('Steam did not exit within the timeout%s. It is still running in accessible mode; '
+          'close it yourself (Steam -> Exit).' % ('; ' + blockers if blockers else ''), file=sys.stderr)
+    return False
+
+
 def gui_verify(options, sleep=time.sleep):
-    """`luna gui verify`: exit 0 pass or skipped, 1 on any failure."""
+    """`luna gui verify`: exit 0 pass, 1 any failure, 5 (EXIT_SKIPPED) it could not run.
+    When --launch started Steam, Steam is closed again at the end unless --keep-steam."""
+    launched = []
+    try:
+        return gui_verify_run(options, sleep, launched)
+    finally:
+        if launched and not getattr(options, 'keep_steam', False):
+            gui_put_steam_back()
+
+
+def gui_verify_run(options, sleep, launched):
     reason = gui_unavailable_reason(need_accessible=False)
     if reason and not (getattr(options, 'launch', False) and reason.startswith('Steam is not running')):
         print('GUI checks skipped: %s' % reason)
-        return EXIT_OK
+        return EXIT_SKIPPED
     running, accessible = gui_steam_state()
     if not running:
         ok, message = gui_launch_accessible()
         print(message, file=sys.stdout if ok else sys.stderr)
         if not ok:
             return 1
+        launched.append(True)
     elif not accessible:
         print('GUI checks skipped: Steam was not started in accessible mode; close it and run: luna gui launch')
-        return EXIT_OK
+        return EXIT_SKIPPED
     tree = gui_wait_for_window(getattr(options, 'wait', 90), sleep=sleep)
     if tree is None:
         print('FAIL: no Steam window with an accessible tree appeared', file=sys.stderr)
         return 1
     titles = gui_titles(gui_windows())
     screen = gui_classify(tree, titles)
+    signal = ''
+    if screen == 'login':  # the startup window looks the same: wait for the log-on to finish
+        started = gui_process_started()
+        screen, tree, signal = gui_wait_for_screen(getattr(options, 'login_grace', GUI_LOGIN_GRACE), sleep, time.monotonic,
+                                                   grace=getattr(options, 'login_grace', GUI_LOGIN_GRACE),
+                                                   age0=(time.time() - started) if started else None)
     failures = []
     panels = {}
     if screen == 'login':
-        failures.append('Steam is at the sign-in screen: sign in first, then re-run luna gui verify')
+        failures.append('Steam is at the sign-in screen: sign in first, then re-run luna gui verify (%s)' % signal)
+    elif screen in ('starting', 'exited'):
+        failures.append('Steam is not ready: %s' % signal)
     elif screen == 'unknown':
         failures.append('could not recognise the current Steam screen')
     else:
@@ -6323,23 +7104,39 @@ def gui_status(options):
     running, accessible = gui_steam_state()
     info = {'tool': tool or 'missing',
             'session': {k: env.get(k, '') for k in ('WAYLAND_DISPLAY', 'DISPLAY', 'NIRI_SOCKET')},
-            'steamRunning': running, 'accessible': accessible, 'screen': 'n/a', 'windows': []}
+            'steamRunning': running, 'accessible': accessible, 'screen': 'n/a', 'windows': [],
+            'backend': {k: v for k, v in gui_backend(env).items() if v}}
     if gui_enabled() and running and gui_have_session(env):
         info['windows'] = gui_titles(gui_windows(env=env))
         if tool and accessible:
             tree, _ = gui_snapshot(env=env)
-            info['screen'] = gui_classify(tree, info['windows'])
+            raw = gui_classify(tree, info['windows'])
         elif any('sign in to steam' in t.lower() for t in info['windows']):
-            info['screen'] = 'login'
+            raw = 'login'
+        else:
+            raw = 'main' if 'Steam' in info['windows'] else 'n/a'
+        info['screen'] = raw
+        if raw in ('login', 'main'):
+            started = gui_process_started()
+            age = time.time() - started if started else None
+            logon = gui_logon_evidence(started - 2) if started else ('unknown', '')
+            info['screen'], info['signal'] = gui_judge_screen(raw, info['windows'], age, getattr(options, 'login_grace', GUI_LOGIN_GRACE), logon)
     if getattr(options, 'json', False):
         print(json.dumps(info, indent=2, sort_keys=True))
         return EXIT_OK
     print('tool       : %s' % info['tool'])
     print('session    : %s' % (' '.join('%s=%s' % (k, v) for k, v in info['session'].items() if v)
                                or 'none (no WAYLAND_DISPLAY/DISPLAY found)'))
+    backend = info['backend']
+    print('backend    : %s (windows: %s; capture: %s)' % (backend['name'], backend['windows'],
+                                                        backend.get('capture') or 'none'))
+    if backend.get('note'):
+        print('             %s' % backend['note'])
     print('steam      : %s' % ('running' if running else 'not running'))
     print('accessible : %s' % ('yes' if accessible else 'no'))
     print('screen     : %s' % info['screen'])
+    if info.get('signal') and info['screen'] in ('starting', 'login'):
+        print('             %s' % info['signal'])
     print('windows    : %s' % (', '.join('"%s"' % t for t in info['windows']) or 'none'))
     reason = gui_unavailable_reason()
     if reason:
@@ -6354,10 +7151,14 @@ def cmd_gui(options):
         return gui_status(options)
     if action == 'library':
         return gui_library(options)
+    if action == 'watch':
+        return gui_watch(options)
+    if action == 'restart-check':
+        return gui_restart_check(options)
     if action == 'launch':
         if not gui_enabled():
             print('GUI checks skipped: disabled (LUNA_GUI_CHECKS=0)')
-            return EXIT_OK
+            return EXIT_SKIPPED
         ok, message = gui_launch_accessible()
         print(message, file=sys.stdout if ok else sys.stderr)
         return EXIT_OK if ok else 1
@@ -6608,8 +7409,10 @@ def _doctor_bridge():
                               % (hook['result'], hook.get('reason') or '?'), 'luna hook repair'))
     steam_up = process_running('steam') or process_running('steamwebhelper')
     if process_running('lumen') and not steam_up:
+        survivor = gui_lumen_survivor()
+        where = ' (pid %s, started %s)' % survivor if survivor and survivor[0] != '?' else ''
         found.append(_finding('lumen.sidecar', 'warn',
-                              'a Lumen sidecar is running without Steam; it keeps the old boot.lua in memory',
+                              'a Lumen sidecar is running without Steam%s; it keeps the old boot.lua in memory' % where,
                               'pkill -u $(id -u) -x lumen'))
     return found
 
@@ -6703,6 +7506,1308 @@ def cmd_doctor(options):
     return code
 # ======================== end luna doctor ==================================
 
+# --- live health probe -------------------------------------------------------
+# `status --live` and the library-order reader talk to the RUNNING Steam client
+# through its Chromium DevTools port (the one Lumen itself injects through). There
+# was no CDP client in this repository to reuse (the add-ons run inside
+# SharedJSContext and never speak CDP), so this is a minimal stdlib one: an HTTP
+# GET for discovery plus a WebSocket handshake with client-side masking and text
+# frames. Everything here is read-only by construction:
+#   * RPCs go through live_rpc(), which refuses any name outside LIVE_RPC_ALLOWLIST;
+#   * the only JavaScript ever evaluated is built by this file from the constants
+#     below (LIVE_READ_EXPRESSIONS and the RPC wrapper), never from user input;
+#   * no clicks, no navigation, no files written, no process touched.
+# Set LUNA_LIVE_CHECKS=0 to switch the whole layer off (tests do).
+
+LIVE_HOST = '127.0.0.1'
+LIVE_TIMEOUT = 6.0            # seconds per HTTP request / per evaluated expression
+LIVE_MAX_MESSAGE = 64 << 20   # a 1,600-game library order is ~100 KB; this is a hard cap
+LIVE_TARGET_TITLE = 'SharedJSContext'
+LIVE_MAIN_TITLE = 'Steam'     # the main window page: where the Library list is mounted
+
+# The ONLY backend methods `status --live` may call. Each was read in its backend
+# source (addons/*/plugin/backend/main.lua) and performs no write, spawn or other
+# state change (the Lua `registry.<name>` handlers contain only reads):
+#   SlsLunaInfo               returns the version, installed add-on names, prefs.
+#   SlsLunaHealth             build_health(): file/marker/version report, "Read-only diagnostics".
+#   SlsPlaytimeGet            snapshot of the ledger + `runtime` health; the 30 s inventory
+#                             cache is memory only (the ledger migration runs at load, not here).
+#   SlsPresenceGet            state + `runtime` health; reads only.
+#   SlsPresenceContractProbe  documented "Read-only contract probe"; echoes the argument shape.
+#   SlsSgdbGet                load_config + grid_dir; reports whether a key exists, masked.
+#   SlsGraphicsGet            reads os-release, /proc and hardware files; nothing is written.
+#   SlsHltbGet                load_store + load_library; local reads only.
+# Deliberately NOT here: SlsCompressorGet (the first call may start a scan process and
+# writes its attempt stamp), and every Put/Set/Edit/Run/Apply/Update/Refresh/Report call.
+LIVE_RPC_ALLOWLIST = frozenset({
+    'SlsLunaInfo', 'SlsLunaHealth', 'SlsPlaytimeGet', 'SlsPresenceGet',
+    'SlsPresenceContractProbe', 'SlsSgdbGet', 'SlsGraphicsGet', 'SlsHltbGet',
+})
+
+# Per add-on: the allow-listed RPC that reports its health, or None when it has no
+# read-only one (reported as "no read-only health RPC", never guessed).
+LIVE_ADDON_PROBES = {
+    'luna': 'SlsLunaHealth',
+    'sgdb': 'SlsSgdbGet',
+    'graphics': 'SlsGraphicsGet',
+    'playtime': 'SlsPlaytimeGet',
+    'presence': 'SlsPresenceGet',
+    'compressor': None,
+}
+
+
+class LiveProbeError(Exception):
+    """A clear, one-line reason the live client cannot be read."""
+
+
+def live_enabled():
+    return os.environ.get('LUNA_LIVE_CHECKS', '1') != '0'
+
+
+def live_proc_dir():
+    return os.environ.get('LUNA_PROC_DIR') or '/proc'
+
+
+# ----------------------------------------------------------------- discovery
+
+def live_candidate_ports(proc=None, lumen=None):
+    """Debug ports worth trying, best first, without hardcoding any number.
+
+    1. $LUNA_CDP_PORT (explicit override);
+    2. Lumen's own `cef_port` file (what the sidecar connects to);
+    3. `--remote-debugging-port=N` on this user's steamwebhelper command lines."""
+    ports = []
+
+    def add(value):
+        try:
+            number = int(str(value).strip())
+        except ValueError:
+            return
+        if 0 < number < 65536 and number not in ports:
+            ports.append(number)
+
+    if os.environ.get('LUNA_CDP_PORT'):
+        add(os.environ['LUNA_CDP_PORT'])
+        return ports
+    try:
+        add((Path(lumen or lumen_root()) / 'cef_port').read_text().split()[0])
+    except (OSError, IndexError):
+        pass
+    try:
+        entries = list(Path(proc or live_proc_dir()).iterdir())
+    except OSError:
+        entries = []
+    uid = os.getuid()
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            argv = (entry / 'cmdline').read_bytes().split(b'\0')
+        except OSError:
+            continue
+        if os.path.basename(argv[0].decode('utf-8', 'replace')) != 'steamwebhelper':
+            continue
+        for arg in argv[1:]:
+            text = arg.decode('utf-8', 'replace')
+            if text.startswith('--remote-debugging-port='):
+                add(text.split('=', 1)[1])
+    return ports
+
+
+def live_http_json(port, path, timeout=LIVE_TIMEOUT):
+    """GET http://127.0.0.1:<port><path> -> parsed JSON. Raises OSError/ValueError."""
+    request = urllib.request.Request('http://%s:%d%s' % (LIVE_HOST, port, path))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via a proxy
+    with opener.open(request, timeout=timeout) as response:
+        return json.loads(response.read(LIVE_MAX_MESSAGE).decode('utf-8', 'replace'))
+
+
+def live_steam_running(proc=None):
+    """True when this user has a steam/steamwebhelper process (reads /proc only)."""
+    try:
+        entries = list(Path(proc or live_proc_dir()).iterdir())
+    except OSError:
+        return False
+    uid = os.getuid()
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            name = (entry / 'comm').read_text().strip()
+        except OSError:
+            continue
+        if name in ('steam', 'steamwebhelper'):
+            return True
+    return False
+
+
+def live_connect_info(timeout=LIVE_TIMEOUT):
+    """{'port', 'targets', 'version'} for the first debug port that answers, or
+    raises LiveProbeError with a one-line explanation."""
+    if not live_enabled():
+        raise LiveProbeError('live checks are disabled (LUNA_LIVE_CHECKS=0)')
+    ports = live_candidate_ports()
+    if not ports:
+        if not live_steam_running():
+            raise LiveProbeError('Steam is not running, so there is no client to probe')
+        raise LiveProbeError('no DevTools debug port found: Steam runs, but neither Lumen\'s cef_port '
+                             'nor a --remote-debugging-port argument is present (is Lumen active?)')
+    problems = []
+    for port in ports:
+        try:
+            targets = live_http_json(port, '/json/list', timeout)
+        except (OSError, ValueError) as error:
+            problems.append('port %d: %s' % (port, getattr(error, 'reason', None) or error))
+            continue
+        if isinstance(targets, list):
+            return {'port': port, 'targets': [t for t in targets if isinstance(t, dict)]}
+        problems.append('port %d: unexpected /json/list answer' % port)
+    if not live_steam_running():
+        raise LiveProbeError('Steam is not running (the stale debug port %s does not answer)'
+                             % ', '.join(str(p) for p in ports))
+    raise LiveProbeError('the DevTools debug port is unavailable (%s)' % '; '.join(problems))
+
+
+def live_pick_target(targets, title=LIVE_TARGET_TITLE):
+    for target in targets:
+        if target.get('type') == 'page' and target.get('title') == title and target.get('webSocketDebuggerUrl'):
+            return target
+    if title != LIVE_TARGET_TITLE:
+        return None
+    for target in targets:  # title can lag behind while the page loads: fall back to its URL
+        if (target.get('type') == 'page' and target.get('webSocketDebuggerUrl')
+                and 'steamloopback.host/index.html' in str(target.get('url', ''))):
+            return target
+    return None
+
+
+# --------------------------------------------------------- minimal WebSocket
+
+class LiveSocket:
+    """Just enough RFC 6455 for CDP: handshake, masked text frames out, text
+    frames in (fragmentation, ping/pong and close handled)."""
+
+    def __init__(self, url, timeout=LIVE_TIMEOUT):
+        match = re.match(r'^ws://([^/:]+):(\d+)(/.*)$', url or '')
+        if not match or match.group(1) not in (LIVE_HOST, 'localhost'):
+            raise LiveProbeError('refusing a non-local DevTools address')
+        self.timeout = timeout
+        host, port, path = match.group(1), int(match.group(2)), match.group(3)
+        try:
+            self.sock = socket.create_connection((LIVE_HOST, port), timeout=timeout)
+        except OSError as error:
+            raise LiveProbeError('could not connect to the DevTools port %d: %s' % (port, error))
+        self.buffer = b''
+        key = base64.b64encode(os.urandom(16)).decode()
+        try:
+            self.sock.sendall(('GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                               'Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n'
+                               % (path, host, port, key)).encode())
+            head = self._read_until(b'\r\n\r\n')
+        except OSError as error:
+            self.close()
+            raise LiveProbeError('DevTools handshake failed: %s' % error)
+        lines = head.decode('latin-1').split('\r\n')
+        accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+        headers = {k.strip().lower(): v.strip() for k, _, v in (l.partition(':') for l in lines[1:]) if k}
+        if ' 101 ' not in lines[0] or headers.get('sec-websocket-accept') != accept:
+            self.close()
+            raise LiveProbeError('DevTools refused the WebSocket upgrade (%s)' % lines[0][:60])
+
+    def _read_until(self, marker):
+        while marker not in self.buffer:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise OSError('connection closed')
+            self.buffer += chunk
+            if len(self.buffer) > LIVE_MAX_MESSAGE:
+                raise OSError('message too large')
+        head, _, self.buffer = self.buffer.partition(marker)
+        return head
+
+    def _read_exact(self, count):
+        while len(self.buffer) < count:
+            chunk = self.sock.recv(max(65536, count - len(self.buffer)))
+            if not chunk:
+                raise OSError('connection closed')
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:count], self.buffer[count:]
+        return data
+
+    def _send_frame(self, opcode, payload):
+        header = bytes([0x80 | opcode])
+        size = len(payload)
+        if size < 126:
+            header += bytes([0x80 | size])
+        elif size < 65536:
+            header += bytes([0x80 | 126]) + struct.pack('>H', size)
+        else:
+            header += bytes([0x80 | 127]) + struct.pack('>Q', size)
+        mask = os.urandom(4)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(header + mask + masked)
+
+    def send_text(self, text):
+        self._send_frame(0x1, text.encode('utf-8'))
+
+    def recv_text(self, deadline):
+        """The next complete text message; raises LiveProbeError on timeout/close."""
+        message = b''
+        try:
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise socket.timeout()
+                self.sock.settimeout(left)
+                first, second = self._read_exact(2)
+                opcode, length = first & 0x0F, second & 0x7F
+                if length == 126:
+                    length = struct.unpack('>H', self._read_exact(2))[0]
+                elif length == 127:
+                    length = struct.unpack('>Q', self._read_exact(8))[0]
+                if length > LIVE_MAX_MESSAGE:
+                    raise LiveProbeError('DevTools sent an oversized message')
+                mask = self._read_exact(4) if second & 0x80 else None
+                payload = self._read_exact(length)
+                if mask:
+                    payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+                if opcode == 0x8:
+                    raise LiveProbeError('DevTools closed the connection')
+                if opcode == 0x9:
+                    self._send_frame(0xA, payload)
+                    continue
+                if opcode == 0xA:
+                    continue
+                message += payload
+                if len(message) > LIVE_MAX_MESSAGE:
+                    raise LiveProbeError('DevTools sent an oversized message')
+                if first & 0x80:
+                    return message.decode('utf-8', 'replace')
+        except socket.timeout:
+            raise LiveProbeError('DevTools did not answer in time')
+        except OSError as error:
+            raise LiveProbeError('DevTools connection failed: %s' % error)
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------ evaluation
+
+# Named read-only expressions. Each only reads state of the page; the library ones
+# are documented where they are used. Never add anything here that assigns, calls a
+# setter, dispatches an event or navigates.
+LIVE_READ_EXPRESSIONS = {
+    # Is Lumen's RPC bridge present, and did the Luna agent run (window.__SlsLunaMenu)?
+    'bridge': '''(() => ({
+        rpc: typeof (window.Millennium && window.Millennium.callServerMethod) === 'function',
+        lunaMenu: !!window.__SlsLunaMenu,
+        lunaSort: (window.__SlsLunaMenu && window.__SlsLunaMenu.sort) ? {
+          value: window.__SlsLunaMenu.sort.value, seen: window.__SlsLunaMenu.sort.seen,
+          games: window.__SlsLunaMenu.sort.games, order: window.__SlsLunaMenu.sort.order || null } : null,
+        href: String(location.href).split('?')[0] }))()''',
+    # The Library list's own row model, read from the mounted list component (main
+    # window). `visibleRows` is the exact array its row renderer indexes into, so
+    # this is the displayed order of the whole list, not just the on-screen rows.
+    # Found through the React fiber of the virtualized grid; only getters are read.
+    'library': '''(() => {
+        const grid = document.querySelector('.ReactVirtualized__Grid');
+        if (!grid) return {found: false, reason: 'the Library list is not mounted (open the Library tab)'};
+        const key = Object.keys(grid).find(k => k.startsWith('__reactFiber'));
+        let fiber = key ? grid[key] : null;
+        let list = null;
+        for (let depth = 0; fiber && depth < 16 && !list; depth++, fiber = fiber.return) {
+          const node = fiber.stateNode;
+          if (node && !(node instanceof Element) && typeof node.GetRowCount === 'function'
+              && 'visibleRows' in node) list = node;
+        }
+        if (!list) return {found: false, reason: 'the Library list component was not found (Steam UI changed?)'};
+        const rows = Array.from(list.visibleRows || []).map(row => row.bIsCollection
+          ? ['c', String(row.strCollectionId), String((row.rgStrNames || [''])[0]), Number(row.nFilteredSize) || 0,
+             row.bIsCollapsed ? 1 : 0]
+          : ['a', String(row.strCollectionId), String((row.appOverview && row.appOverview.display_name)
+              || (row.rgStrNames || [''])[0] || ''), Number(row.appOverview && row.appOverview.appid) || 0]);
+        const ls = {};
+        for (const name of ['slsLunaSortLive', 'slsLunaSortDiag']) {
+          const value = localStorage.getItem(name);
+          if (value !== null) ls[name] = value.slice(0, 600);
+        }
+        return {found: true, rowCount: list.GetRowCount(), rows, storage: ls};
+      })()''',
+}
+
+
+def live_rpc_expression(name, args=None):
+    """JavaScript for one allow-listed RPC. Refuses anything else, in code."""
+    if name not in LIVE_RPC_ALLOWLIST:
+        raise LiveProbeError('refused: %s is not an allow-listed read-only RPC' % name)
+    return ('(async () => { const m = window.Millennium; '
+            'if (!m || typeof m.callServerMethod !== "function") return {error: "Millennium.callServerMethod is missing"}; '
+            'const out = await Promise.race([Promise.resolve(m.callServerMethod("lumen", %s, %s)), '
+            'new Promise((_, no) => setTimeout(() => no(new Error("no answer from the backend")), %d))]); '
+            'return {value: out}; })()'
+            % (json.dumps(name), json.dumps(args or {}), int(LIVE_TIMEOUT * 1000) - 500))
+
+
+class LiveSession:
+    """One DevTools connection to the SharedJSContext page."""
+
+    def __init__(self, socket_factory=LiveSocket, timeout=LIVE_TIMEOUT, title=LIVE_TARGET_TITLE):
+        self.timeout = timeout
+        info = live_connect_info(timeout)
+        target = live_pick_target(info['targets'], title)
+        if target is None:
+            raise LiveProbeError('the DevTools port answers but has no %s page yet (Steam is still starting?)'
+                                 % title)
+        self.port = info['port']
+        self.ws = socket_factory(target['webSocketDebuggerUrl'], timeout)
+        self.next_id = 0
+
+    def close(self):
+        self.ws.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _evaluate(self, expression):
+        self.next_id += 1
+        ident = self.next_id
+        self.ws.send_text(json.dumps({'id': ident, 'method': 'Runtime.evaluate', 'params': {
+            'expression': expression, 'returnByValue': True, 'awaitPromise': True,
+            'userGesture': False, 'silent': True}}))
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                message = json.loads(self.ws.recv_text(deadline))
+            except ValueError:
+                continue
+            if message.get('id') != ident:
+                continue  # an event, or a stale answer
+            if 'error' in message:
+                raise LiveProbeError('DevTools error: %s' % str((message['error'] or {}).get('message', '?'))[:120])
+            result = message.get('result') or {}
+            if result.get('exceptionDetails'):
+                details = result['exceptionDetails']
+                text = ((details.get('exception') or {}).get('description') or details.get('text') or 'exception')
+                raise LiveProbeError('the page raised: %s' % str(text).splitlines()[0][:120])
+            return (result.get('result') or {}).get('value')
+
+    def read(self, name):
+        """Evaluate one of the named LIVE_READ_EXPRESSIONS."""
+        if name not in LIVE_READ_EXPRESSIONS:
+            raise LiveProbeError('refused: %s is not a known read expression' % name)
+        return self._evaluate(LIVE_READ_EXPRESSIONS[name])
+
+    def rpc(self, name, args=None):
+        """Call one allow-listed read-only backend RPC. Returns the parsed JSON object;
+        raises LiveProbeError when it does not answer."""
+        answer = self._evaluate(live_rpc_expression(name, args))
+        if not isinstance(answer, dict):
+            raise LiveProbeError('%s returned nothing' % name)
+        if answer.get('error'):
+            raise LiveProbeError(str(answer['error'])[:120])
+        value = answer.get('value')
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                raise LiveProbeError('%s returned something that is not JSON' % name)
+        if not isinstance(value, dict):
+            raise LiveProbeError('%s returned an unexpected shape' % name)
+        return value
+
+
+# ----------------------------------------------------------------- sidecar
+
+def live_sidecar(proc=None):
+    """{'pid', 'started'} (epoch seconds) of this user's Lumen sidecar, or None.
+    Start time = /proc boot time + the process's starttime ticks."""
+    root = Path(proc or live_proc_dir())
+    uid = os.getuid()
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid or (entry / 'comm').read_text().strip() != 'lumen':
+                continue
+            stat_text = (entry / 'stat').read_text()
+            fields = stat_text[stat_text.rindex(')') + 2:].split()
+            ticks = int(fields[19])  # field 22 overall; `pid (comm)` precede the split
+            btime = next(int(line.split()[1]) for line in (root / 'stat').read_text().splitlines()
+                         if line.startswith('btime '))
+        except (OSError, ValueError, IndexError, StopIteration):
+            continue
+        try:
+            hertz = os.sysconf('SC_CLK_TCK')
+        except (ValueError, OSError):
+            hertz = 100
+        return {'pid': int(entry.name), 'started': btime + ticks / float(hertz)}
+    return None
+
+
+def live_payload_newest(lumen=None):
+    """(mtime, path) of the newest installed file the sidecar loads: boot.lua and
+    everything under sls-addons/. (0, '') when nothing is installed."""
+    base = Path(lumen or lumen_root())
+    newest = (0.0, '')
+    candidates = [base / 'lua' / 'boot.lua']
+    for folder, _, names in os.walk(str(base / 'sls-addons')):
+        candidates.extend(Path(folder) / name for name in names)
+    for path in candidates:
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            continue
+        if stamp > newest[0]:
+            newest = (stamp, str(path.relative_to(base)))
+    return newest
+
+
+def live_sidecar_state(proc=None, lumen=None, slack=2.0):
+    """{'state': 'absent'|'current'|'stale', 'pid', 'started', 'newest', 'newestPath'}.
+    A sidecar started before the newest payload file keeps the old boot.lua and
+    backends in memory; the fix is to restart Steam (the sidecar goes with it)."""
+    sidecar = live_sidecar(proc)
+    newest, path = live_payload_newest(lumen)
+    if not sidecar:
+        return {'state': 'absent', 'newest': newest, 'newestPath': path}
+    state = 'stale' if newest > sidecar['started'] + slack else 'current'
+    return dict(sidecar, state=state, newest=newest, newestPath=path)
+
+
+# --------------------------------------------------------------- status --live
+
+def live_stamp(value):
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(value)) if value else '?'
+
+
+def live_addon_report(session, addon):
+    """(answers, healthy, detail) for one add-on through its allow-listed health RPC."""
+    method = LIVE_ADDON_PROBES.get(addon)
+    if method is None:
+        return None, None, 'no read-only health RPC'
+    try:
+        payload = session.rpc(method)
+    except LiveProbeError as error:
+        return False, False, 'no answer: %s' % error
+    if payload.get('success') is False:
+        return True, False, 'backend error: %s' % str(payload.get('error', '?'))[:80]
+    facts, problems = [], []
+    running = payload.get('version')
+    if addon == 'luna':
+        health = payload.get('health') or {}
+        running = health.get('version', running)
+        drift = (health.get('install') or {}).get('drift') or []
+        if drift:
+            problems.append('install drift: %s' % '; '.join(str(d) for d in drift[:2]))
+        facts.append('%d add-on(s) listed' % len(((health.get('lumen') or {}).get('addons')) or []))
+    elif addon == 'sgdb':
+        facts.append('API key %s' % ('set' if payload.get('hasKey') else 'not set'))
+        if payload.get('gridError'):
+            problems.append('grid dir: %s' % str(payload['gridError'])[:60])
+    elif addon == 'graphics':
+        facts.append('%d GPU(s)' % len(payload.get('gpus') or []))
+    elif addon in ('playtime', 'presence'):
+        runtime = payload.get('runtime') or {}
+        if runtime.get('healthy') is True:
+            facts.append('agent reports healthy')
+        else:
+            problems.append('agent reports unhealthy%s' % (': %s' % runtime['error'] if runtime.get('error') else
+                                                            ' (no report yet)' if not runtime.get('healthy') else ''))
+        if addon == 'presence':
+            try:
+                probe = session.rpc('SlsPresenceContractProbe', {'raw': '{"a":1}'})
+                facts.append('contract %s' % ('ok' if probe.get('argType') == 'string' and probe.get('decoded') else 'MISMATCH'))
+                if not (probe.get('argType') == 'string' and probe.get('decoded')):
+                    problems.append('RPC argument contract changed')
+            except LiveProbeError as error:
+                problems.append('contract probe: %s' % error)
+    disk = None
+    try:
+        disk = json.loads((addons_dir() / addon / 'plugin.json').read_text()).get('version')
+    except (OSError, ValueError):
+        pass
+    if running:
+        facts.insert(0, 'v%s' % running)
+        if disk and str(disk) != str(running):
+            problems.append('running v%s but v%s is installed' % (running, disk))
+    return True, not problems, '; '.join(facts + problems) or 'answers'
+
+
+def live_collect(addons, proc=None, lumen=None):
+    """Everything `status --live` shows, as one dict. Never raises."""
+    report = {'available': False, 'reason': '', 'port': None, 'addons': {}, 'bridge': None, 'degraded': False}
+    report['sidecar'] = live_sidecar_state(proc, lumen)
+    boot = (Path(lumen) if lumen else lumen_root()) / 'lua' / 'boot.lua'
+    try:
+        report['bootMarkers'] = boot.read_text(errors='replace').count(MARKER)
+    except OSError:
+        report['bootMarkers'] = 0
+    try:
+        session = LiveSession()
+    except LiveProbeError as error:
+        report['reason'] = str(error)
+        return report
+    except Exception as error:  # a broken socket must never become a traceback
+        report['reason'] = 'live probe failed: %s' % error
+        return report
+    try:
+        with session:
+            report['available'] = True
+            report['port'] = session.port
+            try:
+                report['bridge'] = session.read('bridge')
+            except LiveProbeError as error:
+                report['bridge'] = {'error': str(error)}
+            for addon in addons:
+                report['addons'][addon] = dict(zip(('answers', 'healthy', 'detail'), live_addon_report(session, addon)))
+    except LiveProbeError as error:
+        report['reason'] = str(error)
+        report['available'] = False
+    except Exception as error:
+        report['reason'] = 'live probe failed: %s' % error
+        report['available'] = False
+    return report
+
+
+def live_boot_line(report):
+    markers = report.get('bootMarkers', 0)
+    bridge = report.get('bridge') or {}
+    answered = any(item.get('answers') for item in report['addons'].values())
+    if not markers:
+        return ('boot.lua is unpatched on disk%s' % ('; the running process still serves add-ons '
+                '(it predates the unpatch: restart Steam)' if answered else ''), False)
+    if not answered:
+        return ('marker x%d on disk, NOT reflected: no add-on backend answers in the running Lumen '
+                '(restart Steam; check lumen logs)' % markers, False)
+    if not bridge.get('rpc') or not bridge.get('lunaMenu'):
+        return ('marker x%d on disk, backends answer, but the front end is missing (%s)'
+                % (markers, 'no Millennium RPC bridge' if not bridge.get('rpc') else 'window.__SlsLunaMenu absent'), False)
+    return ('marker x%d on disk, reflected in the running process (backends answer, RPC bridge and '
+            'window.__SlsLunaMenu present)' % markers, True)
+
+
+def live_rendered_column(addons):
+    """{addon: text} for the 'rendered' column. Read-only: navigation stays off."""
+    reason = gui_unavailable_reason()
+    if reason:
+        return {a: 'n/a (%s)' % reason for a in addons}
+    try:
+        results = gui_rendered(list(addons), navigate=False)
+    except Exception as error:
+        return {a: 'n/a (%s)' % error for a in addons}
+    column = {}
+    for addon in addons:
+        item = results.get(addon) or {}
+        if addon not in GUI_PANEL_SELECTORS:
+            column[addon] = 'n/a (no GUI panel selector)'
+        elif item.get('state') == 'skipped':
+            column[addon] = 'n/a (%s; run luna gui verify)' % (item.get('reason') or 'skipped')
+        else:
+            column[addon] = '%s (%d/%d)' % (item.get('state', '?'), item.get('hits', 0), item.get('samples', 0))
+    return column
+
+
+def print_live_status(targets, installed, proc=None, lumen=None):
+    """The `status --live` section. Returns True when something is degraded."""
+    probed = [a for a in targets if a in installed]
+    report = live_collect(probed, proc, lumen)
+    degraded = False
+    sidecar = report['sidecar']
+    print()
+    if report['available']:
+        print('live       : DevTools on 127.0.0.1:%d, SharedJSContext reachable' % report['port'])
+    else:
+        print('live       : unavailable - %s' % report['reason'])
+    if sidecar['state'] == 'absent':
+        print('sidecar    : no Lumen process running')
+    else:
+        verdict = 'up to date'
+        if sidecar['state'] == 'stale':
+            verdict = ('STALE - installed file %s changed at %s, after the sidecar started; it still runs the '
+                       'old code (restart Steam)' % (sidecar['newestPath'], live_stamp(sidecar['newest'])))
+            degraded = True
+        print('sidecar    : lumen pid %d started %s; newest installed file %s - %s'
+              % (sidecar['pid'], live_stamp(sidecar['started']), live_stamp(sidecar['newest']), verdict))
+    if not report['available']:
+        return degraded
+    line, ok = live_boot_line(report)
+    print('boot.lua   : %s' % line)
+    degraded = degraded or not ok
+    if probed:
+        rendered = live_rendered_column(probed)
+        print('%-10s %-9s %-52s %s' % ('add-on', 'backend', 'health', 'rendered'))
+        for addon in probed:
+            item = report['addons'].get(addon) or {}
+            answers = item.get('answers')
+            backend = 'n/a' if answers is None else 'answers' if answers else 'SILENT'
+            health = item.get('detail', '')
+            print('%-10s %-9s %-52s %s' % (addon, backend, health[:52] + ('...' if len(health) > 52 else ''),
+                                           rendered.get(addon, '')))
+            if len(health) > 52:
+                print('%-10s %-9s   %s' % ('', '', health))
+            if answers is False or item.get('healthy') is False:
+                degraded = True
+    return degraded
+
+
+# ------------------------------------------------------------ library order
+
+def live_library_order(session=None):
+    """The complete Library list, in the order Steam displays it, read from the
+    running client (the mounted list component's own row model: `visibleRows`).
+
+    Returns {'names': [...], 'rendered': n, 'total': n, 'virtualized': False,
+    'unique': n, 'sections': [{'id','name','size','collapsed','start'}], 'rows': n,
+    'source': ..., 'sort': {...}}. `names` lists every game row in display order
+    (a game filed under two collections appears under both), with no section
+    headers. `rendered`/`total`/`virtualized` mirror gui_library_order() so both
+    reads compare with gui_library_compare().
+
+    What it proves: the order the Library SIDEBAR list displays, for all rows, not
+    just those on screen. What it does not prove: the order of a collection grid
+    sorted with Luna's HowLongToBeat option (value 12); that grid is rendered
+    per page and the sidebar never uses it. `sort` carries what Luna and Steam
+    report about the sort state so it can be compared across a restart alongside
+    the order. Raises LiveProbeError when the Library is not mounted."""
+    owner = session is None
+    session = session or LiveSession(title=LIVE_MAIN_TITLE)
+    try:
+        data = session.read('library')
+    finally:
+        if owner:
+            session.close()
+    if not isinstance(data, dict) or not data.get('found'):
+        raise LiveProbeError((data or {}).get('reason') or 'the Library list could not be read')
+    names, sections = [], []
+    for row in data.get('rows') or []:
+        if row and row[0] == 'c':
+            sections.append({'id': row[1], 'name': row[2], 'size': row[3], 'collapsed': bool(row[4]),
+                             'start': len(names)})
+        elif row and row[0] == 'a':
+            names.append(str(row[2]))
+    sort = {'stored': {}, 'luna': None}
+    for key, value in (data.get('storage') or {}).items():
+        try:
+            sort['stored'][key] = json.loads(value)
+        except ValueError:
+            sort['stored'][key] = value
+    if owner:
+        try:
+            with LiveSession() as shared:
+                sort['luna'] = (shared.read('bridge') or {}).get('lunaSort')
+        except LiveProbeError:
+            pass
+    return {'names': names, 'rendered': len(names), 'total': len(names), 'virtualized': False,
+            'unique': len(set(names)), 'rows': len(data.get('rows') or []), 'sections': sections,
+            'source': 'Library list component visibleRows (main window, read-only)', 'sort': sort}
+
+
+def cmd_library_order(options):
+    try:
+        order = live_library_order()
+    except LiveProbeError as error:
+        print('live library order unavailable: %s' % error, file=sys.stderr)
+        return 1
+    except Exception as error:
+        print('live library order failed: %s' % error, file=sys.stderr)
+        return 1
+    code = EXIT_OK
+    if getattr(options, 'save', None):
+        try:
+            write_json_file(Path(options.save), dict(order, savedAt=time.strftime('%Y-%m-%dT%H:%M:%S')))
+        except OSError as problem:
+            print('could not save: %s' % problem, file=sys.stderr)
+            return 1
+    if getattr(options, 'compare', None):
+        saved = read_json_file(Path(options.compare))
+        if not isinstance(saved, dict) or not isinstance(saved.get('names'), list):
+            print('FAIL: %s is not a saved library order' % options.compare, file=sys.stderr)
+            return 1
+        same, lines = gui_library_compare(saved['names'], order['names'])
+        if same:
+            print('library order matches %s (%d rows)' % (options.compare, len(order['names'])))
+        else:
+            print('FAIL: library order differs from %s' % options.compare, file=sys.stderr)
+            print('\n'.join(lines), file=sys.stderr)
+            code = 1
+        if saved.get('sort') != order['sort']:
+            print('note: the sort state differs from the saved one (saved %s, now %s)'
+                  % (json.dumps(saved.get('sort'), sort_keys=True), json.dumps(order['sort'], sort_keys=True)))
+    if getattr(options, 'json', False):
+        print(json.dumps(order, indent=2, ensure_ascii=False))
+    elif not getattr(options, 'compare', None) or code:
+        print('library order (%d game rows, %d unique, %d sections; source: %s)'
+              % (len(order['names']), order['unique'], len(order['sections']), order['source']))
+        print('sort state : %s' % json.dumps(order['sort'], sort_keys=True))
+        limit = getattr(options, 'limit', 40)
+        for number, name in enumerate(order['names'][:limit] if limit else order['names'], 1):
+            print('%5d  %s' % (number, name))
+        if limit and len(order['names']) > limit:
+            print('  ... %d more (use --limit 0, --json or --save FILE)' % (len(order['names']) - limit))
+    if getattr(options, 'save', None):
+        print('saved   : %s' % options.save)
+    return code
+
+# `luna gui watch`, the window backends and `luna gui restart-check`. Everything here
+# builds on 94_gui_check.py (accessibility tree, capture) and 96_live_probe.py (CDP).
+
+
+# ------------------------------------------------------------------ gui watch
+
+def gui_watch_selector(options):
+    """(role, name, exact) from --addon / --role / --name, or raises ValueError."""
+    addon = getattr(options, 'addon', None)
+    role = getattr(options, 'role', None)
+    name = getattr(options, 'name', None)
+    if addon:
+        if role or name:
+            raise ValueError('use either --addon KEY or --role/--name, not both')
+        if addon not in GUI_PANEL_SELECTORS:
+            raise ValueError('unknown add-on key %r (known: %s)' % (addon, ', '.join(sorted(GUI_PANEL_SELECTORS))))
+        return GUI_PANEL_SELECTORS[addon]['panel']
+    if not role and not name:
+        raise ValueError('gui watch needs --role and/or --name, or --addon KEY')
+    return role, name, not getattr(options, 'contains', False)
+
+
+def gui_watch(options, sleep=time.sleep, snapshot=None, clock=time.time, out=None):
+    """`luna gui watch`: sample the accessibility tree and print one timestamped line
+    each time the element appears or disappears. Read-only: it only snapshots, it never
+    clicks, so it does not navigate (open the page you want to watch yourself).
+
+    Exit: 0 normally (Ctrl-C and --duration end it cleanly with a summary); 1 with
+    --fail-if-vanished when the element disappeared after having been seen (the watch
+    then stops at that moment); EXIT_SKIPPED when GUI checks cannot run; EXIT_REFUSED
+    for a bad selector."""
+    out = out or (lambda line: print(line, flush=True))
+    try:
+        role, name, exact = gui_watch_selector(options)
+    except ValueError as error:
+        print('REFUSING: %s' % error, file=sys.stderr)
+        return EXIT_REFUSED
+    reason = gui_unavailable_reason()
+    if reason:
+        print('GUI checks skipped: %s' % reason)
+        return EXIT_SKIPPED
+    interval = max(0.2, float(getattr(options, 'interval', 2.0) or 2.0))
+    duration = getattr(options, 'duration', None)
+    fail_on_vanish = getattr(options, 'fail_if_vanished', False)
+    snapshot = snapshot or gui_snapshot
+    label = ' '.join(part for part in (role or '*', repr(name) if name is not None else '') if part)
+    started = clock()
+    stats = {'samples': 0, 'unreadable': 0, 'appeared': 0, 'vanished': 0, 'seen': False}
+    state = None  # None unknown, True present, False absent
+    readable = True
+
+    def stamp():
+        now = clock()
+        return '%s.%03d' % (time.strftime('%H:%M:%S', time.localtime(now)), int((now % 1) * 1000))
+
+    out('%s watching %s every %.1fs%s (Ctrl-C to stop)'
+        % (stamp(), label, interval, ' for %ds' % duration if duration is not None else ''))
+    code = EXIT_OK
+    try:
+        while True:
+            try:
+                tree, error = snapshot()
+            except Exception as problem:  # a vanished window must not end the watch
+                tree, error = None, str(problem)
+            if tree is None:
+                stats['unreadable'] += 1
+                if readable:
+                    out('%s unreadable (%s); element state unchanged' % (stamp(), error or 'no snapshot'))
+                readable = False
+            else:
+                if not readable and stats['samples']:
+                    out('%s readable again' % stamp())
+                readable = True
+                stats['samples'] += 1
+                count = len(gui_find_nodes(tree, role, name, exact))
+                present = count > 0
+                if present != state:
+                    if present:
+                        stats['appeared'] += 1
+                        stats['seen'] = True
+                        out('%s APPEARED  %s (%d match%s)' % (stamp(), label, count, '' if count == 1 else 'es'))
+                    elif state is True or stats['seen']:
+                        stats['vanished'] += 1
+                        out('%s VANISHED  %s' % (stamp(), label))
+                    else:
+                        out('%s absent    %s (not seen yet)' % (stamp(), label))
+                    state = present
+                    if fail_on_vanish and stats['vanished']:
+                        code = 1
+                        break
+            if duration is not None and clock() - started >= duration:
+                break
+            sleep(interval)
+    except KeyboardInterrupt:
+        out('%s interrupted' % stamp())
+    out('summary: %d samples, %d unreadable, appeared %d, vanished %d, now %s, %.1fs'
+        % (stats['samples'], stats['unreadable'], stats['appeared'], stats['vanished'],
+           {None: 'unknown', True: 'present', False: 'absent'}[state], clock() - started))
+    if code:
+        out('FAIL: %s vanished after having been seen' % label)
+    return code
+
+
+# ------------------------------------------------------- gui restart-check
+#
+# One full Steam restart with before/after evidence: does the Library order (and the sort
+# state), the add-on panels and the sign-in survive it? Steps (each one is a function so
+# the tests can drive them): refuse while a game runs or a download is active; record the
+# state; shut Steam down through _close_steam_gracefully (never kills); report a surviving
+# Lumen sidecar; relaunch in accessible mode; compare; write one report; put Steam back
+# into the mode it started in (--final overrides, --keep-steam keeps it accessible).
+
+GUI_FINAL_MODES = ('accessible', 'normal', 'stopped')
+GUI_DOWNLOAD_LINE = re.compile(r'^Downloads - (\d+) of (\d+) Items Complete$')
+
+
+def gui_running_games(proc='/proc'):
+    """[{'pid', 'appid'}] for running games: a `reaper` process or a `SteamLaunch AppId=`
+    command line. Read-only /proc scan."""
+    found = []
+    try:
+        entries = [p for p in Path(proc).iterdir() if p.name.isdigit()]
+    except OSError:
+        return found
+    for entry in entries:
+        try:
+            argv = [a for a in (entry / 'cmdline').read_bytes().decode('utf-8', 'replace').split('\0') if a]
+            comm = (entry / 'comm').read_text().strip() if (entry / 'comm').exists() else ''
+        except OSError:
+            continue
+        joined = ' '.join(argv)
+        match = re.search(r'AppId=(\d+)', joined)
+        if comm == 'reaper' or (argv and Path(argv[0]).name == 'reaper') or 'SteamLaunch' in joined and match:
+            found.append({'pid': int(entry.name), 'appid': match.group(1) if match else '?'})
+    return found
+
+
+def gui_active_download(tree=None):
+    """Why Steam looks busy downloading, or ''. Reads only: the Downloads line of the
+    main window ('Downloads - 3 of 4 Items Complete') and steamapps/downloading/."""
+    if tree:
+        for node in gui_walk(tree):
+            match = GUI_DOWNLOAD_LINE.match(str(node.get('name') or ''))
+            if match and int(match.group(1)) < int(match.group(2)):
+                return 'the Downloads queue shows %s of %s items complete' % match.groups()
+    try:
+        folder = steam_home() / 'steamapps' / 'downloading'
+        if folder.is_dir() and any(folder.iterdir()):
+            return 'steamapps/downloading/ is not empty'
+    except OSError:
+        pass
+    return ''
+
+
+def gui_read_order(open_library=True, attempts=1, sleep=time.sleep):
+    """Library order for the comparison: the complete list from the running client over
+    CDP when it answers, else the visible rows of the accessibility tree (opening the
+    Library tab, a navigation click). Returns {'source', 'names', 'total', 'sort'} or
+    {'source': 'unavailable', 'why': ...}."""
+    why = ''
+    for attempt in range(max(1, attempts)):  # the Library list can be unmounted for a moment
+        try:
+            order = live_library_order()
+            return {'source': 'cdp', 'names': list(order['names']), 'total': order.get('rows') or len(order['names']),
+                    'sort': order.get('sort')}
+        except Exception as error:  # LiveProbeError and anything unexpected: fall back
+            why = 'CDP: %s' % error
+        if attempt + 1 < attempts:
+            sleep(2)
+    cdp_error = why
+    try:
+        tree, error = gui_snapshot(depth=20)
+        order = gui_library_order(tree) if tree else None
+        if order is None and open_library and tree:
+            shallow, _ = gui_snapshot()
+            tab = (gui_find_nodes(shallow, *GUI_LIBRARY_TAB) or [None])[0] if shallow else None
+            if tab is not None and gui_click_node(tab).get('ok'):
+                for _ in range(8):
+                    time.sleep(0.75)
+                    tree, _ = gui_snapshot(depth=20)
+                    order = gui_library_order(tree) if tree else None
+                    if order:
+                        break
+        if order:
+            return {'source': 'tree (visible rows only)', 'names': order['names'], 'total': order.get('total'),
+                    'sort': None, 'why': cdp_error}
+        why += '; tree: %s' % (error or 'no Library list on screen')
+    except Exception as error:
+        why += '; tree: %s' % error
+    return {'source': 'unavailable', 'why': why, 'names': [], 'total': None, 'sort': None}
+
+
+def gui_read_state(sleep=time.sleep, grace=GUI_LOGIN_GRACE):
+    """Everything compared across the restart: screen, add-on panels, Library order."""
+    try:
+        tree, _ = gui_snapshot()
+    except Exception:
+        tree = None
+    titles = gui_titles(gui_windows())
+    screen = gui_classify(tree, titles) if tree is not None else 'unknown'
+    signal = ''
+    if screen == 'login':  # a sign-in window alone is not proof (see gui_judge_screen)
+        started = gui_process_started()
+        screen, signal = gui_judge_screen(screen, titles, time.time() - started if started else None,
+                                          grace, gui_logon_evidence(started - 2) if started else ('unknown', ''))
+    panels = {}
+    if screen == 'main':
+        panels = {name: item['state'] for name, item in
+                  gui_rendered(gui_addons_with_panel(), sleep=sleep).items()}
+    return {'screen': screen, 'signal': signal, 'panels': panels, 'order': gui_read_order(attempts=3, sleep=sleep) if screen == 'main' else
+            {'source': 'unavailable', 'why': 'not on the main screen', 'names': [], 'total': None, 'sort': None},
+            'download': gui_active_download(tree)}
+
+
+def gui_stable_sort(sort):
+    """The sort state without its clock: Luna stamps slsLunaSortDiag.at on every start, which
+    says when the sort ran, not what it is."""
+    if not isinstance(sort, dict):
+        return sort
+    out = json.loads(json.dumps(sort))
+    diag = (out.get('stored') or {}).get('slsLunaSortDiag')
+    if isinstance(diag, dict):
+        diag.pop('at', None)
+    return out
+
+
+def gui_compare_states(before, after, warnings=None):
+    """(rows, differences): rows are (what, before, after, 'same'|'DIFFERENT'|'n/a').
+    Things that could not be compared are appended to `warnings`."""
+    rows, differences = [], []
+    warnings = [] if warnings is None else warnings
+
+    def row(what, left, right, same=None):
+        same = (left == right) if same is None else same
+        rows.append((what, left, right, 'same' if same else 'DIFFERENT'))
+        if not same:
+            differences.append(what)
+    if str(before['screen']).startswith('n/a'):  # normal mode or not running: no tree to compare
+        rows.append(('screen', before['screen'], after['screen'], 'n/a'))
+    else:
+        row('screen', before['screen'], after['screen'])
+        for name in sorted(set(before['panels']) | set(after['panels'])):
+            row('panel: %s' % name, before['panels'].get(name, 'n/a'), after['panels'].get(name, 'n/a'))
+    left, right = before['order'], after['order']
+    if left['source'] == 'unavailable' or right['source'] == 'unavailable':
+        rows.append(('library order', left.get('why') or '%d rows' % len(left['names']),
+                     right.get('why') or '%d rows' % len(right['names']), 'n/a'))
+        differences.append('library order could not be read on both sides')
+        return rows, differences
+    if left['source'] != right['source']:
+        # A tree read (visible rows only, no sort state) and a CDP read (every row, duplicates
+        # included) cannot prove anything about each other: say so instead of a false DIFFERENT.
+        shown = lambda o: '%d rows via %s%s' % (len(o['names']), o['source'],  # noqa: E731
+                                               ' [%s]' % o['why'] if o.get('why') else '')
+        rows.append(('library order', shown(left), shown(right), 'n/a'))
+        rows.append(('sort state', 'n/a', 'n/a', 'n/a'))
+        warnings.append('library order and sort state could not be compared: before was read via %s, after via %s'
+                        % (left['source'], right['source']))
+        return rows, differences
+    common = 'tree' in left['source']
+    same, lines = gui_library_compare(left['names'], right['names'], common=common)
+    shown = lambda o: '%d rows via %s' % (len(o['names']), o['source'])  # noqa: E731
+    rows.append(('library order' + (' (relative, visible rows)' if common else ''), shown(left), shown(right),
+                 'same' if same else 'DIFFERENT'))
+    if not same:
+        differences.append('library order (%s)' % '; '.join(lines[:3]))
+    if left['sort'] is not None or right['sort'] is not None:
+        row('sort state', json.dumps(gui_stable_sort(left['sort']), sort_keys=True),
+            json.dumps(gui_stable_sort(right['sort']), sort_keys=True))
+    return rows, differences
+
+
+def gui_restart_report(report):
+    lines = ['# Steam restart-cycle check', '', 'Run: %s (by `luna gui restart-check`; nothing was killed, '
+             'no credentials were typed).' % report['when'], '',
+             '## Steps', '', '| step | result |', '|---|---|']
+    lines += ['| %s | %s |' % item for item in report['steps']]
+    lines += ['', '## Before / after', '', '| what | before | after | |', '|---|---|---|---|']
+    lines += ['| %s | %s | %s | %s |' % tuple(str(x).replace('|', '/') for x in item) for item in report['rows']]
+    lines += ['', '## Timing', '', '- shutdown: %s' % report['shutdown'], '- relaunch to window: %s' % report['relaunch'],
+              '- Lumen sidecar after shutdown: %s' % report['sidecar'],
+              '- final state: %s' % report['final'], '', '## How each conclusion was reached', '']
+    lines += ['- %s' % item for item in report.get('signals') or ['(no screen was judged)']]
+    lines += ['', '## Evidence', '', report['screenshot'], '',
+              '## Result', '', report['result'], '']
+    return '\n'.join(lines)
+
+
+def gui_wait_for_screen(timeout, sleep, clock, grace=GUI_LOGIN_GRACE, age0=0.0, logon=None):
+    """Poll a (re)started Steam. Returns (screen, tree, signal): 'main', 'dialog' and 'login'
+    end the wait; 'login' only after the sign-in window outlasted `grace` seconds of Steam
+    uptime with no log-on attempt in connection_log. 'exited' (the process is gone after
+    its first seconds) ends it too. Anything else is 'starting'/'unknown' at the timeout.
+    `age0` = seconds Steam has already been up (None = unknown)."""
+    logon = logon or gui_logon_evidence
+    begin = clock()
+    since = time.time() - (age0 or 0) - 2
+    while True:
+        age = None if age0 is None else age0 + clock() - begin
+        tree, _ = gui_snapshot()
+        titles = gui_titles(gui_windows())
+        if tree is not None:
+            raw = gui_classify(tree, titles)
+        else:
+            raw = 'login' if any('sign in to steam' in t.lower() for t in titles) else 'main' if 'Steam' in titles else 'unknown'
+        screen, signal = gui_judge_screen(raw, titles, age, grace, logon(since))
+        if screen == 'unknown':
+            screen, signal = 'starting', 'no recognisable window yet (titles: %s)' % (', '.join(titles) or 'none')
+        if screen in ('main', 'dialog', 'login'):
+            return screen, tree, signal
+        if age is not None and age >= 6 and not gui_steam_state()[0]:
+            return 'exited', tree, 'the Steam process is gone %.0f s after the launch; %s' % (age, gui_exit_hint(since))
+        if clock() - begin >= timeout:
+            return screen, tree, 'timed out after %.0f s: %s' % (clock() - begin, signal)
+        sleep(3)
+
+
+def gui_wait_normal_window(timeout, sleep, clock, grace=GUI_LOGIN_GRACE, logon=None):
+    """After a normal (non-accessible) launch there is no tree, so: window titles, the
+    log-on evidence and time. Returns (state, signal) with state main/login/starting/exited."""
+    logon = logon or gui_logon_evidence
+    begin = clock()
+    since = time.time() - 2
+    while True:
+        age = clock() - begin
+        titles = gui_titles(gui_windows())
+        raw = 'login' if any('sign in to steam' in t.lower() for t in titles) else 'main' if 'Steam' in titles else 'unknown'
+        state, signal = gui_judge_screen(raw, titles, age, grace, logon(since))
+        if state in ('main', 'login'):
+            return state, signal
+        if age >= 6 and not gui_steam_state()[0]:
+            return 'exited', 'the Steam process is gone %.0f s after the launch; %s' % (age, gui_exit_hint(since))
+        if age >= timeout:
+            return 'starting', 'timed out after %.0f s: %s' % (age, signal if raw != 'unknown' else
+                                                              'no Steam window (titles: %s)' % (', '.join(titles) or 'none'))
+        sleep(3)
+
+
+def gui_restart_check(options, sleep=time.sleep, clock=time.monotonic):
+    """`luna gui restart-check`. Exit 0 identical before/after, 1 any difference or failure,
+    EXIT_NEEDS_FORCE (3) a game or download is active (--force overrides), EXIT_SKIPPED (5)
+    GUI checks cannot run, EXIT_REFUSED (2) a bad --final."""
+    final = getattr(options, 'final', None)
+    if getattr(options, 'keep_steam', False):
+        final = final or 'accessible'
+    if final is not None and final not in GUI_FINAL_MODES:
+        print('REFUSING: --final must be one of %s' % ', '.join(GUI_FINAL_MODES), file=sys.stderr)
+        return EXIT_REFUSED
+    reason = gui_unavailable_reason(need_accessible=False)
+    if reason:
+        print('GUI checks skipped: %s' % reason)
+        return EXIT_SKIPPED
+    running, accessible = gui_steam_state()
+    start_mode = 'not running' if not running else 'accessible' if accessible else 'normal'
+    final = final or {'accessible': 'accessible', 'normal': 'normal', 'not running': 'stopped'}[start_mode]
+    steps, failures = [], []
+    report = {'when': time.strftime('%Y-%m-%d %H:%M'), 'steps': steps, 'rows': [], 'shutdown': 'n/a',
+              'relaunch': 'n/a', 'sidecar': 'n/a', 'final': 'n/a', 'screenshot': 'none', 'result': '', 'signals': [], 'warnings': []}
+
+    def finish(code):
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        report['result'] = ('PASS: nothing changed across the restart' + ''.join('\n\nWARNING: %s' % w for w in report['warnings'])
+                            if code == 0 else
+                            'FAIL\n\n' + '\n'.join('- %s' % f for f in failures)) if code in (0, 1) else \
+            'STOPPED\n\n' + '\n'.join('- %s' % f for f in failures)
+        path = Path(getattr(options, 'report', None) or luna_tools_dir() / 'gui-reports' / ('gui-restart-%s.md' % stamp))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(gui_restart_report(report), encoding='utf-8')
+            print('report : %s' % path)
+        except OSError as error:
+            print('could not write the report: %s' % error, file=sys.stderr)
+        for warning in report['warnings']:
+            print('WARNING: %s' % warning, file=sys.stderr)
+        for failure in failures:
+            print('%s: %s' % ('FAIL' if code == 1 else 'STOPPED', failure), file=sys.stderr)
+        return code
+
+    # 2. refuse while something would be interrupted
+    games = gui_running_games()
+    busy = ['a game appears to be running (%s)' % ', '.join('AppId %s pid %d' % (g['appid'], g['pid']) for g in games)
+            ] if games else []
+    before_tree = None
+    if running and accessible:
+        try:
+            before_tree, _ = gui_snapshot()
+        except Exception:
+            before_tree = None
+    download = gui_active_download(before_tree) if running else ''
+    if download:
+        busy.append('Steam looks busy downloading (%s)' % download)
+    if busy and not getattr(options, 'force', False):
+        print('REFUSING to restart Steam: %s. Finish or pause it, or re-run with --force.' % '; '.join(busy),
+              file=sys.stderr)
+        return EXIT_NEEDS_FORCE
+    if busy:
+        steps.append(('refusal checks', 'overridden with --force: %s' % '; '.join(busy)))
+    else:
+        steps.append(('refusal checks', 'no game running, no active download'))
+
+    # 1. before state
+    if running and accessible:
+        before = gui_read_state(sleep=sleep, grace=getattr(options, 'login_grace', GUI_LOGIN_GRACE))
+        report['signals'].append('before: screen %s (%s)' % (before['screen'], before.get('signal') or 'accessibility tree'))
+        if before['screen'] in ('login', 'starting'):
+            print('STOPPED: Steam is at the %s screen; wait for it or sign in first' % before['screen'], file=sys.stderr)
+            failures.append('Steam is %s before the restart (%s)' % (
+                'at the sign-in screen' if before['screen'] == 'login' else 'still starting', before.get('signal')))
+            return finish(1)
+    elif running:  # normal mode: no tree, so only the CDP order can be recorded
+        before = {'screen': 'n/a (normal mode)', 'panels': {},
+                  'order': gui_read_order(open_library=False), 'download': ''}
+    else:
+        before = {'screen': 'n/a (not running)', 'panels': {},
+                  'order': {'source': 'unavailable', 'why': 'Steam was not running', 'names': [], 'total': None,
+                            'sort': None}, 'download': ''}
+    steps.append(('state before (%s)' % start_mode, 'screen %s, %d panels, library order: %s'
+                  % (before['screen'], len(before['panels']), '%d rows via %s%s' % (len(before['order']['names']),
+                                                                                 before['order']['source'],
+                                                                                 ' (%s)' % before['order']['why'] if before['order'].get('why') else '')
+                     if before['order']['source'] != 'unavailable' else before['order'].get('why'))))
+
+    # 3. shutdown through the project's own path
+    if running:
+        started = clock()
+        gone = _close_steam_gracefully(timeout=getattr(options, 'shutdown_timeout', 90))
+        report['shutdown'] = '%.0f s%s' % (clock() - started, '' if gone else ' (did not exit)')
+        if not gone:
+            blockers = gui_describe_blockers()
+            steps.append(('shutdown', 'Steam did not exit within %ss; nothing was killed' % getattr(options, 'shutdown_timeout', 90)))
+            failures.append('Steam did not exit%s. Close it yourself (Steam -> Exit) and run the check again.'
+                            % ('; it shows: ' + blockers if blockers else ''))
+            report['final'] = 'left running (shutdown failed)'
+            return finish(1)
+        steps.append(('shutdown', 'Steam exited after %s' % report['shutdown']))
+        # 4. sidecar
+        survivor = gui_lumen_survivor()
+        if survivor:
+            report['sidecar'] = 'STILL RUNNING (pid %s, started %s): it keeps the old boot.lua in memory' % survivor
+            steps.append(('sidecar', report['sidecar']))
+            # A warning, not a failure: the before/after comparison is still valid (it only
+            # sees what the client shows), while the stale runtime is what `doctor` flags.
+            report['warnings'].append('a Lumen sidecar survived the shutdown (pid %s, started %s); it was not '
+                                      'killed, and new add-on payloads are not loaded by it' % survivor)
+        else:
+            report['sidecar'] = 'gone'
+            steps.append(('sidecar', 'no Lumen sidecar survived'))
+    else:
+        steps.append(('shutdown', 'skipped: Steam was not running'))
+
+    # 5. relaunch in accessible mode
+    wait = getattr(options, 'relaunch_wait', 240)
+    grace = getattr(options, 'login_grace', GUI_LOGIN_GRACE)
+    ok, message = gui_launch_accessible()
+    print(message, file=sys.stdout if ok else sys.stderr)
+    if not ok:
+        failures.append('could not relaunch Steam: %s' % message)
+        steps.append(('relaunch', 'failed: %s' % message))
+        return finish(1)
+    started = clock()
+    screen, tree, signal = gui_wait_for_screen(wait, sleep, clock, grace=grace)
+    report['relaunch'] = '%.0f s to the %s screen' % (clock() - started, screen)
+    report['signals'].append('relaunch: %s (%s)' % (screen, signal))
+    steps.append(('relaunch (accessible)', report['relaunch']))
+    if screen == 'login':
+        report['final'] = 'left at the sign-in screen, in accessible mode (not restarted again)'
+        failures.append('Steam is waiting at the sign-in screen (%s). It was left there; sign in yourself, '
+                        'nothing was typed and Steam was not restarted again.' % signal)
+        return finish(1)
+    if screen == 'exited':
+        report['final'] = 'Steam is not running (it exited during startup)'
+        failures.append('Steam exited during startup: %s' % signal)
+        return finish(1)
+    if screen != 'main':
+        report['final'] = 'left running in accessible mode'
+        failures.append('no main Steam window appeared within %ds (%s: %s)' % (wait, screen, signal))
+        return finish(1)
+
+    # 6. after state, compare, evidence
+    settle = clock() + getattr(options, 'settle', 90)
+    while True:  # the Lumen plugin and its Library order take a while to come up
+        after = gui_read_state(sleep=sleep)
+        expected = {n for n, v in before['panels'].items() if v == 'found'}
+        ready = (after['screen'] == 'main' and expected <= {n for n, v in after['panels'].items() if v == 'found'}
+                 and (after['order']['source'] == 'cdp' or before['order']['source'] != 'cdp'))
+        if ready or clock() >= settle:
+            break
+        sleep(5)
+    steps.append(('state after', 'screen %s, %d panels, library order: %s' % (
+        after['screen'], len(after['panels']), '%d rows via %s' % (len(after['order']['names']), after['order']['source'])
+        if after['order']['source'] != 'unavailable' else after['order'].get('why'))))
+    rows, differences = gui_compare_states(before, after, report['warnings'])
+    report['rows'] = rows
+    shots = Path(getattr(options, 'screenshots', None) or luna_tools_dir() / 'gui-shots')
+    shot, note = gui_capture(shots, 'gui-restart-%s.png' % time.strftime('%Y%m%d-%H%M%S'),
+                             full_screen=getattr(options, 'full_screen', False))
+    report['screenshot'] = ('`%s` (%s)' % (shot, note)) if shot else 'none (%s)' % note
+    if start_mode == 'not running':
+        differences = [d for d in differences if not d.startswith('library order could not')]
+        steps.append(('compare', 'nothing to compare: Steam was not running before'))
+    failures.extend('differs after the restart: %s' % d for d in differences)
+    for item in after['panels'] if after['panels'] else ():
+        if after['panels'][item] != 'found' and 'panel: %s' % item not in differences:
+            failures.append('panel %s is %s after the restart' % (item, after['panels'][item]))
+
+    # 7. final state
+    code = 1 if failures else EXIT_OK
+    if final == 'accessible':
+        report['final'] = 'left running in accessible mode (started %s)' % start_mode
+    elif final == 'normal':
+        if not _close_steam_gracefully(timeout=getattr(options, 'shutdown_timeout', 90)):
+            report['final'] = 'left running in accessible mode (could not close it to go back to normal)'
+            failures.append('could not close Steam to return it to normal mode: ' + (gui_describe_blockers() or 'unknown'))
+            code = 1
+        else:
+            for key in ('WAYLAND_DISPLAY', 'DISPLAY', 'NIRI_SOCKET'):  # the detached launch needs the session
+                if gui_session_env().get(key):
+                    os.environ.setdefault(key, gui_session_env()[key])
+            os.environ.pop('ACCESSIBILITY_ENABLED', None)
+            started = clock()
+            if not _launch_steam_detached():
+                report['final'] = 'Steam is stopped (normal relaunch failed)'
+                failures.append('could not relaunch Steam in normal mode')
+                code = 1
+            else:
+                seen, signal = gui_wait_normal_window(wait, sleep, clock, grace=grace)
+                report['signals'].append('normal relaunch: %s (%s)' % (seen, signal))
+                report['final'] = 'normal mode, %s (%.0f s)' % ({'main': 'signed in', 'login': 'at the sign-in screen',
+                                                                  'starting': 'still starting', 'exited': 'not running'}[seen],
+                                                                 clock() - started)
+                if seen != 'main':
+                    failures.append('after returning to normal mode Steam shows: %s (%s)' % (seen, signal))
+                    code = 1
+    else:
+        if _close_steam_gracefully(timeout=getattr(options, 'shutdown_timeout', 90)):
+            report['final'] = 'stopped (it was not running before)'
+        else:
+            report['final'] = 'left running (could not close it)'
+            failures.append('could not close Steam to restore "not running"')
+            code = 1
+    steps.append(('final state', report['final']))
+    print('before/after:')
+    for what, left, right, verdict in rows:
+        print('  %-34s %-28s %-28s %s' % (what[:34], str(left)[:28], str(right)[:28], verdict))
+    return finish(code)
 
 def build_parser():
     parser = argparse.ArgumentParser(prog='luna', description=__doc__,
@@ -6720,6 +8825,7 @@ def build_parser():
                           ('probe', cmd_probe), ('fleet', cmd_fleet), ('games', cmd_games),
                           ('launchers', cmd_launchers),
                           ('doctor', cmd_doctor), ('gui', cmd_gui),
+                          ('library-order', cmd_library_order),
                           ('saves', cmd_saves),
                            ('timer', cmd_timer), ('hook', cmd_hook)):
         child = sub.add_parser(name)
@@ -6749,11 +8855,23 @@ def build_parser():
             child.add_argument('--json', action='store_true', help='machine-readable findings')
             child.add_argument('--fix', action='store_true',
                                help='apply only safe, reversible fixes (never sudo, never overwrites payloads)')
+        if name == 'status':
+            child.add_argument('--live', action='store_true',
+                               help='also probe the RUNNING Steam client (read-only, through its DevTools '
+                                    'port): backend health, boot.lua marker, stale Lumen sidecar')
+        if name == 'library-order':
+            child.add_argument('--json', action='store_true', help='machine-readable output')
+            child.add_argument('--save', metavar='FILE', help='write the complete order to FILE')
+            child.add_argument('--compare', metavar='FILE', help='compare with a saved order (exit 1 if different)')
+            child.add_argument('--limit', type=int, default=40, metavar='N',
+                               help='rows to print (default 40; 0 = all)')
         if name == 'gui':
             child.add_argument('gui_action', nargs='?', default='status',
-                               choices=['status', 'launch', 'verify', 'library'],
+                               choices=['status', 'launch', 'verify', 'library', 'watch', 'restart-check'],
                                help='status (default), launch Steam in accessible mode, verify add-on panels, '
-                                    'or read the Library list order')
+                                    'read the Library list order, watch an element appear/vanish, or run the Steam restart-cycle '
+                                    'check. Exit codes of verify/library/launch: '
+                                    '0 pass, 1 failure, 5 skipped (the check could not run)')
             child.add_argument('--json', action='store_true', help='with status/library: machine-readable output')
             child.add_argument('--launch', action='store_true',
                                help='with verify: start Steam in accessible mode first if it is not running')
@@ -6770,6 +8888,35 @@ def build_parser():
                                help='with library --compare: only the relative order of names in both lists')
             child.add_argument('--report', metavar='FILE', help='with verify: markdown report path')
             child.add_argument('--screenshots', metavar='DIR', help='with verify: screenshot directory')
+            child.add_argument('--keep-steam', action='store_true',
+                               help='with verify --launch / restart-check: leave Steam as it ends up instead of '
+                                    'returning it to the state it was in before')
+            child.add_argument('--force', action='store_true',
+                               help='with restart-check: continue although a game is running or a download is active')
+            child.add_argument('--final', choices=['accessible', 'normal', 'stopped'],
+                               help='with restart-check: how to leave Steam (default: the mode it started in; '
+                                    'normal costs one more restart)')
+            child.add_argument('--shutdown-timeout', type=int, default=90, metavar='SECONDS',
+                               help='with restart-check: wait this long for Steam to exit (default 90)')
+            child.add_argument('--relaunch-wait', type=int, default=240, metavar='SECONDS',
+                               help='with restart-check: wait this long for the relaunched window (default 240)')
+            child.add_argument('--settle', type=int, default=90, metavar='SECONDS',
+                               help='with restart-check: after the relaunch, wait up to this long for the Library order to come up (default 90)')
+            child.add_argument('--login-grace', type=int, default=GUI_LOGIN_GRACE, metavar='SECONDS',
+                               help='how long a "Sign in to Steam" window may stay up, with no log-on attempt in '
+                                    'connection_log, before it counts as the real sign-in form (default %d; Steam shows '
+                                    'the same window while it auto-logs-on, which took ~37 s)' % GUI_LOGIN_GRACE)
+            child.add_argument('--role', help='with watch: accessibility role to watch (e.g. button)')
+            child.add_argument('--name', help='with watch: element name (exact unless --contains)')
+            child.add_argument('--contains', action='store_true', help='with watch: --name matches as a substring')
+            child.add_argument('--addon', metavar='KEY',
+                               help='with watch: use the panel selector of an add-on/page key (e.g. playtime, hltb)')
+            child.add_argument('--interval', type=float, default=2.0, metavar='SECONDS',
+                               help='with watch: seconds between samples (default 2; min 0.2)')
+            child.add_argument('--duration', type=int, metavar='SECONDS',
+                               help='with watch: stop after this many seconds (default: until Ctrl-C)')
+            child.add_argument('--fail-if-vanished', action='store_true',
+                               help='with watch: stop and exit 1 when the element vanishes after having been seen')
             child.add_argument('--full-screen', action='store_true',
                                help='with verify: capture the WHOLE screen with grim (everything visible, '
                                     'including unrelated windows); default is the Steam window only')
@@ -6809,13 +8956,18 @@ def build_parser():
                                     'with unlock: launch Steam so it self-updates')
         if name == 'proton':
             child.add_argument('proton_action', nargs='?', default='status',
-                               choices=['status', 'install', 'remove', 'prune'],
+                               choices=['status', 'install', 'remove', 'prune', 'verify'],
                                help='what to do (default: status)')
             child.add_argument('proton_version', nargs='?', help='GE-Proton version (install: default latest)')
             child.add_argument('--json', action='store_true', help='with status: machine-readable output')
             child.add_argument('--dry-run', action='store_true', help='report only; change nothing')
-            child.add_argument('--force', action='store_true', help='with remove: even if games are mapped to it')
-            child.add_argument('--keep', type=int, default=2, help='with prune: newest GE-Proton to keep (default 2)')
+            child.add_argument('--force', action='store_true', help='with remove: even if games are mapped to it (never overrides a running Steam)')
+            child.add_argument('--keep', type=int, default=1, help='with prune: newest GE-Proton to keep (default 1)')
+            child.add_argument('--rebuild', action='store_true',
+                               help='with verify VERSION: create the manifest from a re-downloaded, sha512-verified '
+                                    'release, then check the install against it')
+            child.add_argument('--against', metavar='FILE',
+                               help='with verify VERSION: compare with a sha256sum-format reference file (read-only)')
         if name == 'probe':
             child.add_argument('--json', action='store_true', help='one-line JSON (used by luna fleet)')
         if name == 'fleet':

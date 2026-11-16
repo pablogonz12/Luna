@@ -1,0 +1,2192 @@
+{
+ "command": "snapshot",
+ "data": {
+  "app": "steamwebhelper",
+  "complete": true,
+  "tree": {
+   "available_actions": [
+    "RightClick"
+   ],
+   "children": [
+    {
+     "available_actions": [
+      "RightClick"
+     ],
+     "children": [
+      {
+       "available_actions": [
+        "RightClick",
+        "SetFocus"
+       ],
+       "children": [
+        {
+         "available_actions": [
+          "Click",
+          "RightClick"
+         ],
+         "children": [
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "dom_classes": [
+              "title-area-highlight"
+             ],
+             "ref_id": "@s2cfx90ch0jbdd:e3",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "SVGIcon_Button",
+                "SVGIcon_X_Line"
+               ],
+               "native_id": {
+                "kind": "ax_dom_identifier",
+                "value": "Layer_2"
+               },
+               "ref_id": "@s2cfx90ch0jbdd:e5",
+               "role": "image"
+              }
+             ],
+             "dom_classes": [
+              "title-area-icon",
+              "closeButton",
+              "windowControlButton"
+             ],
+             "ref_id": "@s2cfx90ch0jbdd:e4",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "SVGIcon_Button",
+                "SVGIcon_Maximize"
+               ],
+               "native_id": {
+                "kind": "ax_dom_identifier",
+                "value": "base"
+               },
+               "ref_id": "@s2cfx90ch0jbdd:e7",
+               "role": "image"
+              }
+             ],
+             "dom_classes": [
+              "title-area-icon",
+              "maximizeButton",
+              "windowControlButton"
+             ],
+             "ref_id": "@s2cfx90ch0jbdd:e6",
+             "role": "group"
+            },
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "SVGIcon_Button",
+                "SVGIcon_Minimize"
+               ],
+               "native_id": {
+                "kind": "ax_dom_identifier",
+                "value": "base"
+               },
+               "ref_id": "@s2cfx90ch0jbdd:e9",
+               "role": "image"
+              }
+             ],
+             "dom_classes": [
+              "title-area-icon",
+              "minimizeButton",
+              "windowControlButton"
+             ],
+             "ref_id": "@s2cfx90ch0jbdd:e8",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "TitleBar",
+            "title-area",
+            "WindowFocus",
+            "_5FicoanuNlrOvwQ3dkOVm"
+           ],
+           "ref_id": "@s2cfx90ch0jbdd:e2",
+           "role": "group"
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick",
+            "SetFocus"
+           ],
+           "children": [
+            {
+             "available_actions": [
+              "Click",
+              "RightClick"
+             ],
+             "children": [
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "dom_classes": [
+                "ModalPosition_TopBar"
+               ],
+               "ref_id": "@s2cfx90ch0jbdd:e12",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "name": "STEAM SETTINGS",
+                   "ref_id": "@s2cfx90ch0jbdd:e15",
+                   "role": "statictext"
+                  }
+                 ],
+                 "dom_classes": [
+                  "_2rjVTGz8aLvqOdz5v2gq5C"
+                 ],
+                 "ref_id": "@s2cfx90ch0jbdd:e14",
+                 "role": "group"
+                },
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick",
+                  "Select"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e19",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e18",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Account",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/account"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e20",
+                     "role": "tab",
+                     "states": [
+                      "selected"
+                     ],
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO",
+                    "_2DpXjzK3WWsOtUWUrcuOG7"
+                   ],
+                   "name": "Account",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/account"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e17",
+                   "role": "tab",
+                   "states": [
+                    "selected"
+                   ],
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e23",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e22",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Friends & Chat",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/friends"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e24",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Friends & Chat",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/friends"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e21",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e27",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e26",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Family",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/family"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e28",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Family",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/family"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e25",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e31",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e30",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Security",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/security"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e32",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Security",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/security"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e29",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "dom_classes": [
+                    "_1Hye7o1wYIfc9TE9QKRW4T"
+                   ],
+                   "ref_id": "@s2cfx90ch0jbdd:e33",
+                   "role": "separator",
+                   "subrole": "separator"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e36",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e35",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Notifications",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/notifications"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e37",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Notifications",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/notifications"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e34",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e40",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e39",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Interface",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/interface"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e41",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Interface",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/interface"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e38",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e44",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e43",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Store",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/store"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e45",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Store",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/store"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e42",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e48",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e47",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Library",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/library"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e49",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Library",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/library"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e46",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e52",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e51",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Downloads",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/downloads"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e53",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Downloads",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/downloads"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e50",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e56",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e55",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Storage",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/storage"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e57",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Storage",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/storage"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e54",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e60",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e59",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Cloud",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/cloud"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e61",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Cloud",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/cloud"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e58",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e64",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e63",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "In Game",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/ingame"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e65",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "In Game",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/ingame"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e62",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e68",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e67",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Compatibility",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/compatibility"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e69",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Compatibility",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/compatibility"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e66",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e72",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e71",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Accessibility",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/accessibility"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e73",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Accessibility",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/accessibility"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e70",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "dom_classes": [
+                    "_1Hye7o1wYIfc9TE9QKRW4T"
+                   ],
+                   "ref_id": "@s2cfx90ch0jbdd:e74",
+                   "role": "separator",
+                   "subrole": "separator"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "native_id": {
+                        "kind": "ax_dom_identifier",
+                        "value": "Layer_1"
+                       },
+                       "ref_id": "@s2cfx90ch0jbdd:e77",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e76",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Controller",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/controller/:type/:controllerIndex"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e78",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Controller",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/controller/:type/:controllerIndex"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e75",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e81",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e80",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Game Recording",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/gamerecording"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e82",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Game Recording",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/gamerecording"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e79",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e85",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e84",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Voice",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/voice"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e86",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Voice",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/voice"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e83",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e89",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e88",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Remote Play",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/remoteplay"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e90",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Remote Play",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/remoteplay"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e87",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e93",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e92",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Broadcast",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/broadcast"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e94",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Broadcast",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/broadcast"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e91",
+                   "role": "tab",
+                   "subrole": "tab"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "Select"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e97",
+                       "role": "image"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_1rD8X96FdnksZLvRRlEiCR"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e96",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "Select"
+                     ],
+                     "dom_classes": [
+                      "_2PPbMrzl8PKBwpkjYs9b0i"
+                     ],
+                     "name": "Music",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10a\u00bb/settings/music"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e98",
+                     "role": "tab",
+                     "subrole": "tab"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_1-vlriAtKYDViAEunue4VO"
+                   ],
+                   "name": "Music",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10a\u00bb/settings/music"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e95",
+                   "role": "tab",
+                   "subrole": "tab"
+                  }
+                 ],
+                 "dom_classes": [
+                  "_18QCu-7MTzd51UpVbYysDy",
+                  "Panel"
+                 ],
+                 "ref_id": "@s2cfx90ch0jbdd:e16",
+                 "role": "tablist",
+                 "subrole": "tablist"
+                }
+               ],
+               "dom_classes": [
+                "_2kwFFHckg8jvnwJfg9-la8",
+                "PageListColumn",
+                "Panel"
+               ],
+               "ref_id": "@s2cfx90ch0jbdd:e13",
+               "role": "group"
+              },
+              {
+               "available_actions": [
+                "Click",
+                "RightClick"
+               ],
+               "children": [
+                {
+                 "available_actions": [
+                  "Click",
+                  "RightClick"
+                 ],
+                 "children": [
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "name": "Text 003",
+                     "ref_id": "@s2cfx90ch0jbdd:e102",
+                     "role": "statictext"
+                    }
+                   ],
+                   "dom_classes": [
+                    "DialogHeader"
+                   ],
+                   "name": "Text 002",
+                   "native_id": {
+                    "kind": "ax_dom_identifier",
+                    "value": "\u00abr10b\u00bb"
+                   },
+                   "ref_id": "@s2cfx90ch0jbdd:e101",
+                   "role": "heading",
+                   "subrole": "heading"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "children": [
+                        {
+                         "available_actions": [
+                          "Click",
+                          "RightClick"
+                         ],
+                         "dom_classes": [
+                          "_3xUpb5DWXPFNcHHIcv-9pe",
+                          "avatarStatus",
+                          "right"
+                         ],
+                         "ref_id": "@s2cfx90ch0jbdd:e106",
+                         "role": "group"
+                        },
+                        {
+                         "available_actions": [
+                          "Click",
+                          "RightClick"
+                         ],
+                         "dom_classes": [
+                          "_3h-QRJGxnVOIExtHD1R0f2",
+                          "avatar"
+                         ],
+                         "name": "To get missing image descriptions, open the context menu.",
+                         "ref_id": "@s2cfx90ch0jbdd:e107",
+                         "role": "image",
+                         "role_description": "Unlabeled image"
+                        },
+                        {
+                         "available_actions": [
+                          "Click",
+                          "RightClick"
+                         ],
+                         "children_count": 1,
+                         "dom_classes": [
+                          "X_mJE4BYV5StDPwZhSiAu",
+                          "avatarFrame"
+                         ],
+                         "ref_id": "@s2cfx90ch0jbdd:e108",
+                         "role": "group"
+                        }
+                       ],
+                       "dom_classes": [
+                        "nibodjvvrm86uCfnnAn4g",
+                        "avatarHolder",
+                        "no-drag",
+                        "Large",
+                        "offline",
+                        "_2Qyhcy1iiwhD1Mn6m4teKQ"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e105",
+                       "role": "group"
+                      },
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "children": [
+                        {
+                         "available_actions": [
+                          "Click",
+                          "RightClick"
+                         ],
+                         "name": "Text 004",
+                         "ref_id": "@s2cfx90ch0jbdd:e110",
+                         "role": "statictext"
+                        }
+                       ],
+                       "dom_classes": [
+                        "nOdcT-MoOaXGePXLyPe0H"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e109",
+                       "role": "group"
+                      },
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 005",
+                       "ref_id": "@s2cfx90ch0jbdd:e111",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3jMlJm4PQCA8SfNlUR99Fo"
+                     ],
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10c\u00bb_Label"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e104",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "SetFocus"
+                     ],
+                     "dom_classes": [
+                      "_3epr8QYWw_FqFgMx38YEEm",
+                      "DialogButton",
+                      "_DialogLayout",
+                      "Secondary",
+                      "Focusable"
+                     ],
+                     "name": "Text 006",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10d\u00bb"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e112",
+                     "role": "button",
+                     "subrole": "button"
+                    }
+                   ],
+                   "dom_classes": [
+                    "eKmEXJCm_lgme24Fp_HWt",
+                    "_16vVnDqpbNs-zIH-EdV6Vz",
+                    "GxgIyq8R5xTOeu4ftGrgX",
+                    "_3nLNLFMUMSt4jvxIayuPV3",
+                    "xIITXDcM70faUNqssgUyx",
+                    "_2HFrmMgB38Ike5w4rVxzEX",
+                    "Panel"
+                   ],
+                   "ref_id": "@s2cfx90ch0jbdd:e103",
+                   "role": "group"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "SetFocus"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e114",
+                     "role": "image"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 008",
+                       "ref_id": "@s2cfx90ch0jbdd:e116",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3wadwgMy2-9k8uOKh3iSdT"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e115",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "ref_id": "@s2cfx90ch0jbdd:e118",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3Wb9yDmYPUJksCr7HmaT9H"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e117",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "dom_classes": [
+                      "_1lN1xs-uvOpXUjljf9RJBs",
+                      "Panel"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e119",
+                     "role": "group"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_2HosnnI_K6IvS1QMGhq46P",
+                    "JA6JIY08WWMEfWP-sZkZ2",
+                    "TEWmsM70ZLEOxLAjDMpcv",
+                    "DialogButton",
+                    "_DialogLayout",
+                    "Secondary",
+                    "Focusable"
+                   ],
+                   "name": "Text 007",
+                   "ref_id": "@s2cfx90ch0jbdd:e113",
+                   "role": "button",
+                   "subrole": "button"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "SetFocus"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e121",
+                     "role": "image"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 010",
+                       "ref_id": "@s2cfx90ch0jbdd:e123",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3wadwgMy2-9k8uOKh3iSdT"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e122",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 011",
+                       "ref_id": "@s2cfx90ch0jbdd:e125",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3Wb9yDmYPUJksCr7HmaT9H"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e124",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "dom_classes": [
+                      "_1lN1xs-uvOpXUjljf9RJBs",
+                      "Panel"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e126",
+                     "role": "group"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_2HosnnI_K6IvS1QMGhq46P",
+                    "JA6JIY08WWMEfWP-sZkZ2",
+                    "TEWmsM70ZLEOxLAjDMpcv",
+                    "DialogButton",
+                    "_DialogLayout",
+                    "Secondary",
+                    "Focusable"
+                   ],
+                   "name": "Text 009",
+                   "ref_id": "@s2cfx90ch0jbdd:e120",
+                   "role": "button",
+                   "subrole": "button"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick",
+                    "SetFocus"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e128",
+                     "role": "image"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Account Details",
+                       "ref_id": "@s2cfx90ch0jbdd:e130",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3wadwgMy2-9k8uOKh3iSdT"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e129",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 012",
+                       "ref_id": "@s2cfx90ch0jbdd:e132",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3Wb9yDmYPUJksCr7HmaT9H"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e131",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "dom_classes": [
+                      "_1lN1xs-uvOpXUjljf9RJBs",
+                      "Panel"
+                     ],
+                     "ref_id": "@s2cfx90ch0jbdd:e133",
+                     "role": "group"
+                    }
+                   ],
+                   "dom_classes": [
+                    "_2HosnnI_K6IvS1QMGhq46P",
+                    "JA6JIY08WWMEfWP-sZkZ2",
+                    "TEWmsM70ZLEOxLAjDMpcv",
+                    "DialogButton",
+                    "_DialogLayout",
+                    "Secondary",
+                    "Focusable"
+                   ],
+                   "name": "Account Details Store, Security, Family, Devices",
+                   "ref_id": "@s2cfx90ch0jbdd:e127",
+                   "role": "button",
+                   "subrole": "button"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 013",
+                       "ref_id": "@s2cfx90ch0jbdd:e136",
+                       "role": "statictext"
+                      },
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "1000000",
+                       "ref_id": "@s2cfx90ch0jbdd:e137",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3jMlJm4PQCA8SfNlUR99Fo"
+                     ],
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10e\u00bb_Label"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e135",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "SetFocus"
+                     ],
+                     "dom_classes": [
+                      "_3epr8QYWw_FqFgMx38YEEm",
+                      "DialogButton",
+                      "_DialogLayout",
+                      "Secondary",
+                      "Focusable"
+                     ],
+                     "name": "Text 014",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10f\u00bb"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e138",
+                     "role": "button",
+                     "subrole": "button"
+                    }
+                   ],
+                   "dom_classes": [
+                    "eKmEXJCm_lgme24Fp_HWt",
+                    "_16vVnDqpbNs-zIH-EdV6Vz",
+                    "GxgIyq8R5xTOeu4ftGrgX",
+                    "_3nLNLFMUMSt4jvxIayuPV3",
+                    "xIITXDcM70faUNqssgUyx",
+                    "_2HFrmMgB38Ike5w4rVxzEX",
+                    "_2CCdODv0vfzOMrEBUzZwfI",
+                    "Panel"
+                   ],
+                   "ref_id": "@s2cfx90ch0jbdd:e134",
+                   "role": "group"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 015",
+                       "ref_id": "@s2cfx90ch0jbdd:e141",
+                       "role": "statictext"
+                      },
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 016",
+                       "ref_id": "@s2cfx90ch0jbdd:e142",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3jMlJm4PQCA8SfNlUR99Fo"
+                     ],
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10g\u00bb_Label"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e140",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "SetFocus"
+                     ],
+                     "dom_classes": [
+                      "_3epr8QYWw_FqFgMx38YEEm",
+                      "DialogButton",
+                      "_DialogLayout",
+                      "Secondary",
+                      "Focusable"
+                     ],
+                     "name": "Text 017",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10h\u00bb"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e143",
+                     "role": "button",
+                     "subrole": "button"
+                    }
+                   ],
+                   "dom_classes": [
+                    "eKmEXJCm_lgme24Fp_HWt",
+                    "_16vVnDqpbNs-zIH-EdV6Vz",
+                    "GxgIyq8R5xTOeu4ftGrgX",
+                    "_3nLNLFMUMSt4jvxIayuPV3",
+                    "xIITXDcM70faUNqssgUyx",
+                    "_2HFrmMgB38Ike5w4rVxzEX",
+                    "_2CCdODv0vfzOMrEBUzZwfI",
+                    "Panel"
+                   ],
+                   "ref_id": "@s2cfx90ch0jbdd:e139",
+                   "role": "group"
+                  },
+                  {
+                   "available_actions": [
+                    "Click",
+                    "RightClick"
+                   ],
+                   "children": [
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick"
+                     ],
+                     "children": [
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 018",
+                       "ref_id": "@s2cfx90ch0jbdd:e146",
+                       "role": "statictext"
+                      },
+                      {
+                       "available_actions": [
+                        "Click",
+                        "RightClick"
+                       ],
+                       "name": "Text 019",
+                       "ref_id": "@s2cfx90ch0jbdd:e147",
+                       "role": "statictext"
+                      }
+                     ],
+                     "dom_classes": [
+                      "_3jMlJm4PQCA8SfNlUR99Fo"
+                     ],
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10i\u00bb_Label"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e145",
+                     "role": "group"
+                    },
+                    {
+                     "available_actions": [
+                      "Click",
+                      "RightClick",
+                      "SetFocus"
+                     ],
+                     "dom_classes": [
+                      "_3epr8QYWw_FqFgMx38YEEm",
+                      "DialogButton",
+                      "_DialogLayout",
+                      "Secondary",
+                      "Focusable"
+                     ],
+                     "name": "Text 020",
+                     "native_id": {
+                      "kind": "ax_dom_identifier",
+                      "value": "\u00abr10j\u00bb"
+                     },
+                     "ref_id": "@s2cfx90ch0jbdd:e148",
+                     "role": "button",
+                     "subrole": "button"
+                    }
+                   ],
+                   "dom_classes": [
+                    "eKmEXJCm_lgme24Fp_HWt",
+                    "_16vVnDqpbNs-zIH-EdV6Vz",
+                    "GxgIyq8R5xTOeu4ftGrgX",
+                    "_3nLNLFMUMSt4jvxIayuPV3",
+                    "xIITXDcM70faUNqssgUyx",
+                    "_2HFrmMgB38Ike5w4rVxzEX",
+                    "_2CCdODv0vfzOMrEBUzZwfI",
+                    "Panel"
+                   ],
+                   "ref_id": "@s2cfx90ch0jbdd:e144",
+                   "role": "group"
+                  }
+                 ],
+                 "dom_classes": [
+                  "DialogContent",
+                  "_DialogLayout",
+                  "CFTLX2wIKOK3hNV-fS7_V"
+                 ],
+                 "name": "Account",
+                 "native_id": {
+                  "kind": "ax_dom_identifier",
+                  "value": "\u00abr10a\u00bb/settings/account_Content"
+                 },
+                 "ref_id": "@s2cfx90ch0jbdd:e100",
+                 "role": "scrollarea",
+                 "subrole": "tabpanel"
+                }
+               ],
+               "dom_classes": [
+                "DialogContentTransition",
+                "OX7USkJ5dDP_icD00Gal6",
+                "Panel"
+               ],
+               "ref_id": "@s2cfx90ch0jbdd:e99",
+               "role": "group"
+              }
+             ],
+             "dom_classes": [
+              "ModalPosition_Content"
+             ],
+             "ref_id": "@s2cfx90ch0jbdd:e11",
+             "role": "group"
+            }
+           ],
+           "dom_classes": [
+            "ModalPosition"
+           ],
+           "name": "Text 001",
+           "ref_id": "@s2cfx90ch0jbdd:e10",
+           "role": "group",
+           "states": [
+            "focused"
+           ]
+          },
+          {
+           "available_actions": [
+            "Click",
+            "RightClick"
+           ],
+           "dom_classes": [
+            "window_resize_grip"
+           ],
+           "ref_id": "@s2cfx90ch0jbdd:e149",
+           "role": "group"
+          }
+         ],
+         "dom_classes": [
+          "fullheight"
+         ],
+         "native_id": {
+          "kind": "ax_dom_identifier",
+          "value": "popup_target"
+         },
+         "ref_id": "@s2cfx90ch0jbdd:e1",
+         "role": "group"
+        }
+       ],
+       "name": "Steam Settings",
+       "role": "webarea"
+      }
+     ],
+     "role": "group"
+    }
+   ],
+   "role": "window"
+  }
+ },
+ "ok": true,
+ "version": "2.6"
+}

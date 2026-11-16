@@ -106,6 +106,9 @@ def cmd_install(options):
     print('bridge   : %s' % (addons_dir() / 'bridge.lua'))
     print('boot.lua : %s' % patcher('check').stdout.strip())
     print('\nRestart Steam (Steam -> Exit, then launch it again) to load the add-ons.')
+    hint = gui_install_hint()
+    if hint:
+        print(hint)
     return EXIT_OK
 
 

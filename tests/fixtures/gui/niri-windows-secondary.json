@@ -1,0 +1,60 @@
+[
+ {
+  "id": 56,
+  "title": "Steam",
+  "app_id": "steam",
+  "pid": 8145,
+  "workspace_id": 1,
+  "is_focused": false,
+  "is_floating": false,
+  "is_urgent": false,
+  "layout": {
+   "pos_in_scrolling_layout": [
+    4,
+    1
+   ],
+   "tile_size": [
+    2544.0,
+    1380.0
+   ],
+   "window_size": [
+    2540,
+    1376
+   ],
+   "tile_pos_in_workspace_view": null,
+   "window_offset_in_tile": [
+    2.0,
+    2.0
+   ]
+  }
+ },
+ {
+  "id": 60,
+  "title": "Steam Settings",
+  "app_id": "steam",
+  "pid": 8145,
+  "workspace_id": 1,
+  "is_focused": false,
+  "is_floating": false,
+  "is_urgent": false,
+  "layout": {
+   "pos_in_scrolling_layout": [
+    5,
+    1
+   ],
+   "tile_size": [
+    854.0,
+    1380.0
+   ],
+   "window_size": [
+    850,
+    1376
+   ],
+   "tile_pos_in_workspace_view": null,
+   "window_offset_in_tile": [
+    2.0,
+    2.0
+   ]
+  }
+ }
+]

@@ -5,6 +5,12 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **GE-Proton safety.** `luna proton verify [VERSION] [--rebuild|--against FILE]` and an
+  integrity manifest written by `install`; hash-free corruption warnings in `proton status` and
+  `luna doctor` (several GE versions, DLLs bulk-newer than the tool, dangling/foreign prefix
+  links); `install`/`remove`/`prune` refuse while Steam or a wine process from the tool runs.
+  **`proton prune` now keeps 1 by default (was 2)**; `install` warns when it leaves a second
+  version. Background: docs/PROTON_SINGLE_VERSION.md.
 - **`luna games list|diff|install`.** See which Steam games are installed on which
   machine (`luna probe --json` gains an additive `games` section; older remotes are
   scanned over ssh) and queue `steam://install` on another host after checking free space

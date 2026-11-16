@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 os.environ.setdefault('LUNA_GUI_CHECKS', '0')  # hermetic: tests never probe the real desktop (test_gui_check manages it itself)
+os.environ.setdefault('LUNA_LIVE_CHECKS', '0')  # hermetic: tests never contact a real Steam (test_live_probe uses a fake endpoint)
 import shutil
 import subprocess
 import sys
@@ -151,6 +152,54 @@ class LunaTestCase(unittest.TestCase):
         return package
 
     # -- install ---------------------------------------------------------
+    def test_install_hints_at_the_gui_check_on_a_terminal_only(self):
+        import pty
+
+        def read_all(fd):
+            chunks = []
+            try:
+                while True:
+                    data = os.read(fd, 4096)
+                    if not data:
+                        break
+                    chunks.append(data)
+            except OSError:  # EIO once the slave side is closed and drained
+                pass
+            return b''.join(chunks).decode(errors='replace')
+        stub_bin(self.home)
+        agent = self.bin / 'agent-desktop'
+        agent.write_text('#!/bin/sh\nexit 1\n')
+        agent.chmod(0o755)
+        env = dict(self.env, LUNA_GUI_CHECKS='1', WAYLAND_DISPLAY='wayland-9')
+        command = [sys.executable, str(LUNA), 'install', '--keep-steam-client']
+
+        def install(environment, terminal):
+            """Run a fresh install; returns its stdout as the user would see it."""
+            if not terminal:
+                done = subprocess.run(command, capture_output=True, text=True, env=environment)
+                self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
+                return done.stdout
+            master, slave = pty.openpty()
+            try:
+                done = subprocess.run(command, stdout=slave, stderr=subprocess.PIPE, env=environment)
+                os.close(slave)
+                text = read_all(master)
+            finally:
+                os.close(master)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return text
+
+        def reset():
+            self.assertEqual(self.luna('uninstall').returncode, 0)
+
+        text = install(env, True)
+        self.assertEqual(text.count('luna gui verify'), 1, text)
+        self.assertIn('luna status --live', text)
+        reset()
+        self.assertNotIn('luna gui', install(env, False))  # not a terminal: nothing extra
+        reset()
+        self.assertNotIn('luna gui', install(dict(env, LUNA_GUI_CHECKS='0'), True))
+
     def test_install_both_addons_patches_once(self):
         result = self.luna('install')
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -570,6 +619,22 @@ class LunaTestCase(unittest.TestCase):
         result = self.luna('update', '--bundle', str(bundle))
         self.assertNotEqual(result.returncode, 0, 'a corrupt bundle must not install')
         self.assertFalse(self.addons.exists(), 'a corrupt bundle must not install')
+
+    def test_update_refuses_a_flipped_byte_anywhere_in_the_stream(self):
+        # The inner manifest does not pin scripts/luna.py, so the gzip CRC is what protects it.
+        out = self.temp / 'dist-flip'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        raw = bundle.read_bytes()
+        for fraction in (0.1, 0.35, 0.6, 0.9):
+            mutated = bytearray(raw)
+            mutated[int(len(mutated) * fraction)] ^= 0x01
+            bundle.write_bytes(bytes(mutated))
+            Path(str(bundle) + '.sha256').write_text(
+                '%s  %s\n' % (__import__('hashlib').sha256(bytes(mutated)).hexdigest(), bundle.name))
+            result = self.luna('update', '--bundle', str(bundle))
+            self.assertNotEqual(result.returncode, 0, 'corrupt bundle accepted at %s' % fraction)
+            self.assertFalse(self.addons.exists())
 
     def test_status_degrades_on_a_missing_installed_file(self):
         self.assertEqual(self.luna('install').returncode, 0)

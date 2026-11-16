@@ -27,6 +27,14 @@ GUI_PANEL_SELECTORS = {
     'playtime': {'nav': 'Playtime', 'panel': ('heading', 'Playtime', True)},       # confirmed live
     'presence': {'nav': 'Presence', 'panel': ('heading', 'Presence', True)},       # confirmed live
     'compressor': {'nav': 'Compressor', 'panel': ('heading', 'Compressor', True)},  # confirmed live
+    'sgdb': {'nav': 'SteamGridDB', 'panel': ('heading', 'SteamGridDB artwork', True)},   # confirmed live
+    'graphics': {'nav': 'Graphics', 'panel': ('heading', 'Graphics (read-only)', True)},  # confirmed live
+    # Pages of the Luna core add-on (not add-ons of their own): checked by `gui watch`,
+    # never by verify, since ADDONS does not list them.
+    'hltb': {'nav': 'HowLongToBeat', 'panel': ('heading', 'HowLongToBeat', True)},       # confirmed live
+    'health': {'nav': 'Health', 'panel': ('heading', 'Health (local diagnostics)', True)},  # confirmed live
+    'settings': {'nav': 'Settings', 'panel': ('heading', 'Settings', True)},             # confirmed live
+    'about': {'nav': 'About', 'panel': ('heading', 'About SLS Luna', True)},             # confirmed live
 }
 # Library list: a ReactVirtualized grid, so only the rendered rows exist in the tree.
 GUI_LIBRARY_TABLE = ('table', 'grid', True)      # confirmed live; rows are `cell '<game name>'`
@@ -109,12 +117,32 @@ def gui_run(args, timeout=GUI_TIMEOUT, env=None):
             'error': ('%s %s' % (code or 'error', message or '')).strip()[:200]}
 
 
+def gui_desktop_name(env=None):
+    env = env or os.environ
+    return (env.get('XDG_CURRENT_DESKTOP') or env.get('XDG_SESSION_DESKTOP') or env.get('DESKTOP_SESSION')
+            or 'this desktop')
+
+
+def gui_backend(env=None):
+    """Which window backend is in use. Two exist: 'niri' (tested: real window titles and
+    window-only capture) and 'generic' (agent-desktop list-windows, no capture). No other
+    compositor is guessed at: there, capture says "not supported on <desktop>: <why>"."""
+    env = env or gui_session_env()
+    if shutil.which('niri') and env.get('NIRI_SOCKET'):
+        return {'name': 'niri', 'windows': 'niri msg --json windows',
+                'capture': 'niri msg action screenshot-window', 'note': ''}
+    why = 'niri is not installed' if not shutil.which('niri') else 'no NIRI_SOCKET (not a niri session)'
+    return {'name': 'generic', 'windows': 'agent-desktop list-windows (window titles are empty)',
+            'capture': None,
+            'note': 'not supported on %s: window-only screenshots need niri (%s)' % (gui_desktop_name(os.environ), why)}
+
+
 def gui_windows(timeout=GUI_TIMEOUT, env=None):
     """Open Steam windows as [{'title', 'source'}]. niri first (real titles),
     agent-desktop as the fallback (titles are empty strings there)."""
     env = env or gui_session_env()
     niri = shutil.which('niri')
-    if niri and env.get('NIRI_SOCKET'):
+    if gui_backend(env)['name'] == 'niri':
         try:
             result = subprocess.run([niri, 'msg', '--json', 'windows'], capture_output=True,
                                     text=True, timeout=timeout, env=env)
@@ -230,6 +258,16 @@ def gui_dialogs(tree):
     return dialogs
 
 
+def gui_secondary_windows(tree):
+    """Titles of Steam's own secondary windows (Settings, Friends List, ...). Observed live:
+    each is a separate AT-SPI window holding one `webarea '<title>'`; it has no dialog or
+    alert role and no Close button of its own (the AT-SPI title is empty, niri has the
+    title). The main window's webarea is 'Steam' and the sign-in window's 'Sign in to Steam'."""
+    return [str(node.get('name')) for node in gui_walk(tree)
+            if node.get('role') == 'webarea' and node.get('name')
+            and node.get('name') not in ('Steam', 'Sign in to Steam')]
+
+
 def gui_classify(tree, titles=()):
     """'login', 'main', 'dialog' or 'unknown'."""
     if any('sign in to steam' in t.lower() for t in titles):
@@ -244,6 +282,118 @@ def gui_classify(tree, titles=()):
     if gui_find_nodes(tree, 'statictext', 'LIBRARY') and gui_find_nodes(tree, 'statictext', 'STORE'):
         return 'main'
     return 'unknown'
+
+
+# A "Sign in to Steam" window is NOT proof that the user has to sign in: Steam shows the same
+# window while it auto-logs-on at startup (observed live: ~37 s from process start to the
+# logon response, the main window "Steam" after that). 'login' is therefore only concluded
+# once the window has outlasted this grace period with no log-on attempt in connection_log.
+GUI_LOGIN_GRACE = 120
+GUI_LOG_STAMP = re.compile(r'^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]')
+
+
+def gui_log_epoch(line):
+    match = GUI_LOG_STAMP.match(line)
+    if not match:
+        return None
+    try:
+        return time.mktime(time.strptime(match.group(1), '%Y-%m-%d %H:%M:%S'))
+    except (ValueError, OverflowError):
+        return None
+
+
+def gui_log_tail(name, limit=200000):
+    try:
+        path = steam_home() / 'logs' / name
+        with open(path, 'rb') as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - limit))
+            return handle.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return []
+
+
+def gui_logon_evidence(since, lines=None):
+    """(state, line) from Steam's connection_log.txt for events after `since` (epoch):
+    'logged-on', 'logging-on' (a log-on was started or is connecting), 'none' (nothing
+    since: the client is not trying to log on) or 'unknown' (no log). The last event wins."""
+    lines = gui_log_tail('connection_log.txt') if lines is None else lines
+    if not lines:
+        return 'unknown', ''
+    state, shown = 'none', ''
+    for line in lines:
+        when = gui_log_epoch(line)
+        if when is None or when < since:
+            continue
+        if 'LogOff()' in line or '[Logged Off' in line and 'ConnectionDisconnected' in line:
+            state, shown = 'none', line
+        elif ('RecvMsgClientLogOnResponse' in line and "'OK'" in line) or '[Logged On' in line:
+            state, shown = 'logged-on', line
+        elif ('LogOn() called' in line or '[Connecting' in line) and state != 'logged-on':
+            state, shown = 'logging-on', line
+    return state, shown[:160]
+
+
+def gui_process_started(proc='/proc'):
+    """Epoch start time of this user's oldest Steam client process, or None."""
+    root, uid, best = Path(proc), os.getuid(), None
+    try:
+        btime = next(int(line.split()[1]) for line in (root / 'stat').read_text().splitlines() if line.startswith('btime '))
+        entries = list(root.iterdir())
+    except (OSError, StopIteration, ValueError):
+        return None
+    try:
+        hertz = os.sysconf('SC_CLK_TCK')
+    except (ValueError, OSError):
+        hertz = 100
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            argv = (entry / 'cmdline').read_bytes().split(b'\0')
+            if os.path.basename(argv[0].decode('utf-8', 'replace')) not in ('steam', 'steam.sh'):
+                continue
+            text = (entry / 'stat').read_text()
+            started = btime + int(text[text.rindex(')') + 2:].split()[19]) / float(hertz)
+        except (OSError, ValueError, IndexError):
+            continue
+        best = started if best is None else min(best, started)
+    return best
+
+
+def gui_judge_screen(raw, titles, age, grace, logon):
+    """(screen, signal): 'main', 'dialog', 'starting', 'login' or 'unknown', and the evidence
+    behind the call. `raw` is gui_classify() (or, without a tree, the window titles),
+    `age` the seconds since the Steam process started (None = unknown), `logon` the
+    gui_logon_evidence() pair. A sign-in window is 'starting' until it has persisted for
+    `grace` seconds without any log-on attempt; only then is it the real form."""
+    if raw in ('main', 'dialog'):
+        return raw, 'main window present (%s)' % ('window titled "Steam"' if 'Steam' in titles else 'accessibility tree')
+    if raw == 'login':
+        state, line = logon
+        if state == 'logged-on':
+            return 'starting', 'sign-in window is up but connection_log shows the log-on succeeded: %s' % line
+        if state == 'logging-on':
+            return 'starting', 'sign-in window is up and connection_log shows a log-on in progress: %s' % line
+        if age is None:
+            return 'starting', 'sign-in window is up; Steam start time unknown, so it cannot be told from the startup window'
+        if age < grace:
+            return 'starting', ('sign-in window up at %.0f s after start (grace %.0f s); no log-on attempt in connection_log '
+                                'yet (log-on: %s)' % (age, grace, state))
+        return 'login', ('sign-in window persisted: Steam up %.0f s (> grace %.0f s) and connection_log shows no '
+                         'log-on attempt (%s)' % (age, grace, state))
+    return raw, 'no recognisable Steam window'
+
+
+def gui_exit_hint(since):
+    """Why did Steam go away? What its own logs say about the time after `since`."""
+    for name, marker in (('console_log.txt', 'StartShutdown'), ('bootstrap_log.txt', '] Shutdown')):
+        hits = [line for line in gui_log_tail(name, 100000) if marker in line and (gui_log_epoch(line) or 0) >= since]
+        if hits:
+            return '%s logged a clean shutdown request: "%s" (something asked Steam to exit; not a crash)' % (name, hits[-1][:100])
+    return 'no shutdown line in console_log.txt or bootstrap_log.txt after the launch: a crash or a kill'
 
 
 def gui_steam_state(proc='/proc'):
@@ -310,6 +460,63 @@ def gui_main_window_id(env):
     return best[2], best[3]
 
 
+GUI_CLIP_PREFER = ('text/plain;charset=utf-8', 'image/png')
+
+
+def gui_clip_tools():
+    return shutil.which('wl-paste'), shutil.which('wl-copy')
+
+
+def gui_clip_types(env):
+    """MIME types on the clipboard: a list ([] = empty), or None when it cannot be read."""
+    paste = shutil.which('wl-paste')
+    try:
+        result = subprocess.run([paste, '--list-types'], capture_output=True, timeout=5, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode == 0:
+        return result.stdout.decode('utf-8', 'replace').split()
+    return [] if b'nothing is copied' in result.stderr.lower() else None
+
+
+def gui_clipboard_save(env):
+    """(saved, note). saved is {'type', 'data'} or {'empty': True}, or None when it cannot
+    be kept (then `note` says why). niri's screenshot-window overwrites the clipboard."""
+    paste, copy = gui_clip_tools()
+    if not paste or not copy:
+        return None, 'clipboard not restored: wl-clipboard (wl-paste/wl-copy) is not installed'
+    types = gui_clip_types(env)
+    if types is None:
+        return None, 'clipboard not restored: wl-paste could not read it'
+    if not types:
+        return {'empty': True}, ''
+    kind = next((t for t in GUI_CLIP_PREFER if t in types), types[0])
+    try:
+        result = subprocess.run([paste, '--no-newline', '--type', kind], capture_output=True, timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None, 'clipboard not restored: wl-paste failed'
+    if result.returncode != 0:
+        return None, 'clipboard not restored: wl-paste failed'
+    return {'type': kind, 'data': result.stdout}, ''
+
+
+def gui_clipboard_restore(saved, env, sleep=time.sleep):
+    """Put `saved` back once niri's image has landed on the clipboard. Returns a note
+    ('' when restored)."""
+    copy = shutil.which('wl-copy')
+    for _ in range(8):  # niri sets the clipboard a moment after the file appears
+        if 'image/png' in (gui_clip_types(env) or []):
+            break
+        sleep(0.2)
+    command = [copy, '--clear'] if saved.get('empty') else [copy, '--type', saved['type']]
+    try:  # wl-copy forks to serve the data: no inherited pipes, or run() would wait for it
+        subprocess.run(command, input=None if saved.get('empty') else saved['data'], timeout=10, env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return 'clipboard not restored: wl-copy failed'
+    return ''
+
+
 def gui_capture(directory, name, full_screen=False):
     """Screenshot as evidence. (path or None, note).
 
@@ -333,10 +540,14 @@ def gui_capture(directory, name, full_screen=False):
         if result.returncode != 0 or not target.is_file():
             return None, 'grim failed: %s' % (result.stderr.strip()[:120] or 'exit %d' % result.returncode)
         return target, 'saved (full screen)'
+    backend = gui_backend(env)
+    if backend['name'] != 'niri':
+        return None, 'no window-only screenshot: %s (use --full-screen to capture the whole screen)' % backend['note']
     main = gui_main_window_id(env)
     if main is None:
         return None, 'no window-only screenshot: niri or its Steam window is unavailable (use --full-screen to capture the whole screen)'
     window_id, window_size = main
+    saved, clip_note = gui_clipboard_save(env)
     try:
         result = subprocess.run([shutil.which('niri'), 'msg', 'action', 'screenshot-window', '--id', str(window_id),
                                  '--path', str(target.resolve())], capture_output=True, text=True,
@@ -348,10 +559,27 @@ def gui_capture(directory, name, full_screen=False):
     deadline = time.monotonic() + 5  # the action is asynchronous
     while time.monotonic() < deadline and not (target.is_file() and target.stat().st_size > 0):
         time.sleep(0.2)
+    if saved is not None:
+        clip_note = gui_clipboard_restore(saved, env)
     size = gui_png_size(target) if target.is_file() else None
+    extra = '; ' + clip_note if clip_note else ''
     if size is None:
-        return None, 'niri did not write a PNG to %s' % target
-    return target, 'saved, window only, %dx%d px (niri window %dx%d)' % (size + tuple(window_size))
+        return None, 'niri did not write a PNG to %s%s' % (target, extra)
+    return target, 'saved, window only, %dx%d px (niri window %dx%d)%s' % (size + tuple(window_size) + (extra,))
+
+
+def gui_install_hint(stream=None):
+    """One line printed after a successful install/update, or ''. Only on a terminal (never
+    from the unattended updater or a pipe) and only when the GUI layer could run here. It
+    never starts or restarts Steam: it only points at the commands."""
+    stream = stream or sys.stdout
+    try:
+        if not (gui_enabled() and stream.isatty() and gui_find_tool(GUI_TOOL) and gui_have_session(gui_session_env())):
+            return ''
+    except Exception:
+        return ''
+    return ('Optional check once Steam is back: luna gui verify (add-on panels; Steam must run in accessible mode, '
+            'see luna gui launch) or luna status --live.')
 
 
 def gui_unavailable_reason(need_accessible=True):
@@ -525,7 +753,7 @@ def gui_library(options):
     reason = gui_unavailable_reason()
     if reason:
         print('GUI checks skipped: %s' % reason)
-        return EXIT_OK
+        return EXIT_SKIPPED
     def read():  # depth 20 reaches the shelf headers that carry the total
         return gui_snapshot(depth=20)
     tree, error = read()
@@ -628,6 +856,8 @@ def gui_describe_blockers(budget=3.0):
         if left > 0.8 and gui_find_tool(GUI_TOOL) and gui_steam_state()[1]:
             tree, _ = gui_snapshot(timeout=left, env=env, scope='all', deadline=deadline)
             if tree is not None:
+                for title in gui_secondary_windows(tree):
+                    parts.append('window "%s" is open (a normal window, not a modal; close it in Steam)' % title)
                 for dialog in gui_dialogs(tree):
                     parts.append('dialog "%s" with buttons: %s'
                                  % (dialog['name'] or '?', ', '.join(dialog['buttons']) or 'none'))
@@ -637,19 +867,16 @@ def gui_describe_blockers(budget=3.0):
 
 
 def gui_lumen_survivor():
-    """(pid, started) of a Lumen sidecar still alive, or None. Reuses
-    process_running('lumen'), the detection the preflight and doctor use."""
+    """(pid, started) of a Lumen sidecar still alive, or None. process_running('lumen') is
+    the detection the preflight and doctor use; pid and start time come from the one
+    /proc reader (live_sidecar in 96_live_probe.py)."""
     try:
         if not process_running('lumen'):
             return None
-        result = subprocess.run(['pgrep', '-u', str(os.getuid()), '-x', 'lumen'],
-                                capture_output=True, text=True, timeout=5)
-        pid = (result.stdout.split() or ['?'])[0]
-        started = '?'
-        if pid.isdigit():
-            ps = subprocess.run(['ps', '-o', 'lstart=', '-p', pid], capture_output=True, text=True, timeout=5)
-            started = ps.stdout.strip() or '?'
-        return pid, started
+        sidecar = live_sidecar()
+        if not sidecar:
+            return ('?', '?')
+        return str(sidecar['pid']), live_stamp(sidecar['started'])
     except Exception:
         return ('?', '?')
 
@@ -680,31 +907,65 @@ def gui_report_markdown(report):
     return '\n'.join(lines)
 
 
+def gui_put_steam_back(close=None):
+    """Close the Steam this command launched in accessible mode (final-state rule: it was
+    not running before, so it is not left running, and accessible mode does not linger).
+    Goes through the project's own graceful shutdown; never kills. True when it is gone."""
+    print('Steam was started by this command in accessible mode: closing it again '
+          '(use --keep-steam to leave it running)')
+    close = close or _close_steam_gracefully
+    if close():
+        return True
+    blockers = gui_describe_blockers()
+    print('Steam did not exit within the timeout%s. It is still running in accessible mode; '
+          'close it yourself (Steam -> Exit).' % ('; ' + blockers if blockers else ''), file=sys.stderr)
+    return False
+
+
 def gui_verify(options, sleep=time.sleep):
-    """`luna gui verify`: exit 0 pass or skipped, 1 on any failure."""
+    """`luna gui verify`: exit 0 pass, 1 any failure, 5 (EXIT_SKIPPED) it could not run.
+    When --launch started Steam, Steam is closed again at the end unless --keep-steam."""
+    launched = []
+    try:
+        return gui_verify_run(options, sleep, launched)
+    finally:
+        if launched and not getattr(options, 'keep_steam', False):
+            gui_put_steam_back()
+
+
+def gui_verify_run(options, sleep, launched):
     reason = gui_unavailable_reason(need_accessible=False)
     if reason and not (getattr(options, 'launch', False) and reason.startswith('Steam is not running')):
         print('GUI checks skipped: %s' % reason)
-        return EXIT_OK
+        return EXIT_SKIPPED
     running, accessible = gui_steam_state()
     if not running:
         ok, message = gui_launch_accessible()
         print(message, file=sys.stdout if ok else sys.stderr)
         if not ok:
             return 1
+        launched.append(True)
     elif not accessible:
         print('GUI checks skipped: Steam was not started in accessible mode; close it and run: luna gui launch')
-        return EXIT_OK
+        return EXIT_SKIPPED
     tree = gui_wait_for_window(getattr(options, 'wait', 90), sleep=sleep)
     if tree is None:
         print('FAIL: no Steam window with an accessible tree appeared', file=sys.stderr)
         return 1
     titles = gui_titles(gui_windows())
     screen = gui_classify(tree, titles)
+    signal = ''
+    if screen == 'login':  # the startup window looks the same: wait for the log-on to finish
+        started = gui_process_started()
+        screen, tree, signal = gui_wait_for_screen(getattr(options, 'login_grace', GUI_LOGIN_GRACE), sleep, time.monotonic,
+                                                   grace=getattr(options, 'login_grace', GUI_LOGIN_GRACE),
+                                                   age0=(time.time() - started) if started else None)
     failures = []
     panels = {}
     if screen == 'login':
-        failures.append('Steam is at the sign-in screen: sign in first, then re-run luna gui verify')
+        failures.append('Steam is at the sign-in screen: sign in first, then re-run luna gui verify (%s)' % signal)
+    elif screen in ('starting', 'exited'):
+        failures.append('Steam is not ready: %s' % signal)
     elif screen == 'unknown':
         failures.append('could not recognise the current Steam screen')
     else:
@@ -746,23 +1007,39 @@ def gui_status(options):
     running, accessible = gui_steam_state()
     info = {'tool': tool or 'missing',
             'session': {k: env.get(k, '') for k in ('WAYLAND_DISPLAY', 'DISPLAY', 'NIRI_SOCKET')},
-            'steamRunning': running, 'accessible': accessible, 'screen': 'n/a', 'windows': []}
+            'steamRunning': running, 'accessible': accessible, 'screen': 'n/a', 'windows': [],
+            'backend': {k: v for k, v in gui_backend(env).items() if v}}
     if gui_enabled() and running and gui_have_session(env):
         info['windows'] = gui_titles(gui_windows(env=env))
         if tool and accessible:
             tree, _ = gui_snapshot(env=env)
-            info['screen'] = gui_classify(tree, info['windows'])
+            raw = gui_classify(tree, info['windows'])
         elif any('sign in to steam' in t.lower() for t in info['windows']):
-            info['screen'] = 'login'
+            raw = 'login'
+        else:
+            raw = 'main' if 'Steam' in info['windows'] else 'n/a'
+        info['screen'] = raw
+        if raw in ('login', 'main'):
+            started = gui_process_started()
+            age = time.time() - started if started else None
+            logon = gui_logon_evidence(started - 2) if started else ('unknown', '')
+            info['screen'], info['signal'] = gui_judge_screen(raw, info['windows'], age, getattr(options, 'login_grace', GUI_LOGIN_GRACE), logon)
     if getattr(options, 'json', False):
         print(json.dumps(info, indent=2, sort_keys=True))
         return EXIT_OK
     print('tool       : %s' % info['tool'])
     print('session    : %s' % (' '.join('%s=%s' % (k, v) for k, v in info['session'].items() if v)
                                or 'none (no WAYLAND_DISPLAY/DISPLAY found)'))
+    backend = info['backend']
+    print('backend    : %s (windows: %s; capture: %s)' % (backend['name'], backend['windows'],
+                                                        backend.get('capture') or 'none'))
+    if backend.get('note'):
+        print('             %s' % backend['note'])
     print('steam      : %s' % ('running' if running else 'not running'))
     print('accessible : %s' % ('yes' if accessible else 'no'))
     print('screen     : %s' % info['screen'])
+    if info.get('signal') and info['screen'] in ('starting', 'login'):
+        print('             %s' % info['signal'])
     print('windows    : %s' % (', '.join('"%s"' % t for t in info['windows']) or 'none'))
     reason = gui_unavailable_reason()
     if reason:
@@ -777,10 +1054,14 @@ def cmd_gui(options):
         return gui_status(options)
     if action == 'library':
         return gui_library(options)
+    if action == 'watch':
+        return gui_watch(options)
+    if action == 'restart-check':
+        return gui_restart_check(options)
     if action == 'launch':
         if not gui_enabled():
             print('GUI checks skipped: disabled (LUNA_GUI_CHECKS=0)')
-            return EXIT_OK
+            return EXIT_SKIPPED
         ok, message = gui_launch_accessible()
         print(message, file=sys.stdout if ok else sys.stderr)
         return EXIT_OK if ok else 1

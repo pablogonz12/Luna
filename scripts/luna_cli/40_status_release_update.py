@@ -101,6 +101,12 @@ def cmd_status(options):
     print('manifest   : %d add-on(s) pinned from %s'
           % (len(manifest.get('addons', {})), ', '.join(
               sorted({entry.get('source_repo', '?') for entry in manifest.get('addons', {}).values()}))))
+    if getattr(options, 'live', False):
+        # Read-only probe of the running client; see 96_live_probe.py.
+        try:
+            degraded = print_live_status(targets, installed) or degraded
+        except Exception as error:  # the probe must never turn status into a traceback
+            print('live       : unavailable - %s' % error)
     return 1 if degraded else EXIT_OK
 
 
@@ -335,7 +341,21 @@ def check_updates(force=False):
 
 
 def _safe_extract(bundle, extract_dir):
-    """Unpack without allowing absolute paths or parent-directory escapes."""
+    """Unpack without allowing absolute paths or parent-directory escapes.
+
+    A gzip bundle is first read to its end: tarfile stops at the tar end marker and never
+    reaches the gzip CRC trailer, so a damaged stream that still decodes would otherwise
+    extract silently (the bundled manifest only pins the add-ons and shared scripts, not
+    scripts/luna.py, which `update` then runs)."""
+    with open(str(bundle), 'rb') as probe:
+        gzipped = probe.read(2) == b'\x1f\x8b'
+    if gzipped:
+        try:
+            with gzip.open(str(bundle), 'rb') as stream:
+                while stream.read(1024 * 1024):
+                    pass
+        except (OSError, EOFError, zlib.error) as error:
+            raise ValueError('the bundle is corrupt (gzip stream check failed: %s)' % error) from error
     with tarfile.open(bundle) as tar:
         members = tar.getmembers()
         for member in members:
