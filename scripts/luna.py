@@ -49,6 +49,7 @@ Commands:
 import argparse
 import contextlib
 import hashlib
+import http.server
 import io
 import json
 import lzma
@@ -62,7 +63,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
+import urllib.error
 import urllib.request
 import zipfile
 import zlib
@@ -2635,6 +2638,115 @@ def _steam_package_set_readonly(package, readonly):
     package.chmod(mode & ~0o222 if readonly else mode | stat.S_IWUSR)
 
 
+def _http_get(url, limit=64 * 1024 * 1024):
+    request = urllib.request.Request(url, headers={'User-Agent': 'Luna-Steam-Installer'})
+    with urllib.request.urlopen(request, timeout=60) as source:
+        data = source.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('download exceeds the size limit: %s' % url)
+    return data
+
+
+def _manifest_version(data):
+    text = data.decode('utf-8', errors='replace') if isinstance(data, bytes) else data
+    found = [item for item in re.findall(r'"version"\s+"(\d+)"', text) if item != '0']
+    return found[0] if found else ''
+
+
+def obtain_pinned_manifest(say):
+    """The pinned known-good ubuntu12 manifest bytes, or None when it cannot be obtained.
+
+    Order: Luna cache, then the pinned SteamTracking commit. A copy whose sha256 or
+    version differs from the pins raises ValueError (fail closed, never used).
+    """
+    cached = steam_cache_dir() / 'package' / STEAM_MANIFEST_NAME
+    try:
+        data = cached.read_bytes()
+        if hashlib.sha256(data).hexdigest() == KNOWN_GOOD_MANIFEST_SHA256:
+            say('using the pinned ubuntu12 manifest from the Luna cache')
+            return data
+    except OSError:
+        pass
+    try:
+        data = _http_get(KNOWN_GOOD_MANIFEST_URL)
+    except (OSError, urllib.error.URLError) as error:
+        say('WARN: could not download the pinned manifest (%s)' % error)
+        return None
+    if hashlib.sha256(data).hexdigest() != KNOWN_GOOD_MANIFEST_SHA256:
+        raise ValueError('the manifest downloaded from SteamTracking %s does not match the pinned sha256; '
+                         'refusing' % KNOWN_GOOD_MANIFEST_COMMIT[:12])
+    if _manifest_version(data) != KNOWN_GOOD_UBUNTU12_BUILD:
+        raise ValueError('the pinned manifest has version %s, expected %s; refusing'
+                         % (_manifest_version(data), KNOWN_GOOD_UBUNTU12_BUILD))
+    say('downloaded the pinned ubuntu12 manifest (SteamTracking %s)' % KNOWN_GOOD_MANIFEST_COMMIT[:12])
+    return data
+
+
+class ManifestServer:
+    """127.0.0.1 server: the pinned manifest for the manifest paths, 302 to Valve's CDN otherwise."""
+
+    MANIFEST_PATHS = ('steam_client_ubuntu12', 'steam_client_ubuntu12.manifest', 'client/steam_client_ubuntu12')
+
+    def __init__(self, data):
+        outer = self
+        self.hits = 0
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                path = self.path.split('?', 1)[0].lstrip('/')
+                if path in outer.MANIFEST_PATHS:
+                    outer.hits += 1
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/octet-stream')
+                    self.send_header('Content-Length', str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                if path.startswith('client/'):
+                    path = path[len('client/'):]
+                self.send_response(302)
+                self.send_header('Location', STEAM_CDN + path)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+
+            do_HEAD = do_GET  # noqa: N815
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.port = self.server.server_address[1]
+        self.url = 'http://127.0.0.1:%d' % self.port
+
+    def __enter__(self):
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(5)
+
+
+def _pinned_rollback(sdir, data, say):
+    """Run the launcher against the local manifest server; True once a manifest request was served."""
+    candidates = [path for path in (sdir / 'ubuntu12_32' / 'steam', sdir / 'steam.sh') if path.is_file()]
+    for launcher in candidates:
+        with ManifestServer(data) as server:
+            say('running %s against the local pinned manifest server (%s)' % (launcher.name, server.url))
+            try:
+                subprocess.run([str(launcher), '-forcemanifestsuffix', 'ubuntu12', '-forcesteamupdate',
+                                '-forcepackagedownload', '-overridepackageurl', server.url, '-exitsteam'],
+                               timeout=3600)  # a non-zero exit is tolerated
+            except (OSError, subprocess.SubprocessError) as error:
+                say('WARN: %s failed: %s' % (launcher.name, error))
+            if server.hits > 0:
+                return True
+        say('WARN: %s never asked for the manifest; trying the next launcher' % launcher.name)
+    return False
+
+
 def _rollback_steam_client(sdir, say):
     """Kill Steam, wipe the steamrt64 client packages and fetch the ubuntu12 client.
 
@@ -2647,6 +2759,10 @@ def _rollback_steam_client(sdir, say):
         binary = sdir / 'steam.sh'
     if not binary.is_file():
         return False, 'no Steam launcher found under %s' % sdir
+    try:
+        pinned = obtain_pinned_manifest(say)
+    except ValueError as error:
+        return False, 'REFUSING: %s' % error
     uid = str(os.getuid())
     say('stopping Steam')
     for name in ('steam', 'steamwebhelper'):
@@ -2660,6 +2776,13 @@ def _rollback_steam_client(sdir, say):
     for stale in steam_moon_state_dir().glob('safe_mode*'):
         stale.unlink()
     say('downloading the ubuntu12 client (about 500 MB); this can take a while')
+    if pinned is not None:
+        if not _pinned_rollback(sdir, pinned, say):
+            return False, ('the Steam launcher never requested the pinned manifest, so the rollback did '
+                           'not happen; package/ was left writable. Run: luna steam recover (offline) or retry')
+        return True, 'ubuntu12 client downloaded (pinned manifest %s)' % KNOWN_GOOD_UBUNTU12_BUILD
+    say('WARN: the pinned manifest is unavailable; falling back to the current ubuntu12 manifest from '
+        "Valve's CDN, which Valve may have retired (SteamTracking deleted it on 2026-11-12)")
     # The Luna block would inhibit this very download; it is re-applied by the caller.
     try:
         subprocess.run([str(binary), '-forcemanifestsuffix', 'ubuntu12', '-exitsteam'],
@@ -2687,6 +2810,8 @@ def _lock_steam_client(force, confirm):
     def say(text):
         print('lock    : %s' % text, flush=True)
 
+    if steamos_gaming_mode():
+        say('WARN: SteamOS Gaming Mode detected; run lock from Desktop Mode')
     # The bootstrapper must be free to download: lift Luna's block for the run.
     had_block = steam_updates_blocked() or steam_hard_lock_active()
     remove_steam_cfg_block(steam_cfg_paths())
@@ -2730,8 +2855,168 @@ def _lock_steam_client(force, confirm):
     _steam_package_set_readonly(sdir / 'package', True)
     if steam_moon_state_dir().is_dir():
         (steam_moon_state_dir() / 'boot_fail_count').write_text('0\n')
+    code, note = install_libcrypto(False, say)
+    say(note if code == 0 else 'WARN: %s' % note)
     return 0, ('Steam rolled back to the ubuntu12 client (build %s), pinned and hard-locked: '
                'Steam.cfg + steam.cfg written, package/ read-only. Undo: luna steam unlock' % build)
+
+
+# --------------------------------------------------------------------------- libcrypto.so.3
+
+def _elf32_i386(data):
+    """ELF class 1 (32-bit), little endian, machine 3 (i386)."""
+    return len(data) >= 20 and data[:4] == b'\x7fELF' and data[4] == 1 and data[5] == 1 \
+        and int.from_bytes(data[18:20], 'little') == 3
+
+
+def _elf32_file(path):
+    try:
+        with open(path, 'rb') as handle:
+            return _elf32_i386(handle.read(20))
+    except OSError:
+        return False
+
+
+def libcrypto_target():
+    return steam_home() / 'ubuntu12_32' / 'libcrypto.so.3'
+
+
+def libcrypto_status():
+    """(state, text); state in present/missing/invalid/no-steam."""
+    target = libcrypto_target()
+    if not target.parent.is_dir():
+        return 'no-steam', 'libcrypto: %s does not exist (nothing to do)' % target.parent
+    if not os.path.lexists(target):
+        return 'missing', ('WARN: 32-bit libcrypto.so.3 is missing in ubuntu12_32; games may vanish from the '
+                           'library. Run: luna steam libcrypto --install')
+    if not _elf32_file(target):
+        return 'invalid', 'WARN: %s is not a 32-bit ELF library; luna steam libcrypto --install --force' % target
+    return 'present', 'libcrypto: 32-bit libcrypto.so.3 present in ubuntu12_32'
+
+
+def install_libcrypto(force=False, say=print):
+    """Put a 32-bit libcrypto.so.3 into <Steam>/ubuntu12_32. Returns (code, message)."""
+    target = libcrypto_target()
+    if not target.parent.is_dir():
+        return 1, 'no %s; install/run Steam once first' % target.parent
+    if os.path.lexists(target) and not force:
+        if _elf32_file(target):
+            return EXIT_OK, 'libcrypto.so.3 already present; kept (use --force to replace)'
+        return EXIT_REFUSED, ('REFUSING to overwrite %s (not a 32-bit ELF library); use --force' % target)
+    data, source = None, ''
+    for candidate in LIBCRYPTO_SYSTEM_PATHS:
+        path = Path(candidate)
+        if path.is_file() and _elf32_file(path):
+            try:
+                data, source = path.read_bytes(), 'system %s' % path
+            except OSError:
+                continue
+            break
+    if data is None:
+        try:
+            data = _http_get(LIBCRYPTO_URL, limit=32 * 1024 * 1024)
+        except (OSError, urllib.error.URLError) as error:
+            return 1, 'no system 32-bit libcrypto.so.3 and the pinned download failed: %s' % error
+        if hashlib.sha256(data).hexdigest() != LIBCRYPTO_SHA256:
+            return 1, 'REFUSING: the downloaded libcrypto.so.3 does not match the pinned sha256'
+        source = 'pinned SteamRollbackrLite asset'
+        if not _elf32_i386(data[:20]):
+            return 1, 'REFUSING: the downloaded libcrypto.so.3 is not a 32-bit ELF library'
+    temporary = target.with_name('libcrypto.so.3.luna-tmp')
+    try:
+        temporary.write_bytes(data)
+        temporary.chmod(0o755)
+        os.replace(temporary, target)
+    except OSError as error:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        return 1, 'could not write %s: %s' % (target, error)
+    return EXIT_OK, 'installed 32-bit libcrypto.so.3 into ubuntu12_32 (from %s)' % source
+
+
+def remove_libcrypto():
+    target = libcrypto_target()
+    if not os.path.lexists(target):
+        return EXIT_OK, 'libcrypto.so.3 is not installed in ubuntu12_32; nothing to remove'
+    try:
+        target.unlink()
+    except OSError as error:
+        return 1, 'could not remove %s: %s' % (target, error)
+    return EXIT_OK, 'removed %s' % target
+
+
+def cmd_libcrypto(options):
+    if getattr(options, 'remove', False):
+        code, message = remove_libcrypto()
+    elif getattr(options, 'install', False):
+        code, message = install_libcrypto(getattr(options, 'force', False))
+    else:
+        return print(libcrypto_status()[1]) or EXIT_OK
+    print(message, file=sys.stdout if code == 0 else sys.stderr)
+    return code
+
+
+# --------------------------------------------------------------------------- manifest history
+
+def format_history(commits):
+    """Lines for a SteamTracking commits API payload (pure; the network part is separate)."""
+    lines = []
+    for item in commits if isinstance(commits, list) else []:
+        sha = str(item.get('sha') or '')
+        commit = item.get('commit') or {}
+        message = str(commit.get('message') or '').splitlines()[0] if commit.get('message') else ''
+        when = str((commit.get('author') or {}).get('date') or '')[:10]
+        marks = []
+        if sha == KNOWN_GOOD_MANIFEST_COMMIT:
+            marks.append('KNOWN-GOOD (pinned)')
+        if message.lower().startswith('delete'):
+            marks.append('manifest deleted')
+        lines.append('%s  %s  %s%s' % (sha[:12], when, message, ('   <- ' + ', '.join(marks)) if marks else ''))
+    return lines
+
+
+def cmd_history(options):
+    try:
+        data = json.loads(_http_get(STEAMTRACKING_HISTORY_URL, limit=4 * 1024 * 1024))
+    except urllib.error.HTTPError as error:
+        if error.code in (403, 429):
+            print('history: GitHub rate limit reached (HTTP %d); try again later.' % error.code, file=sys.stderr)
+        else:
+            print('history: GitHub answered HTTP %d' % error.code, file=sys.stderr)
+        return 1
+    except (OSError, urllib.error.URLError, ValueError) as error:
+        print('history: cannot reach GitHub (%s); the pinned known-good commit is %s'
+              % (error, KNOWN_GOOD_MANIFEST_COMMIT), file=sys.stderr)
+        return 1
+    print('SteamTracking ClientManifest/steam_client_ubuntu12 (newest first):')
+    for line in format_history(data):
+        print('  ' + line)
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- environment warnings
+
+def flatpak_steam_only():
+    return (home() / '.var/app/com.valvesoftware.Steam').is_dir() and not steam_home().is_dir()
+
+
+FLATPAK_WARNING = 'WARN: Steam is the Flatpak build; Luna supports native Steam only'
+
+
+def steamos_gaming_mode():
+    try:
+        text = Path(OS_RELEASE_PATH).read_text()
+    except OSError:
+        return False
+    if not re.search(r'^ID="?steamos"?\s*$', text, re.M):
+        return False
+    try:
+        return subprocess.run(['pgrep', '-u', str(os.getuid()), '-f', 'gamescope-session'],
+                              capture_output=True).returncode == 0
+    except OSError:
+        return False
 
 
 def _notify(title, text):
@@ -2920,6 +3205,7 @@ def cmd_steam(options):
         warning = launchopts_warning()
         if warning:
             print('WARN   : %s' % warning)
+        print(libcrypto_status()[1])
         print('cache  : %s' % ('build ' + state['cachedBuild'] if state['cacheReady']
                                 else 'empty (run: luna steam cache with Steam closed)'))
         pending = read_steam_pending()
@@ -2939,6 +3225,10 @@ def cmd_steam(options):
         return EXIT_OK
     if action == 'launchopts':
         return cmd_launchopts(options)
+    if action == 'libcrypto':
+        return cmd_libcrypto(options)
+    if action == 'history':
+        return cmd_history(options)
     if action == 'ignore-pkg':
         return cmd_ignore_pkg(options)
     if action == 'pin':
@@ -3164,6 +3454,16 @@ def heal_steam_lock(apply=True):
     if drift:
         result['notes'].append('SLSsteam changed since the pin (%s); NOT re-pinned. '
                                'Verify it, then run: luna steam pin' % ', '.join(drift))
+    lib_state, lib_text = libcrypto_status()
+    if lib_state == 'missing':
+        if apply:
+            code, message = install_libcrypto(False)
+            if code == 0:
+                result['fixed'].append(message)
+            else:
+                result['notes'].append('%s (%s)' % (lib_text.replace('WARN: ', ''), message))
+        else:
+            result['notes'].append(lib_text.replace('WARN: ', '') + ' (heal would install it)')
     build = str(pin.get('clientBuild') or '')
     if build and (cached_client_build() != build or not (steam_cache_dir() / 'package').is_dir()):
         result['notes'].append('no known-good cache for build %s; run: luna steam cache (Steam closed)' % build)
@@ -3357,6 +3657,23 @@ UPSTREAM_INSTALLER_SHA256 = '1c6896832d32d6d17c5635daf95b539763955f7ea1d9bd4446e
 # rollback client has been validated (see README "Bumping the known-good build").
 KNOWN_GOOD_UBUNTU12_BUILD = '1792618285'
 KNOWN_GOOD_UBUNTU12_DATE = 'Oct 22 2026'
+# Valve deleted the ubuntu12 manifests from SteamTracking HEAD on 2026-11-12, so the exact
+# manifest is pinned by commit + sha256. To bump: pick a commit from `luna steam history`,
+# download its file, set the three values (version must equal KNOWN_GOOD_UBUNTU12_BUILD).
+KNOWN_GOOD_MANIFEST_COMMIT = '4acc42276f213dd41516da7863064fffb8711f6d'
+KNOWN_GOOD_MANIFEST_SHA256 = '5e474d18586e39cac7650382c25c7b4ca1ec2bed785f4eaa36f4ca6d3c9b5d60'
+KNOWN_GOOD_MANIFEST_URL = ('https://raw.githubusercontent.com/SteamTracking/SteamTracking/%s/'
+                           'ClientManifest/steam_client_ubuntu12' % KNOWN_GOOD_MANIFEST_COMMIT)
+STEAMTRACKING_HISTORY_URL = ('https://api.github.com/repos/SteamTracking/SteamTracking/commits'
+                             '?path=ClientManifest/steam_client_ubuntu12&per_page=30')
+STEAM_CDN = 'https://client-fastly.steamstatic.com/client/'
+# 32-bit libcrypto.so.3 (OpenSSL 3.5.7, ELF32 i386) from the MIT-licensed SteamRollbackrLite.
+LIBCRYPTO_URL = ('https://raw.githubusercontent.com/foodiemonster/SteamRollbackrLite/'
+                 '26e7faa545306f034e6d2d4af5e2c02e05dcdf6f/assets/libcrypto.so.3')
+LIBCRYPTO_SHA256 = 'c1a4d22c176c8869b3f91083e5c9ff7921da791294397c7db2814281fc99467f'
+LIBCRYPTO_SYSTEM_PATHS = ['/usr/lib32/libcrypto.so.3', '/usr/lib/i386-linux-gnu/libcrypto.so.3',
+                          '/usr/lib/libcrypto.so.3']
+OS_RELEASE_PATH = '/etc/os-release'
 
 # One table for every system package: (group, probe command or None, {manager: packages}).
 # `probe` skips the row when that command exists; otherwise the package manager is asked.
@@ -3365,7 +3682,8 @@ _BASE_TOOL_ROWS = [('core', tool, {m: [tool] for m in ('pacman', 'apt-get', 'dnf
                    for tool in ('curl', 'jq', 'tar', 'unzip', 'git', 'python3', 'zenity')]
 SYSTEM_PACKAGES = [
     ('steam', 'steam', {'pacman': ['steam'], 'apt-get': ['steam-installer'], 'dnf': ['steam']}),
-    # Without the 32-bit libcrypto.so.3 games silently vanish from the library.
+    # Optional/harmless: Arch's lib32-openssl is OpenSSL 4 (libcrypto.so.4 only), so the real
+    # libcrypto.so.3 fix on every distro is `luna steam libcrypto --install` (run by lock/bootstrap).
     ('core', None, {'pacman': ['lib32-openssl'], 'apt-get': ['libssl3:i386'], 'dnf': ['openssl-libs.i686']}),
 ] + _BASE_TOOL_ROWS + [
     ('mangohud', None, {'pacman': ['mangohud', 'lib32-mangohud'], 'apt-get': ['mangohud', 'mangohud:i386'],
@@ -3547,6 +3865,8 @@ def cmd_bootstrap(options):
     """Fresh-PC setup: deps, Steam, pinned base, ubuntu12 lock, add-ons, heal, timer."""
     dry = getattr(options, 'dry_run', False)
     say = lambda text: print('bootstrap : %s' % text, flush=True)  # noqa: E731
+    if flatpak_steam_only():
+        say(FLATPAK_WARNING)
     install_system_packages(options, say)
     has_steam = (steam_home() / 'steam.sh').is_file()
     if has_steam:
@@ -3622,6 +3942,9 @@ def cmd_bootstrap(options):
             ensure_steam_cfg_block()
             say('pinned Steam client %s' % build)
     print_heal(heal_steam_lock())
+    if not keep and libcrypto_status()[0] == 'missing':
+        code, note = install_libcrypto(False)
+        say(note if code == 0 else 'WARN: %s' % note)
     ok, line = known_good_line()
     say(line if not keep else 'Steam client kept as is (--keep-steam-client); known-good check skipped')
     if not keep and steam_state().get('cacheReady') is False:
@@ -3711,6 +4034,9 @@ def cmd_doctor(options):
     print_heal(result, 'doctor')
     print('\n== Steam client ==')
     print(known_good_line()[1])
+    print(libcrypto_status()[1])
+    if flatpak_steam_only():
+        print(FLATPAK_WARNING)
     print('\n== launch options ==')
     findings = scan_launch_options()
     if not findings:
@@ -4245,11 +4571,15 @@ def build_parser():
             child.add_argument('steam_action', nargs='?', default='status',
                                choices=['status', 'pin', 'unpin', 'cache', 'recover',
                                         'update', 'cancel', 'lock', 'unlock',
-                                        'heal', 'launchopts', 'ignore-pkg'],
+                                        'heal', 'launchopts', 'ignore-pkg', 'libcrypto', 'history'],
                                help='what to do (default: status)')
             child.add_argument('--fix', action='store_true',
                                help='with launchopts: back up localconfig.vdf and clear the options '
                                     'that point at missing paths (Steam must be closed)')
+            child.add_argument('--install', action='store_true',
+                               help='with libcrypto: install the 32-bit libcrypto.so.3 into ubuntu12_32')
+            child.add_argument('--remove', action='store_true',
+                               help='with libcrypto: remove ubuntu12_32/libcrypto.so.3')
             child.add_argument('--apply', action='store_true',
                                help='with ignore-pkg: run the sudo command (interactive only)')
             child.add_argument('--force', action='store_true',

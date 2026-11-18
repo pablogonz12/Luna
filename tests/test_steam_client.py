@@ -56,6 +56,10 @@ class SteamClientTestCase(unittest.TestCase):
                                     'XDG_DATA_HOME': str(self.home / '.local/share'),
                                     'XDG_RUNTIME_DIR': str(self.home / 'run')}).start()
         self.network = mock.patch.object(luna.urllib.request, 'urlopen', side_effect=AssertionError('unexpected network')).start()
+        # Lock/heal try the pinned manifest and libcrypto downloads: offline unless a test says otherwise.
+        mock.patch.object(luna, '_http_get', side_effect=OSError('offline')).start()
+        mock.patch.object(luna, 'LIBCRYPTO_SYSTEM_PATHS', []).start()
+        mock.patch.object(luna, 'OS_RELEASE_PATH', str(self.home / 'os-release')).start()
         # The hook worker and the SteamOS launchers have their own suites; run for
         # real here they read the host's niri/DRM outputs and print hook errors.
         self.hook = mock.patch.object(luna, 'lumen_hook', return_value=0).start()
@@ -845,6 +849,219 @@ class SteamHardLockTestCase(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(line.startswith('WARN:'))
         self.assertIn('1700000000', line)
+
+    # -- pinned manifest rollback / libcrypto / history --------------------------
+    PINNED = ('"manifest"\n{\n\t"version" "777"\n}\n').encode()
+    ELF32 = b'\x7fELF\x01\x01\x01' + b'\0' * 9 + b'\x03\x00\x03\x00' + b'stub-libcrypto'
+    ELF64 = b'\x7fELF\x02\x01\x01' + b'\0' * 9 + b'\x03\x00\x3e\x00' + b'stub'
+
+    def _pin_fixture(self, hit=True, served=None):
+        """Pin the fixture manifest and make the fake launcher fetch it from the local server."""
+        import http.client
+        mock.patch.object(luna, 'KNOWN_GOOD_MANIFEST_SHA256', hashlib.sha256(self.PINNED).hexdigest()).start()
+        mock.patch.object(luna, 'KNOWN_GOOD_UBUNTU12_BUILD', '777').start()
+        luna._http_get.side_effect = lambda url, limit=0: self.PINNED
+        launches = []
+        calls = self.calls
+
+        def fake_run(command, *args, **kw):
+            calls.append(list(command))
+            if '-overridepackageurl' in command:
+                launches.append(list(command))
+                if hit:
+                    url = command[command.index('-overridepackageurl') + 1]
+                    connection = http.client.HTTPConnection(url.replace('http://', ''))
+                    connection.request('GET', '/steam_client_ubuntu12')
+                    body = connection.getresponse().read()
+                    if served is not None:
+                        served.append(body)
+                    self.manifest.write_bytes(body)
+                return mock.Mock(returncode=7)
+            return mock.Mock(returncode=1, stdout='', stderr='')
+        luna.subprocess.run.side_effect = fake_run
+        return launches
+
+    def test_pinned_manifest_rollback_uses_the_local_server(self):
+        served = []
+        launches = self._pin_fixture(served=served)
+        code, output = self.steam('lock')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(served, [self.PINNED])
+        self.assertEqual(len(launches), 1)
+        for flag in ('-forcemanifestsuffix', 'ubuntu12', '-forcesteamupdate', '-forcepackagedownload', '-exitsteam'):
+            self.assertIn(flag, launches[0])
+        self.assertTrue(launches[0][launches[0].index('-overridepackageurl') + 1].startswith('http://127.0.0.1:'))
+        self.assertFalse([call for call in self.calls if call[-2:] == ['ubuntu12', '-exitsteam']])
+        self.assertTrue(luna.steam_hard_lock_active())
+        self.assertEqual(luna.read_steam_pin()['clientBuild'], '777')
+        self.assertIn('pinned ubuntu12 manifest', output)
+
+    def test_pinned_manifest_comes_from_the_cache_first(self):
+        self._pin_fixture()
+        luna._http_get.side_effect = OSError('cache must be used, not the network')
+        cache = luna.steam_cache_dir() / 'package'
+        cache.mkdir(parents=True)
+        (cache / luna.STEAM_MANIFEST_NAME).write_bytes(self.PINNED)
+        self.assertEqual(self.steam('lock')[0], 0)
+
+    def test_pinned_manifest_sha_mismatch_is_refused(self):
+        launches = self._pin_fixture()
+        luna._http_get.side_effect = lambda url, limit=0: self.PINNED + b'tampered'
+        code, output = self.steam('lock')
+        self.assertEqual(code, 1)
+        self.assertIn('REFUSING', output)
+        self.assertEqual(launches, [])
+        self.assertFalse([call for call in self.calls if call[0] == 'pkill'])
+        self.assertFalse(luna.steam_pin_path().exists())
+
+    def test_manifest_server_serves_manifest_and_redirects_everything_else(self):
+        import http.client
+        with luna.ManifestServer(self.PINNED) as server:
+            connection = http.client.HTTPConnection('127.0.0.1', server.port)
+            for path in ('/steam_client_ubuntu12', '/steam_client_ubuntu12.manifest',
+                         '/client/steam_client_ubuntu12'):
+                connection.request('GET', path)
+                response = connection.getresponse()
+                self.assertEqual((response.status, response.read()), (200, self.PINNED))
+            self.assertEqual(server.hits, 3)
+            connection.request('GET', '/client/ubuntu12_32/pkg_1.zip.vz')
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 302)
+            self.assertEqual(response.getheader('Location'),
+                             'https://client-fastly.steamstatic.com/client/ubuntu12_32/pkg_1.zip.vz')
+            connection.request('GET', '/other.zip')
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.getheader('Location'), 'https://client-fastly.steamstatic.com/client/other.zip')
+            self.assertEqual(server.hits, 3)
+
+    def test_zero_manifest_hits_fail_and_leave_package_writable(self):
+        launches = self._pin_fixture(hit=False)
+        code, output = self.steam('lock')
+        self.assertEqual(code, 1)
+        self.assertEqual(len(launches), 2)  # ubuntu12_32/steam, then steam.sh
+        self.assertIn('never requested the pinned manifest', output)
+        self.assertTrue(os.access(self.packages, os.W_OK))
+        self.assertFalse(luna.steam_hard_lock_active())
+        self.assertFalse(luna.steam_pin_path().exists())
+
+    def test_unobtainable_pinned_manifest_falls_back_with_a_warning(self):
+        code, output = self.steam('lock')  # setUp: offline, empty cache
+        self.assertEqual(code, 0, output)
+        self.assertIn('WARN', output)
+        self.assertIn('retired', output)
+        self.assertTrue([call for call in self.calls if call[-3:] == ['-forcemanifestsuffix', 'ubuntu12', '-exitsteam']])
+
+    def _lib(self):
+        return self.root / 'ubuntu12_32' / 'libcrypto.so.3'
+
+    def test_libcrypto_installs_from_a_system_elf32(self):
+        system = self.home / 'lib32'
+        system.mkdir()
+        (system / 'libcrypto.so.3').write_bytes(self.ELF32)
+        mock.patch.object(luna, 'LIBCRYPTO_SYSTEM_PATHS', [str(system / 'libcrypto.so.3')]).start()
+        self.assertIn('missing', luna.libcrypto_status()[1])
+        code, message = luna.install_libcrypto()
+        self.assertEqual(code, 0, message)
+        self.assertIn('system', message)
+        self.assertEqual(self._lib().read_bytes(), self.ELF32)
+        self.assertEqual(stat.S_IMODE(self._lib().stat().st_mode), 0o755)
+        self.assertEqual(luna.libcrypto_status()[0], 'present')
+        self.assertEqual(luna.install_libcrypto()[0], 0)  # idempotent
+
+    def test_libcrypto_downloads_the_pinned_asset_and_checks_hash_and_elf(self):
+        mock.patch.object(luna, 'LIBCRYPTO_SHA256', hashlib.sha256(self.ELF32).hexdigest()).start()
+        luna._http_get.side_effect = lambda url, limit=0: self.ELF32
+        code, message = luna.install_libcrypto()
+        self.assertEqual(code, 0, message)
+        self.assertIn('SteamRollbackrLite', message)
+        self._lib().unlink()
+        luna._http_get.side_effect = lambda url, limit=0: self.ELF32 + b'x'
+        self.assertEqual(luna.install_libcrypto()[0], 1)  # hash mismatch
+        self.assertFalse(self._lib().exists())
+        # a matching hash on a non-ELF32 payload is refused too
+        mock.patch.object(luna, 'LIBCRYPTO_SHA256', hashlib.sha256(self.ELF64).hexdigest()).start()
+        luna._http_get.side_effect = lambda url, limit=0: self.ELF64
+        self.assertEqual(luna.install_libcrypto()[0], 1)
+        self.assertFalse(self._lib().exists())
+
+    def test_libcrypto_ignores_a_64bit_system_library(self):
+        system = self.home / 'lib'
+        system.mkdir()
+        (system / 'libcrypto.so.3').write_bytes(self.ELF64)
+        mock.patch.object(luna, 'LIBCRYPTO_SYSTEM_PATHS', [str(system / 'libcrypto.so.3')]).start()
+        code, message = luna.install_libcrypto()
+        self.assertEqual(code, 1)  # falls through to the (offline) download
+        self.assertFalse(self._lib().exists())
+
+    def test_libcrypto_never_overwrites_without_force_and_remove_works(self):
+        system = self.home / 'lib32'
+        system.mkdir()
+        (system / 'libcrypto.so.3').write_bytes(self.ELF32)
+        mock.patch.object(luna, 'LIBCRYPTO_SYSTEM_PATHS', [str(system / 'libcrypto.so.3')]).start()
+        self._lib().write_bytes(b'something else')
+        code, message = luna.install_libcrypto()
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertEqual(self._lib().read_bytes(), b'something else')
+        self.assertEqual(luna.install_libcrypto(force=True)[0], 0)
+        self.assertEqual(self._lib().read_bytes(), self.ELF32)
+        code, _message = luna.remove_libcrypto()
+        self.assertEqual(code, 0)
+        self.assertFalse(self._lib().exists())
+        self.assertEqual(luna.remove_libcrypto()[0], 0)
+
+    def test_heal_installs_a_missing_libcrypto_only_when_pinned_and_status_reports_it(self):
+        system = self.home / 'lib32'
+        system.mkdir()
+        (system / 'libcrypto.so.3').write_bytes(self.ELF32)
+        mock.patch.object(luna, 'LIBCRYPTO_SYSTEM_PATHS', [str(system / 'libcrypto.so.3')]).start()
+        self.assertFalse(luna.heal_steam_lock()['pinned'])
+        self.assertFalse(self._lib().exists())
+        self.assertEqual(self.steam('lock')[0], 0)  # lock itself installs it
+        self.assertTrue(self._lib().exists())
+        self._lib().unlink()
+        self.assertTrue(any('libcrypto' in line for line in luna.heal_steam_lock(apply=False)['notes']))
+        self.assertFalse(self._lib().exists())
+        self.assertTrue(any('libcrypto' in line for line in luna.heal_steam_lock()['fixed']))
+        self.assertTrue(self._lib().exists())
+        self.assertIn('libcrypto: 32-bit libcrypto.so.3 present', self.steam('status')[1])
+
+    def test_history_marks_known_good_and_deletions(self):
+        payload = [
+            {'sha': '21f29ef59b3df12a223b47c068f0dd05ac29f686', 'commit': {
+                'message': 'Delete retired ubuntu12 client manifests\n\nbody',
+                'author': {'date': '2026-11-12T10:00:00Z'}}},
+            {'sha': luna.KNOWN_GOOD_MANIFEST_COMMIT, 'commit': {
+                'message': 'Update', 'author': {'date': '2026-10-22T10:00:00Z'}}}]
+        lines = luna.format_history(payload)
+        self.assertIn('manifest deleted', lines[0])
+        self.assertIn('2026-11-12', lines[0])
+        self.assertNotIn('body', lines[0])
+        self.assertIn('KNOWN-GOOD', lines[1])
+        luna._http_get.side_effect = lambda url, limit=0: json.dumps(payload).encode()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(luna.cmd_history(argparse.Namespace()), 0)
+        self.assertIn('KNOWN-GOOD', out.getvalue())
+        luna._http_get.side_effect = luna.urllib.error.HTTPError('u', 403, 'rate', {}, None)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(luna.cmd_history(argparse.Namespace()), 1)
+        self.assertIn('rate limit', err.getvalue())
+        luna._http_get.side_effect = OSError('offline')
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(luna.cmd_history(argparse.Namespace()), 1)
+
+    def test_flatpak_and_gaming_mode_warnings(self):
+        shutil.rmtree(self.root)
+        (self.home / '.var/app/com.valvesoftware.Steam').mkdir(parents=True)
+        self.assertTrue(luna.flatpak_steam_only())
+        osr = self.home / 'os-release'
+        osr.write_text('NAME="SteamOS"\nID=steamos\n')
+        self.assertFalse(luna.steamos_gaming_mode())  # no gamescope-session running (pgrep mocked to fail)
+        luna.subprocess.run.side_effect = lambda *a, **k: mock.Mock(returncode=0)
+        self.assertTrue(luna.steamos_gaming_mode())
 
 
 if __name__ == '__main__':
