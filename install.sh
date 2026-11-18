@@ -4,9 +4,8 @@
 set -euo pipefail
 
 readonly LUNA_REPO="pgm1207/Luna"
-readonly UPSTREAM_REPO="swwayps/luatools-moon"
-readonly UPSTREAM_INSTALLER_COMMIT="2c739b5349a972bb1932ac9457b0acf91b09e044"
-readonly UPSTREAM_INSTALLER_SHA256="1c6896832d32d6d17c5635daf95b539763955f7ea1d9bd4446e24c2e8a5806c2"
+# The pinned LuaTools-Moon installer commit/sha256 live in scripts/luna.py
+# (`luna bootstrap`), the single source of truth for the base installation.
 
 usage() {
   cat <<'EOF'
@@ -16,15 +15,19 @@ Usage:
   bash install.sh [options]
 
 The curl one-liner is available once pgm1207/Luna is public. For now, clone the
-private repository and run bash install.sh from its checkout.
+private repository (or fetch it with `gh api`, see the README) and run
+bash install.sh from its checkout.
 
 The installer keeps an existing LuaTools-Moon stack intact. If no complete base
 is found, it runs the pinned LuaTools-Moon installer with --nolaunch, then installs
 the sha256-verified SLS Luna add-ons. LuaTools is currently required by Luna's
 backend contract; --noplugin is therefore intentionally unsupported.
 
-By default Luna installs and verifies Steam client build 1791918634, caches and
-pins it, and blocks Steam self-updates. Steam/Lumen must be fully closed.
+By default Luna rolls Steam back to the ubuntu12 client and hard-locks it
+(Steam.cfg + steam.cfg, read-only package/). The historical build 1791918634 is
+opt-in with --steam-build 1791918634. Steam/Lumen must be fully closed. The same
+flow is available after install as `luna bootstrap` (fresh PC) and
+`luna update-all`; `luna doctor` prints a health report.
 SteamOS Mode application shortcuts are generated automatically, including SDL
 mouse compatibility and a free-pointer action. Gamescope is a system dependency.
 
@@ -32,7 +35,8 @@ Options:
   --only NAME             Install one Luna add-on (repeatable)
   --force                 Replace installed add-on files that differ
   --dry-run               Show Luna changes without writing them
-  --keep-steam-client     Skip the default Steam compatibility downgrade
+  --keep-steam-client     Leave the Steam client exactly as it is (no lock)
+  --steam-build BUILD     Install the historical build 1791918634 instead of the hard lock
   --no-steam-machine      Do not generate SteamOS Mode shortcuts
   --migrate-steam-machine Back up, rename and upgrade recognized old launchers to SteamOS Mode
   --slsteam-channel NAME  Pass stable or beta to the base installer
@@ -57,6 +61,9 @@ while (($#)); do
     -h|--help) usage; exit 0 ;;
     --noplugin) die "--noplugin is not supported: current Luna features require the LuaTools backend." ;;
     --force|--dry-run|--keep-steam-client|--no-steam-machine|--migrate-steam-machine) luna_args+=("$1"); shift ;;
+    --steam-build)
+      (($# >= 2)) || die "--steam-build requires a build number."
+      luna_args+=("$1" "$2"); shift 2 ;;
     --only)
       (($# >= 2)) || die "--only requires an add-on name."
       luna_args+=("$1" "$2"); shift 2 ;;
@@ -68,15 +75,7 @@ while (($#)); do
   esac
 done
 
-home="${HOME:?HOME must be set}"
-lumen_dir="${LUMEN_DIR:-$home/.local/share/Lumen}"
-steam_wrapper="$home/.local/share/SLSsteam/path/steam"
-
-base_ready=1
-base_any=0
-for path in "$lumen_dir/lua/boot.lua" "$lumen_dir/luatools/backend/main.lua" "$steam_wrapper"; do
-  if [[ -e "$path" ]]; then base_any=1; else base_ready=0; fi
-done
+: "${HOME:?HOME must be set}"
 
 tmp_dir=""
 cleanup() { [[ -z "$tmp_dir" ]] || rm -rf -- "$tmp_dir"; }
@@ -103,26 +102,5 @@ if [[ -z "$script_dir" || ! -f "$script_dir/scripts/luna.py" ]]; then
     || die "Downloaded SLS Luna archive is incomplete."
 fi
 
-if ((base_ready == 0)); then
-  if ((base_any)); then
-    die "A partial Moon/Lumen installation was found. Repair the base with its upstream installer first; refusing to clean or replace it automatically."
-  fi
-  if [[ " ${luna_args[*]} " == *" --dry-run "* ]]; then
-    die "The Moon/Lumen/LuaTools base is missing; --dry-run will not bootstrap or modify it."
-  fi
-  command -v curl >/dev/null || die "curl is required to install the Moon/Lumen base."
-  command -v sha256sum >/dev/null || die "sha256sum is required to verify the upstream installer."
-  tmp_dir="${tmp_dir:-$(mktemp -d "${TMPDIR:-/tmp}/sls-luna-install.XXXXXX")}"
-  upstream_script="$tmp_dir/luatools-moon-install.sh"
-  curl -fsSL "https://raw.githubusercontent.com/${UPSTREAM_REPO}/${UPSTREAM_INSTALLER_COMMIT}/install.sh" \
-    -o "$upstream_script" || die "Could not download the pinned LuaTools-Moon installer."
-  actual_sha="$(sha256sum "$upstream_script" | awk '{print $1}')"
-  [[ "$actual_sha" == "$UPSTREAM_INSTALLER_SHA256" ]] \
-    || die "LuaTools-Moon installer checksum mismatch; aborting before installing the base."
-  printf 'Installing Moon/Lumen/LuaTools base from %s @ %s\n' "$UPSTREAM_REPO" "$UPSTREAM_INSTALLER_COMMIT"
-  bash "$upstream_script" --nolaunch "${base_args[@]}"
-fi
-
-printf '\nInstalling SLS Luna add-ons on top of the existing base.\n'
-python3 "$script_dir/scripts/luna.py" verify
-python3 "$script_dir/scripts/luna.py" install "${luna_args[@]}"
+printf '\nSetting up SLS Luna (base, add-ons, Steam lock, timer).\n'
+python3 "$script_dir/scripts/luna.py" bootstrap "${luna_args[@]}" "${base_args[@]}"
