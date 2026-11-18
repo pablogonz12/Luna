@@ -5,6 +5,20 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **Hard lock is the new default.** `luna install` / `install.sh` roll Steam back
+  to ubuntu12 and hard-lock it; build `1791918634` is opt-in via `--steam-build`.
+  `--keep-steam-client` is unchanged. `refresh` refuses under the lock unless
+  `--unlock-first`; the timer defers a pending refresh while locked.
+- **`luna steam heal`** restores `steam.cfg`/`Steam.cfg` and read-only `package/`
+  after third-party installers (LuaTools installer/Auto-fix) remove them; run by
+  the 30-minute timer, preflight and install. Logs to `steam-heal.log`; never re-pins.
+- **`luna steam launchopts [--fix]`** finds launch options pointing at missing
+  paths (also WARNed in status/preflight); `--fix` backs up `localconfig.vdf`.
+- **`luna steam ignore-pkg [--apply]`** prints/applies pacman `IgnorePkg = steam`.
+- **Lumen sidecar** is stopped once Steam is closed (lock, unlock, recover, refresh).
+- **`luna bootstrap`, `luna update-all`, `luna doctor`**; `install.sh` now calls
+  `bootstrap` (pinned base installer constants live only in `luna.py`).
+- Known gaps: no Health-page launch-option warning; no systemd guard hook.
 - **`luna steam lock` / `luna steam unlock`.** `lock` rolls Steam back to the
   old ubuntu12 client (kills Steam: needs `--force` or a y/N answer), pins the
   result, writes the hard update block to both `Steam.cfg` and `steam.cfg`,

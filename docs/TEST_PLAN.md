@@ -35,10 +35,10 @@ open or closed.
    install, upgrade and uninstall.
 6. A second add-on version (re-run `vendor-update.sh`, then install) replaces the
     payload and `status` returns to `same` everywhere.
-7. On a disposable installation, the default installer produces build
-   `1791918634` executables (not just metadata), retains a rollback backup, and
+7. On a disposable installation, the default installer produces the ubuntu12 hard lock;
+   with `--steam-build 1791918634` it produces build `1791918634` executables (not just metadata), retains a rollback backup, and
    leaves accounts/games/saves untouched. On launch, **new** runtime log lines
-   must show `Client version: 1791918634` and `Suppressing Steam update`.
+   must show the expected `Client version` (ubuntu12 default, or 1791918634 when opted in) and `Suppressing Steam update`.
    Do not claim a runtime validation from an old log or a package manifest.
 8. Open a generated SteamOS Mode shortcut on Niri. Confirm the live Gamescope
    process uses the SDL backend and intended mouse mode, Steam menus remain
@@ -83,3 +83,6 @@ the release PR instead of claiming a hosted run.
   process check showed that session was still the old Wayland-backend launcher.
   It was not restarted or interrupted. Physical in-game mouse behaviour with
   the new SDL launcher therefore remains unvalidated until the next launch.
+
+Note: the LuaTools installer and its Auto-fix remove `steam.cfg`; `luna steam heal`
+(timer, preflight, install) must restore it and the read-only `package/`.

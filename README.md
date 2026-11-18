@@ -14,6 +14,20 @@ projects, then adds features designed to work well together.
 > being built: upstream settings, updates, fixes, and cloud-save pages are not all
 > in Luna yet, and Luna does not currently hide or remove upstream menus.
 
+## Quick start (fresh PC)
+
+Luna's repository is **private** for now, so the public `curl | bash` one-liner is
+not available yet. With the GitHub CLI signed in to an account that can read it:
+
+```bash
+mkdir -p ~/luna && gh api repos/pgm1207/Luna/tarball/main | tar -xz --strip-components=1 -C ~/luna
+bash ~/luna/install.sh          # = luna bootstrap: deps, Steam, base, add-ons, ubuntu12 lock, heal timer
+```
+
+Afterwards: `luna update-all` refreshes the add-ons and re-verifies the base
+(it never upgrades a locked Steam) and `luna doctor` prints a read-only health
+report. Both support `--dry-run` where they change anything.
+
 ## What you get today
 
 | Feature | Status | What it does |
@@ -95,12 +109,23 @@ reports waiting conflicts so the menu tells you when this is needed.
 ## Steam client versions
 
 A Steam client update can move the interfaces used by the native integration.
-**New installations and explicit reinstalls default to client build `1791918634`.**
-Luna verifies a SHA256-pinned historical Valve manifest, obtains its hash-named
-packages from the local installation/cache or Valve's CDN (archive fallback),
-extracts the actual executables, and verifies every installed client file. It
-then caches and pins that build and blocks the Steam bootstrapper's self-updates.
-It never copies another machine's accounts, games, saves or settings.
+**New installations default to the ubuntu12 hard lock**: Luna rolls Steam back to
+the old ubuntu12 client, pins and caches it, writes the update block to both
+`Steam.cfg` and `steam.cfg` and makes `package/` read-only. `luna refresh
+--unlock-first` is the way to move to Valve's latest again (plain `refresh`
+refuses under the lock). The historical build `1791918634` is still available as
+an opt-in: `luna install --steam-build 1791918634` (SHA256-pinned manifest,
+packages from the local cache or Valve's CDN, every file verified). Neither path
+copies another machine's accounts, games, saves or settings.
+
+**Third-party installers undo the block.** The LuaTools installer and its
+Auto-fix remove `steam.cfg`; a pacman `steam` upgrade can replace the client.
+`luna steam heal` restores the cfg block and the read-only `package/` (it never
+re-pins by itself), the 30-minute timer runs it, and preflight/install run it
+too. If Steam comes from pacman, `luna steam ignore-pkg` prints the one-line
+`IgnorePkg = steam` command (add `--apply` to run it with sudo, interactive only).
+`luna steam launchopts` lists launch options whose paths no longer exist
+(`--fix` backs up `localconfig.vdf` and clears only those, Steam closed).
 
 An older client does not include newer security/compatibility fixes. To retain
 your chosen Steam client instead, use `bash install.sh --keep-steam-client` or
