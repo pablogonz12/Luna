@@ -24,6 +24,23 @@ mkdir -p ~/luna && gh api repos/pgm1207/Luna/tarball/main | tar -xz --strip-comp
 bash ~/luna/install.sh          # = luna bootstrap: deps, Steam, base, add-ons, ubuntu12 lock, heal timer
 ```
 
+The one-liner installs everything, in this order: system packages (native
+Steam with 32-bit support, 32-bit libcrypto, mangohud + 32-bit, gamescope,
+gamemode + 32-bit, curl jq tar unzip git python3 zenity; pacman/apt/dnf, table
+`SYSTEM_PACKAGES` in `scripts/luna.py`), the first Steam run, the pinned Moon
+base, the ubuntu12 lock on the known-good build, the Luna add-ons, pin + heal +
+cache check, pacman `IgnorePkg`, the heal timer and a final `luna doctor`.
+sudo is asked for only on an interactive terminal (otherwise the exact command
+is printed); Arch needs `[multilib]` enabled, Debian/Ubuntu get
+`dpkg --add-architecture i386`. GPU drivers are never installed (a note is
+printed). Opt-outs: `--no-system-packages`, `--no-mangohud`, `--no-gamescope`,
+`--no-gamemode`. Re-running changes nothing already in place.
+
+**Bumping the known-good build:** after validating a newer ubuntu12 client, edit
+`KNOWN_GOOD_UBUNTU12_BUILD` / `KNOWN_GOOD_UBUNTU12_DATE` in `scripts/luna.py`
+(the manifest `version` of `steam_client_ubuntu12.manifest`). Bootstrap,
+update-all and doctor print it or a WARN when the installed one differs.
+
 Afterwards: `luna update-all` refreshes the add-ons and re-verifies the base
 (it never upgrades a locked Steam) and `luna doctor` prints a read-only health
 report. Both support `--dry-run` where they change anything.

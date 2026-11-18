@@ -5,6 +5,13 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **`luna bootstrap` installs everything** on a fresh PC: per-distro system
+  packages from one table (native Steam, 32-bit libcrypto, mangohud, gamescope,
+  gamemode incl. 32-bit parts, curl/jq/tar/unzip/git/python3/zenity), sudo only
+  interactively, `--dry-run` prints exact commands, opt-outs `--no-system-packages`
+  / `--no-mangohud` / `--no-gamescope` / `--no-gamemode`; then known-good
+  ubuntu12 build 1792618285 (Oct 22 2026) is verified by bootstrap, update-all
+  and doctor (WARN, never a failure, if it differs); IgnorePkg and a final doctor run.
 - **Hard lock is the new default.** `luna install` / `install.sh` roll Steam back
   to ubuntu12 and hard-lock it; build `1791918634` is opt-in via `--steam-build`.
   `--keep-steam-client` is unchanged. `refresh` refuses under the lock unless

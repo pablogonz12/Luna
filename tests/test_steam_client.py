@@ -731,6 +731,121 @@ class SteamHardLockTestCase(unittest.TestCase):
         self.assertEqual(before, snapshot())
         self.assertFalse([call for call in self.calls if call and call[0] == 'sudo'])
 
+    # -- system packages / known-good build --------------------------------------
+    def _pm(self, manager, installed=(), tools=(), foreign=(), multilib=True):
+        """Fake package manager: `installed` packages, `tools` on PATH, dpkg foreign archs."""
+        conf = self.home / 'pacman.conf'
+        conf.write_text('[options]\n' + ('[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' if multilib else ''))
+        mock.patch.dict(os.environ, {'LUNA_PACMAN_CONF': str(conf)}).start()
+        pm_tool = {'apt-get': 'apt-get', 'pacman': 'pacman', 'dnf': 'dnf'}[manager]
+        mock.patch.object(luna.shutil, 'which',
+                          side_effect=lambda name: '/bin/' + name if name == pm_tool or name in tools else None).start()
+        steam_sh = self.home / '.local/share/Steam/steam.sh'
+        if steam_sh.exists():
+            steam_sh.unlink()
+
+        def fake_run(command, *args, **kw):
+            self.calls.append(list(command))
+            if command[0] in ('pacman', 'rpm') and command[1] in ('-Q', '-q'):
+                return mock.Mock(returncode=0 if command[2] in installed else 1, stdout='', stderr='')
+            if command[0] == 'dpkg-query':
+                ok = command[-1] in installed
+                return mock.Mock(returncode=0 if ok else 1, stdout='install ok installed' if ok else '', stderr='')
+            if command[:2] == ['dpkg', '--print-foreign-architectures']:
+                return mock.Mock(returncode=0, stdout=' '.join(foreign), stderr='')
+            return mock.Mock(returncode=0, stdout='', stderr='')
+        luna.subprocess.run.side_effect = fake_run
+
+    def _bootstrap_packages(self, tty=False, answer='y', **kwargs):
+        self.calls.clear()
+        out = io.StringIO()
+        options = argparse.Namespace(dry_run=kwargs.pop('dry_run', False), **kwargs)
+        with mock.patch.object(luna.sys.stdin, 'isatty', return_value=tty), \
+                mock.patch('builtins.input', return_value=answer), contextlib.redirect_stdout(out):
+            luna.install_system_packages(options, lambda text: print(text))
+        return out.getvalue(), [call for call in self.calls if call and call[0] in ('sudo',)]
+
+    def test_pacman_packages_and_sudo_prompt(self):
+        self._pm('pacman')
+        output, sudo = self._bootstrap_packages(tty=True)
+        self.assertEqual(len(sudo), 1)
+        command = sudo[0]
+        self.assertEqual(command[:4], ['sudo', 'pacman', '-S', '--needed'])
+        for name in ('steam', 'lib32-openssl', 'mangohud', 'lib32-mangohud', 'gamescope', 'gamemode',
+                     'lib32-gamemode', 'zenity', 'jq', 'curl', 'unzip', 'git', 'tar', 'python3'):
+            self.assertIn(name, command)
+        self.assertIn('Vulkan', output)
+
+    def test_apt_adds_i386_then_updates_then_installs(self):
+        self._pm('apt-get')
+        _output, sudo = self._bootstrap_packages(tty=True)
+        self.assertEqual(sudo[0], ['sudo', 'dpkg', '--add-architecture', 'i386'])
+        self.assertEqual(sudo[1], ['sudo', 'apt-get', 'update'])
+        for name in ('steam-installer', 'libssl3:i386', 'mangohud:i386', 'gamemode:i386', 'zenity'):
+            self.assertIn(name, sudo[2])
+        self.calls.clear()
+        self._pm('apt-get', foreign=['i386'])
+        _output, sudo = self._bootstrap_packages(tty=True)
+        self.assertNotIn(['sudo', 'dpkg', '--add-architecture', 'i386'], sudo)
+
+    def test_dnf_packages(self):
+        self._pm('dnf')
+        _output, sudo = self._bootstrap_packages(tty=True)
+        self.assertEqual(sudo[0][:4], ['sudo', 'dnf', 'install', '-y'])
+        for name in ('openssl-libs.i686', 'mangohud.i686', 'gamemode.i686', 'gamescope', 'steam'):
+            self.assertIn(name, sudo[0])
+
+    def test_installed_packages_are_skipped_and_opt_outs_work(self):
+        everything = {'steam', 'lib32-openssl', 'mangohud', 'lib32-mangohud', 'gamemode', 'lib32-gamemode'}
+        self._pm('pacman', installed=everything, tools={'curl', 'jq', 'tar', 'unzip', 'git', 'python3',
+                                                         'zenity', 'gamescope', 'steam'})
+        output, sudo = self._bootstrap_packages(tty=True)
+        self.assertEqual(sudo, [])
+        self.assertIn('all present', output)
+        self._pm('pacman', installed={'steam', 'lib32-openssl'}, tools={'curl', 'jq', 'tar', 'unzip', 'git',
+                                                                         'python3', 'zenity'})
+        _output, sudo = self._bootstrap_packages(tty=True, no_mangohud=True, no_gamemode=True)
+        self.assertEqual(sudo[0][4:], ['gamescope'])
+        output, sudo = self._bootstrap_packages(tty=True, no_system_packages=True)
+        self.assertEqual(sudo, [])
+        self.assertIn('skipped', output)
+
+    def test_non_interactive_prints_command_and_never_runs_sudo(self):
+        self._pm('pacman')
+        output, sudo = self._bootstrap_packages(tty=False)
+        self.assertEqual(sudo, [])
+        self.assertIn('NOT installed', output)
+        self.assertIn('sudo pacman -S --needed', output)
+
+    def test_dry_run_prints_commands_without_running_them(self):
+        self._pm('apt-get')
+        output, sudo = self._bootstrap_packages(tty=True, dry_run=True)
+        self.assertEqual(sudo, [])
+        self.assertIn('would run', output)
+        self.assertIn('sudo dpkg --add-architecture i386', output)
+        self.assertFalse([call for call in self.calls if call[:2] in (['apt-get', 'install'], ['apt-get', 'update'])])
+
+    def test_missing_multilib_is_reported_and_32bit_skipped(self):
+        self._pm('pacman', multilib=False)
+        output, sudo = self._bootstrap_packages(tty=True)
+        self.assertIn('[multilib]', output)
+        self.assertNotIn('steam', sudo[0][4:])
+        self.assertFalse([name for name in sudo[0] if name.startswith('lib32-')])
+        self.assertIn('mangohud', sudo[0])
+
+    def test_known_good_build_verified_or_warned(self):
+        manifest = self.root / 'package' / 'steam_client_ubuntu12.manifest'
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text('"manifest"\n{\n\t"version" "%s"\n}\n' % luna.KNOWN_GOOD_UBUNTU12_BUILD)
+        ok, line = luna.known_good_line()
+        self.assertTrue(ok)
+        self.assertEqual(line, 'Steam client: known-good ubuntu12 build 1792618285 (Oct 22 2026)')
+        manifest.write_text('"manifest"\n{\n\t"version" "1700000000"\n}\n')
+        ok, line = luna.known_good_line()
+        self.assertFalse(ok)
+        self.assertTrue(line.startswith('WARN:'))
+        self.assertIn('1700000000', line)
+
 
 if __name__ == '__main__':
     unittest.main()

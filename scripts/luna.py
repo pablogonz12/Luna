@@ -3351,7 +3351,148 @@ def cmd_ignore_pkg(options):
 UPSTREAM_REPO = 'swwayps/luatools-moon'
 UPSTREAM_INSTALLER_COMMIT = '2c739b5349a972bb1932ac9457b0acf91b09e044'
 UPSTREAM_INSTALLER_SHA256 = '1c6896832d32d6d17c5635daf95b539763955f7ea1d9bd4446e24c2e8a5806c2'
-BOOTSTRAP_TOOLS = ('curl', 'jq', 'tar', 'unzip', 'python3', 'git')
+
+# Known-good ubuntu12 client (the manifest "version" field; ubuntu12_32/steam and
+# steamclient.so were built 2026-10-22). Bump these two lines when a newer
+# rollback client has been validated (see README "Bumping the known-good build").
+KNOWN_GOOD_UBUNTU12_BUILD = '1792618285'
+KNOWN_GOOD_UBUNTU12_DATE = 'Oct 22 2026'
+
+# One table for every system package: (group, probe command or None, {manager: packages}).
+# `probe` skips the row when that command exists; otherwise the package manager is asked.
+# Native Steam only (no flatpak). 32-bit rows need multilib/i386 (see system_package_plan).
+_BASE_TOOL_ROWS = [('core', tool, {m: [tool] for m in ('pacman', 'apt-get', 'dnf')})
+                   for tool in ('curl', 'jq', 'tar', 'unzip', 'git', 'python3', 'zenity')]
+SYSTEM_PACKAGES = [
+    ('steam', 'steam', {'pacman': ['steam'], 'apt-get': ['steam-installer'], 'dnf': ['steam']}),
+    # Without the 32-bit libcrypto.so.3 games silently vanish from the library.
+    ('core', None, {'pacman': ['lib32-openssl'], 'apt-get': ['libssl3:i386'], 'dnf': ['openssl-libs.i686']}),
+] + _BASE_TOOL_ROWS + [
+    ('mangohud', None, {'pacman': ['mangohud', 'lib32-mangohud'], 'apt-get': ['mangohud', 'mangohud:i386'],
+                        'dnf': ['mangohud', 'mangohud.i686']}),
+    ('gamescope', 'gamescope', {m: ['gamescope'] for m in ('pacman', 'apt-get', 'dnf')}),
+    ('gamemode', None, {'pacman': ['gamemode', 'lib32-gamemode'], 'apt-get': ['gamemode', 'gamemode:i386'],
+                        'dnf': ['gamemode', 'gamemode.i686']}),
+]
+BOOTSTRAP_TOOLS = tuple(row[1] for row in _BASE_TOOL_ROWS)
+VULKAN_NOTE = ('GPU drivers are not installed by Luna: make sure your Vulkan driver (and its 32-bit part) is '
+               'present, e.g. vulkan-radeon/lib32-vulkan-radeon, nvidia-utils/lib32-nvidia-utils, '
+               'mesa-vulkan-drivers:i386.')
+
+
+def _package_installed(manager, package):
+    if manager == 'pacman':
+        command = ['pacman', '-Q', package]
+    elif manager == 'apt-get':
+        command = ['dpkg-query', '-W', '-f=${Status}', package]
+    else:
+        command = ['rpm', '-q', package]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if manager == 'apt-get':
+        return result.returncode == 0 and 'install ok installed' in (result.stdout or '')
+    return result.returncode == 0
+
+
+def _pacman_multilib_enabled():
+    try:
+        lines = pacman_conf_path().read_text().splitlines()
+    except OSError:
+        return False
+    return any(line.strip() == '[multilib]' for line in lines)
+
+
+def system_package_plan(manager, options=None):
+    """(packages, pre_commands, notes) still needed for `manager`; nothing is run except read-only probes."""
+    skip = {'mangohud': getattr(options, 'no_mangohud', False),
+            'gamescope': getattr(options, 'no_gamescope', False),
+            'gamemode': getattr(options, 'no_gamemode', False)}
+    notes, packages, pre = [], [], []
+    for group, probe, names in SYSTEM_PACKAGES:
+        if skip.get(group) or manager not in names:
+            continue
+        if probe and shutil.which(probe):
+            continue
+        if group == 'steam' and (steam_home() / 'steam.sh').is_file():
+            continue
+        packages += [name for name in names[manager] if not _package_installed(manager, name)]
+    packages = list(dict.fromkeys(packages))
+    if manager == 'pacman':
+        if not _pacman_multilib_enabled():
+            blocked = [name for name in packages if name == 'steam' or name.startswith('lib32-')]
+            if blocked:
+                notes.append('[multilib] is not enabled in %s: uncomment the [multilib] section and its '
+                             'Include line, run `sudo pacman -Syu`, then re-run luna bootstrap (skipped: %s)'
+                             % (pacman_conf_path(), ', '.join(blocked)))
+                packages = [name for name in packages if name not in blocked]
+    elif manager == 'apt-get':
+        if any(':i386' in name or name == 'steam-installer' for name in packages):
+            try:
+                foreign = subprocess.run(['dpkg', '--print-foreign-architectures'], capture_output=True,
+                                         text=True, timeout=30).stdout.split()
+            except (OSError, subprocess.SubprocessError):
+                foreign = []
+            if 'i386' not in foreign:
+                pre.append(['sudo', 'dpkg', '--add-architecture', 'i386'])
+            pre.append(['sudo', 'apt-get', 'update'])
+    elif manager == 'dnf' and 'steam' in packages:
+        notes.append('Fedora ships Steam in RPM Fusion; enable the rpmfusion-nonfree repository if the install fails')
+    return packages, pre, notes
+
+
+def install_system_packages(options, say):
+    """Step 1 of bootstrap. Returns the commands it could not run (for the summary), never fails silently."""
+    dry = getattr(options, 'dry_run', False)
+    if getattr(options, 'no_system_packages', False) or getattr(options, 'skip_deps', False):
+        say('system packages: skipped (--no-system-packages)')
+        return
+    manager, install = detect_package_manager()
+    say('distro package manager: %s' % (manager or 'none detected (pacman/apt/dnf)'))
+    if not manager:
+        say('install these yourself: steam, 32-bit libcrypto/openssl, curl jq tar unzip git python3 zenity, '
+            'mangohud (+32-bit), gamescope, gamemode (+32-bit)')
+        return
+    packages, pre, notes = system_package_plan(manager, options)
+    for note in notes:
+        say('NOTE: %s' % note)
+    say(VULKAN_NOTE)
+    if not packages:
+        say('system packages: all present')
+        return
+    commands = pre + [['sudo'] + install + packages]
+    say('system packages missing: %s' % ', '.join(packages))
+    text = '\n    '.join(' '.join(shlex.quote(part) for part in command) for command in commands)
+    if dry:
+        say('would run (sudo prompt):\n    %s' % text)
+        return
+    if not sys.stdin.isatty():
+        say('NOT installed (non-interactive: Luna never runs sudo unattended). Run yourself:\n    %s' % text)
+        return
+    if input('bootstrap : install them now with sudo? [y/N] ').strip().lower() not in ('y', 'yes'):
+        say('skipped by choice; run yourself:\n    %s' % text)
+        return
+    for command in commands:
+        if subprocess.run(command).returncode != 0:
+            say('WARN: `%s` failed; continuing with what is present' % ' '.join(command))
+            return
+
+
+def known_good_line():
+    """(ok, text): is the installed ubuntu12 manifest the recorded known-good build?"""
+    try:
+        text = (steam_home() / 'package' / STEAM_MANIFEST_NAME).read_text(encoding='utf-8', errors='replace')
+        found = [build for build in re.findall(r'"version"\s+"(\d+)"', text) if build != '0']
+        build = found[-1] if found else ''
+    except OSError:
+        build = ''
+    if build == KNOWN_GOOD_UBUNTU12_BUILD:
+        return True, ('Steam client: known-good ubuntu12 build %s (%s)'
+                      % (KNOWN_GOOD_UBUNTU12_BUILD, KNOWN_GOOD_UBUNTU12_DATE))
+    return False, ('WARN: Steam client: manifest version %s, known-good is ubuntu12 build %s (%s); '
+                   'Valve may have republished it, or run: luna steam lock'
+                   % (build or 'unreadable', KNOWN_GOOD_UBUNTU12_BUILD, KNOWN_GOOD_UBUNTU12_DATE))
 
 
 def base_state():
@@ -3406,39 +3547,14 @@ def cmd_bootstrap(options):
     """Fresh-PC setup: deps, Steam, pinned base, ubuntu12 lock, add-ons, heal, timer."""
     dry = getattr(options, 'dry_run', False)
     say = lambda text: print('bootstrap : %s' % text, flush=True)  # noqa: E731
-    manager, install = detect_package_manager()
-    missing = [tool for tool in BOOTSTRAP_TOOLS if not shutil.which(tool)]
+    install_system_packages(options, say)
     has_steam = (steam_home() / 'steam.sh').is_file()
-    steam_cmd = shutil.which('steam')
-    say('distro package manager: %s' % (manager or 'none detected (pacman/apt/dnf)'))
-    packages = list(missing)
-    if not steam_cmd and not has_steam:
-        packages.append('steam-installer' if manager == 'apt-get' else 'steam')
-    if packages:
-        command = ['sudo'] + install + packages
-        say('system packages missing: %s' % ', '.join(packages))
-        text = ' '.join(shlex.quote(part) for part in command)
-        if dry or not manager:
-            say('would run (sudo prompt): %s' % text if manager else 'install them yourself, then re-run')
-        elif getattr(options, 'skip_deps', False) or not sys.stdin.isatty():
-            say('skipped (%s); run yourself: %s'
-                % ('--skip-deps' if getattr(options, 'skip_deps', False)
-                   else 'non-interactive, no sudo prompt', text))
-        else:
-            answer = input('bootstrap : install them now with sudo? [y/N] ')
-            if answer.strip().lower() in ('y', 'yes'):
-                if subprocess.run(command).returncode != 0:
-                    say('package install failed; continuing with what is present')
-            else:
-                say('skipped by choice')
-    else:
-        say('system packages: all present')
     if has_steam:
         say('Steam directory exists (%s); not touched' % steam_home())
     elif dry:
         say('would run `steam -exitsteam` once to create %s (timeout 30 min)' % steam_home())
     elif not shutil.which('steam'):
-        say('Steam is not installed; install it, then re-run: luna bootstrap')
+        say('Steam is not installed (see the system package step above); install it, then re-run: luna bootstrap')
         return 1
     else:
         say('running Steam once to create %s (steam -exitsteam)' % steam_home())
@@ -3484,8 +3600,8 @@ def cmd_bootstrap(options):
         no_steam_machine=getattr(options, 'no_steam_machine', False),
         migrate_steam_machine=getattr(options, 'migrate_steam_machine', False))
     if dry and base_state() != 'ready':
-        say('would verify and install the Luna add-ons (needs the base first), then pin, heal, '
-            'install the timer, print status + preflight')
+        say('would verify and install the Luna add-ons (needs the base first), then pin, verify known-good '
+            'build %s, heal, IgnorePkg, install the timer, run doctor' % KNOWN_GOOD_UBUNTU12_BUILD)
         print('\nDRY RUN: nothing was written.')
         return EXIT_OK
     code = cmd_verify(argparse.Namespace(sources=False, source_dir=None))
@@ -3495,7 +3611,8 @@ def cmd_bootstrap(options):
     if code != EXIT_OK:
         return code
     if dry:
-        say('would then pin (if not pinned), heal, enable the timer, print status + preflight')
+        say('would then pin (if not pinned), verify known-good ubuntu12 build %s, heal, set IgnorePkg '
+            '(prompt, interactive only), enable the timer, run doctor' % KNOWN_GOOD_UBUNTU12_BUILD)
         print('\nDRY RUN: nothing was written.')
         return EXIT_OK
     if not read_steam_pin() and not keep:
@@ -3505,11 +3622,15 @@ def cmd_bootstrap(options):
             ensure_steam_cfg_block()
             say('pinned Steam client %s' % build)
     print_heal(heal_steam_lock())
+    ok, line = known_good_line()
+    say(line if not keep else 'Steam client kept as is (--keep-steam-client); known-good check skipped')
+    if not keep and steam_state().get('cacheReady') is False:
+        say('WARN: the Steam client cache is missing; run: luna steam cache (Steam closed)')
+    if pacman_steam_state()[0]:
+        cmd_ignore_pkg(argparse.Namespace(apply=sys.stdin.isatty()))
     cmd_timer(argparse.Namespace(action='on'))
-    print('\n== luna status ==')
-    cmd_status(argparse.Namespace(only=[]))
-    print('\n== luna preflight ==')
-    code = cmd_preflight(argparse.Namespace(only=[]))
+    print('\n== luna doctor ==')
+    code = cmd_doctor(argparse.Namespace())
     print('\nbootstrap : done. Start Steam to load Luna. Update later with: luna update-all')
     return code
 
@@ -3572,6 +3693,7 @@ def cmd_update_all(options):
             print('update-all: WARN: could not re-verify the base installer (%s)' % error,
                   file=sys.stderr)
     print_heal(heal_steam_lock(), 'update-all')
+    print('update-all: ' + known_good_line()[1])
     if not steam_hard_lock_active() and not read_steam_pin():
         print('update-all: Steam is not locked; to freeze the client run: luna steam lock')
     return status
@@ -3587,6 +3709,8 @@ def cmd_doctor(options):
     elif not result['notes']:
         print('ok: update block and read-only state are intact')
     print_heal(result, 'doctor')
+    print('\n== Steam client ==')
+    print(known_good_line()[1])
     print('\n== launch options ==')
     findings = scan_launch_options()
     if not findings:
@@ -4071,8 +4195,12 @@ def build_parser():
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
             child.add_argument('--force', action='store_true',
                                help='replace installed add-on files that differ')
-            child.add_argument('--skip-deps', action='store_true',
-                               help='never offer system packages / native Steam (no sudo prompt)')
+            child.add_argument('--skip-deps', '--no-system-packages', dest='no_system_packages',
+                               action='store_true',
+                               help='skip the whole system package step (no sudo prompt)')
+            child.add_argument('--no-mangohud', action='store_true', help='do not install mangohud (+32-bit)')
+            child.add_argument('--no-gamescope', action='store_true', help='do not install gamescope')
+            child.add_argument('--no-gamemode', action='store_true', help='do not install gamemode (+32-bit)')
             child.add_argument('--keep-steam-client', action='store_true',
                                help='leave the Steam client alone (no ubuntu12 hard lock)')
             child.add_argument('--steam-build', metavar='BUILD',

@@ -23,6 +23,13 @@ is found, it runs the pinned LuaTools-Moon installer with --nolaunch, then insta
 the sha256-verified SLS Luna add-ons. LuaTools is currently required by Luna's
 backend contract; --noplugin is therefore intentionally unsupported.
 
+On a fresh PC this installs everything: native Steam (32-bit support enabled),
+32-bit libcrypto, mangohud, gamescope, gamemode (+32-bit parts), curl jq tar
+unzip git python3 zenity (pacman/apt/dnf; sudo is asked for only on an
+interactive terminal, otherwise the exact command is printed), then the base,
+the ubuntu12 lock on the known-good build, the add-ons, heal, IgnorePkg and the
+timer. Re-running changes nothing that is already in place.
+
 By default Luna rolls Steam back to the ubuntu12 client and hard-locks it
 (Steam.cfg + steam.cfg, read-only package/). The historical build 1791918634 is
 opt-in with --steam-build 1791918634. Steam/Lumen must be fully closed. The same
@@ -37,6 +44,10 @@ Options:
   --dry-run               Show Luna changes without writing them
   --keep-steam-client     Leave the Steam client exactly as it is (no lock)
   --steam-build BUILD     Install the historical build 1791918634 instead of the hard lock
+  --no-system-packages    Skip the distro package step (Steam, 32-bit libs, tools)
+  --no-mangohud           Do not install mangohud (+32-bit)
+  --no-gamescope          Do not install gamescope
+  --no-gamemode           Do not install gamemode (+32-bit)
   --no-steam-machine      Do not generate SteamOS Mode shortcuts
   --migrate-steam-machine Back up, rename and upgrade recognized old launchers to SteamOS Mode
   --slsteam-channel NAME  Pass stable or beta to the base installer
@@ -60,7 +71,7 @@ while (($#)); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --noplugin) die "--noplugin is not supported: current Luna features require the LuaTools backend." ;;
-    --force|--dry-run|--keep-steam-client|--no-steam-machine|--migrate-steam-machine) luna_args+=("$1"); shift ;;
+    --force|--dry-run|--keep-steam-client|--no-system-packages|--no-mangohud|--no-gamescope|--no-gamemode|--no-steam-machine|--migrate-steam-machine) luna_args+=("$1"); shift ;;
     --steam-build)
       (($# >= 2)) || die "--steam-build requires a build number."
       luna_args+=("$1" "$2"); shift 2 ;;
