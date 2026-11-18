@@ -5,6 +5,12 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **Pinned-manifest Steam rollback** (ideas from
+  [SteamRollbackrLite](https://github.com/foodiemonster/SteamRollbackrLite)):
+  `luna steam lock` serves the sha256-pinned ubuntu12 manifest from a local
+  server (Valve deleted it upstream on 2026-11-12), falling back with a WARN;
+  `luna steam history`; `luna steam libcrypto [--install|--remove]` wired into
+  lock/bootstrap/heal/status/doctor; Flatpak and SteamOS Gaming Mode warnings.
 - **`luna bootstrap` installs everything** on a fresh PC: per-distro system
   packages from one table (native Steam, 32-bit libcrypto, mangohud, gamescope,
   gamemode incl. 32-bit parts, curl/jq/tar/unzip/git/python3/zenity), sudo only

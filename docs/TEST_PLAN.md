@@ -86,3 +86,11 @@ the release PR instead of claiming a hosted run.
 
 Note: the LuaTools installer and its Auto-fix remove `steam.cfg`; `luna steam heal`
 (timer, preflight, install) must restore it and the read-only `package/`.
+
+### Pinned rollback / libcrypto
+
+- Local-server pinned rollback, cache-first, sha mismatch refused before kill,
+  zero manifest hits fail with `package/` writable, offline fallback WARN.
+- libcrypto: system ELF32 copy, pinned download with sha/ELF checks, no overwrite
+  without `--force`, remove, heal. History formatting and rate-limit handling.
+- Flatpak and SteamOS Gaming Mode warnings. All offline, fake HOME.

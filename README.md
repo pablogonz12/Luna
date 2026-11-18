@@ -25,7 +25,7 @@ bash ~/luna/install.sh          # = luna bootstrap: deps, Steam, base, add-ons, 
 ```
 
 The one-liner installs everything, in this order: system packages (native
-Steam with 32-bit support, 32-bit libcrypto, mangohud + 32-bit, gamescope,
+Steam with 32-bit support, 32-bit libcrypto (`luna steam libcrypto`), mangohud + 32-bit, gamescope,
 gamemode + 32-bit, curl jq tar unzip git python3 zenity; pacman/apt/dnf, table
 `SYSTEM_PACKAGES` in `scripts/luna.py`), the first Steam run, the pinned Moon
 base, the ubuntu12 lock on the known-good build, the Luna add-ons, pin + heal +
@@ -143,6 +143,28 @@ too. If Steam comes from pacman, `luna steam ignore-pkg` prints the one-line
 `IgnorePkg = steam` command (add `--apply` to run it with sudo, interactive only).
 `luna steam launchopts` lists launch options whose paths no longer exist
 (`--fix` backs up `localconfig.vdf` and clears only those, Steam closed).
+
+**Pinned-manifest rollback.** Valve deleted the ubuntu12 manifests from
+SteamTracking on 2026-11-12, so the old `-forcemanifestsuffix ubuntu12` download
+can stop working. `luna steam lock` therefore obtains the exact manifest (Luna
+cache, else the pinned SteamTracking commit, sha256-verified, refused on any
+mismatch before Steam is touched), serves it from a 127.0.0.1 server and runs
+Steam with `-overridepackageurl`; every other file redirects to Valve's CDN. If
+the manifest cannot be obtained it falls back to the old method with a WARN.
+`luna steam history` lists the manifest's SteamTracking commits (read-only).
+
+**libcrypto.so.3.** Games vanish from the library without a 32-bit
+`ubuntu12_32/libcrypto.so.3`. Distro packages do not fix this (Arch's
+`lib32-openssl` ships only libcrypto.so.4). `luna steam libcrypto` reports it;
+`--install` copies a system 32-bit copy or the sha256-pinned asset, `--remove`
+deletes it. Lock, bootstrap and heal run it automatically.
+
+**Bumping the pinned client:** pick a commit with `luna steam history`, then set
+`KNOWN_GOOD_MANIFEST_COMMIT`, `KNOWN_GOOD_MANIFEST_SHA256`,
+`KNOWN_GOOD_UBUNTU12_BUILD` (= manifest version) and `_DATE` in `scripts/luna.py`.
+
+Credit: this approach is reimplemented from
+[SteamRollbackrLite](https://github.com/foodiemonster/SteamRollbackrLite) (MIT).
 
 An older client does not include newer security/compatibility fixes. To retain
 your chosen Steam client instead, use `bash install.sh --keep-steam-client` or
