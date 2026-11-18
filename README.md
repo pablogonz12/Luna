@@ -16,13 +16,13 @@ projects, then adds features designed to work well together.
 
 ## Quick start (fresh PC)
 
-Luna's repository is **private** for now, so the public `curl | bash` one-liner is
-not available yet. With the GitHub CLI signed in to an account that can read it:
+One command installs everything from scratch:
 
 ```bash
-mkdir -p ~/luna && gh api repos/pgm1207/Luna/tarball/main | tar -xz --strip-components=1 -C ~/luna
-bash ~/luna/install.sh          # = luna bootstrap: deps, Steam, base, add-ons, ubuntu12 lock, heal timer
+curl -fsSL https://raw.githubusercontent.com/pgm1207/Luna/main/install.sh | bash   # = luna bootstrap: deps, Steam, base, add-ons, ubuntu12 lock, heal timer
 ```
+
+From a checkout instead: `bash install.sh`. Update everything later with `luna update-all`.
 
 The one-liner installs everything, in this order: system packages (native
 Steam with 32-bit support, 32-bit libcrypto (`luna steam libcrypto`), mangohud + 32-bit, gamescope,
@@ -312,8 +312,7 @@ menus requires completing and validating the Luna page integrations first.
 
 ## Install
 
-The repository is currently **private**, so you install it from a checkout (the
-`curl | bash` one-liner in `install.sh` starts working once it is public).
+Use the one-liner from the Quick start, or install from a checkout.
 
 **What you need first**
 

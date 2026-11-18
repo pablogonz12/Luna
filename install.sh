@@ -14,9 +14,10 @@ SLS Luna installer
 Usage:
   bash install.sh [options]
 
-The curl one-liner is available once pgm1207/Luna is public. For now, clone the
-private repository (or fetch it with `gh api`, see the README) and run
-bash install.sh from its checkout.
+One-liner (fresh PC):
+  curl -fsSL https://raw.githubusercontent.com/pgm1207/Luna/main/install.sh | bash
+
+Or run `bash install.sh` from a checkout.
 
 The installer keeps an existing LuaTools-Moon stack intact. If no complete base
 is found, it runs the pinned LuaTools-Moon installer with --nolaunch, then installs
