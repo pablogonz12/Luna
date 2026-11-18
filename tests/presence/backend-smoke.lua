@@ -48,9 +48,9 @@ do
   f:write([[
 "users"
 {
-	"76561190000000000"
+	"76561198000000000"
 	{
-		"AccountName"		"dirtysidemusic"
+		"AccountName"		"testaccount"
 		"PersonaName"		"LePapot"
 		"MostRecent"		"1"
 		"Timestamp"		"1791884517"
@@ -122,7 +122,7 @@ if os.getenv('SLS_KIND')=='presence' then
   -- FNV-1a implementation byte for byte (see tests/presence-lifecycle.test.cjs).
   local ident=call(reg,'SlsPresenceGet').identity
   assert(ident, 'identity missing')
-  assert(ident.key=='04830297', 'identity digest mismatch: '..tostring(ident.key))
+  assert(ident.key=='5bda05e3', 'identity digest mismatch: '..tostring(ident.key))
   assert(ident.source=='loginusers', 'identity source must be reported')
   assert(ident.known==1 and ident.ambiguous==false, 'single account must not be ambiguous')
   -- Read-only contract probe: proves the {raw: string} argument shape.
@@ -186,9 +186,9 @@ if os.getenv('SLS_KIND')=='presence' then
   assert(#string_games==1 and string_complete, 'string-shaped directory entries remain supported')
   -- The loginusers parser drives the account guard; it must not be fooled by
   -- numeric keys that are not SteamIDs.
-  local users=plugin.login_users('"shortkey"{ "AccountName" "x" }\n"76561190000000000"{ "MostRecent" "1" }')
+  local users=plugin.login_users('"shortkey"{ "AccountName" "x" }\n"76561198000000000"{ "MostRecent" "1" }')
   assert(#users==1, 'only 17+ digit keys are accounts')
-  assert(users[1].id=='76561190000000000' and users[1].most_recent==true, 'SteamID block not parsed')
+  assert(users[1].id=='76561198000000000' and users[1].most_recent==true, 'SteamID block not parsed')
   assert(users[1].account_name==nil, 'fields must not leak between account blocks')
   -- A stop on a shortcut the ledger cannot confirm is refused by the backend too.
   assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000002}})).success==false,

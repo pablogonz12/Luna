@@ -165,7 +165,7 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
       const payload=args&&args.raw?JSON.parse(args.raw):(args||{});
       calls.push({fn,payload});
       if(fn==='SlsPlaytimeGet')return JSON.stringify(get||{success:true,apps:[],games:{},titles:{},shortcutNames:{},
-        stats:{today:0,last7d:0,last30d:0},runtime:{healthy:true,reportedAt:Date.now()/1000,file:'x.json'},account:'76561190000000000',manifestCount:0,shortcutCount:0});
+        stats:{today:0,last7d:0,last30d:0},runtime:{healthy:true,reportedAt:Date.now()/1000,file:'x.json'},account:'76561198000000000',manifestCount:0,shortcutCount:0});
       if(fn==='SlsPresenceGet')return JSON.stringify(presence||{success:true,state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}});
       if(fn==='SlsPlaytimeEdit')return JSON.stringify({success:true});
       if(fn==='SlsPresenceSetEnabled')return JSON.stringify({success:true,enabled:payload.enabled});
@@ -410,7 +410,7 @@ test('the menu opens with the sidebar, both settings sections and the account ro
   const {w,calls}=fakeWindow(document,{
     get:{success:true,apps:[620,3212112756],titles:{},shortcutNames:{'3212112756':'Minecraft'},
       games:{'620':{title:'Portal 2',trackedSeconds:7200,adjustmentSeconds:0}},stats:{today:7200,last7d:7200,last30d:7200},
-      runtime:{healthy:true,reportedAt:Date.now()/1000,file:'76561190000000000.json'},account:'76561190000000000',
+      runtime:{healthy:true,reportedAt:Date.now()/1000,file:'76561198000000000.json'},account:'76561198000000000',
       manifestCount:1,shortcutCount:1}});
   mount(w);
   document.getElementById('sls-luna-btn').click();
@@ -1583,7 +1583,7 @@ test('the compressor Stats tab charts the measured ledgers and can refresh them'
       saved_bytes:3221225472,games:[{name:'Gamma',path:'/lib/Gamma',saved_bytes:2147483648,
         original_bytes:5368709120,disk_bytes:3221225472}]},
     dedupe:{passes:3,directories:1,saved_bytes:6606028,newest:1700000400,
-      entries:[{path:'/mnt/storage/Games/SteamLibrary/steamapps/common/Slay the Spire 2',saved_bytes:6606028}]},
+      entries:[{path:'/mnt/games/SteamLibrary/steamapps/common/Slay the Spire 2',saved_bytes:6606028}]},
     luna:{measured:1,saved_bytes:12345678,games:[{name:'Hades',saved_bytes:12345678}]},
     library:{games:3,bytes:37665836}};
   const {w,calls}=fakeWindow(document,{compressor:compressorFixture({stats})});

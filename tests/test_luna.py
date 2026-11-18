@@ -106,7 +106,7 @@ class LunaTestCase(unittest.TestCase):
         self.data.mkdir(parents=True)
         (self.data / 'presence.json').write_text('{"version":1,"owned":{}}')
         (self.data / 'playtime').mkdir()
-        (self.data / 'playtime/76561190000000000.json').write_text('{"version":2,"games":{}}')
+        (self.data / 'playtime/76561198000000000.json').write_text('{"version":2,"games":{}}')
         self.bin = stub_bin(self.home)
         self.env = dict(os.environ, HOME=str(self.home),
                         XDG_DATA_HOME=str(self.home / '.local/share'),
@@ -379,7 +379,7 @@ class LunaTestCase(unittest.TestCase):
         sources = self.home / 'Documents/Scripts'
         sources.mkdir(parents=True)
         for name in ('playtime', 'presence'):
-            origin = Path(os.environ.get('HOME', '/home/user')) / 'Documents/Scripts' / ('slsteam-' + name)
+            origin = Path(os.environ.get('HOME', str(Path.home()))) / 'Documents/Scripts' / ('slsteam-' + name)
             if not (origin / '.git').is_dir():
                 self.skipTest('no local %s checkout to compare against' % name)
             shutil.copytree(origin, sources / ('slsteam-' + name),
