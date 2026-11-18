@@ -95,6 +95,8 @@ class SteamClientTestCase(unittest.TestCase):
         mock.patch.object(luna, 'STEAM_COMPAT_MANIFEST_SHA256', hashlib.sha256(manifest).hexdigest()).start()
 
     def install(self, **kwargs):
+        # The historical build is opt-in now; the default is the ubuntu12 hard lock.
+        kwargs.setdefault('steam_build', luna.STEAM_COMPAT_BUILD)
         options = argparse.Namespace(only=[], force=False, dry_run=False, keep_steam_client=False, **kwargs)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return luna.cmd_install(options)
@@ -211,10 +213,15 @@ class SteamClientTestCase(unittest.TestCase):
 
     def test_dry_run_has_no_network_or_disk_changes(self):
         before = self.snapshot()
-        options = argparse.Namespace(only=[], force=False, dry_run=True, keep_steam_client=False)
+        options = argparse.Namespace(only=[], force=False, dry_run=True, keep_steam_client=False,
+                                     steam_build=luna.STEAM_COMPAT_BUILD)
         with contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(luna.cmd_install(options), 0)
         self.assertIn('would install/verify build', output.getvalue())
+        options.steam_build = ''
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(luna.cmd_install(options), 0)
+        self.assertIn('ubuntu12', output.getvalue())
         self.assertEqual(before, self.snapshot())
         self.network.assert_not_called()
 
@@ -572,6 +579,157 @@ class SteamHardLockTestCase(unittest.TestCase):
         luna._cache_client_packages(self.ROLLED_BACK)
         shutil.rmtree(luna.steam_cache_dir())
         self.assertEqual(self.steam('unlock')[0], 0)
+
+    # -- heal / launchopts / refresh / ignore-pkg / sidecar / bootstrap ----------
+    def test_heal_restores_deleted_cfg_and_readonly_package(self):
+        self.assertEqual(self.steam('lock')[0], 0)
+        for name in ('Steam.cfg', 'steam.cfg'):
+            (self.root / name).unlink()
+        os.chmod(self.packages, 0o755)
+        before_pin = luna.steam_pin_path().read_bytes()
+        code, output = self.steam('heal')
+        self.assertEqual(code, 0, output)
+        for name in ('Steam.cfg', 'steam.cfg'):
+            self.assertIn('BootStrapperInhibitAll=enable', (self.root / name).read_text())
+        self.assertEqual(stat.S_IMODE(self.packages.stat().st_mode) & 0o222, 0)
+        self.assertEqual(before_pin, luna.steam_pin_path().read_bytes())
+        self.assertTrue((luna.luna_tools_dir() / 'steam-heal.log').is_file())
+
+    def test_heal_without_a_pin_does_nothing_and_status_is_read_only(self):
+        result = luna.heal_steam_lock()
+        self.assertFalse(result['pinned'])
+        self.assertFalse((self.root / 'steam.cfg').exists())
+        self.assertEqual(self.steam('lock')[0], 0)
+        (self.root / 'steam.cfg').unlink()
+        self.steam('status')
+        self.assertFalse((self.root / 'steam.cfg').exists())
+
+    def test_lock_leaves_cache_equal_to_the_pinned_build(self):
+        self.assertEqual(self.steam('lock')[0], 0)
+        self.assertEqual(luna.read_steam_pin()['clientBuild'], self.ROLLED_BACK)
+        self.assertEqual((luna.steam_cache_dir() / 'build.txt').read_text().strip(), self.ROLLED_BACK)
+        self.assertTrue((luna.steam_cache_dir() / 'package').is_dir())
+        self.assertEqual(self.steam('pin')[0], 0)
+        self.assertEqual((luna.steam_cache_dir() / 'build.txt').read_text().strip(),
+                         luna.read_steam_pin()['clientBuild'])
+
+    def _localconfig(self, option):
+        config = self.home / '.local/share/Steam/userdata/42/config'
+        config.mkdir(parents=True, exist_ok=True)
+        path = config / 'localconfig.vdf'
+        path.write_text('"UserLocalConfigStore"\n{\n\t"apps"\n\t{\n\t\t"480"\n\t\t{\n'
+                        '\t\t\t"LaunchOptions"\t\t"%s"\n\t\t}\n\t\t"220"\n\t\t{\n'
+                        '\t\t\t"LaunchOptions"\t\t"-novid"\n\t\t}\n\t}\n}\n' % option)
+        return path
+
+    def launchopts(self, **kwargs):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = luna.cmd_steam(argparse.Namespace(
+                steam_action='launchopts', build=None, now=False, force=False, **kwargs))
+        return code, out.getvalue() + err.getvalue()
+
+    def test_launchopts_detects_missing_path_and_fix_clears_only_it(self):
+        path = self._localconfig('/gone/dir/tool %command%')
+        code, output = self.launchopts(fix=False)
+        self.assertEqual(code, 0)
+        self.assertIn('/gone/dir/tool', output)
+        self.assertEqual(path.read_text().count('/gone/dir/tool'), 1)
+        self.assertIn('launch option', luna.launchopts_warning())
+        code, output = self.launchopts(fix=True)
+        self.assertEqual(code, 0, output)
+        text = path.read_text()
+        self.assertNotIn('/gone/dir', text)
+        self.assertIn('-novid', text)
+        backups = list(path.parent.glob('localconfig.vdf.luna-bak-*'))
+        self.assertEqual(len(backups), 1)
+        self.assertIn('/gone/dir/tool', backups[0].read_text())
+        self.assertEqual(luna.launchopts_warning(), '')
+
+    def test_launchopts_fix_refuses_while_steam_runs(self):
+        path = self._localconfig('/gone/dir/tool %command%')
+        original = path.read_text()
+        mock.patch.object(luna, 'process_running', side_effect=lambda name: name == 'steam').start()
+        code, output = self.launchopts(fix=True)
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertEqual(path.read_text(), original)
+        self.assertFalse(list(path.parent.glob('*luna-bak*')))
+
+    def test_refresh_refuses_under_the_hard_lock(self):
+        self.assertEqual(self.steam('lock')[0], 0)
+        before = luna.steam_pin_path().read_bytes()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = luna.cmd_refresh(argparse.Namespace(dry_run=False))
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertIn('--unlock-first', err.getvalue())
+        self.assertTrue(luna.steam_hard_lock_active())
+        self.assertEqual(before, luna.steam_pin_path().read_bytes())
+
+    def _ignore_pkg(self, **kwargs):
+        conf = self.home / 'pacman.conf'
+        conf.write_text('[options]\nHoldPkg = pacman glibc\n')
+        mock.patch.dict(os.environ, {'LUNA_PACMAN_CONF': str(conf)}).start()
+        calls = self.calls
+
+        def fake_run(command, *args, **kw):
+            calls.append(list(command))
+            return mock.Mock(returncode=0 if command[:2] == ['pacman', '-Q'] else 1, stdout='', stderr='')
+        luna.subprocess.run.side_effect = fake_run
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = luna.cmd_steam(argparse.Namespace(
+                steam_action='ignore-pkg', build=None, now=False, force=False, **kwargs))
+        return code, out.getvalue(), conf
+
+    def test_ignore_pkg_prints_the_command_and_never_runs_sudo_without_apply(self):
+        code, output, conf = self._ignore_pkg(apply=False)
+        self.assertEqual(code, 0)
+        self.assertIn('IgnorePkg = steam', output)
+        self.assertIn(str(conf), output)
+        self.assertFalse([call for call in self.calls if call and call[0] == 'sudo'])
+        self.assertNotIn('IgnorePkg', conf.read_text())
+
+    def test_ignore_pkg_apply_needs_a_terminal(self):
+        mock.patch.object(luna.sys.stdin, 'isatty', return_value=False).start()
+        code, _output, _conf = self._ignore_pkg(apply=True)
+        self.assertEqual(code, luna.EXIT_REFUSED)
+        self.assertFalse([call for call in self.calls if call and call[0] == 'sudo'])
+
+    def test_lumen_sidecar_is_stopped_once_steam_is_closed(self):
+        running = {'lumen': True}
+        mock.patch.object(luna, 'process_running', side_effect=lambda name: running.get(name, False)).start()
+
+        def fake_run(command, *args, **kw):
+            self.calls.append(list(command))
+            if command[0] == 'pkill':
+                running['lumen'] = False
+            return mock.Mock(returncode=0, stdout='', stderr='')
+        luna.subprocess.run.side_effect = fake_run
+        self.assertTrue(luna.stop_lumen_sidecar())
+        self.assertIn(['pkill', '-u', str(os.getuid()), '-x', 'lumen'], self.calls)
+        self.calls.clear()
+        self.assertTrue(luna.stop_lumen_sidecar())
+        self.assertEqual(self.calls, [])
+
+    def test_lumen_sidecar_is_never_stopped_while_steam_runs(self):
+        mock.patch.object(luna, 'process_running', return_value=True).start()
+        self.assertTrue(any('Steam is running' in reason
+                            for reason in luna.refuse_reasons(for_install=True, stop_sidecar=True)))
+        self.assertFalse([call for call in self.calls if call[0] == 'pkill'])
+
+    def test_bootstrap_and_update_all_dry_runs_write_nothing(self):
+        snapshot = lambda: sorted(str(p) for p in self.home.rglob('*'))  # noqa: E731
+        mock.patch.object(luna, 'base_state', return_value='none').start()
+        before = snapshot()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(luna.cmd_bootstrap(argparse.Namespace(dry_run=True)), 0)
+            self.assertEqual(luna.cmd_update_all(argparse.Namespace(dry_run=True)), 0)
+        self.assertIn('bootstrap', out.getvalue())
+        self.assertIn('update-all: would', out.getvalue())
+        self.assertEqual(before, snapshot())
+        self.assertFalse([call for call in self.calls if call and call[0] == 'sudo'])
 
 
 if __name__ == '__main__':

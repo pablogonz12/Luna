@@ -54,6 +54,7 @@ import json
 import lzma
 import os
 import re
+import shlex
 import shutil
 import stat
 import struct
@@ -647,8 +648,32 @@ def addon_version(name):
 
 # --------------------------------------------------------------------------- refusals
 
-def refuse_reasons(for_install):
-    """Environment problems that must stop an install or uninstall."""
+def stop_lumen_sidecar(wait=10):
+    """Stop this user's lingering `lumen` sidecar (pkill -u uid -x lumen).
+
+    Only ever called once Steam itself is closed: the sidecar outlives Steam and
+    would keep the old boot.lua / client in memory. Returns True when none is
+    left running.
+    """
+    if not process_running('lumen'):
+        return True
+    try:
+        subprocess.run(['pkill', '-u', str(os.getuid()), '-x', 'lumen'], capture_output=True)
+    except FileNotFoundError:
+        return not process_running('lumen')
+    for _ in range(max(1, int(wait * 4))):
+        if not process_running('lumen'):
+            return True
+        time.sleep(0.25)
+    return not process_running('lumen')
+
+
+def refuse_reasons(for_install, stop_sidecar=False):
+    """Environment problems that must stop an install or uninstall.
+
+    With stop_sidecar a lingering Lumen sidecar is stopped (Steam is closed),
+    instead of being reported.
+    """
     reasons = []
     root = lumen_root()
     if not (root / 'lua' / 'boot.lua').is_file():
@@ -658,7 +683,12 @@ def refuse_reasons(for_install):
     if process_running('steam') or process_running('steamwebhelper'):
         reasons.append('Steam is running. Close it completely (Steam -> Exit) before changing Lumen.')
     # A sidecar from an earlier session keeps the old boot.lua in memory, which
-    # makes a successful install look ineffective. Never kill it for the user.
+    # makes a successful install look ineffective. Plain install reports it;
+    # lock/unlock/recover/refresh stop it once Steam is closed.
+    if (stop_sidecar and not (process_running('steam') or process_running('steamwebhelper'))
+            and process_running('lumen')):
+        if stop_lumen_sidecar():
+            print('lumen     : stopped a lingering sidecar from an earlier session')
     if process_running('lumen'):
         reasons.append('A Lumen sidecar is still running (pid owner: %s). Stop it first:\n'
                        '    pkill -u $(id -u) -x lumen' % os.getuid())
@@ -866,7 +896,16 @@ def cmd_preflight(options):
                  if peer.get('steamRunning') else 'closed',
                  peer.get('luna', '?'),
                  '' if peer.get('steamRunning') else ''))
+    if not getattr(options, 'no_heal', False):
+        # Third-party installers (LuaTools, Auto-fix) delete steam.cfg: put the block back.
+        try:
+            print_heal(heal_steam_lock(), 'heal       ')
+        except OSError as error:
+            print('heal       : WARN: could not heal: %s' % error)
     drift = steam_drift_note()
+    warning = launchopts_warning()
+    if warning:
+        print('launchopts : WARN: %s' % warning)
     if drift:
         print('steam      : %s' % drift)
     else:
@@ -919,6 +958,9 @@ def cmd_status(options):
               'run scripts/install-local.sh')
         degraded = True
     print('data       : %s' % ('present' if data_dir().is_dir() else 'absent'))
+    warning = launchopts_warning()
+    if warning:
+        print('launchopts : WARN: %s' % warning)
     print('manifest   : %d add-on(s) pinned from %s'
           % (len(manifest.get('addons', {})), ', '.join(
               sorted({entry.get('source_repo', '?') for entry in manifest.get('addons', {}).values()}))))
@@ -1476,6 +1518,12 @@ def cmd_autoupdate(options):
     pending_refresh = read_refresh_pending()
     verbose = bool(getattr(options, 'verbose', False))
     write_heartbeat()
+    # Self-heal the update block first: third-party installers delete steam.cfg,
+    # and the timer is what notices it while Steam is closed or running.
+    try:
+        heal_steam_lock()
+    except Exception as error:  # noqa: BLE001 - healing must never break the timer
+        print('heal      : failed: %s' % error, file=sys.stderr)
     extra_result = {}
 
     def record(payload):
@@ -1506,6 +1554,9 @@ def cmd_autoupdate(options):
         # below so the bridge and payloads land verified. Needs Steam closed
         # like every other mutation; otherwise it waits for the next run.
         if read_refresh_pending():
+            if steam_hard_lock_active():
+                return record({'result': 'deferred', 'refreshPending': True,
+                               'reason': 'the ubuntu12 hard lock is active; run: luna refresh --unlock-first'})
             reasons = refuse_reasons(for_install=True)
             if reasons:
                 return record({'result': 'deferred', 'reason': reasons[0],
@@ -2323,7 +2374,10 @@ def _stage_steam_payload(packages, data, want, destination):
 
 
 def _steam_client_closed():
-    if any(process_running(name) for name in ('steam', 'steamwebhelper', 'lumen')):
+    if any(process_running(name) for name in ('steam', 'steamwebhelper')):
+        raise ValueError('Steam or the Lumen sidecar is running; close it completely first')
+    # Steam is closed: a leftover sidecar is stopped rather than refused.
+    if process_running('lumen') and not stop_lumen_sidecar():
         raise ValueError('Steam or the Lumen sidecar is running; close it completely first')
 
 
@@ -2598,6 +2652,8 @@ def _rollback_steam_client(sdir, say):
     for name in ('steam', 'steamwebhelper'):
         subprocess.run(['pkill', '-9', '-u', uid, '-x', name], capture_output=True)
     time.sleep(2)
+    if not stop_lumen_sidecar():
+        return False, 'the Lumen sidecar would not stop; run: pkill -u $(id -u) -x lumen'
     _steam_package_set_readonly(package, False)
     for stale in package.glob('steam_client_steamrt64*'):
         stale.unlink()
@@ -2714,6 +2770,8 @@ def _close_steam_gracefully(timeout=90):
 
 def _unlock_steam_client(now):
     """`luna steam unlock`: undo the hard lock and the pin."""
+    if not (process_running('steam') or process_running('steamwebhelper')) and stop_lumen_sidecar():
+        pass  # a lingering sidecar from an earlier session is stopped, never a reason to refuse
     package = steam_home() / 'package'
     if package.is_dir():
         _steam_package_set_readonly(package, False)
@@ -2793,14 +2851,24 @@ def cmd_refresh(options):
         print('refresh : would update Steam (closed), pin, cache, install Luna --keep-steam-client, verify')
         print('\nDRY RUN: Steam stays untouched, nothing was written.')
         return EXIT_OK
-    reasons = refuse_reasons(for_install=True)
+    if steam_hard_lock_active() and not (getattr(options, 'unlock_first', False)
+                                         or getattr(options, 'allow_unlocked_refresh', False)):
+        print('REFUSING to refresh: the ubuntu12 hard lock is active (Steam is pinned on purpose).\n'
+              '  To move Steam to Valve\'s latest, run: luna refresh --unlock-first\n'
+              '  (lifts the hard lock, updates, pins the new build with the standard update block).',
+              file=sys.stderr)
+        return EXIT_REFUSED
+    reasons = refuse_reasons(for_install=True, stop_sidecar=True)
     if reasons:
         print('REFUSING to refresh:')
         for reason in reasons:
             print('  - %s' % reason)
         return EXIT_REFUSED
-    if read_refresh_pending() and False:
-        pass
+    if steam_hard_lock_active() and getattr(options, 'unlock_first', False):
+        print('refresh : lifting the hard lock first')
+        code = _unlock_steam_client(False)
+        if code != EXIT_OK:
+            return code
     ok, message, build = _refresh_steam_side()
     print('refresh : %s' % message, file=sys.stdout if ok else sys.stderr)
     if not ok:
@@ -2846,6 +2914,12 @@ def cmd_steam(options):
             print('%-16s %s' % (name + ':', digest[:12] if digest else '(missing)'))
         if state['slssteamDrift']:
             print('WARN   : SLSsteam changed since the pin: %s' % ', '.join(state['slssteamDrift']))
+        for line in heal_steam_lock(apply=False)['notes']:  # read-only: status never repairs
+            if 'SLSsteam changed' not in line:
+                print('WARN   : %s' % line)
+        warning = launchopts_warning()
+        if warning:
+            print('WARN   : %s' % warning)
         print('cache  : %s' % ('build ' + state['cachedBuild'] if state['cacheReady']
                                 else 'empty (run: luna steam cache with Steam closed)'))
         pending = read_steam_pending()
@@ -2854,6 +2928,19 @@ def cmd_steam(options):
                   % (pending.get('action', '?'),
                      time.strftime('%Y-%m-%d %H:%M', time.localtime(int(pending.get('at') or 0)))))
         return EXIT_OK
+    if action == 'heal':
+        result = heal_steam_lock()
+        if not result['pinned']:
+            print('heal  : nothing to heal; no Steam build is pinned (luna steam pin / luna steam lock)')
+            return EXIT_OK
+        print_heal(result)
+        if not result['fixed'] and not result['notes']:
+            print('heal  : update block and read-only state are intact')
+        return EXIT_OK
+    if action == 'launchopts':
+        return cmd_launchopts(options)
+    if action == 'ignore-pkg':
+        return cmd_ignore_pkg(options)
     if action == 'pin':
         build = options.build or steam_client_build()
         if not build:
@@ -2971,9 +3058,13 @@ def cmd_steam(options):
             print('nothing queued')
         return EXIT_OK
     if action == 'recover':
-        if process_running('steam') or process_running('steamwebhelper') or process_running('lumen'):
-            print('REFUSING to recover: Steam or the Lumen sidecar is running. '
+        if process_running('steam') or process_running('steamwebhelper'):
+            print('REFUSING to recover: Steam is running. '
                   'Close it completely (Steam -> Exit) first.')
+            return EXIT_REFUSED
+        if not stop_lumen_sidecar():
+            print('REFUSING to recover: the Lumen sidecar would not stop. '
+                  'Run: pkill -u $(id -u) -x lumen')
             return EXIT_REFUSED
         want = str(options.build or '')
         pin = read_steam_pin()
@@ -2989,7 +3080,8 @@ def cmd_steam(options):
         print(message)
         print('launch Steam and verify, then run: luna steam pin')
         return EXIT_OK
-    print('unknown steam action: %s (status|pin|unpin|cache|recover|update|cancel|lock|unlock)' % action, file=sys.stderr)
+    print('unknown steam action: %s (status|pin|unpin|cache|recover|update|cancel|lock|unlock|'
+          'heal|launchopts|ignore-pkg)' % action, file=sys.stderr)
     return 2
 
 
@@ -3013,6 +3105,498 @@ def steam_drift_note():
                 'cache a known-good build: luna steam cache (Steam closed)'
                 % (state['build'], state['pinned']))
     return ''
+
+
+# --------------------------------------------------------------------------- self-heal
+
+def _cfg_block_present(paths, block):
+    """Does every file hold all of the block's key lines, with none contradicted?"""
+    want = {line.strip().lower() for line in block.splitlines() if line.strip()}
+    want_keys = {line.split('=', 1)[0] for line in want}
+    for path in paths:
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            return False
+        have = {line.strip().lower() for line in lines if _STEAM_CFG_KEYS.match(line)}
+        if not want <= have:
+            return False
+        if any(line.split('=', 1)[0] in want_keys and line not in want for line in have):
+            return False
+    return True
+
+
+def heal_steam_lock(apply=True):
+    """Restore the update block a third-party installer may have removed.
+
+    Applies when a Steam build is pinned (or the hard lock is recorded):
+    re-writes steam.cfg (+ Steam.cfg under the hard lock) and puts package/
+    back to read-only. Only cfg + chmod, so it is safe while Steam runs.
+    SLSsteam hash drift is reported, never re-pinned silently (`luna steam pin`
+    is the only thing that does that). Returns {'pinned', 'fixed', 'notes'}.
+    """
+    result = {'pinned': False, 'fixed': [], 'notes': []}
+    pin = read_steam_pin()
+    if not pin or not (pin.get('clientBuild') or pin.get('hardLock')):
+        return result
+    if not steam_home().is_dir():
+        return result
+    result['pinned'] = True
+    hard = steam_hard_lock_active()
+    paths = steam_cfg_paths() if hard else [steam_cfg_path()]
+    block = STEAM_HARD_CFG_BLOCK if hard else STEAM_CFG_BLOCK
+    names = ' + '.join(path.name for path in paths)
+    if not _cfg_block_present(paths, block):
+        if apply:
+            ensure_steam_cfg_block()
+            result['fixed'].append('update block was missing or changed; re-wrote %s' % names)
+        else:
+            result['notes'].append('update block missing or changed in %s (heal would re-write it)' % names)
+    package = steam_home() / 'package'
+    if hard and package.is_dir() and package.stat().st_mode & 0o222:
+        if apply:
+            _steam_package_set_readonly(package, True)
+            result['fixed'].append('package/ was writable; made it read-only again')
+        else:
+            result['notes'].append('package/ is writable (heal would make it read-only)')
+    now = slssteam_hashes()
+    drift = sorted(name for name, digest in (pin.get('slssteam') or {}).items() if now.get(name, '') != digest)
+    if drift:
+        result['notes'].append('SLSsteam changed since the pin (%s); NOT re-pinned. '
+                               'Verify it, then run: luna steam pin' % ', '.join(drift))
+    build = str(pin.get('clientBuild') or '')
+    if build and (cached_client_build() != build or not (steam_cache_dir() / 'package').is_dir()):
+        result['notes'].append('no known-good cache for build %s; run: luna steam cache (Steam closed)' % build)
+    if result['fixed']:
+        try:
+            luna_tools_dir().mkdir(parents=True, exist_ok=True)
+            with open(luna_tools_dir() / 'steam-heal.log', 'a') as log:
+                for line in result['fixed']:
+                    log.write('%s %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), line))
+        except OSError:
+            pass
+    return result
+
+
+def print_heal(result, prefix='heal  '):
+    for line in result['fixed']:
+        print('%s: FIXED: %s' % (prefix, line))
+    for line in result['notes']:
+        print('%s: WARN: %s' % (prefix, line))
+
+
+# --------------------------------------------------------------------------- launch options
+
+_VDF_APPID = re.compile(rb'^\s*"(\d+)"\s*$')
+_VDF_LAUNCH = re.compile(rb'^(\s*"LaunchOptions"\s+")((?:[^"\\]|\\.)*)(".*)$', re.S)
+_ENV_ASSIGN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+def _missing_launch_paths(option):
+    """Absolute (or ~/) paths in a launch option that do not exist."""
+    try:
+        tokens = shlex.split(option)
+    except ValueError:
+        tokens = option.split()
+    missing = []
+    for token in tokens:
+        if '%command%' in token or '://' in token or _ENV_ASSIGN.match(token):
+            continue
+        candidate = token.split('=', 1)[1] if token.startswith('-') and '=' in token else token
+        if candidate.startswith('~/'):
+            path = home() / candidate[2:]
+        elif candidate.startswith('/') and len(candidate) > 1:
+            path = Path(candidate)
+        else:
+            continue
+        if not os.path.lexists(path) and candidate not in missing:
+            missing.append(candidate)
+    return missing
+
+
+def _scan_launch_file(path):
+    """One pass over a localconfig.vdf (bytes, never decoded as a whole).
+
+    Returns (lines or None, findings); lines are kept only when something was
+    found, so `--fix` can rewrite the file without reading it again.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None, []
+    if b'LaunchOptions' not in data:
+        return None, []
+    lines = data.split(b'\n')
+    findings, appid = [], ''
+    for index, line in enumerate(lines):
+        if b'"' not in line:
+            continue
+        found = _VDF_APPID.match(line)
+        if found:
+            appid = found.group(1).decode()
+            continue
+        if b'LaunchOptions' not in line:
+            continue
+        match = _VDF_LAUNCH.match(line)
+        if not match or not match.group(2):
+            continue
+        option = re.sub(r'\\(["\\])', r'\1', match.group(2).decode('utf-8', errors='surrogateescape'))
+        missing = _missing_launch_paths(option)
+        if missing:
+            findings.append({'file': path, 'line': index, 'appid': appid,
+                             'option': option, 'missing': missing})
+    return (lines if findings else None), findings
+
+
+def scan_launch_options():
+    """Every launch option whose absolute path is gone: [{appid, option, missing, file, line}]."""
+    found = []
+    for user in _steam_user_configs():
+        _, findings = _scan_launch_file(user / 'config' / 'localconfig.vdf')
+        found.extend(findings)
+    return found
+
+
+def launchopts_warning():
+    count = len(scan_launch_options())
+    if not count:
+        return ''
+    return ('%d Steam launch option(s) point at paths that no longer exist (the game may fail '
+            'to start); inspect: luna steam launchopts' % count)
+
+
+def fix_launch_options():
+    """Back up each affected localconfig.vdf, then clear only the offending options."""
+    cleared, stamp = 0, time.strftime('%Y%m%d-%H%M%S')
+    for user in _steam_user_configs():
+        path = user / 'config' / 'localconfig.vdf'
+        lines, findings = _scan_launch_file(path)
+        if not findings:
+            continue
+        backup = path.with_name('localconfig.vdf.luna-bak-%s' % stamp)
+        shutil.copy2(path, backup)
+        for finding in findings:
+            match = _VDF_LAUNCH.match(lines[finding['line']])
+            lines[finding['line']] = match.group(1) + match.group(3)
+            cleared += 1
+        temporary = path.with_name(path.name + '.luna-tmp')
+        temporary.write_bytes(b'\n'.join(lines))
+        shutil.copystat(path, temporary)
+        os.replace(temporary, path)
+        print('launchopts: backup %s' % backup)
+    return cleared
+
+
+def cmd_launchopts(options):
+    findings = scan_launch_options()
+    if not findings:
+        print('launchopts: every absolute path in your launch options exists')
+        return EXIT_OK
+    for item in findings:
+        print('app %-10s %s\n    missing: %s' % (item['appid'] or '?', item['option'],
+                                                  ', '.join(item['missing'])))
+    if not getattr(options, 'fix', False):
+        print('\n%d option(s) affected. Close Steam, then: luna steam launchopts --fix '
+              '(backs up localconfig.vdf, clears only these options)' % len(findings))
+        return EXIT_OK
+    if process_running('steam') or process_running('steamwebhelper'):
+        print('REFUSING to fix: Steam is running and would overwrite localconfig.vdf on exit. '
+              'Close it completely first.', file=sys.stderr)
+        return EXIT_REFUSED
+    cleared = fix_launch_options()
+    print('launchopts: cleared %d option(s)' % cleared)
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- pacman IgnorePkg
+
+def ignore_pkg_command():
+    return ['sudo', 'sed', '-i', r'/^\[options\]/a IgnorePkg = steam', str(pacman_conf_path())]
+
+
+def ignore_pkg_hint():
+    """One line when a pacman-owned Steam could be replaced by a system update ('' otherwise)."""
+    try:
+        managed, ignored = pacman_steam_state()
+    except Exception:  # noqa: BLE001 - a hint must never fail an install
+        return ''
+    if managed and not ignored:
+        return ('hint      : Steam is pacman-managed and not in IgnorePkg; run: luna steam ignore-pkg')
+    return ''
+
+
+def cmd_ignore_pkg(options):
+    managed, ignored = pacman_steam_state()
+    if not managed:
+        print('pacman : Steam is not installed through pacman; nothing to do')
+        return EXIT_OK
+    if ignored:
+        print('pacman : "steam" is already in IgnorePkg')
+        return EXIT_OK
+    command = ignore_pkg_command()
+    print('pacman : Steam is pacman-managed and NOT in IgnorePkg: a system update can replace it.')
+    print('Run (needs sudo):\n    %s' % ' '.join(shlex.quote(part) for part in command))
+    if not getattr(options, 'apply', False):
+        print('or let Luna do it: luna steam ignore-pkg --apply')
+        return EXIT_OK
+    if not sys.stdin.isatty():
+        print('REFUSING: --apply needs an interactive terminal for the sudo prompt '
+              '(Luna never runs sudo unattended).', file=sys.stderr)
+        return EXIT_REFUSED
+    return subprocess.run(command).returncode
+
+
+# --------------------------------------------------------------------------- bootstrap
+
+UPSTREAM_REPO = 'swwayps/luatools-moon'
+UPSTREAM_INSTALLER_COMMIT = '2c739b5349a972bb1932ac9457b0acf91b09e044'
+UPSTREAM_INSTALLER_SHA256 = '1c6896832d32d6d17c5635daf95b539763955f7ea1d9bd4446e24c2e8a5806c2'
+BOOTSTRAP_TOOLS = ('curl', 'jq', 'tar', 'unzip', 'python3', 'git')
+
+
+def base_state():
+    """'ready', 'partial' or 'none' for the Moon/Lumen/LuaTools base."""
+    paths = [lumen_root() / 'lua' / 'boot.lua', lumen_root() / 'luatools' / 'backend' / 'main.lua',
+             home() / '.local/share/SLSsteam/path/steam']
+    present = [path.exists() for path in paths]
+    return 'ready' if all(present) else 'partial' if any(present) else 'none'
+
+
+def detect_package_manager():
+    for name, install in (('pacman', ['pacman', '-S', '--needed']),
+                          ('apt-get', ['apt-get', 'install', '-y']),
+                          ('dnf', ['dnf', 'install', '-y'])):
+        if shutil.which(name):
+            return name, install
+    return '', []
+
+
+def fetch_base_installer(ref, expected_sha, destination):
+    """Download the LuaTools-Moon installer at `ref`; verify sha256 when one is expected."""
+    url = 'https://raw.githubusercontent.com/%s/%s/install.sh' % (UPSTREAM_REPO, ref)
+    with urllib.request.urlopen(url, timeout=60) as response:
+        data = response.read(4 * 1024 * 1024)
+    digest = hashlib.sha256(data).hexdigest()
+    if expected_sha and digest != expected_sha:
+        raise ValueError('LuaTools-Moon installer checksum mismatch (got %s); aborting' % digest)
+    destination.write_bytes(data)
+    return digest
+
+
+def run_base_installer(ref, expected_sha, extra):
+    with tempfile.TemporaryDirectory(prefix='luna-base-') as work:
+        script = Path(work) / 'luatools-moon-install.sh'
+        digest = fetch_base_installer(ref, expected_sha, script)
+        print('base      : installer %s@%s sha256 %s' % (UPSTREAM_REPO, ref[:12], digest))
+        return subprocess.run(['bash', str(script), '--nolaunch'] + list(extra)).returncode
+
+
+def _base_extra(options):
+    extra = []
+    for flag in ('slsteam_channel', 'plugin_channel', 'lumen_channel'):
+        value = getattr(options, flag, None)
+        if value:
+            extra += ['--' + flag.replace('_', '-'), value]
+    if getattr(options, 'keep_millennium', False):
+        extra.append('--keep-millennium')
+    return extra
+
+
+def cmd_bootstrap(options):
+    """Fresh-PC setup: deps, Steam, pinned base, ubuntu12 lock, add-ons, heal, timer."""
+    dry = getattr(options, 'dry_run', False)
+    say = lambda text: print('bootstrap : %s' % text, flush=True)  # noqa: E731
+    manager, install = detect_package_manager()
+    missing = [tool for tool in BOOTSTRAP_TOOLS if not shutil.which(tool)]
+    has_steam = (steam_home() / 'steam.sh').is_file()
+    steam_cmd = shutil.which('steam')
+    say('distro package manager: %s' % (manager or 'none detected (pacman/apt/dnf)'))
+    packages = list(missing)
+    if not steam_cmd and not has_steam:
+        packages.append('steam-installer' if manager == 'apt-get' else 'steam')
+    if packages:
+        command = ['sudo'] + install + packages
+        say('system packages missing: %s' % ', '.join(packages))
+        text = ' '.join(shlex.quote(part) for part in command)
+        if dry or not manager:
+            say('would run (sudo prompt): %s' % text if manager else 'install them yourself, then re-run')
+        elif getattr(options, 'skip_deps', False) or not sys.stdin.isatty():
+            say('skipped (%s); run yourself: %s'
+                % ('--skip-deps' if getattr(options, 'skip_deps', False)
+                   else 'non-interactive, no sudo prompt', text))
+        else:
+            answer = input('bootstrap : install them now with sudo? [y/N] ')
+            if answer.strip().lower() in ('y', 'yes'):
+                if subprocess.run(command).returncode != 0:
+                    say('package install failed; continuing with what is present')
+            else:
+                say('skipped by choice')
+    else:
+        say('system packages: all present')
+    if has_steam:
+        say('Steam directory exists (%s); not touched' % steam_home())
+    elif dry:
+        say('would run `steam -exitsteam` once to create %s (timeout 30 min)' % steam_home())
+    elif not shutil.which('steam'):
+        say('Steam is not installed; install it, then re-run: luna bootstrap')
+        return 1
+    else:
+        say('running Steam once to create %s (steam -exitsteam)' % steam_home())
+        try:
+            subprocess.run(['steam', '-exitsteam'], timeout=1800)
+        except (OSError, subprocess.SubprocessError) as error:
+            say('Steam first run did not finish: %s' % error)
+        if not (steam_home() / 'steam.sh').is_file():
+            say('%s still missing; launch Steam once, then re-run' % steam_home())
+            return 1
+    state = base_state()
+    if state == 'partial':
+        print('REFUSING: a partial Moon/Lumen installation was found. Repair the base with its '
+              'upstream installer first; Luna will not clean or replace it.', file=sys.stderr)
+        return EXIT_REFUSED
+    if state == 'ready':
+        say('Moon/Lumen/LuaTools base already installed; kept')
+    elif dry:
+        say('would install the pinned LuaTools-Moon base (commit %s, sha256 %s)'
+            % (UPSTREAM_INSTALLER_COMMIT, UPSTREAM_INSTALLER_SHA256))
+    else:
+        reasons = refuse_reasons(for_install=False)
+        reasons = [reason for reason in reasons if 'Steam is running' in reason]
+        if reasons:
+            print('REFUSING: %s' % reasons[0], file=sys.stderr)
+            return EXIT_REFUSED
+        try:
+            code = run_base_installer(UPSTREAM_INSTALLER_COMMIT, UPSTREAM_INSTALLER_SHA256,
+                                      _base_extra(options))
+        except (OSError, ValueError) as error:
+            print('REFUSING: %s' % error, file=sys.stderr)
+            return 1
+        if code != 0:
+            print('base installer failed (exit %d)' % code, file=sys.stderr)
+            return 1
+    keep = getattr(options, 'keep_steam_client', False)
+    steam_build = getattr(options, 'steam_build', '') or ''
+    say('Steam client: %s' % ('kept as is' if keep else 'historical build %s' % steam_build
+                              if steam_build else 'ubuntu12 hard lock (default), pinned + cached'))
+    install_options = argparse.Namespace(
+        only=getattr(options, 'only', []) or [], force=getattr(options, 'force', False),
+        dry_run=dry, keep_steam_client=keep, steam_build=steam_build,
+        no_steam_machine=getattr(options, 'no_steam_machine', False),
+        migrate_steam_machine=getattr(options, 'migrate_steam_machine', False))
+    if dry and base_state() != 'ready':
+        say('would verify and install the Luna add-ons (needs the base first), then pin, heal, '
+            'install the timer, print status + preflight')
+        print('\nDRY RUN: nothing was written.')
+        return EXIT_OK
+    code = cmd_verify(argparse.Namespace(sources=False, source_dir=None))
+    if code != EXIT_OK:
+        return code
+    code = cmd_install(install_options)
+    if code != EXIT_OK:
+        return code
+    if dry:
+        say('would then pin (if not pinned), heal, enable the timer, print status + preflight')
+        print('\nDRY RUN: nothing was written.')
+        return EXIT_OK
+    if not read_steam_pin() and not keep:
+        build = steam_client_build()
+        if build:
+            write_json_file(steam_pin_path(), new_steam_pin(build))
+            ensure_steam_cfg_block()
+            say('pinned Steam client %s' % build)
+    print_heal(heal_steam_lock())
+    cmd_timer(argparse.Namespace(action='on'))
+    print('\n== luna status ==')
+    cmd_status(argparse.Namespace(only=[]))
+    print('\n== luna preflight ==')
+    code = cmd_preflight(argparse.Namespace(only=[]))
+    print('\nbootstrap : done. Start Steam to load Luna. Update later with: luna update-all')
+    return code
+
+
+def cmd_update_all(options):
+    """Update Luna add-ons, re-verify the base, keep the lock; never upgrades Steam."""
+    dry = getattr(options, 'dry_run', False)
+    base_latest = getattr(options, 'base_latest', False)
+    if base_latest and not getattr(options, 'yes', False) and not dry:
+        print('REFUSING: --base-latest moves the Moon/Lumen base to the unpinned upstream main. '
+              'Re-run with --yes to confirm (the installer sha256 is shown first).', file=sys.stderr)
+        return EXIT_REFUSED
+    source = ('bundle %s' % options.bundle if getattr(options, 'bundle', None)
+              else 'url %s' % options.url if getattr(options, 'url', None) else 'the latest release (gh)')
+    if dry:
+        print('update-all: would update the Luna add-ons from %s' % source)
+        print('update-all: would re-verify the base against the pinned installer (commit %s)'
+              % UPSTREAM_INSTALLER_COMMIT[:12])
+        if base_latest:
+            print('update-all: would fetch the upstream MAIN installer, show its sha256 and run it (--yes)')
+        print('update-all: would re-apply the Steam lock/heal; Steam itself is never upgraded while locked')
+        print('\nDRY RUN: nothing was written.')
+        return EXIT_OK
+    status = EXIT_OK
+    code = cmd_update(argparse.Namespace(
+        bundle=getattr(options, 'bundle', None), url=getattr(options, 'url', None),
+        latest=not (getattr(options, 'bundle', None) or getattr(options, 'url', None)),
+        dry_run=False, only=[]))
+    if code != EXIT_OK:
+        print('update-all: the add-on update did not complete (exit %d)' % code, file=sys.stderr)
+        status = code
+    if base_state() != 'ready':
+        print('update-all: the Moon/Lumen base is not complete; run: luna bootstrap', file=sys.stderr)
+        status = status or 1
+    elif base_latest:
+        reasons = [reason for reason in refuse_reasons(for_install=True, stop_sidecar=True)
+                   if 'Steam is running' in reason]
+        if reasons:
+            print('REFUSING base update: %s' % reasons[0], file=sys.stderr)
+            return EXIT_REFUSED
+        try:
+            code = run_base_installer('main', None, [])
+        except (OSError, ValueError) as error:
+            print('update-all: base update failed: %s' % error, file=sys.stderr)
+            return 1
+        if code != 0:
+            return code
+        # A base update replaces boot.lua and drops steam.cfg; put both back.
+        code = cmd_install(argparse.Namespace(only=[], force=True, dry_run=False, keep_steam_client=True,
+                                              no_steam_machine=False, migrate_steam_machine=False))
+        status = status or code
+    else:
+        try:
+            with tempfile.TemporaryDirectory(prefix='luna-base-') as work:
+                digest = fetch_base_installer(UPSTREAM_INSTALLER_COMMIT, UPSTREAM_INSTALLER_SHA256,
+                                              Path(work) / 'install.sh')
+            print('update-all: base verified against the pinned installer (sha256 %s); pin not moved'
+                  % digest[:12])
+        except (OSError, ValueError) as error:
+            print('update-all: WARN: could not re-verify the base installer (%s)' % error,
+                  file=sys.stderr)
+    print_heal(heal_steam_lock(), 'update-all')
+    if not steam_hard_lock_active() and not read_steam_pin():
+        print('update-all: Steam is not locked; to freeze the client run: luna steam lock')
+    return status
+
+
+def cmd_doctor(options):
+    """Print-only health check: preflight, update-block heal check, launch options, pacman."""
+    code = cmd_preflight(argparse.Namespace(only=[], no_heal=True))
+    print('\n== update block (heal check, nothing is changed) ==')
+    result = heal_steam_lock(apply=False)
+    if not result['pinned']:
+        print('no Steam build is pinned (luna steam pin / luna steam lock)')
+    elif not result['notes']:
+        print('ok: update block and read-only state are intact')
+    print_heal(result, 'doctor')
+    print('\n== launch options ==')
+    findings = scan_launch_options()
+    if not findings:
+        print('ok: no launch option points at a missing path')
+    for item in findings:
+        print('WARN: app %s: %s (missing: %s)' % (item['appid'] or '?', item['option'],
+                                                   ', '.join(item['missing'])))
+    print('\n== pacman ==')
+    print(ignore_pkg_hint() or 'ok: nothing to do')
+    return code
 
 
 def cmd_install(options):
@@ -3045,8 +3629,12 @@ def cmd_install(options):
             if code:
                 return code
         if not getattr(options, 'keep_steam_client', False):
-            print('steam     : would install/verify build %s executables, cache, pin and block updates'
-                  % STEAM_COMPAT_BUILD)
+            if getattr(options, 'steam_build', ''):
+                print('steam     : would install/verify build %s executables, cache, pin and block updates'
+                      % STEAM_COMPAT_BUILD)
+            else:
+                print('steam     : would roll back to the ubuntu12 client, pin, cache and hard-lock it '
+                      '(Steam.cfg + steam.cfg, package/ read-only); skipped when already locked')
         print('\nDRY RUN: %d file(s) would change%s.' % (len(to_write),
               ' + bridge reinstall' if needs_bridge else ', nothing was written'))
         return EXIT_OK
@@ -3059,10 +3647,25 @@ def cmd_install(options):
         return EXIT_NEEDS_FORCE
 
     if not getattr(options, 'keep_steam_client', False):
-        ok, message = ensure_compatible_steam()
-        print('steam     : %s' % message, file=sys.stdout if ok else sys.stderr)
-        if not ok:
-            return 1
+        steam_build = getattr(options, 'steam_build', '') or ''
+        if steam_build:
+            if steam_build != STEAM_COMPAT_BUILD:
+                print('REFUSING: --steam-build supports only the verified historical build %s'
+                      % STEAM_COMPAT_BUILD, file=sys.stderr)
+                return EXIT_REFUSED
+            ok, message = ensure_compatible_steam()
+            print('steam     : %s' % message, file=sys.stdout if ok else sys.stderr)
+            if not ok:
+                return 1
+        elif steam_hard_lock_active() and steam_state().get('binariesMatch') is not False:
+            print('steam     : ubuntu12 hard lock already active; keeping it (build %s)'
+                  % (read_steam_pin().get('clientBuild') or '?'))
+            print_heal(heal_steam_lock(), 'steam     ')
+        else:
+            code, message = _lock_steam_client(False, lambda: False)
+            print('steam     : %s' % message, file=sys.stdout if code == 0 else sys.stderr)
+            if code != 0:
+                return 1
     if not to_write and not needs_bridge:
         if not getattr(options, 'no_steam_machine', False):
             code = steam_machine_action('install', migrate=getattr(options, 'migrate_steam_machine', False))
@@ -3074,6 +3677,9 @@ def cmd_install(options):
         if read_steam_pin():
             ensure_steam_cfg_block()
         print('\nAlready installed and identical to the pinned payloads. Nothing to do.')
+        hint = ignore_pkg_hint()
+        if hint:
+            print(hint)
         return EXIT_OK
     only_bridge = needs_bridge and not to_write
 
@@ -3114,6 +3720,9 @@ def cmd_install(options):
         print('bridge   : reinstalled into boot.lua (payloads were already current)')
     print('bridge   : %s' % (addons_dir() / 'bridge.lua'))
     print('boot.lua : %s' % patcher('check').stdout.strip())
+    hint = ignore_pkg_hint()
+    if hint:
+        print(hint)
     print('\nRestart Steam (Steam -> Exit, then launch it again) to load the add-ons.')
     return EXIT_OK
 
@@ -3436,9 +4045,11 @@ def build_parser():
                           ('backup', cmd_backup), ('restore', cmd_restore),
                           ('steam', cmd_steam),
                           ('refresh', cmd_refresh),
+                          ('bootstrap', cmd_bootstrap), ('update-all', cmd_update_all),
+                          ('doctor', cmd_doctor),
                           ('launchers', cmd_launchers),
                            ('timer', cmd_timer), ('hook', cmd_hook)):
-        child = sub.add_parser(name)
+        child = sub.add_parser(name, aliases=['up'] if name == 'update-all' else [])
         child.set_defaults(handler=handler)
         child.add_argument('--only', action='append', default=[],
                            help='restrict to one add-on (repeatable): %s' % ', '.join(ADDONS))
@@ -3448,14 +4059,47 @@ def build_parser():
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
             child.add_argument('--keep-steam-client', action='store_true',
                                default=os.environ.get('LUNA_KEEP_STEAM_CLIENT') == '1',
-                               help='skip the default verified Steam compatibility downgrade')
+                               help='leave the Steam client alone (no ubuntu12 hard lock)')
+            child.add_argument('--steam-build', metavar='BUILD',
+                               help='opt in to the historical verified build %s instead of the '
+                                    'default ubuntu12 hard lock' % STEAM_COMPAT_BUILD)
             child.add_argument('--no-steam-machine', action='store_true',
                                help='do not generate SteamOS Mode application shortcuts')
             child.add_argument('--migrate-steam-machine', action='store_true',
                                help='back up, rename and upgrade recognized legacy launchers to SteamOS Mode')
+        if name == 'bootstrap':
+            child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+            child.add_argument('--force', action='store_true',
+                               help='replace installed add-on files that differ')
+            child.add_argument('--skip-deps', action='store_true',
+                               help='never offer system packages / native Steam (no sudo prompt)')
+            child.add_argument('--keep-steam-client', action='store_true',
+                               help='leave the Steam client alone (no ubuntu12 hard lock)')
+            child.add_argument('--steam-build', metavar='BUILD',
+                               help='opt in to the historical build %s instead of the hard lock'
+                                    % STEAM_COMPAT_BUILD)
+            child.add_argument('--no-steam-machine', action='store_true',
+                               help='do not generate SteamOS Mode application shortcuts')
+            child.add_argument('--migrate-steam-machine', action='store_true',
+                               help='back up, rename and upgrade recognized legacy launchers')
+            for flag in ('--slsteam-channel', '--plugin-channel', '--lumen-channel'):
+                child.add_argument(flag, help='pass stable or beta to the base installer')
+            child.add_argument('--keep-millennium', action='store_true',
+                               help='pass through to the base installer')
+        if name == 'update-all':
+            child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+            child.add_argument('--bundle', help='update the add-ons from a local bundle tarball')
+            child.add_argument('--url', help='update the add-ons from a bundle URL')
+            child.add_argument('--base-latest', action='store_true',
+                               help='also move the Moon/Lumen base to upstream main (needs --yes; '
+                                    'default: only re-verify the pinned installer)')
+            child.add_argument('--yes', action='store_true', help='confirm --base-latest')
         if name == 'refresh':
             child.add_argument('--dry-run', action='store_true',
                                help='print the plan without updating or writing')
+            child.add_argument('--unlock-first', action='store_true',
+                               help='lift the ubuntu12 hard lock, then update Steam (refresh refuses '
+                                    'while the lock is active)')
         if name == 'launchers':
             child.add_argument('--dry-run', action='store_true', help='show launcher changes without writing')
             child.add_argument('--migrate-legacy', action='store_true',
@@ -3472,8 +4116,14 @@ def build_parser():
         if name == 'steam':
             child.add_argument('steam_action', nargs='?', default='status',
                                choices=['status', 'pin', 'unpin', 'cache', 'recover',
-                                        'update', 'cancel', 'lock', 'unlock'],
+                                        'update', 'cancel', 'lock', 'unlock',
+                                        'heal', 'launchopts', 'ignore-pkg'],
                                help='what to do (default: status)')
+            child.add_argument('--fix', action='store_true',
+                               help='with launchopts: back up localconfig.vdf and clear the options '
+                                    'that point at missing paths (Steam must be closed)')
+            child.add_argument('--apply', action='store_true',
+                               help='with ignore-pkg: run the sudo command (interactive only)')
             child.add_argument('--force', action='store_true',
                                help='with lock: kill a running Steam without asking')
             child.add_argument('--relaunch', action='store_true',
