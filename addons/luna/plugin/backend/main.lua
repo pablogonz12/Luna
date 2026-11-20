@@ -12,7 +12,15 @@ local json = require('json')
 local M = {}
 local VERSION = '0.14.18'
 local home = os.getenv('HOME') or ''
-local lumen_root = home .. '/.local/share/Lumen'
+-- OPTIONAL third-party host (Lumen). This is the only place in this backend
+-- that names a path under Lumen: every other read goes through
+-- optional_lumen_root() and missing files mean "not present", never an error.
+-- Nothing here is required by a Luna page; with no Lumen installed the
+-- backend behaves exactly as on luna-host.
+local function optional_lumen_root()
+  return home .. '/.local/share/Lumen'
+end
+local lumen_root = optional_lumen_root()
 -- luna-host (Luna's own plugin host) exports LUNA_HOME; the third-party Lumen
 -- host never does. That decides where add-ons and Luna's state live.
 local luna_home = os.getenv('LUNA_HOME') or ''
@@ -1051,7 +1059,6 @@ local function host_info()
 end
 
 local function build_health()
-  local lumen_root = home .. '/.local/share/Lumen'
   local boot_path = lumen_root .. '/lua/boot.lua'
   local boot = read_file(boot_path)
   local markers = 0
@@ -1093,7 +1100,13 @@ local function build_health()
       drift = json.array(drift),
     } or { drift = json.array({}) },
     host = host_info(),
+    -- Optional third-party host. `present` is false when none of its files
+    -- exist, which is the normal state on luna-host; each flag below is then
+    -- false and the Health page shows "not present" instead of an error.
     lumen = {
+      present = path_exists(lumen_root .. '/lumen') or path_exists(boot_path)
+        or path_exists(lumen_root .. '/luatools/backend/main.lua')
+        or path_exists(lumen_root .. '/sls-addons') or path_exists(lumen_root .. '/sls-luna'),
       root = lumen_root,
       binary = path_exists(lumen_root .. '/lumen'),
       luatools = path_exists(lumen_root .. '/luatools/backend/main.lua'),
@@ -1324,13 +1337,16 @@ function M.register(registry)
       raw = read_file(candidate)
       if raw then path = candidate; break end
     end
+    -- No file means LuaTools was never here: "not present", not an error.
+    -- Every Luna page, including this footer row, works without it.
     if not raw then
-      return { ok = false, signedIn = false, name = '', avatar = '', expired = false, at = 0, path = '',
-        error = 'LuaTools has not saved a Discord session on this machine' }
+      return { ok = true, present = false, signedIn = false, name = '', avatar = '',
+        expired = false, at = 0, path = '' }
     end
     local ok, data = pcall(json.decode, raw)
     if not ok or type(data) ~= 'table' then
-      return { ok = false, signedIn = false, name = '', avatar = '', expired = false, at = 0, path = path,
+      return { ok = false, present = true, signedIn = false, name = '', avatar = '',
+        expired = false, at = 0, path = path,
         error = 'the LuaTools session file could not be read' }
     end
     local user = type(data.user) == 'table' and data.user or {}
@@ -1350,6 +1366,7 @@ function M.register(registry)
     local expires_at = tonumber(data.expires_at) or 0
     return {
       ok = true,
+      present = true,
       signedIn = tostring(app.provider or '') == 'discord' and name ~= '' and has_refresh,
       name = name,
       avatar = avatar,
