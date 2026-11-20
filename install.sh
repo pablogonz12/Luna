@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install the supported slsteam-moon/Lumen/LuaTools base, then layer SLS Luna on top.
-# This intentionally calls (rather than copies) the LuaTools-Moon installer.
+# Default: install Luna's standalone luna-host (no Lumen). With --lumen, install
+# the slsteam-moon/Lumen/LuaTools base first, then layer SLS Luna on top.
 set -euo pipefail
 
 readonly LUNA_REPO="pgm1207/Luna"
@@ -19,28 +19,35 @@ One-liner (fresh PC):
 
 Or run `bash install.sh` from a checkout.
 
-The installer keeps an existing LuaTools-Moon stack intact. If no complete base
-is found, it pins and hard-locks the Steam client first, then runs the pinned
-LuaTools-Moon installer with --nolaunch, then installs the sha256-verified SLS
-Luna add-ons. LuaTools is currently required by Luna's backend contract;
---noplugin is therefore intentionally unsupported.
+By default this installs Luna's own luna-host in ~/.local/share/Luna: no
+Lumen, no LuaTools and no Steam wrapper patch. It installs the system packages,
+the add-ons, the launchers, the user unit, ~/.local/bin/luna and the timer, and
+leaves the Steam client exactly as it is.
 
-On a fresh PC this installs everything: native Steam (32-bit support enabled),
+With --lumen it keeps an existing LuaTools-Moon stack intact (or installs the
+pinned one), pins and hard-locks the Steam client first, runs the pinned
+LuaTools-Moon installer with --nolaunch, then installs the sha256-verified SLS
+Luna add-ons on top. An existing install whose host.json says lumen is never
+downgraded: a plain run refreshes its Luna add-ons only.
+
+On a fresh PC the package step installs native Steam (32-bit support enabled),
 32-bit libcrypto, mangohud, gamescope, gamemode (+32-bit parts), curl jq tar
 unzip git python3 zenity (pacman/apt/dnf; sudo is asked for only on an
-interactive terminal, otherwise the exact command is printed), then the ubuntu12
-lock + pin on the known-good build, the pinned base, the add-ons, heal, IgnorePkg
-and the timer. Re-running changes nothing that is already in place.
+interactive terminal, otherwise the exact command is printed). Re-running
+changes nothing that is already in place.
 
-By default Luna rolls Steam back to the ubuntu12 client and hard-locks it
-(Steam.cfg + steam.cfg, read-only package/). The historical build 1791918634 is
-opt-in with --steam-build 1791918634. Steam/Lumen must be fully closed. The same
-flow is available after install as `luna bootstrap` (fresh PC) and
-`luna update-all`; `luna doctor` prints a health report.
+--lumen rolls Steam back to the ubuntu12 client and hard-locks it (Steam.cfg +
+steam.cfg, read-only package/); use --lock-steam-client to do that on the
+standalone host. The historical build 1791918634 is opt-in with
+--steam-build 1791918634. Steam/Lumen must be fully closed. The same flow is
+available after install as `luna bootstrap` and `luna update-all`;
+`luna doctor` prints a health report.
 SteamOS Mode application shortcuts are generated automatically, including SDL
 mouse compatibility and a free-pointer action. Gamescope is a system dependency.
 
 Options:
+  --lumen                 Opt in to the full Lumen/LuaTools/SLSsteam base pipeline
+  --lock-steam-client     Standalone host: pin and hard-lock the Steam client
   --only NAME             Install one Luna add-on (repeatable)
   --force                 Replace installed add-on files that differ
   --dry-run               Show Luna changes without writing them
@@ -72,8 +79,8 @@ base_args=()
 while (($#)); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --noplugin) die "--noplugin is not supported: current Luna features require the LuaTools backend." ;;
-    --force|--dry-run|--keep-steam-client|--no-system-packages|--no-mangohud|--no-gamescope|--no-gamemode|--no-steam-machine|--migrate-steam-machine) luna_args+=("$1"); shift ;;
+    --noplugin) die "--noplugin is not supported: install the standalone host without --lumen instead." ;;
+    --force|--dry-run|--keep-steam-client|--lumen|--lock-steam-client|--no-system-packages|--no-mangohud|--no-gamescope|--no-gamemode|--no-steam-machine|--migrate-steam-machine) luna_args+=("$1"); shift ;;
     --steam-build)
       (($# >= 2)) || die "--steam-build requires a build number."
       luna_args+=("$1" "$2"); shift 2 ;;
@@ -115,5 +122,5 @@ if [[ -z "$script_dir" || ! -f "$script_dir/scripts/luna.py" ]]; then
     || die "Downloaded SLS Luna archive is incomplete."
 fi
 
-printf '\nSetting up SLS Luna (base, add-ons, Steam lock, timer).\n'
+printf '\nSetting up SLS Luna (standalone host, or the Lumen base with --lumen).\n'
 python3 "$script_dir/scripts/luna.py" bootstrap "${luna_args[@]}" "${base_args[@]}"

@@ -2,10 +2,15 @@
 
 ## Current stack
 
+The default install is standalone: Steam loads `luna-host` from
+`~/.local/share/Luna`, with no Lumen dependency. The Lumen variant below is
+opt-in (`luna install --lumen`) and kept for existing installs; see
+[`LUMEN.md`](LUMEN.md).
+
 ```text
 Steam client
 └── slsteam-moon                 native Steam integration; fork of SLSsteam
-    └── Lumen                    sidecar runtime, CDP injector and Lua RPC host
+    └── Lumen                    optional third-party sidecar host (--lumen)
         ├── LuaTools-Moon        plugin UI and Moon-oriented features
         └── SLS Luna             current add-on distribution and feature set
             ├── playtime         local playtime support for non-Steam games
@@ -13,6 +18,9 @@ Steam client
             ├── compressor       UI/backend for the external Btrfs compressor
             └── luna             Luna shell and shared integration
 ```
+
+For the standalone path, `luna-host` replaces Lumen at the same layer and loads
+the add-ons directly from `~/.local/share/Luna/addons`.
 
 The boundaries matter: slsteam-moon is the low-level Steam integration; Lumen
 hosts and injects plugin/add-on code; LuaTools-Moon supplies its own plugin UI and

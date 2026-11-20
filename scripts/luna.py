@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""SLS Luna - install the SLSsteam-Moon / Lumen add-ons as one unit.
+"""SLS Luna - install the Luna add-ons as one unit on Luna's own plugin host.
 
-Lumen loads every add-on it finds under `~/.local/share/Lumen/sls-addons/<name>`
-through one shared bridge, which is patched into `lua/boot.lua` once. Each add-on
-project ships its own installer for people who want only that add-on; Luna owns
-the combination:
+By default `luna install` sets up the standalone `luna-host` in
+`~/.local/share/Luna`: no Lumen, no LuaTools, no Steam wrapper patch. The
+optional Lumen stack stays available behind `--lumen` (Steam pin, then the
+pinned Lumen/LuaTools/SLSsteam installer, then Luna on top). Existing Lumen
+installs keep their host until an explicit `luna host cutover`.
+
+Each add-on project ships its own installer for people who want only that
+add-on; Luna owns the combination:
 
   * one preflight, one install, one rollback for the whole set;
   * payloads pinned by source commit and verified by sha256, so what is installed
@@ -17,7 +21,11 @@ the combination:
 Commands:
     luna preflight [--only NAME]        read-only environment and state report
     luna status [--only NAME]           what is installed, and whether it matches
-    luna install [--only NAME] [--force] [--dry-run]
+    luna install [--only NAME] [--force] [--dry-run] [--lumen] [--lock-steam-client]
+                                        default: luna-host (standalone); --lumen opts in to the
+                                        full Steam-pin + Lumen/LuaTools/SLSsteam pipeline
+    luna bootstrap [--lumen] [--lock-steam-client] [--dry-run]
+                                        fresh machine; the default installs luna-host only
     luna host status|cutover|rollback    show / switch the plugin host (Luna's luna-host vs. Lumen)
     luna lumen status|update|cancel|restore [--dry-run] [--yes] [--queue]
                                         update the Lumen base (Lumen host only): back up, run the
@@ -489,12 +497,38 @@ def lumen_root():
     return Path(os.environ.get('LUMEN_DIR') or (home() / '.local/share/Lumen'))
 
 
+# Set while an install runs: the host that run targets. Without it addons_dir()
+# and active_host() answer for the host that is actually serving Steam.
+_TARGET_HOST = None
+
+
+def serving_host():
+    """The host this command serves: an explicit install target, else the active host."""
+    return _TARGET_HOST or active_host()
+
+
+def prefer_luna():
+    try:
+        data = json.loads(host_state_path().read_text())
+    except (OSError, ValueError):
+        data = None
+    return isinstance(data, dict) and data.get('active') == 'luna'
+
+
+def lumen_install_present():
+    """True when a Moon/Lumen stack exists here, even without a host.json."""
+    root = lumen_root()
+    return ((root / 'lua' / 'boot.lua').is_file() or (root / 'sls-addons').is_dir()
+            or (root / 'luatools').is_dir() or (root / 'sls-luna').is_dir())
+
+
 def addons_dir():
-    return lumen_root() / 'sls-addons'
+    return (luna_home() / 'addons') if serving_host() == 'luna' else lumen_root() / 'sls-addons'
 
 
 def boot_file():
-    return lumen_root() / 'lua' / 'boot.lua'
+    return ((luna_home() / 'lua' / 'boot.lua') if serving_host() == 'luna'
+            else lumen_root() / 'lua' / 'boot.lua')
 
 
 def data_dir():
@@ -511,12 +545,22 @@ def host_state_path():
 
 
 def active_host():
-    """'luna' once `luna host cutover` ran, otherwise the third-party 'lumen'."""
+    """'luna' for Luna's own host, 'lumen' for the third-party host.
+
+    host.json is authoritative. Without it, an existing Lumen/Moon installation
+    is left exactly where it is (never downgraded silently); a machine with no
+    such tree is a fresh standalone install and defaults to luna-host.
+    """
     try:
         data = json.loads(host_state_path().read_text())
     except (OSError, ValueError):
-        return 'lumen'
+        return 'lumen' if lumen_install_present() else 'luna'
     return 'luna' if isinstance(data, dict) and data.get('active') == 'luna' else 'lumen'
+
+
+def host_label(host=None):
+    host = host or active_host()
+    return 'luna (standalone)' if host == 'luna' else 'lumen'
 
 
 def lumen_tools_dir():
@@ -531,7 +575,7 @@ def luna_tools_dir():
     never fight over the copies. After `luna host cutover` it is
     `$LUNA_HOME/state` (also machine-local), matching the backend.
     """
-    if active_host() == 'luna':
+    if serving_host() == 'luna':
         return luna_home() / 'state'
     return lumen_tools_dir()
 
@@ -766,12 +810,15 @@ def refuse_reasons(for_install, stop_sidecar=False):
     """
     reasons = []
     root = lumen_root()
-    if not (root / 'lua' / 'boot.lua').is_file():
-        reasons.append('Lumen lua/boot.lua not found under %s (is the LuaTools-Moon stack installed?)' % root)
-    if not (root / 'luatools' / 'backend' / 'main.lua').is_file():
-        reasons.append('LuaTools-Moon backend not found under %s' % root)
+    host = serving_host()
+    if host == 'lumen':
+        if not (root / 'lua' / 'boot.lua').is_file():
+            reasons.append('Lumen lua/boot.lua not found under %s (is the LuaTools-Moon stack installed?)' % root)
+        if not (root / 'luatools' / 'backend' / 'main.lua').is_file():
+            reasons.append('LuaTools-Moon backend not found under %s' % root)
     if steam_running():
-        reasons.append('Steam is running. Close it completely (Steam -> Exit) before changing Lumen.')
+        reasons.append('Steam is running. Close it completely (Steam -> Exit) before changing %s.'
+                       % ('the plugin host' if host == 'luna' else 'Lumen'))
     # With the luna-host cutover the menu is served from Luna's tree, so an
     # add-on write aimed at Lumen is invisible until the two are mirrored again.
     if active_host() == 'luna' and luna_host_running() and not steam_running():
@@ -783,7 +830,7 @@ def refuse_reasons(for_install, stop_sidecar=False):
             and lumen_running()):
         if stop_lumen_sidecar():
             print('lumen     : stopped a lingering sidecar from an earlier session')
-    if lumen_running():
+    if host == 'lumen' and lumen_running():
         reasons.append('A Lumen sidecar is still running (pid owner: %s). Stop it first:\n'
                        '    pkill -u $(id -u) -x lumen' % os.getuid())
     return reasons
@@ -884,8 +931,10 @@ def component_inventory():
 
     return (
         ('slsteam-moon wrapper', 'present' if moon_wrapper.is_file() else 'not detected', str(moon_wrapper)),
-        ('Lumen runtime', 'present' if lumen_boot.is_file() else 'not detected', str(lumen_boot)),
-        ('LuaTools backend', 'present' if luatools_backend.is_file() else 'not detected', str(luatools_backend)),
+        ('Lumen runtime', 'present' if lumen_boot.is_file()
+         else ('not installed' if serving_host() == 'luna' else 'not detected'), str(lumen_boot)),
+        ('LuaTools backend', 'present' if luatools_backend.is_file()
+         else ('not installed' if serving_host() == 'luna' else 'not detected'), str(luatools_backend)),
         ('CloudRedirect', cloud_state, cloud_detail),
         ('Decky Loader', decky_state, decky_detail),
         ('Compressor CLI', 'present' if compressor else 'not detected', str(compressor or compressor_candidates[0])),
@@ -1006,8 +1055,12 @@ class Apply:
 # --------------------------------------------------------------------------- commands
 
 def cmd_preflight(options):
+    host = active_host()
     print('SLS Luna %s' % (load_manifest().get('generated', '?')[:10]))
-    print('lumen root : %s' % lumen_root())
+    print('host       : %s' % host_label(host))
+    print('host home  : %s' % (luna_home() if host == 'luna' else lumen_root()))
+    if host == 'lumen':
+        print('lumen root : %s' % lumen_root())
     print('add-ons    : %s' % ', '.join('%s %s' % (name, addon_version(name)) for name in ADDONS))
     steam_root = home() / '.local/share/Steam'
     resolved = Path(os.path.realpath(home() / '.steam/steam')) if (home() / '.steam/steam').exists() else None
@@ -1020,13 +1073,21 @@ def cmd_preflight(options):
     print('installed  : %s' % (', '.join(installed_addons()) or 'none'))
     print_component_inventory()
     boot = boot_file()
-    if boot.is_file():
+    if host == 'luna':
+        print('host run   : %s (%s)'
+              % ('installed' if (luna_home() / 'bin/luna-host').is_file() else 'not installed',
+                 luna_home() / 'bin/luna-host'))
+        print('boot.lua   : luna-host runtime (no Lumen patch)')
+    elif boot.is_file():
         content = boot.read_text(errors='replace')
         print('boot.lua   : %s, %d marker(s), backup %s'
               % ('patched' if MARKER in content else 'unpatched', content.count(MARKER),
                  'present' if boot.with_name('boot.lua.sls-addons.original').is_file() else 'absent'))
-    check = patcher('check')
-    print('anchors    : %s' % (check.stdout.strip() or check.stderr.strip() or 'no output'))
+    if host == 'lumen':
+        check = patcher('check')
+        print('anchors    : %s' % (check.stdout.strip() or check.stderr.strip() or 'no output'))
+    else:
+        print('anchors    : not applicable (Lumen is not installed)')
     data = data_dir()
     if data.is_dir():
         ledgers = sorted(p.name for p in (data / 'playtime').glob('*.json')) if (data / 'playtime').is_dir() else []
@@ -1094,21 +1155,23 @@ def bridge_status():
     stamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(when)) if when else 'unknown time'
     pid = int(data.get('pid') or 0)
     host_alive = bool(pid) and pid_alive(pid)
-    running = lumen_running()
+    host = active_host()
+    running = luna_host_running() if host == 'luna' else lumen_running()
+    host_name = 'Luna host' if host == 'luna' else 'Lumen'
     failed = [item for item in data.get('failed') or [] if isinstance(item, dict)]
     lines, level = [], 'ok'
     if data and host_alive:
         lines.append('attached: %d add-ons, loaded at %s' % (len(data.get('addons') or []), stamp))
     elif running:
         level = 'warn'
-        lines.append('WARN: Lumen is running but the bridge has not loaded since Steam started%s'
-                     % (' (last heartbeat %s is from a process that is gone)' % stamp if data
+        lines.append('WARN: %s is running but the bridge has not loaded since Steam started%s'
+                     % (host_name, ' (last heartbeat %s is from a process that is gone)' % stamp if data
                         else ' (no heartbeat file yet)'))
         lines.append('      repair: luna hook repair, then restart Steam')
     elif data:
         level = 'info'
-        lines.append('not attached now (Lumen is not running); last load: %d add-ons at %s'
-                     % (len(data.get('addons') or []), stamp))
+        lines.append('not attached now (%s is not running); last load: %d add-ons at %s'
+                     % (host_name, len(data.get('addons') or []), stamp))
     else:
         level = 'info'
         lines.append('no bridge heartbeat yet (it appears the first time Steam loads Luna)')
@@ -1130,14 +1193,20 @@ def cmd_status(options):
     targets = selected_addons(options)
     manifest = load_manifest()
     installed = installed_addons()
+    host = active_host()
     boot = boot_file()
     content = boot.read_text(errors='replace') if boot.is_file() else ''
     patched = MARKER in content
-    print('boot.lua   : %s (marker x%d, backup %s)'
-          % ('patched' if patched else 'unpatched', content.count(MARKER),
-             'present' if boot.with_name('boot.lua.sls-addons.original').is_file() else 'absent'))
-    print('processes  : steam=%s lumen=%s'
-          % (steam_running(), lumen_running()))
+    print('host       : %s' % host_label(host))
+    if host == 'luna':
+        print('boot.lua   : luna-host runtime (%s)'
+              % ('present' if (luna_home() / 'bin/luna-host').is_file() else 'binary missing'))
+    else:
+        print('boot.lua   : %s (marker x%d, backup %s)'
+              % ('patched' if patched else 'unpatched', content.count(MARKER),
+                 'present' if boot.with_name('boot.lua.sls-addons.original').is_file() else 'absent'))
+    print('processes  : steam=%s host=%s lumen=%s'
+          % (steam_running(), luna_host_running(), lumen_running()))
     for line in bridge_status()[1]:
         print('bridge     : %s' % line)
     print_component_inventory()
@@ -1167,7 +1236,7 @@ def cmd_status(options):
     for name in targets:
         if name not in installed:
             print('note       : %s is not installed' % name)
-    if installed and not patched:
+    if installed and not patched and host == 'lumen':
         print('note       : add-ons are installed but boot.lua is not patched; '
               'run scripts/install-local.sh')
         degraded = True
@@ -2187,6 +2256,8 @@ def mirror_addons_to_host():
     """Copy the installed add-ons (same layout as sls-addons) into $LUNA_HOME/addons."""
     dest_root = luna_home() / 'addons'
     dest_root.mkdir(parents=True, exist_ok=True)
+    if dest_root.resolve() == addons_dir().resolve():
+        return  # already installing straight into the standalone host
     for name in ADDONS:
         source = addons_dir() / name
         if source.is_dir():
@@ -2354,6 +2425,8 @@ def host_status():
         legacy = []
     return {
         'active': active_host(),
+        'display': host_label(),
+        'standalone': active_host() == 'luna',
         'home': str(luna_home()),
         'addons': str(luna_home() / 'addons' if active_host() == 'luna' else addons_dir()),  # the ACTIVE host's real path
         'state': str(luna_tools_dir()),
@@ -4969,6 +5042,8 @@ def _base_extra(options):
 def resume_command(options):
     """The exact command that continues this pipeline after a failure."""
     parts = ['luna', 'bootstrap']
+    if getattr(options, 'lock_steam_client', False):
+        parts.append('--lock-steam-client')
     if getattr(options, 'no_system_packages', False):
         parts.append('--no-system-packages')
     if getattr(options, 'keep_steam_client', False):
@@ -4985,6 +5060,8 @@ def resume_command(options):
         parts.append('--keep-millennium')
     if getattr(options, 'no_steam_machine', False):
         parts.append('--no-steam-machine')
+    if getattr(options, 'lumen', False):
+        parts.append('--lumen')
     return ' '.join(parts)
 
 
@@ -5135,9 +5212,11 @@ def bootstrap_lumen(options, say, dry):
 
 def bootstrap_luna(options, say, dry):
     """Step 3: Luna on top, then check the bridge, the block and `luna status`."""
+    lumen = bool(getattr(options, 'lumen', False)) or active_host() == 'lumen'
     install_options = argparse.Namespace(
         only=[], force=getattr(options, 'force', False), dry_run=dry,
-        keep_steam_client=True, steam_build='',
+        keep_steam_client=True, steam_build='', lumen=lumen,
+        lock_steam_client=getattr(options, 'lock_steam_client', False),
         no_steam_machine=getattr(options, 'no_steam_machine', False),
         migrate_steam_machine=getattr(options, 'migrate_steam_machine', False))
     if dry:
@@ -5152,56 +5231,72 @@ def bootstrap_luna(options, say, dry):
     if problems:
         say('WARN: %d payload(s) differ from vendor/MANIFEST.json (development checkout); '
             'the installed bytes are still verified below' % len(problems))
-    say('installing Luna on top (Steam stays at its pin)')
+    say('installing Luna on top')
     code = cmd_install(install_options)
     if code != EXIT_OK:
         return bootstrap_stop(options, 'Luna', 'the add-on install failed (exit %d)' % code, code)
-    check = patcher('check')
-    if check.returncode != 0 or 'bridge installed' not in (check.stdout or ''):
-        return bootstrap_stop(options, 'Luna', 'the bridge patch is not installed (%s)'
-                              % (check.stderr.strip() or check.stdout.strip()), EXIT_PATCH)
-    if 'lumen self-update blocked' not in (check.stdout or ''):
-        return bootstrap_stop(options, 'Luna', "Lumen's own updater is not blocked", EXIT_PATCH)
+    if lumen:
+        check = patcher('check')
+        if check.returncode != 0 or 'bridge installed' not in (check.stdout or ''):
+            return bootstrap_stop(options, 'Luna', 'the bridge patch is not installed (%s)'
+                                  % (check.stderr.strip() or check.stdout.strip()), EXIT_PATCH)
+        if 'lumen self-update blocked' not in (check.stdout or ''):
+            return bootstrap_stop(options, 'Luna', "Lumen's own updater is not blocked", EXIT_PATCH)
+        say('verified: bridge installed, Lumen self-update blocked')
+    else:
+        if not (luna_home() / 'bin/luna-host').is_file():
+            return bootstrap_stop(options, 'Luna', 'the luna-host binary was not installed')
+        say('verified: luna-host installed and serving Luna directly')
     status = cmd_status(argparse.Namespace(only=[], strict=False))
     if status != EXIT_OK:
         return bootstrap_stop(options, 'Luna', (
             'luna status reports drift or an incomplete install (exit %d)' % status), status)
-    say('verified: bridge installed, Lumen self-update blocked, luna status clean')
+    say('verified: luna status clean')
     return EXIT_OK
 
 
 def cmd_bootstrap(options):
-    """Fresh-PC setup, in order: packages, Steam pin+lock, pinned base, Luna."""
+    """Fresh-PC setup: packages, optional Steam pin/Lumen base, then Luna."""
+    global _TARGET_HOST
     dry = getattr(options, 'dry_run', False)
+    lumen = bool(getattr(options, 'lumen', False)) or active_host() == 'lumen'
+    pin = getattr(options, 'lock_steam_client', False)
+    _TARGET_HOST = 'lumen' if lumen else 'luna'
     say = lambda text: print('bootstrap : %s' % text, flush=True)  # noqa: E731
     if flatpak_steam_only():
         say(FLATPAK_WARNING)
     install_system_packages(options, say)
-    code = bootstrap_steam(options, say, dry)
-    if code != EXIT_OK:
-        return code
-    code = bootstrap_lumen(options, say, dry)
-    if code != EXIT_OK:
-        return code
+    if lumen or pin:
+        code = bootstrap_steam(options, say, dry)
+        if code != EXIT_OK:
+            return code
+    else:
+        say('Steam client: left alone (no pin; use --lock-steam-client to pin it)')
+    if lumen:
+        code = bootstrap_lumen(options, say, dry)
+        if code != EXIT_OK:
+            return code
+    else:
+        say('host: luna (standalone); Lumen/LuaTools are not installed (use --lumen to opt in)')
     code = bootstrap_luna(options, say, dry)
     if code != EXIT_OK:
         return code
     if dry:
-        say('would then heal the lock, install 32-bit libcrypto if missing, suggest IgnorePkg '
-            '(interactive only), enable the update timer and run doctor')
+        say('would then enable the update timer and run doctor')
         print('\nDRY RUN: nothing was written.')
         return EXIT_OK
     keep = getattr(options, 'keep_steam_client', False)
-    print_heal(heal_steam_lock())
-    if not keep and libcrypto_status()[0] == 'missing':
-        code, note = install_libcrypto(False)
-        say(note if code == 0 else 'WARN: %s' % note)
-    ok, line = known_good_line()
-    say(line if not keep else 'Steam client kept as is (--keep-steam-client); known-good check skipped')
-    if not keep and steam_state().get('cacheReady') is False:
-        say('WARN: the Steam client cache is missing; run: luna steam cache (Steam closed)')
-    if pacman_steam_state()[0]:
-        cmd_ignore_pkg(argparse.Namespace(apply=sys.stdin.isatty()))
+    if lumen or pin:
+        print_heal(heal_steam_lock())
+        if not keep and libcrypto_status()[0] == 'missing':
+            code, note = install_libcrypto(False)
+            say(note if code == 0 else 'WARN: %s' % note)
+        ok, line = known_good_line()
+        say(line if not keep else 'Steam client kept as is (--keep-steam-client); known-good check skipped')
+        if not keep and steam_state().get('cacheReady') is False:
+            say('WARN: the Steam client cache is missing; run: luna steam cache (Steam closed)')
+        if pacman_steam_state()[0]:
+            cmd_ignore_pkg(argparse.Namespace(apply=sys.stdin.isatty()))
     cmd_timer(argparse.Namespace(action='on'))
     print('\n== luna doctor ==')
     cmd_doctor(argparse.Namespace())
@@ -5247,8 +5342,11 @@ def cmd_update_all(options):
         print('update-all: the add-on update did not complete (exit %d)' % code, file=sys.stderr)
         status = code
     if base_state() != 'ready':
-        print('update-all: the Moon/Lumen base is not complete; run: luna bootstrap', file=sys.stderr)
-        status = status or 1
+        if active_host() == 'luna' and base_state() == 'none':
+            print('update-all: Lumen base: not installed (standalone host); add-ons only')
+        else:
+            print('update-all: the Moon/Lumen base is not complete; run: luna bootstrap', file=sys.stderr)
+            status = status or 1
     elif base_latest:
         # Same lock, same code path as `luna lumen update --installer-latest --yes`.
         code = cmd_lumen_guard(argparse.Namespace(
@@ -6575,7 +6673,8 @@ def lumen_status(check=False):
              'tooling': {'ok': not tooling, 'problems': tooling},
              'toolingIncomplete': ('tooling incomplete: ' + '; '.join(tooling)) if tooling else '',
              'applyService': APPLY_UNIT if systemd_available() else 'timer-only'}
-    result = patcher('check') if not tooling and boot_file().is_file() else None
+    result = (patcher('check') if not tooling and host == 'lumen' and boot_file().is_file()
+              else None)
     out = result.stdout if result is not None else ''
     state['bridge'] = ('tooling incomplete' if tooling else
                        'installed' if 'bridge installed' in out else
@@ -6654,14 +6753,20 @@ def cmd_lumen(options):
     action = getattr(options, 'lumen_action', 'status')
     if action == 'channels':
         return cmd_lumen_channels(options)
+    if action in ('update', 'restore') and active_host() == 'luna' and base_state() == 'none':
+        print('lumen     : not installed (the active host is luna, standalone); '
+              'opt in with: luna install --lumen')
+        return EXIT_OK
     if action == 'status':
         state = lumen_status(check=getattr(options, 'check', False))
         if getattr(options, 'json', False):
             print(json.dumps(state, sort_keys=True))
             return EXIT_OK
-        print('host      : %s%s' % (state['host'], '' if state['host'] == 'lumen'
+        print('host      : %s%s' % (host_label(state['host']), '' if state['host'] == 'lumen'
                                     else ' (Lumen updates only apply while Lumen is the active host)'))
-        print('base      : %s' % state['baseState'])
+        base = state['baseState']
+        print('base      : %s' % ('not installed (standalone host)' if (
+            state['host'] == 'luna' and base == 'none') else base))
         print('versions  : %s' % (', '.join('%s %s' % item for item in sorted(state['versions'].items())) or 'unknown'))
         print('channels  : %s' % ', '.join('%s=%s' % (key, value)
                                           for key, value in state['channels'].items()))
@@ -7029,6 +7134,7 @@ cmd_clean_guard = lambda options: (run_locked(cmd_clean, options) if getattr(opt
 
 def cmd_doctor(options):
     """Print-only health check: preflight, update-block heal check, launch options, pacman."""
+    print('host       : %s' % host_label())
     code = cmd_preflight(argparse.Namespace(only=[], no_heal=True))
     print('\n== update block (heal check, nothing is changed) ==')
     result = heal_steam_lock(apply=False)
@@ -7074,6 +7180,43 @@ def cmd_doctor(options):
 
 
 def cmd_install(options):
+    """Serve the active host; `--lumen` opts in to the full Lumen pipeline."""
+    global _TARGET_HOST
+    target = 'lumen' if getattr(options, 'lumen', False) else active_host()
+    _TARGET_HOST = target
+    try:
+        return _cmd_install(options, target)
+    finally:
+        _TARGET_HOST = None
+
+
+def _cmd_install(options, target):
+    dry = getattr(options, 'dry_run', False)
+    if target == 'lumen' and getattr(options, 'lumen', False):
+        # The base installer must not run while Steam is open. Check that one
+        # guard before touching anything; the rest are re-checked below.
+        blocked = [reason for reason in refuse_reasons(for_install=True)
+                   if 'Steam is running' in reason]
+        if blocked:
+            print('REFUSING to install:')
+            for reason in blocked:
+                print('  - %s' % reason)
+            return EXIT_REFUSED
+        say = lambda text: print('install   : %s' % text, flush=True)  # noqa: E731
+        code = bootstrap_steam(options, say, dry)
+        if code != EXIT_OK:
+            return code
+        code = bootstrap_lumen(options, say, dry)
+        if code != EXIT_OK:
+            return code
+        if not dry and (not host_state_path().is_file() or active_host() != 'lumen'):
+            _write_host_state('lumen', 'luna')
+            unpatch_wrapper()
+            systemctl_user('disable', '--now', HOST_UNIT)
+            systemctl_user('daemon-reload')
+            systemctl_user('enable', '--now', LUMEN_UNIT)
+    elif target == 'luna' and not dry and not prefer_luna():
+        _write_host_state('luna', active_host())
     targets = selected_addons(options)
     reasons = refuse_reasons(for_install=True)
     if reasons:
@@ -7081,28 +7224,35 @@ def cmd_install(options):
         for reason in reasons:
             print('  - %s' % reason)
         return EXIT_REFUSED
-    check = patcher('check')
-    if check.returncode != 0:
-        print('REFUSING to install: %s' % (check.stderr.strip() or check.stdout.strip()), file=sys.stderr)
-        return EXIT_PATCH
+    print('host      : %s' % host_label(target))
+    if target == 'lumen':
+        check = patcher('check')
+        if check.returncode != 0:
+            print('REFUSING to install: %s' % (check.stderr.strip() or check.stdout.strip()),
+                  file=sys.stderr)
+            return EXIT_PATCH
+    else:
+        check = None
     rows = plan(targets)
     to_write = [row for row in rows if row[4] in ('new', 'differs')]
     # A base (Lumen/Moon) update replaces boot.lua and wipes the bridge while
     # the payloads stay current. That is not "nothing to do": reinstalling the
     # bridge is part of every install, or Luna silently leaves the menu.
-    needs_bridge = 'bridge compatible, not installed' in check.stdout
+    needs_bridge = bool(check is not None and 'bridge compatible, not installed' in check.stdout)
     print('plan for %s:' % ', '.join(targets))
     for addon, label, source, dest, state in rows:
         print('  %-9s %-22s %s' % (addon, label, state))
     if needs_bridge:
         print('  bridge    boot.lua               reinstall (a base update wiped it)')
-    if options.dry_run:
+    steam_step = ((target == 'lumen' and not getattr(options, 'lumen', False))
+                  or (target == 'luna' and getattr(options, 'lock_steam_client', False)))
+    if dry:
         if not getattr(options, 'no_steam_machine', False):
             code = steam_machine_action('install', dry_run=True,
                                         migrate=getattr(options, 'migrate_steam_machine', False))
             if code:
                 return code
-        if not getattr(options, 'keep_steam_client', False):
+        if steam_step and not getattr(options, 'keep_steam_client', False):
             if getattr(options, 'steam_build', ''):
                 print('steam     : would install/verify build %s executables, cache, pin and block updates'
                       % STEAM_COMPAT_BUILD)
@@ -7121,7 +7271,7 @@ def cmd_install(options):
         print('Re-run with --force if you really want to replace them.')
         return EXIT_NEEDS_FORCE
 
-    if not getattr(options, 'keep_steam_client', False):
+    if steam_step and not getattr(options, 'keep_steam_client', False):
         steam_build = getattr(options, 'steam_build', '') or ''
         if steam_build:
             if steam_build != STEAM_COMPAT_BUILD:
@@ -7177,10 +7327,10 @@ def cmd_install(options):
         for addon, label, source, dest, state in rows:
             if state in ('new', 'differs'):
                 apply.write(source, dest)
-        result = patcher('install')
-        if result.returncode != 0:
+        result = patcher('install') if target == 'lumen' else None
+        if result is not None and result.returncode != 0:
             raise RuntimeError('boot.lua patch failed: %s' % (result.stderr.strip() or result.stdout.strip()))
-        apply.did_patch = True
+        apply.did_patch = result is not None
     except BaseException as error:  # noqa: BLE001 - Ctrl-C/SIGTERM must roll back too
         failures = apply.rollback()
         if not failures:
@@ -7192,7 +7342,7 @@ def cmd_install(options):
                   'interrupted install.' % failures, file=sys.stderr)
         else:
             print('Every add-on change made by this run was rolled back.', file=sys.stderr)
-        if not getattr(options, 'keep_steam_client', False):
+        if steam_step and not getattr(options, 'keep_steam_client', False):
             print('The separately verified Steam client installation remains in place; '
                   'its rollback backup was retained.', file=sys.stderr)
         if isinstance(error, Exception):
@@ -7209,11 +7359,17 @@ def cmd_install(options):
         # blocked, so re-apply Luna's block right away (Steam is closed here).
         ensure_steam_cfg_block()
         print('steam.cfg : update block re-applied (a Steam build is pinned)')
-    print('\ninstalled: %s' % ', '.join('%s %s' % (name, addon_version(name)) for name in targets))
+    print('\ninstalled: %s (host: %s)'
+          % (', '.join('%s %s' % (name, addon_version(name)) for name in targets),
+             host_label(target)))
     if only_bridge:
         print('bridge   : reinstalled into boot.lua (payloads were already current)')
     print('bridge   : %s' % (addons_dir() / 'bridge.lua'))
-    print('boot.lua : %s' % patcher('check').stdout.strip())
+    if target == 'lumen':
+        print('boot.lua : %s' % patcher('check').stdout.strip())
+    else:
+        print('host     : luna-host serves %s (no Lumen boot.lua patch)'
+              % (addons_dir()))
     hint = ignore_pkg_hint()
     if hint:
         print(hint)
@@ -7244,12 +7400,13 @@ def cmd_uninstall(options):
         return EXIT_OK
     # Last one out: restore Lumen before deleting the payload it points at, so a
     # failed restore can never leave a live bridge aiming at removed files.
-    result = patcher('uninstall')
-    if result.returncode != 0:
-        print('REFUSING to remove the last add-on: %s'
-              % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
-        return EXIT_PATCH
-    print(result.stdout.strip())
+    if active_host() == 'lumen':
+        result = patcher('uninstall')
+        if result.returncode != 0:
+            print('REFUSING to remove the last add-on: %s'
+                  % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
+            return EXIT_PATCH
+        print(result.stdout.strip())
     for name in targets:
         shutil.rmtree(addons_dir() / name, ignore_errors=True)
         print('removed %s' % name)
@@ -7312,6 +7469,7 @@ def warn_untraceable(manifest, stream=sys.stdout):
 
 
 def cmd_verify(options):
+    print('host       : %s' % host_label())
     manifest = load_manifest()
     problems = []
     checked = 0
@@ -7584,6 +7742,13 @@ def build_parser():
             child.add_argument('--strict', action='store_true',
                                help='exit 1 instead of 6 when a payload differs (CI gate)')
         if name == 'install':
+            child.add_argument('--lumen', action='store_true',
+                               help='opt in to the Lumen stack: pin Steam, install Lumen/LuaTools/'
+                                    'SLSsteam with the pinned installer, then Luna on top; '
+                                    'without it installs on Luna\'s own standalone host')
+            child.add_argument('--lock-steam-client', action='store_true',
+                               help='standalone host only: pin and hard-lock the Steam client '
+                                    'explicitly (never automatic without --lumen)')
             child.add_argument('--force', action='store_true',
                                help='replace installed files that differ from the pinned payloads')
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
@@ -7598,6 +7763,13 @@ def build_parser():
             child.add_argument('--migrate-steam-machine', action='store_true',
                                help='back up, rename and upgrade recognized legacy launchers to SteamOS Mode')
         if name == 'bootstrap':
+            child.add_argument('--lumen', action='store_true',
+                               help='opt in to today\'s full Lumen pipeline: Steam pin, then '
+                                    'Lumen/LuaTools/SLSsteam via the pinned installer, then Luna; '
+                                    'without it a fresh machine gets Luna\'s standalone host only')
+            child.add_argument('--lock-steam-client', action='store_true',
+                               help='standalone host only: pin and hard-lock the Steam client '
+                                    'explicitly (never automatic without --lumen)')
             child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
             child.add_argument('--force', action='store_true',
                                help='replace installed add-on files that differ')

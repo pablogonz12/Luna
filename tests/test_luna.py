@@ -1346,6 +1346,64 @@ class LunaTestCase(unittest.TestCase):
 
 
 
+    def test_plain_install_after_cutover_targets_the_luna_host(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        result = self.luna('host', 'cutover')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        target = self.luna_home / 'addons/playtime/backend/main.lua'
+        self.assertTrue(target.is_file())
+        target.unlink()
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('host      : luna (standalone)', result.stdout)
+        self.assertTrue(target.is_file(), 'a plain install must refresh the Luna host')
+        self.assertTrue((self.addons / 'playtime/backend/main.lua').is_file(),
+                        'the old Lumen tree is left alone')
+
+    def test_host_json_lumen_is_never_downgraded_by_a_plain_install(self):
+        self.luna_home.mkdir(parents=True, exist_ok=True)
+        (self.luna_home / 'host.json').write_text('{"active": "lumen"}\n')
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('host      : lumen', result.stdout)
+        self.assertEqual(json.loads((self.luna_home / 'host.json').read_text())['active'], 'lumen')
+        self.assertTrue(self.installed('playtime', 'backend/main.lua'))
+
+
+    def test_default_install_is_standalone_and_health_checks_pass(self):
+        shutil.rmtree(self.home / '.local/share/Lumen', ignore_errors=True)
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('host      : luna (standalone)', result.stdout)
+        self.assertFalse((self.home / '.local/share/Lumen').exists(),
+                         'a plain install must not create a Lumen tree')
+        self.assertTrue((self.luna_home / 'bin/luna-host').is_file())
+        self.assertTrue((self.luna_home / 'addons/playtime/backend/main.lua').is_file())
+        self.assertTrue((self.home / '.local/bin/luna').is_file())
+        self.assertTrue((self.home / '.config/systemd/user/luna-host.service').is_file())
+        self.assertFalse((self.home / '.local/share/SLSsteam/path/steam').exists(),
+                         'no wrapper may be patched')
+        for cfg in ('steam.cfg', 'Steam.cfg'):
+            self.assertFalse((self.home / '.local/share/Steam' / cfg).exists())
+        status = self.luna('status')
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertIn('host       : luna (standalone)', status.stdout)
+        doctor = self.luna('doctor')
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertIn('host       : luna (standalone)', doctor.stdout)
+        verify = self.luna('verify')
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertIn('host       : luna (standalone)', verify.stdout)
+
+    def test_steam_machine_launcher_is_generated_without_luatools(self):
+        shutil.rmtree(self.home / '.local/share/Lumen', ignore_errors=True)
+        self.assertFalse((self.home / '.local/share/Lumen/luatools').exists())
+        result = self.luna('launchers')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue((self.home / '.local/bin/luna-steam-machine').is_file())
+        self.assertTrue((self.home / '.local/share/applications/steamos-1920x1080-60.desktop').is_file())
+
+
 class LumenUpdateTestCase(unittest.TestCase):
     """`luna lumen`: backup, installer, re-attach. The installer and processes are faked."""
 

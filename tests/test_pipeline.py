@@ -144,7 +144,9 @@ for name in ("steam.cfg", "Steam.cfg"):
         return subprocess.run([sys.executable, str(LUNA)] + list(args),
                               capture_output=True, text=True, env=environment, timeout=180)
 
-    def bootstrap(self, *extra, installer=None):
+    def bootstrap(self, *extra, installer=None, lumen=True):
+        if lumen:
+            extra = tuple(extra) + ('--lumen',)
         return self.luna('bootstrap', '--no-system-packages', *extra, installer=installer)
 
     # -- helpers ---------------------------------------------------------
@@ -255,6 +257,34 @@ for name in ("steam.cfg", "Steam.cfg"):
         for call in invocations:
             self.assertIn('ubuntu12', call)
             self.assertNotIn('latest', call)
+
+    def test_bootstrap_without_flag_installs_only_the_luna_host(self):
+        result = self.bootstrap(lumen=False)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertFalse((self.home / '.local/share/Lumen').exists(), output)
+        self.assertTrue((self.home / '.local/share/Luna/bin/luna-host').is_file())
+        self.assertTrue((self.home / '.local/share/Luna/addons/luna/backend/main.lua').is_file())
+        self.assertFalse((self.home / 'lumen-installer-args.log').exists())
+        for name in ('steam.cfg', 'Steam.cfg'):
+            self.assertFalse((self.steam / name).exists())
+        self.assertIn('host: luna (standalone)', output)
+
+    def test_install_lumen_flag_runs_steam_then_lumen_then_luna(self):
+        result = self.luna('install', '--lumen', '--no-steam-machine',
+                           installer=self.installer_ok)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        steam = output.index('verified: Steam client pinned to %s' % KNOWN_GOOD)
+        lumen = output.index('verified: Lumen boot.lua')
+        luna = output.index('installed:')
+        self.assertLess(steam, lumen)
+        self.assertLess(lumen, luna)
+        self.assertTrue((self.home / 'lumen-installer-args.log').is_file())
+        self.assertEqual(json.loads((self.home / '.local/share/Luna/host.json').read_text())['active'],
+                         'lumen')
+        self.assertTrue((self.home / '.local/share/Lumen/sls-addons/luna/backend/main.lua').is_file())
+        self.assertTrue((self.home / '.local/share/Luna/bin/luna-host').is_file())
 
     def test_dry_run_writes_nothing(self):
         before = self.tree()

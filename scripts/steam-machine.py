@@ -18,9 +18,27 @@ import time
 DRM_ROOT = Path('/sys/class/drm')
 
 
+def luna_home():
+    return Path(os.environ.get('LUNA_HOME') or Path.home() / '.local/share/Luna')
+
+
+def active_host():
+    """host.json wins; otherwise an existing Lumen tree stays the Lumen host."""
+    try:
+        state = json.loads((luna_home() / 'host.json').read_text())
+        return 'luna' if state.get('active') == 'luna' else 'lumen'
+    except (OSError, ValueError, AttributeError):
+        root = Path(os.environ.get('LUMEN_DIR') or Path.home() / '.local/share/Lumen')
+        if ((root / 'lua/boot.lua').is_file() or (root / 'sls-addons').is_dir()
+                or (root / 'luatools').is_dir() or (root / 'sls-luna').is_dir()):
+            return 'lumen'
+        return 'luna'
+
+
 def paths():
     home = Path.home()
-    tools = home / '.local/share/Lumen/sls-luna'
+    tools = (luna_home() / 'state' if active_host() == 'luna'
+             else home / '.local/share/Lumen/sls-luna')
     data = Path(os.environ.get('XDG_DATA_HOME') or home / '.local/share')
     if not data.is_absolute():
         data = home / '.local/share'

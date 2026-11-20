@@ -4031,7 +4031,9 @@
         + (lumen.luatools ? ' \u00b7 LuaTools present' : ' \u00b7 LuaTools missing')
         + (lumen.bridge ? ' \u00b7 bridge present' : ' \u00b7 bridge missing'));
       const hostInfo = health.host || {};
-      line('Host: ' + (hostInfo.running || '?') + (hostInfo.configured && hostInfo.configured !== hostInfo.running
+      line('Host: ' + (hostInfo.running || '?')
+        + (hostInfo.running === 'luna' ? ' (standalone)' : '')
+        + (hostInfo.configured && hostInfo.configured !== hostInfo.running
         ? ' (configured: ' + hostInfo.configured + ')' : ''));
       line('Boot: ' + (boot.path || '?'));
       line('Steam: ' + (steam.root || '?') + (steam.exists ? '' : ' (steam.sh missing)'));

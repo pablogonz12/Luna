@@ -1050,6 +1050,7 @@ local function host_info()
   return {
     running = on_luna_host and 'luna' or 'lumen',
     configured = state.active == 'luna' and 'luna' or 'lumen',
+    standalone = (on_luna_host and state.active ~= 'lumen'),
     addons = base,
     state = update_dir,
     -- luna-host has no version string of its own: report the binary Luna
