@@ -373,6 +373,75 @@ local function shortcut_inventory(root,steamid64)
   end
   return names
 end
+-- Steam-native game inventory: the installed Steam library, read from Steam's
+-- own files only. Library roots come from steamapps/libraryfolders.vdf (plus
+-- the Steam root itself); each root's steamapps/appmanifest_<appid>.acf
+-- declares one installed app. Entry fields: appid, name, size (SizeOnDisk),
+-- lastPlayed (LastPlayed, 0 when absent). A missing root or an unparseable
+-- file yields the entries that could be read plus an `error` note; this
+-- function never throws and never shells out.
+local function steam_library(root)
+  local entries, err = {}, nil
+  if type(root) ~= 'string' or root == '' then return entries, 'Steam root not found' end
+  local libraries, seen = { root }, { [root] = true }
+  local folders = read_file(root .. '/steamapps/libraryfolders.vdf')
+    or read_file(root .. '/config/libraryfolders.vdf')
+  if folders then
+    local ok, store = pcall(text_vdf_parse, folders)
+    local bucket = ok and type(store) == 'table'
+      and (store.libraryfolders or store.LibraryFolders) or nil
+    if type(bucket) == 'table' then
+      for _, value in pairs(bucket) do
+        local path = type(value) == 'table' and tostring(value.path or '') or ''
+        if path ~= '' and not seen[path] then
+          seen[path] = true
+          libraries[#libraries + 1] = path
+        end
+      end
+    else
+      err = 'libraryfolders.vdf could not be parsed'
+    end
+  end
+  local installed = {}
+  for _, library in ipairs(libraries) do
+    local steamapps = library:gsub('/+$', '') .. '/steamapps'
+    local ok, items = pcall(fs.list, steamapps)
+    if ok and type(items) == 'table' then
+      for _, item in ipairs(items) do
+        if not item.is_directory then
+          local appid = tostring(item.name):match('^appmanifest_(%d+)%.acf$')
+          -- One entry per AppID: a stale manifest can sit in a second library.
+          if appid and valid_id(appid) and not installed[tonumber(appid)] then
+            local raw = read_file(steamapps .. '/appmanifest_' .. appid .. '.acf')
+            local app = nil
+            if raw then
+              local parsed, store = pcall(text_vdf_parse, raw)
+              app = parsed and type(store) == 'table'
+                and (store.AppState or store.appstate) or nil
+            end
+            if type(app) ~= 'table' then
+              err = err or ('appmanifest_' .. appid .. '.acf could not be parsed')
+            end
+            local name = type(app) == 'table' and app.name or ''
+            installed[tonumber(appid)] = true
+            entries[#entries + 1] = {
+              appid = tonumber(appid),
+              name = type(name) == 'string' and name:sub(1, 160) or '',
+              size = type(app) == 'table' and (tonumber(app.SizeOnDisk) or 0) or 0,
+              lastPlayed = type(app) == 'table' and (tonumber(app.LastPlayed) or 0) or 0,
+            }
+          end
+        end
+      end
+    elseif #libraries == 1 or library == root then
+      err = err or ('steamapps directory could not be listed under ' .. library)
+    end
+  end
+  table.sort(entries, function(a, b) return a.appid < b.appid end)
+  return entries, err
+end
+-- Exposed for tests and diagnostics: the Steam-native installed library.
+M.steam_library = steam_library
 local function decode_ledger(raw)
   local ok,obj=pcall(json.decode,raw)
   if not ok then return nil,'not valid JSON' end
@@ -559,29 +628,25 @@ function M.register(registry)
   --   * trackable - non-Steam library shortcuts. Nothing else records their
   --     playtime, so the agent must count sessions while they run.
   --   * editable  - every game the panel may show and edit: shortcuts plus the
-  --     numeric Lua manifests. Steam itself already records playtime for
-  --     manifest games, so those are deliberately edit-only and are never
-  --     auto-counted. SLS_PLAYTIME_TRACK_MANIFESTS=1 restores counting them.
+  --     installed Steam library (steamapps/appmanifest_*.acf across every
+  --     steamapps/libraryfolders.vdf root; see steam_library above). Steam
+  --     itself already records playtime for those apps, so they are
+  --     deliberately edit-only and are never auto-counted.
+  --     SLS_PLAYTIME_TRACK_MANIFESTS=1 restores counting them.
+  -- Counted: installed Steam manifests + non-Steam shortcuts. Nothing else.
   local inventory={ts=0,ids={},trackIds={},trackSet={},editSet={},
-    manifestCount=0,shortcutCount=0,shortcutNames={}}
+    manifestCount=0,shortcutCount=0,shortcutNames={},libraryError=''}
   local function refresh_inventory()
     local now=os.time()
     if now-inventory.ts<30 then return inventory end
     local editset,trackids={},{}
+    local libraryError=''
     if root~='' then
-      local dir=fs.join(root,'config','stplug-in')
-      if fs.exists(dir) then
-        local ok,items=pcall(fs.list,dir)
-        if ok and type(items)=='table' then
-          for _,entry in ipairs(items) do
-            if not entry.is_directory then
-              local appid=tostring(entry.name):match('^(%d+)%.lua$')
-              if valid_id(appid) and not editset[tonumber(appid)] then
-                editset[tonumber(appid)]=true
-              end
-            end
-          end
-        end
+      local installed,why=steam_library(root)
+      libraryError=why or ''
+      for _,entry in ipairs(installed) do
+        local id=tonumber(entry.appid)
+        if valid_id(id) then editset[id]=true end
       end
     end
     local shortcutNames={}
@@ -612,7 +677,8 @@ function M.register(registry)
     local ids={}
     for id in pairs(editset) do ids[#ids+1]=id end
     inventory={ts=now,ids=ids,trackIds=trackids,trackSet=trackset,editSet=editset,
-      manifestCount=manifestCount,shortcutCount=shortcutCount,shortcutNames=shortcutNames}
+      manifestCount=manifestCount,shortcutCount=shortcutCount,shortcutNames=shortcutNames,
+      libraryError=libraryError}
     return inventory
   end
   local function manifests()
@@ -796,7 +862,7 @@ function M.register(registry)
       stats=stats(data),account=data.account,
       runtime=runtime,schema=SCHEMA,recent=recent_events(data,20),titles=data.titles,
       manifestCount=snap.manifestCount,shortcutCount=snap.shortcutCount,
-      shortcutNames=snap.shortcutNames,
+      shortcutNames=snap.shortcutNames,libraryError=snap.libraryError,
       policy={trackManifests=os.getenv('SLS_PLAYTIME_TRACK_MANIFESTS')=='1'}})
   end
   registry.SlsPlaytimeEdit=function(raw)

@@ -374,26 +374,105 @@ local function default_unix()
   if ok and type(socket) == 'table' and type(socket.unix) == 'function' then return socket.unix() end
   return nil
 end
-local manifest_cache={at=0,apps={}}
+-- Steam's text KeyValues (libraryfolders.vdf, appmanifest_*.acf). Only
+-- quoted keys with string or object values are needed; junk degrades to {}.
+local function kv_parse(text)
+  local pos, length = 1, #text
+  local function skip()
+    while pos <= length do
+      local ch = text:sub(pos, pos)
+      if ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n' then pos = pos + 1
+      elseif ch == '/' and text:sub(pos + 1, pos + 1) == '/' then
+        local nl = text:find('\n', pos, true)
+        pos = nl and nl + 1 or length + 1
+      else return end
+    end
+  end
+  local function read_string()
+    local out = {}
+    pos = pos + 1
+    while pos <= length do
+      local ch = text:sub(pos, pos)
+      if ch == '\\' then out[#out + 1] = text:sub(pos + 1, pos + 1); pos = pos + 2
+      elseif ch == '"' then pos = pos + 1; return table.concat(out)
+      else out[#out + 1] = ch; pos = pos + 1 end
+    end
+    return table.concat(out)
+  end
+  local parse_object
+  parse_object = function()
+    local out = {}
+    while true do
+      skip()
+      if pos > length then return out end
+      if text:sub(pos, pos) == '}' then pos = pos + 1; return out end
+      if text:sub(pos, pos) == '"' then
+        local key = read_string()
+        skip()
+        local nextch = text:sub(pos, pos)
+        if nextch == '{' then pos = pos + 1; out[key] = parse_object()
+        elseif nextch == '"' then out[key] = read_string()
+        else out[key] = '' end
+      else pos = pos + 1 end
+    end
+  end
+  local ok, out = pcall(parse_object)
+  return ok and type(out) == 'table' and out or {}
+end
+-- The installed Steam library, from Steam's own files: every library root in
+-- steamapps/libraryfolders.vdf plus the Steam root, then one AppID per
+-- steamapps/appmanifest_<appid>.acf. A missing or corrupt file is reported as
+-- an `error` note next to the ids that could be read, never thrown.
+local function library_apps(root)
+  local apps, err, seen = {}, nil, {}
+  if type(root) ~= 'string' or root == '' then return apps, 'Steam root not found' end
+  local libraries = { root }
+  seen[root] = true
+  local folders = nil
+  for _, rel in ipairs({ '/steamapps/libraryfolders.vdf', '/config/libraryfolders.vdf' }) do
+    local f = io.open(root .. rel, 'rb')
+    if f then folders = f:read('*a'); f:close(); break end
+  end
+  if folders then
+    local bucket = kv_parse(folders)
+    bucket = type(bucket.libraryfolders) == 'table' and bucket.libraryfolders
+      or (type(bucket.LibraryFolders) == 'table' and bucket.LibraryFolders or nil)
+    if bucket then
+      for _, value in pairs(bucket) do
+        local path = type(value) == 'table' and tostring(value.path or '') or ''
+        if path ~= '' and not seen[path] then seen[path] = true; libraries[#libraries + 1] = path end
+      end
+    else
+      err = 'libraryfolders.vdf could not be parsed'
+    end
+  end
+  for _, library in ipairs(libraries) do
+    local steamapps = library:gsub('/+$', '') .. '/steamapps'
+    local ok, items = pcall(fs.list, steamapps)
+    if ok and type(items) == 'table' then
+      for _, entry in ipairs(items) do
+        if not entry.is_directory then
+          local id = tostring(entry.name):match('^appmanifest_(%d+)%.acf$')
+          if valid_id(id) and not seen['#' .. id] then
+            seen['#' .. id] = true
+            apps[#apps + 1] = tonumber(id)
+          end
+        end
+      end
+    elseif library == root then
+      err = err or ('steamapps directory could not be listed under ' .. library)
+    end
+  end
+  table.sort(apps)
+  return apps, err
+end
+M.library_apps = library_apps
+local manifest_cache={at=0,apps={},error=''}
 local function manifests()
   local now=os.time()
   if now-manifest_cache.at<30 then return manifest_cache.apps end
-  local root=millennium.steam_path()
-  local dir=fs.join(root,'config','stplug-in')
-  local apps={}
-  if root~='' and fs.exists(dir) then
-    local ok,files=pcall(fs.list,dir)
-    if ok and type(files)=='table' then
-      for _,entry in ipairs(files) do
-        if not entry.is_directory then
-          local id=tostring(entry.name):match('^(%d+)%.lua$')
-          if valid_id(id) then apps[#apps+1]=tonumber(id) end
-        end
-      end
-      table.sort(apps)
-    end
-  end
-  manifest_cache={at=now,apps=apps}
+  local apps,err=library_apps(millennium.steam_path())
+  manifest_cache={at=now,apps=apps,error=err or ''}
   return apps
 end
 local live = {}
@@ -405,7 +484,9 @@ function M.register(registry)
     helpersPaused=false,helperPauseReason='',restoredSelections=0}
   local titles={}
   registry.SlsPresenceGet=function()
-    return response({success=true, state=state, apps=manifests(), runtime=runtime,
+    local apps=manifests()
+    return response({success=true, state=state, apps=apps, libraryError=manifest_cache.error,
+      runtime=runtime,
       titles=titles, identity=identity(), session=helper_policy()})
   end
   -- Read-only contract probe: proves the wire shape Lumen actually delivers

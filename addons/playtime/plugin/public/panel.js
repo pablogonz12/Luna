@@ -105,7 +105,7 @@
         (live.error?`${live.error} `:'')+
         (activeIds.length?`Recording now: ${activeIds.map(id=>`${named(id)||('App '+id)} (${hours((snapshot.games||{})[id]?.trackedSeconds)}h)`).join(', ')}. `:'');
       info.textContent=`Account ${snapshot.account||'shared (unscoped)'} | ledger ${live.file||'playtime.json'}. `+
-        `${snapshot.manifestCount??0} Steam manifests (edit-only) + `+
+        `${snapshot.manifestCount??0} installed Steam games (edit-only) + `+
         `${snapshot.shortcutCount??0} non-Steam shortcuts (tracked)`+
         `${snapshot.policy?.trackManifests?(', manifest tracking forced on'):''}, `+
         `${Object.keys(snapshot.games||{}).length} with records, ${result.length} listed. `+
