@@ -25,12 +25,15 @@ package.preload['fs'] = function()
       return true
     end,
     exists=function(path)
-      return path:sub(-9)=='stplug-in' or path:match('loginusers%.vdf$')~=nil
+      return path:match('loginusers%.vdf$')~=nil
     end,
     join=function(...) return table.concat({...},'/') end,
     list=function(path)
-      assert(path:find('stplug%-in$'))
-      return { {name='620.lua',is_directory=false}, {name='note.txt',is_directory=false}, {name='999.lua.disabled',is_directory=false} }
+      -- The installed-library scan: appmanifest_<appid>.acf under steamapps.
+      assert(path:find('steamapps$'), 'unexpected listing: '..tostring(path))
+      return { {name='appmanifest_620.acf',is_directory=false},
+        {name='appmanifest_621.acf.disabled',is_directory=false},
+        {name='libraryfolders.vdf',is_directory=false} }
     end,
   }
 end
