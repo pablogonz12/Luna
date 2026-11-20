@@ -103,7 +103,11 @@ trap cleanup EXIT
 
 # A curl|bash invocation has no checkout beside the script. Fetch one immutable
 # repository commit, then install from its verified manifest just like a clone.
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+# Piped through bash there is no BASH_SOURCE; stay quiet under set -u.
+script_dir=""
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+fi
 if [[ -z "$script_dir" || ! -f "$script_dir/scripts/luna.py" ]]; then
   command -v curl >/dev/null || die "curl is required to fetch the SLS Luna payload."
   command -v python3 >/dev/null || die "python3 is required to fetch the SLS Luna payload."
