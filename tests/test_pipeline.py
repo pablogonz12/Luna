@@ -295,6 +295,99 @@ for name in ("steam.cfg", "Steam.cfg"):
         self.assertFalse((self.home / 'lumen-installer-args.log').exists())
         self.assertFalse((self.home / 'steam-invocations.log').exists())
 
+    # -- an older install left behind ------------------------------------
+    def old_install_layout(self):
+        """A machine with a three-day-old Luna: Lumen tree, pre-runtime luna.py, host lumen."""
+        lumen = self.home / '.local/share/Lumen'
+        for rel, body in (('lua/boot.lua', UPSTREAM), ('lua/about.lua', ABOUT),
+                          ('luatools/backend/main.lua', '-- backend\n')):
+            (lumen / rel).parent.mkdir(parents=True, exist_ok=True)
+            (lumen / rel).write_text(body)
+        (self.home / '.local/share/SLSsteam/path').mkdir(parents=True, exist_ok=True)
+        (self.home / '.local/share/SLSsteam/path/steam').write_text('')
+        # The copy an older run left: it takes ROOT from the Lumen tree, and no runtime/
+        # tree sits beside it. That is the layout behind the MANIFEST.json FAIL line.
+        (lumen / 'sls-luna').mkdir(parents=True, exist_ok=True)
+        shutil.copy2(LUNA, lumen / 'sls-luna/luna.py')
+        (self.home / '.local/share/Luna').mkdir(parents=True, exist_ok=True)
+        (self.home / '.local/share/Luna/host.json').write_text('{"active": "lumen"}\n')
+        return lumen
+
+    def test_bootstrap_over_an_old_install_replaces_the_stale_copy(self):
+        lumen = self.old_install_layout()
+        tools = lumen / 'sls-luna'
+        # The installed copy on its own is exactly the reported failure: it looks for
+        # vendor/MANIFEST.json under Lumen, where no checkout ever puts it.
+        stale = subprocess.run([sys.executable, str(tools / 'luna.py'), 'bootstrap',
+                                '--no-system-packages', '--keep-steam-client'],
+                               capture_output=True, text=True, env=self.env, timeout=180)
+        self.assertNotEqual(stale.returncode, 0)
+        # It is refused before it can look for pins that are not under Lumen at all.
+        self.assertIn('current tooling', stale.stderr)
+        self.assertNotIn('vendor-update.sh', stale.stderr)
+        result = self.bootstrap()
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        # The current code was installed first, and the stale copy was replaced by it.
+        self.assertIn('installed the current tooling first', output)
+        self.assertEqual((tools / 'luna.py').read_bytes(), LUNA.read_bytes())
+        self.assertEqual(json.loads((self.home / '.local/share/Luna/host.json').read_text())['active'],
+                         'lumen')
+        # The pinned payloads the run used now live in the installed copy's runtime tree.
+        runtime = tools / 'runtime'
+        self.assertTrue((runtime / 'vendor/MANIFEST.json').is_file())
+        manifest = json.loads((runtime / 'RUNTIME.json').read_text())
+        self.assertEqual(manifest['lunaSha256'], hashlib.sha256(LUNA.read_bytes()).hexdigest())
+        self.assertTrue((runtime / 'scripts/patch-lumen.py').is_file())
+        self.assertTrue((runtime / 'addons/luna/plugin/backend/main.lua').is_file())
+        self.assertTrue((lumen / 'sls-addons/luna/backend/main.lua').is_file())
+        # And the replaced copy serves the machine, instead of failing on its own pins.
+        served = subprocess.run([sys.executable, str(tools / 'luna.py'), 'status'],
+                                capture_output=True, text=True, env=self.env, timeout=180)
+        self.assertEqual(served.returncode, 0, served.stdout + served.stderr)
+        self.assertNotIn('vendor-update.sh', served.stderr)
+
+    def test_steam_running_stops_bootstrap_before_any_write_on_both_hosts(self):
+        self.old_install_layout()
+        self.fake('pgrep', '#!/bin/sh\nexit 0\n')  # Steam and steamwebhelper are "up"
+        for host in ('lumen', 'luna'):
+            (self.home / '.local/share/Luna/host.json').write_text(
+                '{"active": "%s"}\n' % host)
+            before = self.tree()
+            result = self.bootstrap(lumen=(host == 'lumen'))
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 2, output)  # EXIT_REFUSED
+            self.assertIn('Quit Steam (Steam → Exit) and run the command again', output)
+            self.assertIn('luna (standalone)' if host == 'luna' else 'for the lumen host', output)
+            self.assertNotIn('before changing Lumen', output)
+            # Nothing was written on either host: no tooling, no payloads, no Steam work.
+            self.assertFalse((self.home / '.local/share/Lumen/sls-luna/runtime').exists())
+            self.assertFalse((self.home / '.local/share/Lumen/sls-addons').exists())
+            self.assertFalse((self.home / 'steam-invocations.log').exists())
+            self.assertFalse((self.home / 'lumen-installer-args.log').exists())
+            self.assertEqual(before, self.tree())
+
+    def test_broken_runtime_tree_is_repaired_not_delegated_to(self):
+        lumen = self.old_install_layout()
+        first = self.bootstrap()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        tools = lumen / 'sls-luna'
+        # A half-updated tree: luna.py from the checkout, runtime from neither build.
+        (tools / 'runtime/RUNTIME.json').write_text('{"lunaSha256": "0", "files": {}}\n')
+        shutil.rmtree(tools / 'runtime/vendor')
+        delegated = subprocess.run([sys.executable, str(tools / 'luna.py'), 'bootstrap',
+                                    '--no-system-packages', '--keep-steam-client'],
+                                   capture_output=True, text=True, env=self.env, timeout=180)
+        self.assertEqual(delegated.returncode, 1)
+        self.assertIn('installing the current tooling first', delegated.stderr.lower())
+        self.assertNotIn('vendor-update.sh', delegated.stderr)
+        repaired = self.bootstrap()
+        output = repaired.stdout + repaired.stderr
+        self.assertEqual(repaired.returncode, 0, output)
+        self.assertTrue((tools / 'runtime/vendor/MANIFEST.json').is_file())
+        manifest = json.loads((tools / 'runtime/RUNTIME.json').read_text())
+        self.assertEqual(manifest['lunaSha256'], hashlib.sha256(LUNA.read_bytes()).hexdigest())
+
 
 if __name__ == '__main__':
     unittest.main()

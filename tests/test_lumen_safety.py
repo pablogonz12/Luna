@@ -856,7 +856,8 @@ class StateCase(SafetyBase):
             seen['command'], seen['env'] = command, env
             return subprocess.CompletedProcess(command, 0)
 
-        with mock.patch.object(self.m, '_LUNA_REPLACED', True), mock.patch.object(self.m.subprocess, 'run', fake_run), \
+        with mock.patch.object(self.m, 'installed_copy_problems', lambda *a, **k: []), \
+                mock.patch.object(self.m, '_LUNA_REPLACED', True), mock.patch.object(self.m.subprocess, 'run', fake_run), \
                 mock.patch.object(self.m, 'apply_base_update', side_effect=AssertionError('old code must not drive it')):
             self.assertTrue(self.m.apply_queued_lumen({}))
         self.assertEqual(seen['command'][1:], [str(self.m.luna_tools_dir() / 'luna.py'), 'lumen', 'update', '--yes'])

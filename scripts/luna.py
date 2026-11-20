@@ -817,8 +817,8 @@ def refuse_reasons(for_install, stop_sidecar=False):
         if not (root / 'luatools' / 'backend' / 'main.lua').is_file():
             reasons.append('LuaTools-Moon backend not found under %s' % root)
     if steam_running():
-        reasons.append('Steam is running. Close it completely (Steam -> Exit) before changing %s.'
-                       % ('the plugin host' if host == 'luna' else 'Lumen'))
+        reasons.append('Steam is running. Quit Steam (Steam → Exit) and run the command again; '
+                       'the %s host is not changed while Steam is up.' % host_label(host))
     # With the luna-host cutover the menu is served from Luna's tree, so an
     # add-on write aimed at Lumen is invisible until the two are mirrored again.
     if active_host() == 'luna' and luna_host_running() and not steam_running():
@@ -1792,6 +1792,43 @@ def locked(func):
 
 
 CLI_LAUNCHER = '''#!/bin/sh
+# Managed by SLS Luna CLI v4
+# Runs the copy of luna.py kept by the active plugin host (see: luna host status); when a
+# base install replaced the Lumen tree, the rescue copy in Luna's own state dir is used.
+# A copy is only run when its support tree sits beside it: a pre-runtime copy takes ROOT
+# from its own directory and then looks for vendor/MANIFEST.json in the Lumen tree, which
+# is the "is missing; run scripts/vendor-update.sh" dead end. Skip it, never consult it.
+LUNA_HOME="${LUNA_HOME:-$HOME/.local/share/Luna}"
+if grep -q '"active": *"luna"' "$LUNA_HOME/host.json" 2>/dev/null \\
+   && [ -f "$LUNA_HOME/state/runtime/RUNTIME.json" ] \\
+   && [ -f "$LUNA_HOME/state/runtime/vendor/MANIFEST.json" ]; then
+  exec python3 "$LUNA_HOME/state/luna.py" "$@"
+fi
+for copy in "$HOME/.local/share/Lumen/sls-luna/luna.py" "$LUNA_HOME/state/rescue/luna.py"; do
+  dir=$(dirname "$copy")
+  if [ -f "$copy" ] && [ -f "$dir/runtime/RUNTIME.json" ] \\
+     && [ -f "$dir/runtime/vendor/MANIFEST.json" ]; then
+    exec python3 "$copy" "$@"
+  fi
+done
+echo "luna: no Luna tooling copy with its runtime tree found (a base install may have replaced ~/.local/share/Lumen/sls-luna)." >&2
+echo "Get Luna back: unpack a Luna release (or use the checkout) and run: python3 scripts/luna.py install --force" >&2
+exit 1
+'''
+
+# The pre-runtime launcher Luna wrote itself (v3): still ours, upgraded in place on install.
+LEGACY_CLI_LAUNCHERS = ('''#!/bin/sh
+# Managed by SLS Luna CLI v2
+# Runs the copy of luna.py kept by the active plugin host (see: luna host status).
+LUNA_HOME="${LUNA_HOME:-$HOME/.local/share/Luna}"
+if grep -q '"active": *"luna"' "$LUNA_HOME/host.json" 2>/dev/null && [ -f "$LUNA_HOME/state/luna.py" ]; then
+  exec python3 "$LUNA_HOME/state/luna.py" "$@"
+fi
+exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
+''', '''#!/bin/sh
+# Managed by SLS Luna CLI v1
+exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
+''', '''#!/bin/sh
 # Managed by SLS Luna CLI v3
 # Runs the copy of luna.py kept by the active plugin host (see: luna host status); when a
 # base install replaced the Lumen tree, the rescue copy in Luna's own state dir is used.
@@ -1805,21 +1842,7 @@ done
 echo "luna: no Luna tooling copy found (a base install may have replaced ~/.local/share/Lumen/sls-luna)." >&2
 echo "Get Luna back: unpack a Luna release (or use the checkout) and run: python3 scripts/luna.py install --force" >&2
 exit 1
-'''
-
-# Earlier launcher bytes Luna wrote itself: still ours, safe to upgrade in place.
-LEGACY_CLI_LAUNCHERS = ('''#!/bin/sh
-# Managed by SLS Luna CLI v2
-# Runs the copy of luna.py kept by the active plugin host (see: luna host status).
-LUNA_HOME="${LUNA_HOME:-$HOME/.local/share/Luna}"
-if grep -q '"active": *"luna"' "$LUNA_HOME/host.json" 2>/dev/null && [ -f "$LUNA_HOME/state/luna.py" ]; then
-  exec python3 "$LUNA_HOME/state/luna.py" "$@"
-fi
-exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
-''', '''#!/bin/sh
-# Managed by SLS Luna CLI v1
-exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
-''',)
+''')
 
 
 def ours_cli_launcher(launcher):
@@ -1936,6 +1959,29 @@ def runtime_problems(full=False):
     if full and install_marker_path().is_file():
         problems.append('a previous Luna install was interrupted (%s present)' % install_marker_path())
     return ['%s; %s' % (problems[0], RUNTIME_REPAIR)] + problems[1:] if problems else []
+
+
+def installed_copy_problems(tools=None):
+    """Problems with the copy at <tools>/luna.py + <tools>/runtime, checked before re-exec'ing it."""
+    tools = Path(tools or luna_tools_dir())
+    script = tools / 'luna.py'
+    runtime = tools / 'runtime'
+    if not script.is_file():
+        return ['%s is missing' % script]
+    manifest = read_json_file(runtime / RUNTIME_MANIFEST)
+    if not isinstance(manifest, dict):
+        return ['%s has no %s, so it would run without its support tree' % (runtime, RUNTIME_MANIFEST)]
+    problems = []
+    try:
+        if manifest.get('lunaSha256') != _file_sha256(script):
+            problems.append('%s was replaced after its runtime tree was deployed' % script)
+    except OSError:
+        problems.append('%s is unreadable' % script)
+    for rel in sorted((manifest.get('files') or {})):
+        if not (runtime / rel).is_file():
+            problems.append('%s/%s is missing' % (runtime, rel))
+            break
+    return problems
 
 
 def write_tooling():
@@ -5062,14 +5108,110 @@ def resume_command(options):
         parts.append('--no-steam-machine')
     if getattr(options, 'lumen', False):
         parts.append('--lumen')
-    return ' '.join(parts)
+    command = ' '.join(parts)
+    if ROOT != _INSTALLED_ROOT:
+        # A stale launcher or installed copy would run other code: name this one too.
+        command += '  (this code: python3 %s %s)' % (Path(__file__).resolve(), ' '.join(parts[1:]))
+    return command
 
 
 def bootstrap_stop(options, step, reason, code=1):
-    """Stop the pipeline at `step`, with the exact command that resumes it."""
+    """Stop the pipeline at `step`: what failed, what state the machine is in, how to resume."""
     print('\nbootstrap : STOPPED at %s: %s' % (step, reason), file=sys.stderr)
+    print('bootstrap : state: %s' % bootstrap_state_note(), file=sys.stderr)
     print('bootstrap : fix that, then resume with: %s' % resume_command(options), file=sys.stderr)
     return code
+
+
+_BOOTSTRAP_LUNA_BEFORE = None  # fingerprint of the Luna tree taken before its half of the run
+
+
+def luna_state_token():
+    """Cheap fingerprint of the Luna-owned paths, to say honestly whether a run changed them."""
+    paths = [addons_dir(), luna_home() / 'bin', luna_tools_dir() / 'luna.py',
+             luna_tools_dir() / 'runtime', home() / '.local/bin/luna']
+    token = []
+    for path in paths:
+        try:
+            info = path.stat()
+            token.append((str(path), info.st_mtime_ns, info.st_size))
+        except OSError:
+            token.append((str(path), 0, 0))
+    return token
+
+
+def bootstrap_state_note():
+    """The machine's state at a bootstrap stop, in the terms the user needs to act on."""
+    base = {'ready': 'Moon/Lumen/LuaTools base kept as it was',
+            'partial': 'Moon/Lumen/LuaTools base is partial (its upstream installer must repair it)',
+            'none': 'Moon/Lumen/LuaTools base not installed'}[base_state()]
+    if install_marker_path().is_file():
+        luna = ('Luna partially changed: this run wrote part of it and could not undo every '
+                'change (`luna status` reports the interrupted install)')
+    elif _BOOTSTRAP_LUNA_BEFORE is not None and luna_state_token() != _BOOTSTRAP_LUNA_BEFORE:
+        luna = 'Luna was installed by this run'
+    else:
+        luna = 'Luna unchanged by this run'
+    return '%s; %s' % (base, luna)
+
+
+def bootstrap_preflight(options, say, dry):
+    """Steam must be closed before anything is written, on either host.
+
+    This used to run inside the Steam/Lumen steps, after the packages and after
+    Luna's own tooling had already been written, and its wording said "Lumen"
+    even when this run serves the luna host. One refusal, first, named for the
+    host it serves.
+    """
+    host = serving_host()
+    if not steam_running():
+        return EXIT_OK
+    return bootstrap_stop(options, 'Steam', (
+        'Steam is running. Quit Steam (Steam → Exit) and run the command again. '
+        'This run installs %s for the %s host and writes nothing while Steam is up.'
+        % ('the Moon/Lumen base and Luna' if host == 'lumen' else 'Luna',
+           host_label(host))), EXIT_REFUSED)
+
+
+def bootstrap_tooling(options, say, dry):
+    """Install the tooling of the code that is running before anything can use an old copy.
+
+    A bootstrap from a checkout or an unpacked bundle used to leave the copy from
+    an earlier run (and the `luna` launcher, and every child process) pointed at
+    that old tree. Such a copy has no runtime/ tree, so it takes ROOT from its own
+    directory and looks for vendor/MANIFEST.json in the Lumen tree: the "is
+    missing; run scripts/vendor-update.sh" dead end. Deploy the current runtime
+    tree and luna.py first; then the old copy is replaced, never consulted.
+    """
+    tools = luna_tools_dir()
+    target = tools / 'luna.py'
+    if ROOT == _INSTALLED_ROOT:
+        problems = runtime_problems()
+        if problems:
+            return bootstrap_stop(options, 'Tooling', (
+                'the installed copy this run started from cannot serve it (%s). Installing the '
+                'current tooling first needs its source: run this from a checkout or an unpacked '
+                'bundle (python3 <checkout>/scripts/luna.py bootstrap)' % problems[0]))
+        say('tooling: running from the installed copy %s (runtime tree verified)' % target)
+        return EXIT_OK
+    missing = ([rel for rel, source in runtime_sources() if not source.is_file()]
+               + ([] if MANIFEST_PATH.is_file() else ['vendor/MANIFEST.json']))
+    if missing:
+        return bootstrap_stop(options, 'Tooling', (
+            'the code that is running is incomplete: %s is missing under %s. An older installed '
+            'copy cannot fix itself; start the run from a checkout or an unpacked release '
+            '(python3 <checkout>/scripts/luna.py bootstrap) so the current tooling is installed '
+            'first' % (missing[0], ROOT)))
+    if dry:
+        say('would install the current tooling first (%s and its runtime/ tree)' % target)
+        return EXIT_OK
+    try:
+        write_tooling()
+    except OSError as error:
+        return bootstrap_stop(options, 'Tooling', (
+            'could not install the current tooling to %s: %s' % (tools, error)))
+    say('installed the current tooling first: %s (runtime/ %s)' % (target, tools / 'runtime'))
+    return EXIT_OK
 
 
 def bootstrap_channels(options):
@@ -5223,11 +5365,18 @@ def bootstrap_luna(options, say, dry):
         say('would verify the payloads and install the Luna add-ons, bridge, tooling, '
             'shortcuts and the update timer')
         return EXIT_OK
-    problems = _manifest_problems(load_manifest(), ROOT)
+    try:
+        manifest = load_manifest()
+    except SystemExit as error:
+        return bootstrap_stop(options, 'Luna', (
+            '%s. The code running here is %s, so the pinned payloads are not beside it; start '
+            'the run from a checkout or an unpacked release, never from an older installed copy'
+            % (error, ROOT)))
+    problems = _manifest_problems(manifest, ROOT)
     missing = [problem for problem in problems if problem.startswith('missing ')]
     if missing:
         return bootstrap_stop(options, 'Luna', (
-            'the checkout is incomplete: %s' % missing[0]))
+            'the code that is running is incomplete: %s' % missing[0]))
     if problems:
         say('WARN: %d payload(s) differ from vendor/MANIFEST.json (development checkout); '
             'the installed bytes are still verified below' % len(problems))
@@ -5257,7 +5406,7 @@ def bootstrap_luna(options, say, dry):
 
 def cmd_bootstrap(options):
     """Fresh-PC setup: packages, optional Steam pin/Lumen base, then Luna."""
-    global _TARGET_HOST
+    global _TARGET_HOST, _BOOTSTRAP_LUNA_BEFORE
     dry = getattr(options, 'dry_run', False)
     lumen = bool(getattr(options, 'lumen', False)) or active_host() == 'lumen'
     pin = getattr(options, 'lock_steam_client', False)
@@ -5265,6 +5414,16 @@ def cmd_bootstrap(options):
     say = lambda text: print('bootstrap : %s' % text, flush=True)  # noqa: E731
     if flatpak_steam_only():
         say(FLATPAK_WARNING)
+    # Steam closed first: nothing below may write while it is up, and the refusal
+    # names the host this run serves (it used to fire late and say "Lumen").
+    code = bootstrap_preflight(options, say, dry)
+    if code != EXIT_OK:
+        return code
+    # Then replace any older installed copy with the code that is running, so no
+    # step (or child process) can be answered by a copy without a runtime tree.
+    code = bootstrap_tooling(options, say, dry)
+    if code != EXIT_OK:
+        return code
     install_system_packages(options, say)
     if lumen or pin:
         code = bootstrap_steam(options, say, dry)
@@ -5278,6 +5437,7 @@ def cmd_bootstrap(options):
             return code
     else:
         say('host: luna (standalone); Lumen/LuaTools are not installed (use --lumen to opt in)')
+    _BOOTSTRAP_LUNA_BEFORE = luna_state_token()
     code = bootstrap_luna(options, say, dry)
     if code != EXIT_OK:
         return code
@@ -6938,6 +7098,16 @@ _LUNA_REPLACED = False  # set once this run installed a new Luna release
 def run_update_in_new_luna():
     """The Luna release installed earlier in this run replaced luna.py and the runtime tree;
     this process still runs the OLD code. Run the Lumen step with the NEW installed copy."""
+    problems = installed_copy_problems()
+    if problems:
+        # Re-exec'ing a copy whose runtime tree is missing or from another build sends
+        # the next step looking for pins that are not there. Repair, never delegate.
+        print('REFUSING to run the Lumen step from the installed copy:', file=sys.stderr)
+        for problem in problems:
+            print('  - %s' % problem, file=sys.stderr)
+        print('Fix that by installing the current tooling first: luna install --force '
+              '(or python3 <checkout>/scripts/luna.py install --force)', file=sys.stderr)
+        return EXIT_REFUSED
     command = [sys.executable, str(luna_tools_dir() / 'luna.py'), 'lumen', 'update', '--yes']
     return subprocess.run(command, env=dict(os.environ, **{LOCK_HELD_ENV: '1'})).returncode
 
