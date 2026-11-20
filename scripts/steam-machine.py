@@ -31,6 +31,18 @@ def digest(content):
     return hashlib.sha256(content).hexdigest()
 
 
+MARKER = 'X-Luna-SteamOS=true'
+
+
+def has_marker(content):
+    """Luna stamps every launcher it writes. The stamp alone never grants ownership."""
+    try:
+        text = content.decode('utf-8')
+    except UnicodeDecodeError:
+        return False
+    return any(line.strip() == MARKER for line in text.splitlines())
+
+
 def read_state():
     try:
         state = json.loads((paths()[0] / 'steam-machine-shortcuts.json').read_text())
@@ -146,7 +158,7 @@ def legacy_profile(path):
     split = arguments.index('--')
     options, child = arguments[:split], arguments[split + 1:]
     if child[:1] == [str(Path.home() / '.local/bin/ccd-launch')]:
-        if child[1:4] != ['--group', 'auto', '--']:
+        if child[1:4] not in (['--group', 'auto', '--'], ['--group', 'e', '--']):
             return None
         child = child[4:]
     allowed = {'steam', str(Path.home() / '.local/share/SLSsteam/path/steam')}
@@ -189,14 +201,22 @@ def atomic_write(path, content, mode):
             os.unlink(temporary)
 
 
-def install(dry_run=False, migrate_legacy=False):
-    tools, applications, wrapper = paths()
-    state = read_state()
-    source = Path(__file__).read_bytes()
-    installed = tools / 'steam-machine.py'
-    wrapper_bytes = ('#!/bin/sh\n# Luna-managed SteamOS Mode entry point.\nexec %s %s run "$@"\n'
-                     % (shlex.quote(sys.executable), shlex.quote(str(installed)))).encode()
-    desired = {installed: (source, 0o755), wrapper: (wrapper_bytes, 0o755)}
+def archive_owned(tools, path):
+    """Keep the bytes of a file before it is replaced."""
+    folder = tools / 'archive'
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    target = folder / ('%s.%s' % (path.name, stamp))
+    suffix = 0
+    while target.exists():
+        suffix += 1
+        target = folder / ('%s.%s-%d' % (path.name, stamp, suffix))
+    atomic_write(target, path.read_bytes(), 0o600)
+    print('archived previous copy: %s' % target)
+    return target
+
+
+def base_modes(state):
     modes = {}
     for item in discover_profiles():
         modes[mode_key(item)] = item
@@ -210,6 +230,69 @@ def install(dry_run=False, migrate_legacy=False):
             continue
         old_profiles[name] = checked
         modes.setdefault(mode_key(checked), checked)
+    return modes, old_profiles
+
+
+def build_desired(modes):
+    tools, applications, wrapper = paths()
+    installed = tools / 'steam-machine.py'
+    wrapper_bytes = ('#!/bin/sh\n# Luna-managed SteamOS Mode entry point.\nexec %s %s run "$@"\n'
+                     % (shlex.quote(sys.executable), shlex.quote(str(installed)))).encode()
+    desired = {installed: (Path(__file__).read_bytes(), 0o755), wrapper: (wrapper_bytes, 0o755)}
+    for item in modes.values():
+        desired[applications / entry_name(item)] = (desktop_entry(item), 0o644)
+    return desired
+
+
+def classify(path, content, old, adopt):
+    """Decide what to do with a desired file. Never returns 'write' over unrecorded edits.
+
+    'write'  : absent, identical, or untouched since Luna wrote it (silent upgrade)
+    'adopt'  : the owner asked for Luna's version explicitly (old bytes get archived)
+    'edited' : bytes differ from what Luna last wrote, or Luna has no record
+    'foreign': no record and no Luna marker
+    """
+    if path.is_symlink():
+        raise ValueError('Refusing to replace a launcher symlink: %s' % path)
+    if not path.exists():
+        return 'write'
+    current = path.read_bytes()
+    if current == content:
+        return 'write'
+    if str(path) in adopt:
+        return 'adopt'
+    recorded = old.get('sha256') if old else None
+    if recorded and digest(current) == recorded:
+        return 'write'
+    if not recorded and path.suffix == '.desktop' and not has_marker(current):
+        return 'foreign'
+    return 'edited'
+
+
+def kept_line(path, kind, behind):
+    if kind == 'foreign':
+        return 'kept (not a Luna file): %s' % path
+    line = 'kept (edited outside Luna): %s' % path
+    if behind:
+        line += " - Luna's version has changed since, so this copy is behind"
+    return line
+
+
+def resolve_adopt(adopt, desired):
+    chosen = set()
+    for raw in adopt or []:
+        matches = [path for path in desired if str(path) == str(Path(raw).expanduser()) or path.name == raw]
+        if not matches:
+            raise ValueError('--adopt %s is not a file Luna manages (see: steam-machine.py status)' % raw)
+        chosen.update(str(path) for path in matches)
+    return chosen
+
+
+def install(dry_run=False, migrate_legacy=False, adopt=()):
+    tools, applications, wrapper = paths()
+    state = read_state()
+    installed = tools / 'steam-machine.py'
+    modes, old_profiles = base_modes(state)
     adopted = {}
     if migrate_legacy:
         for path in sorted(applications.glob('steam-machine*.desktop')):
@@ -225,19 +308,20 @@ def install(dry_run=False, migrate_legacy=False):
                     adopted[str(path)] = item
             elif str(path) not in state['files']:
                 print('preserved custom launcher: %s' % path)
-    for key, item in modes.items():
-        desired[applications / entry_name(item)] = (desktop_entry(item), 0o644)
+    desired = build_desired(modes)
+    adopt_set = resolve_adopt(adopt, desired)
     planned = {}
+    archive = set()
+    kept = {}
     for path, (content, mode) in desired.items():
         old = state['files'].get(str(path))
-        if path.is_symlink():
-            raise ValueError('Refusing to replace a launcher symlink: %s' % path)
-        if path.exists():
-            current = digest(path.read_bytes())
-            if old and current != old.get('sha256'):
-                raise ValueError('Launcher changed outside Luna; preserve/review it first: %s' % path)
-            if not old and path.read_bytes() != content:
-                raise ValueError('Refusing to overwrite an unmanaged launcher: %s' % path)
+        action = classify(path, content, old, adopt_set)
+        if action in ('edited', 'foreign'):
+            recorded = old.get('sha256') if old else None
+            kept[path] = (action, bool(recorded) and recorded != digest(content))
+            continue
+        if action == 'adopt':
+            archive.add(path)
         planned[path] = (content, mode)
     # Adopt-and-rename: recognized legacy launchers move to the SteamOS scheme.
     # First-time adoptions are backed up; previously managed old-scheme files
@@ -262,7 +346,9 @@ def install(dry_run=False, migrate_legacy=False):
         retire.append((path, item, info))
     if dry_run:
         for path in planned:
-            print('would manage: %s' % path)
+            print('would %s: %s' % ('adopt (archive old, then overwrite)' if path in archive else 'manage', path))
+        for path, (kind, behind) in kept.items():
+            print('would keep: ' + kept_line(path, kind, behind))
         for path, item, _ in retire:
             print('would retire: %s -> %s' % (path, applications / entry_name(item)))
         return 0
@@ -273,6 +359,8 @@ def install(dry_run=False, migrate_legacy=False):
             previous[path] = (path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None
             old = state['files'].get(str(path), {})
             if not path.exists() or path.read_bytes() != content or path.stat().st_mode & 0o777 != mode:
+                if path in archive:
+                    archive_owned(tools, path)
                 atomic_write(path, content, mode)
             state['files'][str(path)] = dict(old, sha256=digest(content))
         for path, item, info in retire:
@@ -291,6 +379,16 @@ def install(dry_run=False, migrate_legacy=False):
                 state['files'][str(new_path)] = dict(current, original=original,
                                                      migrated_from=str(path))
             print('retired old shortcut name: %s -> %s' % (path.name, new_path.name))
+        # Kept files stay quiet on later runs; they are reported again only when the
+        # file or Luna's own version of it changes. `status` always lists them.
+        old_kept = state.get('kept') if isinstance(state.get('kept'), dict) else {}
+        state['kept'] = {}
+        announce = []
+        for path, (kind, behind) in kept.items():
+            seen = {'seen': digest(path.read_bytes()), 'luna': digest(desired[path][0]), 'kind': kind}
+            state['kept'][str(path)] = seen
+            if old_kept.get(str(path)) != seen:
+                announce.append(kept_line(path, kind, behind))
         state['profiles'] = {entry_name(item): dict(zip(('width', 'height', 'refresh'), key))
                              for key, item in modes.items()}
         atomic_write(tools / 'steam-machine-shortcuts.json', (json.dumps(state, indent=2, sort_keys=True) + '\n').encode(), 0o600)
@@ -303,7 +401,37 @@ def install(dry_run=False, migrate_legacy=False):
         raise
     if shutil.which('update-desktop-database'):
         subprocess.run(['update-desktop-database', str(applications)], capture_output=True, timeout=15)
+    for line in announce:
+        print(line)
+    if announce:
+        script = Path(__file__).resolve()
+        print('  compare with Luna\'s version: python3 %s status --diff' % shlex.quote(str(script)))
+        print('  adopt Luna\'s version (archives yours first): python3 %s install --adopt PATH' % shlex.quote(str(script)))
     print('SteamOS Mode shortcuts: %d; SDL mouse compatibility' % len(modes))
+    return 0
+
+
+def status(show_diff=False):
+    """Read-only: list files Luna kept because they were edited outside Luna."""
+    state = read_state()
+    modes, _ = base_modes(state)
+    desired = build_desired(modes)
+    found = 0
+    for path, (content, _) in desired.items():
+        kind = classify(path, content, state['files'].get(str(path)), set())
+        if kind not in ('edited', 'foreign'):
+            continue
+        found += 1
+        recorded = (state['files'].get(str(path)) or {}).get('sha256')
+        print(kept_line(path, kind, bool(recorded) and recorded != digest(content)))
+        if show_diff:
+            import difflib
+            old = path.read_bytes().decode('utf-8', 'replace').splitlines(True)
+            new = content.decode('utf-8', 'replace').splitlines(True)
+            sys.stdout.writelines(difflib.unified_diff(old, new, str(path), "Luna's version"))
+    if not found:
+        print('No files kept: everything Luna manages is Luna-written.')
+    return 0
     if any(info.get('original') for info in state['files'].values()):
         print('Original launcher backups: %s' % (tools / 'steam-machine-backups'))
     return 0
@@ -352,15 +480,34 @@ def launch_command(options):
     if capture and backend == 'wayland':
         raise ValueError('Use the SDL backend for captured mouse mode; the Wayland backend can freeze pointer motion.')
     command = [gamescope, '--backend', backend, '-W', str(item['width']), '-H', str(item['height']),
-               '-w', str(item['width']), '-h', str(item['height']), '-r', str(item['refresh']), '--fullscreen', '--steam']
+               '-w', str(item['width']), '-h', str(item['height']), '-r', str(item['refresh']), '--fullscreen', '--steam', '--mangoapp']
     if capture:
         command.append('--force-grab-cursor')
-    command += ['--', shutil.which('env') or '/usr/bin/env', '-u', 'WAYLAND_DISPLAY',
+    # gamescope tells Steam that mangoapp exists, and Steam then drives its visibility
+    # (the QAM performance overlay level, hidden by default) and overrides keybinds.
+    # Hide that from the client so the overlay follows our config and Shift_R+F12 alone.
+    command.append('--')
+    hotkey = Path.home() / '.local/bin/mangoapp-hotkey'
+    if hotkey.is_file() and os.access(hotkey, os.X_OK):
+        # mangoapp samples its own toggle key (0.1-0.5 s apart) and misses most presses.
+        # This helper watches the session keyboard and sends mangoapp a toggle message.
+        command += ['/bin/sh', '-c', '"$0" & exec "$@"', str(hotkey)]
+    command += [shutil.which('env') or '/usr/bin/env', '-u', 'WAYLAND_DISPLAY', '-u', 'MANGOHUD', '-u', 'MANGOHUD_CONFIG',
+                '-u', 'STEAM_USE_MANGOAPP', '-u', 'STEAM_MANGOAPP_PRESETS_SUPPORTED',
+                '-u', 'STEAM_MANGOAPP_HORIZONTAL_SUPPORTED',
+                # MANGOHUD=0: mangoapp already draws the overlay here, so keep the per-game layer
+                # (~/.local/share/vulkan/implicit_layer.d/MangoHud-steam.*.json) from adding a second one.
+                'MANGOHUD=0',
                 'SDL_VIDEODRIVER=x11', 'SDL_VIDEO_DRIVER=x11', 'GDK_BACKEND=x11', 'QT_QPA_PLATFORM=xcb']
     cpu = Path.home() / '.local/bin/ccd-launch'
     if cpu.is_file() and os.access(cpu, os.X_OK):
-        command += [str(cpu), '--group', 'auto', '--']
-    return command + [str(steam), '-gamepadui']
+        # CCD layout: Steam client on CCD1 (group e); games reach CCD0 through steam-ccd-pin.
+        command += [str(cpu), '--group', 'e', '--']
+    command = command + [str(steam), '-gamepadui']
+    if cpu.is_file() and os.access(cpu, os.X_OK):
+        # gamescope (the compositor) must stay on all CPUs, whatever slice the launcher itself sits in.
+        command = [str(cpu), '--group', 'all', '--'] + command
+    return command
 
 
 def steam_running():
@@ -422,6 +569,14 @@ def run(options):
         env = os.environ.copy()
         env['SDL_VIDEODRIVER'] = 'wayland,x11' if env.get('WAYLAND_DISPLAY') else 'x11'
         env['SDL_VIDEO_DRIVER'] = env['SDL_VIDEODRIVER']
+        # gamescope --steam otherwise writes a throwaway config containing only
+        # "no_display" and points MANGOHUD_CONFIGFILE at it, so mangoapp starts
+        # hidden and our layout and toggle key are ignored. Pin the real config.
+        env['MANGOHUD_CONFIGFILE'] = str(Path.home() / '.config/MangoHud/MangoHud.conf')
+        # Read that file, but park mangoapp's built-in toggle on an unused key:
+        # the mangoapp-hotkey helper owns the toggle (the key is still toggle_hud in the file).
+        if os.access(Path.home() / '.local/bin/mangoapp-hotkey', os.X_OK):
+            env['MANGOHUD_CONFIG'] = 'read_cfg,toggle_hud=F24'
         log = Path.home() / '.local/state/Luna/steam-machine.log'
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open('ab') as out:
@@ -441,18 +596,24 @@ def main():
     install_parser = sub.add_parser('install')
     install_parser.add_argument('--dry-run', action='store_true')
     install_parser.add_argument('--migrate-legacy', action='store_true')
+    install_parser.add_argument('--adopt', action='append', default=[], metavar='PATH',
+                                help="overwrite this kept file with Luna's version (old bytes are archived first)")
+    status_parser = sub.add_parser('status')
+    status_parser.add_argument('--diff', action='store_true')
     sub.add_parser('uninstall')
     launch = sub.add_parser('run')
     launch.add_argument('--width', type=int, default=1920)
     launch.add_argument('--height', type=int, default=1080)
     launch.add_argument('--refresh', type=int, default=60)
-    launch.add_argument('--mouse-mode', choices=('auto', 'captured', 'free'), default='auto')
+    launch.add_argument('--mouse-mode', choices=('auto', 'captured', 'free'), default='free')
     launch.add_argument('--backend', choices=('sdl', 'wayland'), default='sdl')
     launch.add_argument('--print-command', action='store_true')
     options = parser.parse_args()
     try:
         if options.command == 'install':
-            return install(options.dry_run, options.migrate_legacy)
+            return install(options.dry_run, options.migrate_legacy, options.adopt)
+        if options.command == 'status':
+            return status(options.diff)
         if options.command == 'uninstall':
             return uninstall()
         return run(options)

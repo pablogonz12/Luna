@@ -24,6 +24,15 @@ local MAX_IMAGE_BYTES = 8 * 1024 * 1024
 -- reasonable sizes so the CDP binding is not asked to carry huge strings.
 local MAX_LIVE_BYTES = 4 * 1024 * 1024
 local MAX_ASSETS = 60
+-- Lumen runs every RPC on one injector thread: a request must never be given
+-- more than this to answer, and the Auto pass must not wait at all.
+local HTTP_TIMEOUT = 8
+-- Largest response body accepted from SteamGridDB (API JSON or image bytes).
+local MAX_BODY_BYTES = MAX_IMAGE_BYTES
+-- An Auto pass is abandoned after this many seconds; unfinished slots are
+-- reported as failures instead of leaving the page waiting.
+local AUTO_JOB_TTL = 180
+local AUTO_KINDS = { 'grid', 'wide', 'hero', 'logo', 'icon' }
 
 -- kind -> Steam file suffix (the part between the appid and the extension)
 local KINDS = {
@@ -45,6 +54,22 @@ local LIVE_TYPES = { grid = 0, hero = 1, logo = 2, wide = 3 }
 local ALLOWED_MIME = { ['image/png'] = 'png', ['image/jpeg'] = 'jpg' }
 
 local function reply(data) return json.encode(data) end
+
+-- A throw inside a handler becomes a structured reply (the same shape Luna's
+-- handlers use), so the page shows a reason instead of waiting out the RPC
+-- timeout and reporting nothing.
+local function err_text(err)
+  return (tostring(err):gsub('^.-:%d+: ', ''))
+end
+
+local function protected(handler)
+  return function(...)
+    local done, out = pcall(handler, ...)
+    if done and out ~= nil then return out end
+    return reply({ success = false, error = done and 'The backend returned nothing.'
+      or ('Backend error: ' .. err_text(out)) })
+  end
+end
 
 local function read_file(path)
   local f = io.open(path, 'rb')
@@ -155,14 +180,30 @@ function M.kind_suffix(kind)
   return KINDS[kind]
 end
 
+-- Resolving the grid directory walks Steam's account records. The panel asks
+-- for it on every refresh, so the answer is cached against the loginusers.vdf
+-- content: a different account list (or a new login) resolves again at once.
+local grid_cache = {}
 local function grid_dir()
   local root = M.steam_root(home)
   if not root then return nil, 'no bootstrapped Steam installation found' end
+  local raw = read_file(root .. '/config/loginusers.vdf') or ''
+  local key = root .. '|' .. #raw .. '|' .. raw:sub(1, 96)
+  if grid_cache.key == key then return grid_cache.dir, grid_cache.error end
   local account, why = M.resolve_account(root)
-  if not account then return nil, why end
-  local id = M.account_id(account)
-  if not id then return nil, 'could not derive the account id' end
-  return root .. '/userdata/' .. tostring(id) .. '/config/grid'
+  local directory, err
+  if not account then
+    err = why
+  else
+    local id = M.account_id(account)
+    if not id then
+      err = 'could not derive the account id'
+    else
+      directory = root .. '/userdata/' .. tostring(id) .. '/config/grid'
+    end
+  end
+  grid_cache.key, grid_cache.dir, grid_cache.error = key, directory, err
+  return directory, err
 end
 
 -- All files belonging to one slot, whatever extension Steam might have.
@@ -327,13 +368,22 @@ end
 
 local ok_http, http = pcall(require, 'http')
 
-local function http_get(url, headers)
+-- Every request carries its own deadline and a body cap, and any failure
+-- (including the module throwing) comes back as a reason, never as an error.
+local function http_get(url, headers, timeout)
   if not ok_http or type(http) ~= 'table' or type(http.get) ~= 'function' then
     return nil, 'The Lumen HTTP module is unavailable; cannot reach SteamGridDB.'
   end
-  local response, err = http.get(url, { headers = headers, timeout = 20 })
+  local ok, response, err = pcall(http.get, url,
+    { headers = headers, timeout = timeout or HTTP_TIMEOUT })
+  if not ok then
+    return nil, 'SteamGridDB request failed: ' .. err_text(response)
+  end
   if type(response) ~= 'table' then
     return nil, 'SteamGridDB request failed: ' .. tostring(err or 'no response')
+  end
+  if type(response.body) == 'string' and #response.body > MAX_BODY_BYTES then
+    return nil, 'The SteamGridDB response was too large.'
   end
   return response
 end
@@ -403,32 +453,22 @@ local function fetch_assets(config, gameId, kind)
   return M.sanitize_assets(parsed.data), #parsed.data
 end
 
--- Shared by Apply and Auto: download one asset and place it in the grid
--- folder, stashing whatever occupied the slot into undo history. ok, detail.
-local function place_asset(appid, kind, url, mime, author)
-  local extension = ALLOWED_MIME[tostring(mime)]
-  if not extension then
+-- Store already-downloaded bytes in the slot, stashing whatever was there.
+-- Split from the download so the Auto job can fetch asynchronously and hand
+-- the bytes back here without a second request.
+local function store_asset(appid, kind, body, mime, author)
+  if not ALLOWED_MIME[tostring(mime)] then
     return false, { code = 'mime', error = 'That image type cannot be used by Steam (use PNG or JPEG).' }
   end
-  if tostring(url or '') == '' then
-    return false, { code = 'invalid', error = 'Missing image URL.' }
-  end
-  local directory, why = grid_dir()
-  if not directory then return false, { code = 'no_steam', error = tostring(why) } end
-  fs.create_directories(directory)
-  local response, down_why = http_get(url, { ['User-Agent'] = USER_AGENT })
-  if not response then return false, { code = 'unavailable', error = down_why } end
-  if response.status ~= 200 then
-    return false, { code = 'http',
-      error = 'The image download failed (HTTP ' .. tostring(response.status) .. ').' }
-  end
-  local body = response.body
   if type(body) ~= 'string' or #body == 0 then
     return false, { code = 'unexpected', error = 'The image download was empty.' }
   end
   if #body > MAX_IMAGE_BYTES then
     return false, { code = 'too_big', error = 'That image is too large.' }
   end
+  local directory, why = grid_dir()
+  if not directory then return false, { code = 'no_steam', error = tostring(why) } end
+  fs.create_directories(directory)
   local slot = math.floor(appid)
   local base = directory .. '/' .. tostring(slot) .. KINDS[kind]
   local existing = slot_files(directory, slot, kind)
@@ -439,6 +479,7 @@ local function place_asset(appid, kind, url, mime, author)
   if #existing > 0 then
     stashed = push_history(directory, slot, kind, author)
   end
+  local extension = ALLOWED_MIME[tostring(mime)]
   local target = base .. '.' .. extension
   local saved, save_why = write_file_atomic(target, body)
   if not saved then
@@ -455,6 +496,30 @@ local function place_asset(appid, kind, url, mime, author)
   end
   return true, { path = target, kind = kind, backedUp = stashed > 0,
     history = history_depth(directory, slot, kind) }
+end
+
+-- Shared by Apply: one download and one store, both bounded.
+local function place_asset(appid, kind, url, mime, author)
+  if not ALLOWED_MIME[tostring(mime)] then
+    return false, { code = 'mime', error = 'That image type cannot be used by Steam (use PNG or JPEG).' }
+  end
+  if tostring(url or '') == '' then
+    return false, { code = 'invalid', error = 'Missing image URL.' }
+  end
+  -- Only SteamGridDB's own CDN is fetched; a caller cannot point this at an
+  -- arbitrary host (localhost, link-local) and make the backend write its bytes.
+  if not tostring(url):match('^https://') then
+    return false, { code = 'invalid', error = 'Only https image URLs are accepted.' }
+  end
+  local directory, why = grid_dir()
+  if not directory then return false, { code = 'no_steam', error = tostring(why) } end
+  local response, down_why = http_get(url, { ['User-Agent'] = USER_AGENT })
+  if not response then return false, { code = 'unavailable', error = down_why } end
+  if response.status ~= 200 then
+    return false, { code = 'http',
+      error = 'The image download failed (HTTP ' .. tostring(response.status) .. ').' }
+  end
+  return store_asset(appid, kind, response.body, mime, author)
 end
 
 -- Keep only what the panel shows, drop flagged content, and offer the four
@@ -487,6 +552,181 @@ function M.sanitize_assets(rows)
   local capped = {}
   for index = 1, math.min(#out, MAX_ASSETS) do capped[index] = out[index] end
   return capped
+end
+
+-- ------------------------------------------------------------------ auto job
+--
+-- One Auto pass is five API lookups plus five image downloads. Run inline,
+-- that held Lumen's only injector thread for minutes. SlsSgdbAuto now creates
+-- a job and returns at once; each SlsSgdbAutoStatus call advances it by at
+-- most one request (http.start/http.poll where the host has them, otherwise a
+-- single GET with an 8 s deadline), so a dead network costs one short timeout
+-- per poll instead of freezing Steam.
+
+local auto_job = nil
+local auto_seq = 0
+
+local function async_http()
+  return ok_http and type(http) == 'table'
+    and type(http.start) == 'function' and type(http.poll) == 'function'
+end
+
+local function job_kind(job) return AUTO_KINDS[job.index] end
+
+-- The panel-facing shape. Unfinished kinds are listed as pending so the page
+-- can always show one row per slot and fill in each result as it lands.
+local function job_snapshot(job)
+  local results = {}
+  for _, result in ipairs(job.results) do results[#results + 1] = result end
+  for index = job.done + 1, #AUTO_KINDS do
+    results[#results + 1] = { kind = AUTO_KINDS[index], ok = false, pending = true,
+      error = 'Still working...' }
+  end
+  return {
+    success = true,
+    state = job.state,
+    pending = job.state == 'running',
+    job = { id = job.id, state = job.state, done = job.done, total = job.total,
+      startedAt = job.startedAt, appid = job.appid, gameId = job.gameId },
+    results = json.array(results),
+    error = job.error or '',
+  }
+end
+
+local function job_finish_item(job, result)
+  result.kind = job_kind(job)
+  job.results[#job.results + 1] = result
+  job.done = #job.results
+  job.index = job.index + 1
+  job.stage, job.asset, job.handle, job.response = 'assets', nil, nil, nil
+  if job.index > #AUTO_KINDS then
+    job.state, job.error = 'done', ''
+  end
+end
+
+-- Begin the current kind's request. Async mode leaves a handle for the poll;
+-- the blocking fallback returns the response in the same call.
+local function job_start(job)
+  local kind = job_kind(job)
+  local url, headers
+  if job.stage == 'assets' then
+    url, headers = assets_url(job.gameId, kind), api_headers(job.config.apiKey)
+  else
+    url, headers = job.asset.url, { ['User-Agent'] = USER_AGENT }
+  end
+  if async_http() then
+    local ok, handle, err = pcall(http.start, url, { headers = headers, timeout = HTTP_TIMEOUT })
+    if not ok or not handle then
+      job_finish_item(job, { ok = false, code = 'unavailable',
+        error = 'SteamGridDB request failed: ' .. err_text(ok and err or handle) })
+      return
+    end
+    job.handle = handle
+    return
+  end
+  local response, why = http_get(url, headers)
+  if not response then
+    job_finish_item(job, { ok = false, code = 'unavailable', error = tostring(why) })
+    job.sync_used = true
+    return
+  end
+  job.response, job.sync_used = response, true
+end
+
+-- Turn the finished response for the current stage into a result.
+local function job_finish(job)
+  local kind = job_kind(job)
+  local response = job.response
+  job.response = nil
+  if type(response.body) == 'string' and #response.body > MAX_BODY_BYTES then
+    job_finish_item(job, { ok = false, code = 'too_big',
+      error = 'That SteamGridDB response was too large.' })
+    return
+  end
+  if job.stage == 'assets' then
+    if response.status == 401 then
+      job_finish_item(job, { ok = false, code = 'bad_key',
+        error = 'SteamGridDB rejected that API key.' })
+    elseif response.status ~= 200 then
+      job_finish_item(job, { ok = false, code = 'http',
+        error = 'SteamGridDB assets failed (HTTP ' .. tostring(response.status) .. ').' })
+    else
+      local parsed = decode_body(response.body)
+      if not parsed or type(parsed.data) ~= 'table' then
+        job_finish_item(job, { ok = false, code = 'unexpected',
+          error = 'SteamGridDB returned an unexpected response.' })
+      else
+        local assets = M.sanitize_assets(parsed.data)
+        if #assets == 0 then
+          job_finish_item(job, { ok = false, code = 'none',
+            error = 'No usable ' .. kind .. ' images.' })
+        else
+          job.asset, job.stage = assets[1], 'download'
+        end
+      end
+    end
+    return
+  end
+  local asset = job.asset
+  if response.status ~= 200 then
+    job_finish_item(job, { ok = false, code = 'http',
+      error = 'The image download failed (HTTP ' .. tostring(response.status) .. ').' })
+    return
+  end
+  local placed, detail = store_asset(job.appid, kind, response.body, asset.mime, asset.author)
+  if placed then
+    job_finish_item(job, { ok = true, path = detail.path, backedUp = detail.backedUp,
+      author = asset.author, width = asset.width, height = asset.height,
+      live = LIVE_TYPES[kind] ~= nil })
+  else
+    job_finish_item(job, { ok = false, code = detail.code, error = detail.error })
+  end
+end
+
+-- Advance the job without ever waiting: at most four cheap transitions per
+-- call, and at most one network request.
+local function auto_advance(job)
+  if not job or job.state ~= 'running' then return end
+  local actions = 0
+  while job.state == 'running' and actions < 4 do
+    if os.time() - job.startedAt > AUTO_JOB_TTL then
+      while job.state == 'running' do
+        job_finish_item(job, { ok = false, code = 'timeout',
+          error = 'SteamGridDB did not answer in time.' })
+      end
+      return
+    end
+    if job.handle then
+      local ok, done, response, err = pcall(http.poll, job.handle, 0)
+      if not ok then
+        job.handle = nil
+        job_finish_item(job, { ok = false, code = 'unavailable',
+          error = 'SteamGridDB request failed: ' .. err_text(done) })
+        actions = actions + 1
+      elseif not done then
+        return -- in flight; the next status poll asks again
+      else
+        job.handle = nil
+        if type(response) == 'table' then
+          job.response = response
+        else
+          job_finish_item(job, { ok = false, code = 'unavailable',
+            error = 'SteamGridDB request failed: ' .. tostring(err or 'no response') })
+          actions = actions + 1
+        end
+      end
+    elseif job.response then
+      job_finish(job)
+      actions = actions + 1
+      -- The blocking fallback performs one bounded request per poll, no more:
+      -- a slow network must not chain several timeouts inside one RPC.
+      if job.sync_used then job.sync_used = nil; return end
+    else
+      job_start(job)
+      actions = actions + 1
+      if job.sync_used then job.sync_used = nil; return end
+    end
+  end
 end
 
 -- ------------------------------------------------------------------ registry
@@ -613,8 +853,8 @@ function M.register(registry)
       live = LIVE_TYPES[kind] ~= nil })
   end
 
-  -- One pass that fills every slot with SteamGridDB's top-ranked usable image.
-  -- Per-kind results so the page can show exactly what happened.
+  -- Start the auto pass and return at once. The page polls SlsSgdbAutoStatus
+  -- for progress; nothing here waits for SteamGridDB.
   registry.SlsSgdbAuto = function(raw)
     local ok, entry = pcall(json.decode, tostring(raw or ''))
     if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) or not tonumber(entry.gameId) then
@@ -629,27 +869,39 @@ function M.register(registry)
     if config.apiKey == '' then
       return reply({ success = false, code = 'no_key', error = 'Add your SteamGridDB API key first.' })
     end
-    local results = {}
-    for _, kind in ipairs({ 'grid', 'wide', 'hero', 'logo', 'icon' }) do
-      local assets, _, code, why = fetch_assets(config, gameId, kind)
-      if not assets then
-        results[#results + 1] = { kind = kind, ok = false, code = code, error = why }
-      elseif #assets == 0 then
-        results[#results + 1] = { kind = kind, ok = false, code = 'none',
-          error = 'No usable ' .. kind .. ' images.' }
-      else
-        local asset = assets[1]
-        local placed, detail = place_asset(appid, kind, asset.url, asset.mime, asset.author)
-        if placed then
-          results[#results + 1] = { kind = kind, ok = true, path = detail.path,
-            backedUp = detail.backedUp, author = asset.author, width = asset.width, height = asset.height,
-            live = LIVE_TYPES[kind] ~= nil }
-        else
-          results[#results + 1] = { kind = kind, ok = false, code = detail.code, error = detail.error }
-        end
-      end
+    appid = math.floor(appid)
+    -- A pass already running for this game is reused: a second one would only
+    -- double the requests.
+    if auto_job and auto_job.state == 'running'
+        and auto_job.appid == appid and auto_job.gameId == gameId then
+      return reply(job_snapshot(auto_job))
     end
-    return reply({ success = true, results = results })
+    auto_seq = auto_seq + 1
+    auto_job = { id = auto_seq, appid = appid, gameId = gameId, config = config,
+      startedAt = os.time(), index = 1, done = 0, total = #AUTO_KINDS,
+      stage = 'assets', results = {}, state = 'running', error = '' }
+    -- Kick off the first request when that is non-blocking; with only the
+    -- blocking http.get the first status poll starts it instead.
+    if async_http() then job_start(auto_job) end
+    return reply(job_snapshot(auto_job))
+  end
+
+  -- Cheap progress poll: reads the in-memory job (advancing it by one bounded
+  -- request) and reports every slot, including which one failed and why.
+  registry.SlsSgdbAutoStatus = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    if not ok or type(entry) ~= 'table' then entry = {} end
+    local job = auto_job
+    if not job then
+      return reply({ success = false, code = 'no_job',
+        error = 'No artwork pass has been started.' })
+    end
+    if entry.id ~= nil and tonumber(entry.id) ~= job.id then
+      return reply({ success = false, code = 'stale',
+        error = 'That artwork pass is no longer running.' })
+    end
+    auto_advance(job)
+    return reply(job_snapshot(job))
   end
 
   -- The bytes of the slot's current file, base64-encoded, so the agent can ask
@@ -670,6 +922,15 @@ function M.register(registry)
     local files = slot_files(directory, math.floor(tonumber(entry.appid)), kind)
     if #files == 0 then
       return reply({ success = false, code = 'none', error = 'Nothing has been applied to this slot yet.' })
+    end
+    -- Size first: reading a huge file into memory on the RPC path would stall
+    -- the injector before the cap below ever ran.
+    local probe = io.open(files[1], 'rb')
+    local size = probe and probe:seek('end')
+    if probe then probe:close() end
+    if not size or size > MAX_LIVE_BYTES then
+      return reply({ success = false, code = 'too_big',
+        error = 'The image is too large for a live update; restart Steam to see it.' })
     end
     local body = read_file(files[1])
     if not body then return reply({ success = false, code = 'io', error = 'Could not read the artwork file.' }) end
@@ -740,6 +1001,14 @@ function M.register(registry)
     local depths = {}
     for kind in pairs(KINDS) do depths[kind] = history_depth(directory, appid, kind) end
     return reply({ success = true, history = depths })
+  end
+
+  -- An exception inside any handler must still produce a reply: otherwise the
+  -- page waits for the RPC timeout and shows nothing at all.
+  for name in pairs(registry) do
+    if type(name) == 'string' and name:match('^SlsSgdb') and type(registry[name]) == 'function' then
+      registry[name] = protected(registry[name])
+    end
   end
 end
 

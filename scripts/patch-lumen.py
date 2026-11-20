@@ -64,6 +64,57 @@ def patch(source):
     for old,new in candidates: source=source.replace(old,new,1)
     return source
 
+# Lumen's own About-page updater would replace the Lua tree and wipe the Luna
+# bridge. Lumen updates are controlled from the Luna menu instead (`luna lumen
+# update`), so the stock updater is turned into a pointer to it.
+BLOCK_BEGIN='-- LUNA-LUMEN-UPDATE-BLOCK: begin v1'
+BLOCK_END='-- LUNA-LUMEN-UPDATE-BLOCK: end v1'
+BLOCK=BLOCK_BEGIN+'''
+function about.update_script(...)
+  error('Lumen updates are managed from the Luna menu (Health > Lumen). Update there so Luna stays attached.')
+end
+'''+BLOCK_END+'\n'
+ABOUT_ANCHOR='\nreturn about'
+
+HOOK_BEGIN='-- LUNA-POST-UPDATE-HOOK: begin v1'
+HOOK_END='-- LUNA-POST-UPDATE-HOOK: end v1\n'
+
+def drop_old_hook(text):
+    """The old update-recovery decorator is superseded by the Luna-menu update."""
+    if HOOK_BEGIN not in text: return text
+    if text.count(HOOK_BEGIN)!=1 or text.count(HOOK_END)!=1 or text.index(HOOK_BEGIN)>text.index(HOOK_END):
+        raise ValueError('old Luna update hook was modified; refusing to remove it')
+    return text[:text.index(HOOK_BEGIN)]+text[text.index(HOOK_END)+len(HOOK_END):]
+
+def about_patch(text):
+    if BLOCK_BEGIN in text:
+        return text
+    text=drop_old_hook(text)
+    if text.count('function about.update_script(')!=1 or text.count(ABOUT_ANCHOR)!=1:
+        raise ValueError('unsupported Lumen about.lua update contract')
+    return text.replace(ABOUT_ANCHOR,'\n'+BLOCK+'return about',1)
+
+def about_unpatch(text):
+    if BLOCK_BEGIN not in text: return text
+    if text.count(BLOCK)!=1: raise ValueError('Lumen update block was modified; refusing to remove it')
+    return text.replace('\n'+BLOCK+'return about',ABOUT_ANCHOR,1)
+
+def about_step(mode,lumen):
+    """Best effort: a Lumen without the expected about.lua just keeps its own updater."""
+    path=lumen/'lua'/'about.lua'
+    if not path.is_file(): return
+    text=path.read_text()
+    try:
+        new=about_unpatch(drop_old_hook(text)) if mode=='uninstall' else about_patch(text)
+    except ValueError as error:
+        print('Lumen self-update NOT blocked: '+str(error),file=sys.stderr); return
+    if mode=='check':
+        print('lumen self-update blocked' if BLOCK_BEGIN in text else 'lumen self-update open'); return
+    if new==text: return
+    tmp=path.with_name('about.lua.luna.tmp')
+    tmp.write_text(new); os.replace(tmp,path)
+    print('Lumen self-update '+('unblocked' if mode=='uninstall' else 'blocked (use the Luna menu)'))
+
 def main():
     p=argparse.ArgumentParser()
     p.add_argument('mode',choices=['install','uninstall','check'])
@@ -76,8 +127,10 @@ def main():
     if opts.mode=='check':
       if MARK not in content: patch(content)  # fail if upstream layout changed
       print('bridge installed' if MARK in content else 'bridge compatible, not installed')
+      about_step('check',opts.lumen)
       return
     if opts.mode=='uninstall':
+      about_step('uninstall',opts.lumen)
       if MARK not in content: print('Lumen boot already unmodified'); return
       if not backup.is_file(): sys.exit('No original backup: refusing unsafe rollback')
       original=backup.read_text()
@@ -87,6 +140,7 @@ def main():
       tmp.write_text(original);os.replace(tmp,dest)
       print('Lumen boot restored from backup')
       return
+    about_step('install',opts.lumen)
     if MARK in content:
       print('bridge already installed'); return
     updated=patch(content) # fail before modifying disk

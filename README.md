@@ -27,9 +27,12 @@ From a checkout instead: `bash install.sh`. Update everything later with `luna u
 The one-liner installs everything, in this order: system packages (native
 Steam with 32-bit support, 32-bit libcrypto (`luna steam libcrypto`), mangohud + 32-bit, gamescope,
 gamemode + 32-bit, curl jq tar unzip git python3 zenity; pacman/apt/dnf, table
-`SYSTEM_PACKAGES` in `scripts/luna.py`), the first Steam run, the pinned Moon
-base, the ubuntu12 lock on the known-good build, the Luna add-ons, pin + heal +
-cache check, pacman `IgnorePkg`, the heal timer and a final `luna doctor`.
+`SYSTEM_PACKAGES` in `scripts/luna.py`), the first Steam run, the ubuntu12 lock
+and pin on the known-good build, the pinned Moon base (the owner's channels when
+`update-channels.json` exists, stable on a fresh machine), the Luna add-ons,
+heal + cache check, pacman `IgnorePkg`, the update timer and a final `luna doctor`.
+Each step verifies its result before the next starts; a failure stops the
+pipeline with the exact `luna bootstrap` command that resumes it.
 sudo is asked for only on an interactive terminal (otherwise the exact command
 is printed); Arch needs `[multilib]` enabled, Debian/Ubuntu get
 `dpkg --add-architecture i386`. GPU drivers are never installed (a note is
@@ -75,13 +78,13 @@ the current installer does not install or update that executable.
 
 ## Updating
 
-The **Health** page in the Luna menu checks the release channel and shows the
+The **Updates** page in the Luna menu (Health only points to it) checks the release channel and shows the
 installed version against the newest release, with **Check now**, **Install
 update** and a three-way switch:
 
 - **Off** - never checks.
 - **Notify me** - a user timer checks every 30 minutes and records what it found;
-  the Health page shows it (and the Health tab gains a dot). Nothing is installed.
+  the Updates page shows it (and its tab gains a dot). Nothing is installed.
 - **Install automatically** - the same timer installs a newer release by itself.
 
 Applying an update needs Steam closed, so one queued from the menu lands on the
@@ -94,6 +97,24 @@ the standalone updater copy at `~/.local/share/Lumen/sls-luna/luna.py`.
 python3 scripts/luna.py check --force        # JSON: installed, latest, available
 python3 scripts/luna.py update --latest      # apply now (Steam must be closed)
 python3 scripts/luna.py timer on|off|status  # the unattended timer
+```
+
+### Lumen and Steam from the Updates page
+
+On the Lumen host the page has a Lumen section: **Update Lumen** queues a job that
+runs once Steam is closed (cancel any time). It backs up `lua`, `lumen`,
+`versions.json` and `update-channels.json` (newest 3 kept), runs the upstream
+installer, then re-installs Luna on top so the bridge, the self-update block and
+the Steam lock are back. If upstream can no longer be patched, the backup stays:
+`luna lumen restore`. **Update everything** queues the Luna update, then the Lumen
+update; it never moves Steam. The Steam section stays on the known-good build
+(Recommended); moving to Valve's latest is a separate, confirmed, queued action.
+
+```bash
+python3 scripts/luna.py lumen status [--json] [--check]
+python3 scripts/luna.py lumen update --dry-run   # plan only
+python3 scripts/luna.py lumen update --queue     # applied by the timer when Steam is closed
+python3 scripts/luna.py lumen restore            # undo from the last backup
 ```
 
 On the source machine, `luna release --publish` builds the bundle, writes its
@@ -269,26 +290,37 @@ diagnostics* puts the whole report on the clipboard.
 If a base update wipes the bridge, Health names it and offers **Repair
 bridge** (Steam must be closed); the shell equivalent is
 `python3 scripts/luna.py install --keep-steam-client`, which reinstalls the
-bridge even when every payload is already current. The attention list, headers
-Development builds also arm automatic recovery after **Lumen → Update All**:
-the updater waits for the base installer, reattaches the **installed** Luna and
-re-arms the next-update hook before Steam is restarted. An independent user
-service watches the completion stamp and checks for missed hooks once a minute.
-No full reinstall, Steam downgrade, update-policy change or add-on replacement
-is involved. Unknown upstream layouts fail closed; running Steam/Lumen is deferred,
-never killed by the repair worker. Details: [`docs/LUMEN_UPDATE_HOOK.md`](docs/LUMEN_UPDATE_HOOK.md).
+bridge even when every payload is already current.
 
-Bridge-only manual commands (close Steam **and** Lumen for a repair):
+The old automatic Lumen recovery hook is retired (`luna hook` only prints a
+pointer, `luna hook repair` equals `luna install --keep-steam-client`). While
+Lumen is still the active host, `patch-lumen.py` keeps a marked block in
+`lua/about.lua` that blocks Lumen's own in-app self-update (legacy: it only
+matters until you switch to Luna's host, see below).
 
-```sh
-python3 scripts/luna.py hook on      # arm/enrol the installed Luna
-python3 scripts/luna.py hook status
-python3 scripts/luna.py hook repair  # bridge + next-update hook only
-python3 scripts/luna.py hook off     # disable recovery, retain add-ons/data/backups
-```
+### Luna host
 
-Older Health pages offer **Repair bridge** through a full installer invocation;
-prefer the bridge-only command above to preserve local payloads and Steam policy.
+Luna ships its own Steam plugin host, `luna-host`, so it no longer has to depend
+on the third-party Lumen host. It lives in `~/.local/share/Luna` (`$LUNA_HOME`):
+`bin/luna-host`, `lua/` (its runtime), `addons/<name>/` (the same add-on layout
+as `sls-addons`), `state/` (Luna's machine-local files once switched),
+`legacy-plugins.json` and `host.json` (`{"active": "luna" | "lumen"}`).
+
+- `luna install` builds `host/bin/luna-host` when missing (release bundles carry
+  the prebuilt binary), installs it, mirrors the add-ons into `$LUNA_HOME/addons`
+  (Lumen's `sls-addons` are still written while Lumen is active), lists LuaTools
+  in `legacy-plugins.json` when `~/.local/share/Lumen/luatools/plugin.json`
+  exists, and writes `~/.config/systemd/user/luna-host.service`. It does **not**
+  enable the unit before the cutover.
+- `luna host status` prints JSON: active host, unit states, binary version, add-ons dir.
+- `luna host cutover` (Steam must be closed): disables `lumen.service`, enables
+  `luna-host.service`, copies Luna's small state (`sls-luna/*.json`) to
+  `$LUNA_HOME/state` and links the big Steam-client backups instead of moving them.
+- `luna host rollback` reverses it. `~/.local/share/Lumen` is never deleted.
+
+SGDB/LuaTools-style game unlocking (SLSsteam, LuaTools, the Moon launcher) stays
+a separate upstream install; Luna only references it.
+
 The attention list, headers
 and action buttons switch to Spanish when Settings → Language is Español;
 paths and bug-report dumps stay in English in both languages.

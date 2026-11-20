@@ -20,6 +20,9 @@ import zlib
 
 from test_luna import UPSTREAM
 
+# Runs luna.py code paths that can notify; silence them.
+os.environ.setdefault('LUNA_NO_NOTIFY', '1')
+
 
 SPEC = importlib.util.spec_from_file_location('luna_client_test', Path(__file__).resolve().parents[1] / 'scripts/luna.py')
 luna = importlib.util.module_from_spec(SPEC)
@@ -60,9 +63,8 @@ class SteamClientTestCase(unittest.TestCase):
         mock.patch.object(luna, '_http_get', side_effect=OSError('offline')).start()
         mock.patch.object(luna, 'LIBCRYPTO_SYSTEM_PATHS', []).start()
         mock.patch.object(luna, 'OS_RELEASE_PATH', str(self.home / 'os-release')).start()
-        # The hook worker and the SteamOS launchers have their own suites; run for
-        # real here they read the host's niri/DRM outputs and print hook errors.
-        self.hook = mock.patch.object(luna, 'lumen_hook', return_value=0).start()
+        # The SteamOS launchers have their own suite; run for real here they
+        # read the host's niri/DRM outputs.
         self.launchers = mock.patch.object(luna, 'steam_machine_action', return_value=0).start()
         self.make_packages()
 
@@ -172,7 +174,6 @@ class SteamClientTestCase(unittest.TestCase):
         for name in ('userdata/private', 'config/loginusers.vdf', 'steamapps/private-save'):
             self.assertEqual((self.root / name).read_text(), 'private sentinel')
         self.network.assert_not_called()
-        self.hook.assert_called_with('enable')
         self.assertEqual(self.launchers.call_args.args[0], 'install')
 
     def test_untraceable_pins_are_named(self):
@@ -528,6 +529,9 @@ class SteamHardLockTestCase(unittest.TestCase):
             self.assertEqual(luna.cmd_steam(options), 0)
         self.assertEqual(launched.call_args[0][0], ['setsid', 'steam'])
 
+    # This is the one test that asserts notify-send is attempted; empty value
+    # means "set but not suppressing" (only a non-empty value silences it).
+    @mock.patch.dict(os.environ, {'LUNA_NO_NOTIFY': ''})
     def test_relaunch_modes_notify_and_reopen_steam_detached(self):
         launched = mock.patch.object(luna.subprocess, 'Popen').start()
         options = argparse.Namespace(steam_action='lock', build=None, now=False, force=True, relaunch=True)

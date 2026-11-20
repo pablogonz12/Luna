@@ -279,4 +279,21 @@ assert(report.optiscaler_client and report.optiscaler_client.managed == 2,
   'the client report must ride along')
 assert(#report.steam.runtimes == 1)
 
-print('Luna Graphics backend OK: GPU, lsfg-vk layers/config/Decky, OptiScaler + Client, Steam runtime, empty roots')
+-- A refresh is served from the session cache; force rebuilds it.
+local again = call('SlsGraphicsGet')
+assert(again.success == true and #again.gpus == 2 and again.system.distro == report.system.distro)
+local forced = call('SlsGraphicsGet', '{"force":true}')
+assert(forced.success == true and #forced.gpus == 2)
+
+-- A throw inside the report becomes a structured error, and the next call
+-- recovers instead of leaving the panel on blanks.
+local real_gpu = backend.gpu_report
+backend.gpu_report = function() error('synthetic failure') end
+local broken = call('SlsGraphicsGet', '{"force":true}')
+backend.gpu_report = real_gpu
+assert(broken.success == false and type(broken.error) == 'string'
+  and broken.error:find('Backend error', 1, true) ~= nil, 'the report must be pcall-wrapped')
+local recovered = call('SlsGraphicsGet', '{"force":true}')
+assert(recovered.success == true and #recovered.gpus == 2, 'a failed report must not be cached')
+
+print('Luna Graphics backend OK: GPU, lsfg-vk layers/config/Decky, OptiScaler + Client, Steam runtime, cache, error shape, empty roots')

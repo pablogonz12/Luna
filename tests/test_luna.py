@@ -5,6 +5,7 @@ Everything runs against a disposable HOME with a minimal Lumen fixture, so no
 real Lumen, Steam or user data is touched. `pgrep` is stubbed so the tests never
 depend on whether the developer's own Steam is open.
 """
+import argparse
 import hashlib
 import json
 import os
@@ -13,12 +14,16 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
 LUNA = HERE / 'scripts' / 'luna.py'
+
+# Tests drive real install/update paths; never pop a desktop notification.
+os.environ.setdefault('LUNA_NO_NOTIFY', '1')
 
 # The upstream shape the patcher accepts: four anchors, once each.
 UPSTREAM = '''local registry = {}
@@ -83,8 +88,13 @@ esac
     gh.chmod(0o755)
     # systemctl: the timer tests only need the calls to succeed.
     systemctl = directory / 'systemctl'
-    systemctl.write_text('#!/bin/sh\ncase "$2" in is-enabled) echo enabled;; is-active) echo active;; esac\nexit 0\n')
+    systemctl.write_text('#!/bin/sh\necho "$*" >> "$HOME/systemctl.log"\n'
+                         '[ -n "$LUNA_TEST_SYSTEMCTL_FAIL" ] && case "$*" in *"$LUNA_TEST_SYSTEMCTL_FAIL"*) exit 1;; esac\n'
+                         'case "$2" in is-enabled) echo enabled;; is-active) echo active;; esac\nexit 0\n')
     systemctl.chmod(0o755)
+    pkill = directory / 'pkill'
+    pkill.write_text('#!/bin/sh\necho "pkill $*" >> "$HOME/systemctl.log"\nexit 0\n')
+    pkill.chmod(0o755)
     niri = directory / 'niri'
     niri.write_text('#!/bin/sh\nexit 1\n')
     niri.chmod(0o755)
@@ -108,7 +118,16 @@ class LunaTestCase(unittest.TestCase):
         (self.data / 'playtime').mkdir()
         (self.data / 'playtime/76561198000000000.json').write_text('{"version":2,"games":{}}')
         self.bin = stub_bin(self.home)
+        # A prebuilt luna-host fixture: tests never compile or touch the real host/.
+        self.host_src = self.temp / 'host-src'
+        (self.host_src / 'bin').mkdir(parents=True)
+        (self.host_src / 'bin/luna-host').write_text('#!/bin/sh\nexit 0\n')
+        (self.host_src / 'bin/luna-host').chmod(0o755)
+        (self.host_src / 'lua/luna').mkdir(parents=True)
+        (self.host_src / 'lua/luna/boot.lua').write_text('-- boot')
+        self.luna_home = self.home / '.local/share/Luna'
         self.env = dict(os.environ, HOME=str(self.home),
+                        LUNA_HOME=str(self.luna_home), LUNA_HOST_SRC=str(self.host_src),
                         XDG_DATA_HOME=str(self.home / '.local/share'),
                         XDG_RUNTIME_DIR=str(self.home / 'run'),
                         PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', ''))
@@ -357,8 +376,130 @@ class LunaTestCase(unittest.TestCase):
         self.luna('install')
         (self.addons / 'playtime/public/panel.js').write_text('// changed\n')
         result = self.luna('status')
-        self.assertEqual(result.returncode, 1)
+        # A differing payload is a local edit or drift, not corruption: its own
+        # code (6) so scripts can tell it from a broken tree (1).
+        self.assertEqual(result.returncode, 6)
         self.assertIn('differs', result.stdout)
+        strict = self.luna('status', '--strict')
+        self.assertEqual(strict.returncode, 1)
+
+    # -- reliability: lock, rollback, undo, drift -------------------------
+    def tools_dir(self):
+        return self.home / '.local/share/Lumen/sls-luna'
+
+    def hold_lock(self):
+        tools = self.tools_dir()
+        tools.mkdir(parents=True, exist_ok=True)
+        (tools / 'update.lock').write_text(json.dumps(
+            {'pid': os.getpid(), 'at': int(time.time())}))
+
+    def test_install_refuses_while_another_command_holds_the_lock(self):
+        self.hold_lock()
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 5, result.stderr + result.stdout)
+        self.assertIn('already running', result.stderr)
+        self.assertIn('pid %d' % os.getpid(), result.stderr)
+        self.assertFalse((self.addons / 'bridge.lua').exists(), 'nothing may be written while busy')
+
+    def test_timer_skips_quietly_while_another_command_holds_the_lock(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        (self.data / 'luna.json').write_text(json.dumps({'version': 1, 'auto_update': 'install'}))
+        self.hold_lock()
+        result = self.luna('autoupdate')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        last = json.loads((self.tools_dir() / 'autoupdate.json').read_text())
+        self.assertEqual(last['result'], 'deferred')
+
+    def test_force_archives_differing_payloads_before_overwriting(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        target = self.addons / 'playtime/public/panel.js'
+        target.write_text('// my local hotfix\n')
+        result = self.luna('install', '--force')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('undo', result.stdout)
+        saved = list((self.tools_dir() / 'undo').rglob('panel.js'))
+        self.assertTrue(saved, 'the overwritten bytes must be copied aside')
+        self.assertEqual(saved[0].read_text(), '// my local hotfix\n')
+        self.assertNotEqual(target.read_text(), '// my local hotfix\n')
+
+    def test_status_reports_an_interrupted_install(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        marker = self.tools_dir() / 'install-in-progress.json'
+        marker.write_text(json.dumps({'pid': 999999, 'at': int(time.time()), 'addons': ['luna']}))
+        result = self.luna('status')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('last install was interrupted', result.stdout)
+        self.assertEqual(self.luna('install').returncode, 0)
+        self.assertFalse(marker.exists(), 'a verified install clears the marker')
+
+    def test_keyboard_interrupt_rolls_back_the_payloads(self):
+        import importlib.util
+        self.assertEqual(self.luna('install').returncode, 0)
+        target = self.addons / 'playtime/public/panel.js'
+        target.write_text('// pre-install hotfix\n')
+        spec = importlib.util.spec_from_file_location('luna_mod_ctrl_c', str(LUNA))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        def interrupt(mode, *extra):
+            if mode == 'install':
+                raise KeyboardInterrupt()
+            return argparse.Namespace(returncode=0, stdout='bridge compatible, not installed', stderr='')
+
+        module.patcher = interrupt
+        saved = dict(os.environ)
+        os.environ.update(self.env)
+        try:
+            options = argparse.Namespace(only=[], force=True, dry_run=False, keep_steam_client=True,
+                                         no_steam_machine=True, migrate_steam_machine=False)
+            with self.assertRaises(KeyboardInterrupt):
+                module.cmd_install(options)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual(target.read_text(), '// pre-install hotfix\n',
+                         'a Ctrl-C must put the previous payload back')
+        self.assertFalse((self.tools_dir() / 'install-in-progress.json').exists())
+
+    def test_check_is_single_flight(self):
+        tools = self.tools_dir()
+        tools.mkdir(parents=True, exist_ok=True)
+        (tools / 'check.lock').write_text(json.dumps({'pid': os.getpid(), 'at': int(time.time())}))
+        result = self.luna('check')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('busy', result.stdout)
+        (tools / 'check.lock').unlink()
+        self.assertEqual(self.luna('check').returncode, 0)
+        self.assertFalse((tools / 'check.lock').exists(), 'a finished check releases its lock')
+
+    def test_install_keeps_a_hand_edited_steam_machine_copy(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        tools = self.tools_dir()
+        installed = tools / 'steam-machine.py'
+        installed.write_text(installed.read_text() + '\n# local hotfix\n')
+        dry = self.luna('install', '--dry-run')
+        self.assertEqual(dry.returncode, 0, dry.stderr + dry.stdout)
+        self.assertNotIn('needs attention', dry.stdout + dry.stderr)
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn('needs attention', result.stdout + result.stderr)
+        self.assertIn('kept (edited outside Luna)', result.stdout)
+        self.assertIn('# local hotfix', installed.read_text())
+        self.assertFalse((tools / 'archive').exists())
+
+    def test_install_silently_upgrades_an_untouched_older_steam_machine_copy(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        tools = self.tools_dir()
+        installed = tools / 'steam-machine.py'
+        older = installed.read_text() + '\n# older Luna version\n'
+        installed.write_text(older)
+        state = json.loads((tools / 'steam-machine-shortcuts.json').read_text())
+        state['files'][str(installed)]['sha256'] = hashlib.sha256(older.encode()).hexdigest()
+        (tools / 'steam-machine-shortcuts.json').write_text(json.dumps(state))
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn('kept (edited outside Luna)', result.stdout)
+        self.assertNotIn('# older Luna version', installed.read_text())
 
     def test_verify_detects_a_tampered_payload(self):
         target = HERE / 'addons/presence/plugin/public/panel.js'
@@ -418,9 +559,193 @@ class LunaTestCase(unittest.TestCase):
             names = tar.getnames()
         prefix = 'luna-%s/' % self.bundle_version()
         for expected in ('vendor/MANIFEST.json', 'scripts/luna.py', 'scripts/steam-machine.py', 'scripts/patch-lumen.py',
+                         'host/bin/luna-host', 'host/lua/luna/boot.lua',
                          'bridge/bridge.lua', 'addons/luna/plugin/plugin.json',
                          'addons/playtime/plugin/backend/main.lua'):
             self.assertIn(prefix + expected, names)
+
+    def systemctl_log(self):
+        path = self.home / 'systemctl.log'
+        return path.read_text().splitlines() if path.is_file() else []
+
+    def test_install_deploys_luna_host_side_by_side(self):
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue((self.luna_home / 'bin/luna-host').is_file())
+        self.assertTrue(os.access(self.luna_home / 'bin/luna-host', os.X_OK))
+        self.assertTrue((self.luna_home / 'lua/luna/boot.lua').is_file())
+        self.assertTrue((self.luna_home / 'addons/luna/plugin.json').is_file()
+                        or (self.luna_home / 'addons/luna/backend/main.lua').is_file())
+        # Lumen keeps working: its sls-addons are still written.
+        self.assertTrue(self.installed('luna', 'backend/main.lua'))
+        unit = (self.home / '.config/systemd/user/luna-host.service').read_text()
+        self.assertIn('# Managed by Luna: host v1', unit)
+        self.assertIn('Restart=always', unit)
+        self.assertIn('RestartSec=5', unit)
+        self.assertIn('Environment=LUNA_HOME=%s' % self.luna_home, unit)
+        self.assertIn('Environment=LUNA_LUA_DIR=%s' % (self.luna_home / 'lua'), unit)
+        self.assertIn('ExecStart=%s' % (self.luna_home / 'bin/luna-host'), unit)
+        # Never enabled by install while Lumen is the active host.
+        self.assertFalse([line for line in self.systemctl_log() if 'enable' in line])
+        # luatools has no plugin.json in this fixture: no legacy list.
+        self.assertFalse((self.luna_home / 'legacy-plugins.json').exists())
+
+    def test_install_lists_luatools_as_a_legacy_plugin_when_present(self):
+        (self.home / '.local/share/Lumen/luatools/plugin.json').write_text('{"name":"luatools"}')
+        self.assertEqual(self.luna('install').returncode, 0)
+        listed = json.loads((self.luna_home / 'legacy-plugins.json').read_text())
+        self.assertEqual(listed, [str(self.home / '.local/share/Lumen/luatools')])
+
+    def test_install_keeps_a_custom_host_unit(self):
+        unit = self.home / '.config/systemd/user/luna-host.service'
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Service]\nExecStart=/bin/true\n')
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(unit.read_text(), '[Service]\nExecStart=/bin/true\n')
+
+    def test_host_status_cutover_and_rollback(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        status = json.loads(self.luna('host', 'status').stdout)
+        self.assertEqual(status['active'], 'lumen')
+        self.assertTrue(status['binary']['present'])
+        lumen_dir = self.home / '.local/share/Lumen'
+        self.assertEqual(status['addons'], str(lumen_dir / 'sls-addons'), 'lumen host loads from sls-addons')
+        self.assertEqual(status['state'], str(lumen_dir / 'sls-luna'))
+        self.assertEqual(status['lunaHostAddons'], str(self.luna_home / 'addons'))
+        self.assertEqual(status['lunaState'], str(self.luna_home / 'state'))
+        self.assertIn('enabled', status['units']['luna'])
+        # State written while Lumen is the host must follow the cutover.
+        tools = self.home / '.local/share/Lumen/sls-luna'
+        (tools / 'update-check.json').write_text('{"seen":1}')
+        big = tools / 'steam-client-backups'
+        (big / '1').mkdir(parents=True)
+        (self.home / 'systemctl.log').unlink()
+        result = self.luna('host', 'cutover')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        log = self.systemctl_log()
+        self.assertIn('--user disable --now lumen.service', log)
+        self.assertIn('--user enable --now luna-host.service', log)
+        self.assertEqual(json.loads((self.luna_home / 'host.json').read_text())['active'], 'luna')
+        cut = json.loads(self.luna('host', 'status').stdout)
+        self.assertEqual(cut['active'], 'luna')
+        self.assertEqual(cut['addons'], str(self.luna_home / 'addons'), 'luna-host loads from its own addons')
+        self.assertEqual(cut['state'], str(self.luna_home / 'state'))
+        state = self.luna_home / 'state'
+        self.assertEqual(json.loads((state / 'update-check.json').read_text()), {'seen': 1})
+        self.assertTrue((state / 'steam-client-backups').is_symlink())
+        self.assertTrue((state / 'luna.py').is_file())
+        self.assertTrue((self.home / '.local/share/Lumen').is_dir())
+        # The CLI launcher follows the active host.
+        launcher = (self.home / '.local/bin/luna').read_text()
+        self.assertIn('$LUNA_HOME/state/luna.py', launcher)
+        result = self.luna('host', 'rollback')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('--user disable --now luna-host.service', self.systemctl_log())
+        self.assertEqual(self.systemctl_log()[-1], '--user enable --now lumen.service')
+        self.assertEqual(json.loads((self.luna_home / 'host.json').read_text())['active'], 'lumen')
+        self.assertTrue((self.home / '.local/share/Lumen').is_dir())
+
+    WRAPPER_SAMPLE = (
+        '#!/bin/bash\nLUMEN_DIR="$HOME/.local/share/Lumen"\n'
+        'if [ -x "$LUMEN_DIR/lumen" ] && ! pgrep -f "$LUMEN_DIR/lumen" >/dev/null 2>&1; then\n'
+        '\ttouch "$HOME/.steam/steam/.cef-enable-remote-debugging" 2>/dev/null || true\n'
+        '\techo LAUNCH\nfi\n')
+
+    def make_wrapper(self, text=None):
+        wrapper = self.home / '.local/share/SLSsteam/path/steam'
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text(self.WRAPPER_SAMPLE if text is None else text)
+        wrapper.chmod(0o755)
+        return wrapper
+
+    def run_wrapper(self, wrapper):
+        (self.home / '.local/share/Lumen/lumen').write_text('#!/bin/sh\n')
+        (self.home / '.local/share/Lumen/lumen').chmod(0o755)
+        nopg = self.temp / 'nopgrep'
+        nopg.mkdir(exist_ok=True)
+        (nopg / 'pgrep').write_text('#!/bin/sh\nexit 1\n')
+        (nopg / 'pgrep').chmod(0o755)
+        env = dict(self.env, PATH=str(nopg) + os.pathsep + self.env['PATH'])
+        return subprocess.run(['bash', str(wrapper)], capture_output=True, text=True, env=env).stdout
+
+    def test_wrapper_patch_is_idempotent_reversible_and_skips_lumen(self):
+        wrapper = self.make_wrapper()
+        original = wrapper.read_text()
+        self.assertEqual(self.run_wrapper(wrapper).strip(), 'LAUNCH')
+        self.assertEqual(self.luna('host', 'patch-wrapper').returncode, 0)
+        patched = wrapper.read_text()
+        self.assertEqual(self.luna('host', 'patch-wrapper').returncode, 0)
+        self.assertEqual(wrapper.read_text(), patched)
+        self.assertEqual(patched.count('luna-patch: skip'), 1)
+        self.assertEqual((wrapper.parent / 'steam.luna-orig').read_text(), original)
+        self.assertTrue(json.loads(self.luna('host', 'status').stdout)['wrapperPatched'])
+        self.assertEqual(subprocess.run(['bash', '-n', str(wrapper)]).returncode, 0)
+        self.assertEqual(self.run_wrapper(wrapper).strip(), 'LAUNCH')  # host.json absent: Lumen active
+        self.luna_home.mkdir(parents=True, exist_ok=True)
+        (self.luna_home / 'host.json').write_text('{\n  "active": "luna"\n}\n')
+        self.assertEqual(self.run_wrapper(wrapper).strip(), '')
+        self.assertEqual(self.luna('host', 'unpatch-wrapper').returncode, 0)
+        self.assertEqual(wrapper.read_text(), original)
+        self.assertFalse(json.loads(self.luna('host', 'status').stdout)['wrapperPatched'])
+
+    def test_wrapper_with_unknown_shape_warns_without_failing_install(self):
+        wrapper = self.make_wrapper('#!/bin/bash\n# lumen moved\nexec true\n')
+        (self.luna_home).mkdir(parents=True)
+        (self.luna_home / 'host.json').write_text('{"active": "luna"}')
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('changed shape', result.stderr)
+        self.assertNotIn('luna-patch', wrapper.read_text())
+
+    def test_cutover_patches_wrapper_and_stops_lumen_rollback_restores(self):
+        wrapper = self.make_wrapper()
+        original = wrapper.read_text()
+        self.assertEqual(self.luna('install').returncode, 0)
+        self.assertEqual(self.luna('host', 'cutover').returncode, 0)
+        self.assertIn('pkill -u %d -x lumen' % os.getuid(), self.systemctl_log())
+        self.assertIn('luna-patch', wrapper.read_text())
+        # install re-applies the patch after an upstream overwrite
+        wrapper.write_text(original)
+        self.assertEqual(self.luna('install').returncode, 0)
+        self.assertIn('luna-patch', wrapper.read_text())
+        self.assertEqual(self.luna('host', 'rollback').returncode, 0)
+        self.assertEqual(wrapper.read_text(), original)
+
+    def test_cutover_refuses_while_steam_runs(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        (self.home / 'systemctl.log').unlink(missing_ok=True)
+        result = self.luna('host', 'cutover', running='steam')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('Steam is running', result.stdout)
+        self.assertFalse([line for line in self.systemctl_log() if 'disable' in line or 'enable' in line])
+        self.assertFalse((self.luna_home / 'host.json').exists())
+
+    def test_cutover_refuses_when_the_host_is_not_installed(self):
+        result = self.luna('host', 'cutover')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('luna install', result.stdout)
+
+    def test_failed_cutover_restores_lumen(self):
+        self.assertEqual(self.luna('install').returncode, 0)
+        env = dict(self.env, LUNA_TEST_SYSTEMCTL_FAIL='enable --now luna-host')
+        result = self.luna('host', 'cutover', env=env)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('--user enable --now lumen.service', self.systemctl_log())
+        self.assertFalse((self.luna_home / 'host.json').exists())
+
+    def test_tools_dir_follows_host_state(self):
+        probe = ('import importlib.util,sys;'
+                 's=importlib.util.spec_from_file_location("luna",%r);m=importlib.util.module_from_spec(s);'
+                 's.loader.exec_module(m);print(m.luna_tools_dir())' % str(LUNA))
+        run = lambda: subprocess.run([sys.executable, '-c', probe], capture_output=True, text=True,
+                                     env=self.env).stdout.strip()
+        self.assertEqual(run(), str(self.home / '.local/share/Lumen/sls-luna'))
+        self.luna_home.mkdir(parents=True)
+        (self.luna_home / 'host.json').write_text('{"active": "luna"}')
+        self.assertEqual(run(), str(self.luna_home / 'state'))
+        (self.luna_home / 'host.json').write_text('not json')
+        self.assertEqual(run(), str(self.home / '.local/share/Lumen/sls-luna'))
 
     def test_update_installs_from_a_verified_bundle(self):
         out = self.temp / 'dist'
@@ -1019,6 +1344,673 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(check.returncode, 0, check.stderr)
         self.assertIn('"installed"', check.stdout)
 
+
+
+class LumenUpdateTestCase(unittest.TestCase):
+    """`luna lumen`: backup, installer, re-attach. The installer and processes are faked."""
+
+    def setUp(self):
+        import importlib.util
+        from unittest import mock
+        self.mock = mock
+        self.temp = Path(tempfile.mkdtemp(prefix='luna-lumen-'))
+        self.home = self.temp / 'home'
+        self.lumen = self.home / '.local/share/Lumen'
+        (self.lumen / 'lua').mkdir(parents=True)
+        (self.lumen / 'luatools/backend').mkdir(parents=True)
+        (self.lumen / 'luatools/backend/main.lua').write_text('-- present')
+        (self.lumen / 'lua/boot.lua').write_text('boot v1 SLS-ADDONS-INTEGRATION')
+        (self.lumen / 'lua/about.lua').write_text('about v1 LUNA-LUMEN-UPDATE-BLOCK: begin')
+        (self.lumen / 'lumen').write_text('binary v1')
+        (self.lumen / 'versions.json').write_text(json.dumps({'lumen': {'tag': 'v2.8'}}))
+        self.sls = self.home / '.local/share/SLSsteam'
+        (self.sls / 'path').mkdir(parents=True)
+        (self.sls / 'path/steam').write_text('wrapper v1')
+        (self.sls / 'path/steam.luna-orig').write_text('orig v1')
+        (self.sls / 'SLSsteam.so').write_text('so v1')
+        os.chmod(self.sls / 'SLSsteam.so', 0o755)
+        os.symlink('SLSsteam.so', self.sls / 'link.so')
+        (self.sls / 'backup').mkdir()
+        (self.sls / 'backup/keep.txt').write_text('installer keeps this')
+        (self.lumen / 'luatools/backend/extra.lua').write_text('luatools v1')
+        self.cfg = self.home / '.config/SLSsteam'
+        self.cfg.mkdir(parents=True)
+        (self.cfg / 'config.yaml').write_text('user: settings\n')
+        (self.cfg / 'notes.txt').write_text('mine')
+        self.steam_home = self.home / '.local/share/Steam'
+        self.steam_home.mkdir(parents=True)
+        (self.steam_home / 'steam.cfg').write_text('BootStrapperInhibitAll=enable\n')
+        patcher = mock.patch.dict(os.environ, {'HOME': str(self.home), 'LUMEN_DIR': str(self.lumen),
+                                               'LUNA_HOME': str(self.home / '.local/share/Luna'),
+                                               'XDG_DATA_HOME': str(self.home / '.local/share')})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        spec = importlib.util.spec_from_file_location('luna_lumen_mod', str(LUNA))
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+        self.steam_running = False
+        self.installer_ok = True
+        self.patchable = True
+        self.installs = []
+        self.config_after = {}
+        self.wrapper_patched_by_upstream = False
+
+        def running(name):
+            return self.steam_running and name in ('steam', 'steamwebhelper')
+
+        def installer(ref, sha, extra):
+            self.installs.append(ref)
+            if not self.installer_ok:
+                return 1
+            (self.lumen / 'lua/boot.lua').write_text('boot v2 upstream')
+            (self.lumen / 'lua/about.lua').write_text('about v2 upstream')
+            (self.lumen / 'lumen').write_text('binary v2')
+            (self.lumen / 'versions.json').write_text(json.dumps({'lumen': {'tag': 'v2.9'}}))
+            # what upstream replaces or deletes besides lua/lumen:
+            shutil.rmtree(self.lumen / 'luatools')
+            (self.lumen / 'luatools/backend').mkdir(parents=True)
+            (self.lumen / 'luatools/backend/main.lua').write_text('luatools v2')
+            for entry in self.sls.iterdir():
+                if entry.name != 'backup':
+                    shutil.rmtree(entry) if entry.is_dir() and not entry.is_symlink() else entry.unlink()
+            (self.sls / 'SLSsteam.so').write_text('so v2')
+            (self.sls / 'path').mkdir()
+            (self.sls / 'path/steam').write_text('wrapper v2 LUNA-PATCH' if self.wrapper_patched_by_upstream
+                                                  else 'wrapper v2')
+            (self.steam_home / 'steam.cfg').unlink(missing_ok=True)
+            for name, text in self.config_after.items():
+                if text is None:
+                    (self.cfg / name).unlink()
+                else:
+                    (self.cfg / name).write_text(text)
+            return 0
+
+        def fake_patcher(mode, *extra):
+            boot = (self.lumen / 'lua/boot.lua').read_text()
+            about = (self.lumen / 'lua/about.lua').read_text()
+            if not self.patchable and 'upstream' in boot:
+                return subprocess.CompletedProcess([], 1, '', 'anchor not found')
+            out = ('bridge installed\n' if 'SLS-ADDONS-INTEGRATION' in boot else 'bridge not installed\n')
+            out += 'lumen self-update blocked\n' if 'LUNA-LUMEN-UPDATE-BLOCK' in about else ''
+            return subprocess.CompletedProcess([], 0, out, '')
+
+        def install(options):
+            self.installs.append('luna-install')
+            (self.lumen / 'lua/boot.lua').write_text('boot v2 SLS-ADDONS-INTEGRATION')
+            (self.lumen / 'lua/about.lua').write_text('about v2 LUNA-LUMEN-UPDATE-BLOCK: begin')
+            return 0
+
+        for name, value in (('process_running', running), ('run_base_installer', installer),
+                            ('verify_base_installer', lambda ref, sha: 'f' * 64),
+                            ('lumen_upstream_state', lambda *a, **k: {'overall': 'newer', 'components': [], 'channels': {}}),
+                            ('patcher', fake_patcher), ('cmd_install', install),
+                            ('systemctl_user', lambda *a, **k: subprocess.CompletedProcess([], 0, 'inactive', ''))):
+            patch = mock.patch.object(self.m, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def run_lumen(self, action, **kwargs):
+        options = argparse.Namespace(lumen_action=action, dry_run=False, yes=False, queue=False,
+                                     json=False, check=False, backup='')
+        for key, value in kwargs.items():
+            setattr(options, key, value)
+        return self.m.cmd_lumen(options)
+
+    def test_status_json_reports_versions_and_block(self):
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_lumen('status', json=True), 0)
+        state = json.loads(out.getvalue())
+        self.assertEqual(state['host'], 'lumen')
+        self.assertEqual(state['versions'], {'lumen': 'v2.8'})
+        self.assertTrue(state['selfUpdateBlocked'])
+        self.assertEqual(state['bridge'], 'installed')
+        self.assertFalse(state['pending'])
+
+    def test_dry_run_prints_the_plan_and_writes_nothing(self):
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_lumen('update', dry_run=True), 0)
+        self.assertIn('would back up', out.getvalue())
+        self.assertIn('re-attach Luna', out.getvalue())
+        self.assertEqual(self.installs, [])
+        self.assertEqual(self.m.lumen_backups(), [])
+
+    def test_update_refuses_while_steam_runs_and_can_queue(self):
+        import io, contextlib
+        self.steam_running = True
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_lumen('update', yes=True), self.m.EXIT_REFUSED)
+        self.assertEqual(self.installs, [])
+        self.assertEqual(self.run_lumen('update', queue=True), 0)
+        self.assertTrue(self.m.read_lumen_pending())
+        self.assertEqual(self.installs, [], 'queueing must not run the installer')
+        self.assertEqual(self.run_lumen('cancel'), 0)
+        self.assertFalse(self.m.read_lumen_pending())
+
+    def test_queued_update_waits_for_steam_then_runs(self):
+        self.m.write_json_file(self.m.lumen_pending_path(), {'action': 'update'})
+        self.steam_running = True
+        extra = {}
+        self.assertFalse(self.m.apply_queued_lumen(extra))
+        self.assertTrue(extra['lumenPending'])
+        self.assertEqual(self.installs, [])
+        self.steam_running = False
+        self.assertTrue(self.m.apply_queued_lumen(extra))
+        self.assertEqual(extra['lumen'], 'applied')
+        self.assertFalse(self.m.read_lumen_pending())
+
+    def test_update_reattaches_luna_after_the_installer(self):
+        self.assertEqual(self.run_lumen('update', yes=True), 0)
+        self.assertEqual(self.installs, [self.m.UPSTREAM_INSTALLER_COMMIT, 'luna-install'], 'pinned installer first, Luna on top')
+        self.assertEqual((self.lumen / 'lumen').read_text(), 'binary v2')
+        self.assertIn('SLS-ADDONS-INTEGRATION', (self.lumen / 'lua/boot.lua').read_text())
+        self.assertIn('LUNA-LUMEN-UPDATE-BLOCK', (self.lumen / 'lua/about.lua').read_text())
+        self.assertEqual(self.m.read_json_file(self.m.lumen_result_path())['state'], 'applied')
+        self.assertEqual(len(self.m.lumen_backups()), 1)
+
+    def test_unpatchable_upstream_leaves_a_restorable_backup(self):
+        import io, contextlib
+        self.patchable = False
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertNotEqual(self.run_lumen('update', yes=True), 0)
+        self.assertEqual(self.m.read_json_file(self.m.lumen_result_path())['state'], 'failed')
+        self.assertNotIn('luna-install', self.installs)
+        self.assertTrue(self.m.read_json_file(self.m.lumen_result_path())['rolledBack'])
+        self.assertEqual((self.lumen / 'lumen').read_text(), 'binary v1', 'rolled back automatically')
+        self.m.mark_lumen_backup_failed(self.m.lumen_backups()[0])
+        self.assertEqual(self.run_lumen('restore', yes=True), 0)
+        self.assertEqual((self.lumen / 'lumen').read_text(), 'binary v1')
+        self.assertIn('SLS-ADDONS-INTEGRATION', (self.lumen / 'lua/boot.lua').read_text())
+        self.assertEqual(json.loads((self.lumen / 'versions.json').read_text())['lumen']['tag'], 'v2.8')
+
+    def test_failed_installer_keeps_the_backup(self):
+        import io, contextlib
+        self.installer_ok = False
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertNotEqual(self.run_lumen('update', yes=True), 0)
+        self.assertEqual(len(self.m.lumen_backups()), 1)
+
+    def snapshot(self):
+        """Every file/link under the trees the installer touches, with content."""
+        out = {}
+        for root in (self.lumen, self.sls, self.cfg, self.steam_home):
+            for path in sorted(root.rglob('*')):
+                rel = str(path)
+                if 'sls-luna' in rel or '.luna-' in rel or 'Steam/package' in rel:
+                    continue
+                if path.is_symlink():
+                    out[rel] = 'link:' + os.readlink(path)
+                elif path.is_file():
+                    out[rel] = (path.read_bytes(), oct(path.stat().st_mode))
+        return out
+
+    def test_backup_covers_every_tree_the_installer_touches(self):
+        backup = self.m.backup_lumen_tree()
+        meta = json.loads((backup / 'backup.json').read_text())
+        for item in ('lua', 'lumen', 'versions.json', 'luatools', 'slsteam', 'slsteam-config', 'steam.cfg'):
+            self.assertIn(item, meta['items'])
+        self.assertIn('update-channels.json', meta['absent'])
+        self.assertEqual((backup / 'slsteam/path/steam.luna-orig').read_text(), 'orig v1')
+        self.assertTrue((backup / 'slsteam/link.so').is_symlink())
+        self.assertEqual(oct((backup / 'slsteam/SLSsteam.so').stat().st_mode & 0o777), '0o755')
+        self.assertFalse((backup / 'slsteam/backup').exists(), 'the installer keeps its own backup dir')
+        self.assertEqual((backup / 'slsteam-config/config.yaml').read_text(), 'user: settings\n')
+        self.assertEqual(self.m.verify_lumen_backup(backup), (True, ''))
+        self.assertGreater(meta['files'], 8)
+
+    def test_restore_round_trip_returns_the_exact_pre_update_state(self):
+        before = self.snapshot()
+        self.assertEqual(self.run_lumen('update', yes=True), 0)
+        self.assertNotEqual(self.snapshot(), before)
+        self.assertEqual(self.run_lumen('restore', yes=True), 0)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual((self.sls / 'backup/keep.txt').read_text(), 'installer keeps this')
+
+    def test_restore_removes_a_steam_cfg_that_did_not_exist_before(self):
+        (self.steam_home / 'steam.cfg').unlink()
+        backup = self.m.backup_lumen_tree()
+        (self.steam_home / 'steam.cfg').write_text('late')
+        ok, _msg = self.m.restore_lumen_backup(backup.name)
+        self.assertTrue(ok)
+        self.assertFalse((self.steam_home / 'steam.cfg').exists())
+
+    def test_restore_refuses_a_damaged_backup_and_changes_nothing(self):
+        backup = self.m.backup_lumen_tree()
+        (self.lumen / 'lumen').write_text('binary v-now')
+        (backup / 'slsteam/SLSsteam.so').write_text('tampered')
+        ok, message = self.m.restore_lumen_backup(backup.name)
+        self.assertFalse(ok)
+        self.assertIn('manifest', message)
+        self.assertEqual((self.lumen / 'lumen').read_text(), 'binary v-now')
+
+    def test_restore_refuses_while_steam_or_lumen_runs(self):
+        self.m.backup_lumen_tree()
+        self.steam_running = True
+        ok, message = self.m.restore_lumen_backup()
+        self.assertFalse(ok)
+        self.assertIn('close Steam', message)
+        self.steam_running = False
+        with self.mock.patch.object(self.m, 'process_running', lambda name: name == 'lumen'):
+            self.assertFalse(self.m.restore_lumen_backup()[0])
+
+    def test_only_two_backups_survive_a_successful_update(self):
+        for index in range(3):
+            self.m.backup_lumen_tree()
+            time.sleep(0.01)
+        # distinct names even within one second
+        self.assertEqual(self.run_lumen('update', yes=True), 0)
+        self.assertEqual(len(self.m.lumen_backups()), self.m.LUMEN_KEEP_BACKUPS)
+
+    def test_a_failed_updates_backup_is_never_pruned(self):
+        import io, contextlib
+        self.installer_ok = False
+        with contextlib.redirect_stderr(io.StringIO()), \
+                self.mock.patch.object(self.m, 'restore_lumen_backup', lambda *a, **k: (False, 'no')):
+            self.assertNotEqual(self.run_lumen('update', yes=True), 0)
+        failed = [item['name'] for item in self.m.lumen_backup_info() if item['failed']]
+        self.assertEqual(len(failed), 1)
+        self.installer_ok = True
+        for _ in range(3):
+            self.assertEqual(self.run_lumen('update', yes=True), 0)
+        names = [item['name'] for item in self.m.lumen_backup_info()]
+        self.assertIn(failed[0], names)
+        self.assertEqual(len(names), self.m.LUMEN_KEEP_BACKUPS + 1)
+
+    def test_removed_user_config_comes_back_and_changed_config_is_only_listed(self):
+        import io, contextlib
+        self.config_after = {'config.yaml': None, 'notes.txt': 'rewritten by upstream'}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_lumen('update', yes=True), 0)
+        self.assertEqual((self.cfg / 'config.yaml').read_text(), 'user: settings\n')
+        self.assertEqual((self.cfg / 'notes.txt').read_text(), 'rewritten by upstream', 'never guess')
+        self.assertIn('restored (verbatim from the backup): %s' % (self.cfg / 'config.yaml'), out.getvalue())
+        self.assertIn('changed by the installer, left as is: %s' % (self.cfg / 'notes.txt'), out.getvalue())
+        self.assertIn('configChanged', self.m.read_json_file(self.m.lumen_result_path()))
+
+    def test_wrapper_is_unpatched_for_the_lumen_host_after_an_update(self):
+        calls = []
+        with self.mock.patch.object(self.m, 'wrapper_patched', lambda: True), \
+                self.mock.patch.object(self.m, 'unpatch_wrapper', lambda: calls.append(1)):
+            self.assertEqual(self.run_lumen('update', yes=True), 0)
+        self.assertEqual(calls, [1])
+
+    def test_dry_run_plan_lists_sizes_for_every_tree(self):
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.run_lumen('update', dry_run=True)
+        text = out.getvalue()
+        for name in ('luatools', 'slsteam ', 'slsteam-config', 'steam.cfg', 'total'):
+            self.assertIn(name, text)
+        self.assertIn('installer keeps backup', text)
+
+    def test_status_lists_backups_with_date_and_size(self):
+        import io, contextlib
+        self.m.backup_lumen_tree()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.run_lumen('status')
+        line = [l for l in out.getvalue().splitlines() if l.startswith('backups')][0]
+        self.assertRegex(line, r'\d{4}-\d\d-\d\d \d\d:\d\d, [\d.]+[BKMG]')
+
+
+class LumenChannelsTestCase(unittest.TestCase):
+    """`luna lumen channels`: show, set, validate, write atomically, and feed --check."""
+
+    def setUp(self):
+        import importlib.util
+        from unittest import mock
+        self.mock = mock
+        self.temp = Path(tempfile.mkdtemp(prefix='luna-channels-'))
+        self.home = self.temp / 'home'
+        self.lumen = self.home / '.local/share/Lumen'
+        (self.lumen / 'lua').mkdir(parents=True)
+        (self.lumen / 'luatools/backend').mkdir(parents=True)
+        (self.lumen / 'luatools/backend/main.lua').write_text('-- present')
+        (self.lumen / 'lua/boot.lua').write_text('boot v1')
+        patcher = mock.patch.dict(os.environ, {'HOME': str(self.home), 'LUMEN_DIR': str(self.lumen),
+                                               'LUNA_HOME': str(self.home / '.local/share/Luna'),
+                                               'XDG_DATA_HOME': str(self.home / '.local/share')})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        spec = importlib.util.spec_from_file_location('luna_channels_mod', str(LUNA))
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def options(self, **kwargs):
+        options = argparse.Namespace(lumen_action='channels', channels_action='', channels_value='',
+                                     only=[], json=False, check=False, dry_run=False, yes=False)
+        for key, value in kwargs.items():
+            setattr(options, key, value)
+        return options
+
+    def run_channels(self, **kwargs):
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = self.m.cmd_lumen(self.options(**kwargs))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_show_reports_all_three_and_defaults_to_stable(self):
+        code, out, _err = self.run_channels()
+        self.assertEqual(code, self.m.EXIT_OK)
+        for name in ('lumen', 'plugin', 'slsteam_moon'):
+            self.assertRegex(out, r'(?m)^%s\s+stable$' % name)
+        self.assertIn('(not written; stable applies)', out)
+        self.assertFalse(self.m.lumen_channels_path().exists())
+
+    def test_set_writes_all_three_atomically_and_audits_the_change(self):
+        code, out, _err = self.run_channels(channels_action='set', channels_value='beta')
+        self.assertEqual(code, self.m.EXIT_OK)
+        data = json.loads(self.m.lumen_channels_path().read_text())
+        self.assertEqual(data, {'lumen': 'beta', 'plugin': 'beta', 'slsteam_moon': 'beta'})
+        # mkstemp + os.replace leaves no scratch file behind
+        leftovers = [p.name for p in self.m.lumen_channels_path().parent.iterdir()
+                     if p.name.startswith('.update-channels.json')]
+        self.assertEqual(leftovers, [])
+        audit = self.m.read_json_file(self.m.lumen_channels_audit_path())
+        self.assertEqual(audit['state'], 'applied')
+        self.assertEqual(audit['changed'], {'lumen': 'beta', 'plugin': 'beta', 'slsteam_moon': 'beta'})
+        self.assertIn('channels set to beta', out)
+        self.assertEqual(self.m.lumen_channels_effective()['plugin'], 'beta')
+
+    def test_set_only_one_component_leaves_the_others_stable(self):
+        code, _out, _err = self.run_channels(channels_action='set', channels_value='beta', only=['plugin'])
+        self.assertEqual(code, self.m.EXIT_OK)
+        self.assertEqual(json.loads(self.m.lumen_channels_path().read_text()),
+                         {'lumen': 'stable', 'plugin': 'beta', 'slsteam_moon': 'stable'})
+
+    def test_set_refuses_an_unknown_value_without_writing(self):
+        code, _out, err = self.run_channels(channels_action='set', channels_value='nightly')
+        self.assertEqual(code, self.m.EXIT_REFUSED)
+        self.assertIn('stable or beta', err)
+        self.assertFalse(self.m.lumen_channels_path().exists())
+
+    def test_set_refuses_an_unknown_component_without_writing(self):
+        code, _out, err = self.run_channels(channels_action='set', channels_value='beta', only=['moon'])
+        self.assertEqual(code, self.m.EXIT_REFUSED)
+        self.assertIn('unknown component', err)
+        self.assertFalse(self.m.lumen_channels_path().exists())
+
+    def test_upstream_state_compares_against_the_chosen_channel(self):
+        self.m.write_json_file(self.m.lumen_channels_path(),
+                               {'lumen': 'beta', 'plugin': 'beta', 'slsteam_moon': 'beta'})
+        asked = []
+
+        def fetch(repo, beta_path, glob, mode, channel):
+            asked.append((repo, channel))
+            return {'tag': 'v9', 'id': 1, 'size': 2, 'channel': channel}, ''
+
+        verdict = self.m.lumen_upstream_state(installed={}, fetch=fetch)
+        self.assertEqual(sorted({channel for _repo, channel in asked}), ['beta'])
+        self.assertEqual({row['channel'] for row in verdict['components']}, {'beta'})
+        self.assertEqual(verdict['overall'], 'newer')
+        self.assertEqual(verdict['channels']['plugin'], 'beta')
+
+    def test_a_beta_with_no_published_build_says_so_plainly(self):
+        import urllib.error
+        calls = []
+
+        def fake_public_json(url):
+            calls.append(url)
+            if 'ref=beta' in url:
+                raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+            return {'tag_name': 'v3.0', 'assets': [{'id': 7, 'name': 'lumen-linux.zip', 'size': 9}]}
+
+        with self.mock.patch.object(self.m, '_public_json', fake_public_json):
+            info, note = self.m._upstream_component('swwayps/lumen', 'dist/lumen-linux.zip',
+                                                    r'^lumen-linux\.zip$', 'latest', 'beta')
+        self.assertEqual(info['channel'], 'stable')
+        self.assertIn('no beta build published', note)
+
+    def test_status_check_compares_against_the_chosen_channel(self):
+        self.m.write_json_file(self.m.lumen_channels_path(),
+                               {'lumen': 'stable', 'plugin': 'beta', 'slsteam_moon': 'stable'})
+        asked = []
+
+        def fetch(repo, beta_path, glob, mode, channel):
+            asked.append(channel)
+            return {'tag': 'v9', 'id': 1, 'size': 2, 'channel': channel}, ''
+
+        with self.mock.patch.object(self.m, '_upstream_component', fetch), \
+                self.mock.patch.object(self.m, 'fetch_base_installer', lambda *a, **k: 'f' * 64), \
+                self.mock.patch.object(self.m, 'patcher',
+                                       lambda *a, **k: subprocess.CompletedProcess([], 1, '', '')):
+            state = self.m.lumen_status(check=True)
+        by_name = {row['component']: row['channel'] for row in state['upstream']['components']}
+        self.assertEqual(by_name, {'slsteam_moon': 'stable', 'plugin': 'beta', 'lumen': 'stable'})
+        self.assertEqual(sorted(asked), ['beta', 'stable', 'stable'])
+
+
+class TerminalUpdateTestCase(unittest.TestCase):
+    """`--terminal`: plan, confirmation, `steam -shutdown`, the emulator argv and the log."""
+
+    def setUp(self):
+        import importlib.util
+        from unittest import mock
+        self.mock = mock
+        self.temp = Path(tempfile.mkdtemp(prefix='luna-terminal-'))
+        self.home = self.temp / 'home'
+        self.lumen = self.home / '.local/share/Lumen'
+        for name in ('lua', 'luatools/backend'):
+            (self.lumen / name).mkdir(parents=True)
+        (self.lumen / 'luatools/backend/main.lua').write_text('-- present')
+        (self.lumen / 'lua/boot.lua').write_text('boot v1')
+        patcher = mock.patch.dict(os.environ, {'HOME': str(self.home), 'LUMEN_DIR': str(self.lumen),
+                                               'LUNA_HOME': str(self.home / '.local/share/Luna'),
+                                               'XDG_DATA_HOME': str(self.home / '.local/share'),
+                                               'PATH': str(self.temp / 'bin') + os.pathsep + os.environ.get('PATH', '')})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        spec = importlib.util.spec_from_file_location('luna_terminal_mod', str(LUNA))
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+        self.calls = []
+        self.spawned = []
+        self.running = []
+
+    def tearDown(self):
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def options(self, **kwargs):
+        options = argparse.Namespace(dry_run=False, yes=False, terminal=True, only=[], bundle=None, url=None,
+                                     base_latest=False, steam_timeout=1, lumen_action='update',
+                                     installer_latest=False, reinstall=False, keep_millennium=False,
+                                     remove_millennium=False, queue=False, json=False, check=False, backup='')
+        for key, value in kwargs.items():
+            setattr(options, key, value)
+        return options
+
+    def patch_steam(self, processes, clear_on_shutdown=True):
+        self.running = list(processes)
+
+        def fake_run(command, *args, **kwargs):
+            self.calls.append(list(command))
+            if '-shutdown' in command and clear_on_shutdown:
+                self.running = []
+            return self.mock.Mock(returncode=0)
+
+        def fake_popen(argv, *args, **kwargs):
+            self.spawned.append(list(argv))
+            return self.mock.Mock(pid=4242)
+        for patcher in (self.mock.patch.object(self.m, 'process_running',
+                                              lambda name: name in self.running),
+                        self.mock.patch.object(self.m.subprocess, 'run', fake_run),
+                        self.mock.patch.object(self.m.subprocess, 'Popen', fake_popen)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_terminal_argv_for_every_known_emulator_family(self):
+        shell = 'echo hi'
+        expected = {
+            'foot': ['foot', '-e', 'bash', '-lc', shell],
+            'alacritty': ['alacritty', '-e', 'bash', '-lc', shell],
+            'kitty': ['kitty', 'bash', '-lc', shell],
+            'wezterm': ['wezterm', 'start', '--', 'bash', '-lc', shell],
+            'gnome-terminal': ['gnome-terminal', '--', 'bash', '-lc', shell],
+            'konsole': ['konsole', '-e', 'bash', '-lc', shell],
+            'xterm': ['xterm', '-e', 'bash', '-lc', shell],
+        }
+        for name, argv in expected.items():
+            self.assertEqual(self.m.terminal_argv(name, shell), argv)
+        self.assertEqual(self.m.terminal_argv('foot', shell, ['/usr/bin/foot'])[0], '/usr/bin/foot')
+
+    def test_terminal_discovery_respects_TERMINAL_and_the_path_order(self):
+        with self.mock.patch.dict(os.environ, {'TERMINAL': '/opt/bin/wezterm --class luna'}):
+            self.assertEqual(
+                self.m.find_terminal(which=lambda name: name if name.endswith('wezterm') else None),
+                ('wezterm', ['/opt/bin/wezterm', '--class', 'luna']))
+        with self.mock.patch.dict(os.environ, {'TERMINAL': ''}):
+            self.assertEqual(
+                self.m.find_terminal(which=lambda name: '/usr/bin/alacritty' if name == 'alacritty' else None),
+                ('alacritty', ['/usr/bin/alacritty']))
+            self.assertEqual(self.m.find_terminal(which=lambda name: None), ('', []))
+
+    def test_update_all_terminal_asks_steam_to_quit_then_opens_a_window(self):
+        import contextlib
+        import io
+        self.m.write_json_file(self.m.steam_pin_path(), {'clientBuild': '1620000000'})
+        self.patch_steam(['steam', 'steamwebhelper'])
+        with self.mock.patch.object(self.m, 'find_terminal', lambda which=None: ('foot', ['/usr/bin/foot'])):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = self.m.cmd_update_all_terminal(self.options(yes=True))
+        text = out.getvalue()
+        self.assertEqual(code, self.m.EXIT_OK)
+        self.assertEqual(self.calls, [['steam', '-shutdown']], 'Steam is asked, never killed')
+        self.assertEqual(len(self.spawned), 1)
+        argv = self.spawned[0]
+        self.assertEqual(argv[:4], ['/usr/bin/foot', '-e', 'bash', '-lc'])
+        shell = argv[4]
+        self.assertIn('update-all', shell)
+        self.assertIn('--yes', shell)
+        self.assertNotIn('--terminal', shell)
+        self.assertIn('tee -a', shell)
+        self.assertIn(str(self.m.luna_state_dir() / 'update-'), shell)
+        logs = list(self.m.luna_state_dir().glob('update-*.log'))
+        self.assertEqual(len(logs), 1)
+        self.assertIn('luna: ', logs[0].read_text())
+        self.assertIn('Steam client: unchanged (pinned 1620000000)', text)
+        self.assertIn('Steam quit', text)
+        self.assertIn('log       : %s' % logs[0], text)
+
+    def test_lumen_update_terminal_runs_the_same_command_without_the_flag(self):
+        import contextlib
+        import io
+        self.patch_steam(['steam'])
+        with self.mock.patch.object(self.m, 'find_terminal', lambda which=None: ('kitty', ['/usr/bin/kitty'])):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = self.m.cmd_lumen_update_terminal(self.options(yes=True, lumen_action='update',
+                                                                     installer_latest=True))
+        self.assertEqual(code, self.m.EXIT_OK)
+        self.assertEqual(self.calls, [['steam', '-shutdown']])
+        shell = self.spawned[0][-1]
+        self.assertIn('lumen update --yes', shell)
+        self.assertIn('--installer-latest', shell)
+        self.assertNotIn('--terminal', shell)
+        text = out.getvalue()
+        self.assertIn('Steam client: unchanged', text)
+        self.assertIn('would run the upstream MAIN installer', text)
+
+    def test_terminal_refuses_when_steam_will_not_quit_and_never_kills_it(self):
+        import contextlib
+        import io
+        self.patch_steam(['steam', 'steamwebhelper'], clear_on_shutdown=False)
+        with self.mock.patch.object(self.m, 'find_terminal', lambda which=None: ('foot', ['/usr/bin/foot'])), \
+                self.mock.patch.object(self.m.time, 'sleep', lambda _seconds: None):
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = self.m.cmd_update_all_terminal(self.options(yes=True))
+        self.assertEqual(code, self.m.EXIT_REFUSED)
+        self.assertEqual(self.calls, [['steam', '-shutdown']])
+        self.assertIn('still running', err.getvalue())
+        self.assertEqual(self.spawned, [])
+        self.assertFalse([call for call in self.calls
+                          if any(word in part for part in call for word in ('kill', 'pkill', '-9'))])
+
+    def test_terminal_needs_confirmation_without_yes(self):
+        import contextlib
+        import io
+        self.patch_steam([])
+        with self.mock.patch.object(self.m.sys.stdin, 'isatty', lambda: False), \
+                self.mock.patch.object(self.m.sys.stdout, 'isatty', lambda: False):
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = self.m.cmd_update_all_terminal(self.options())
+        self.assertEqual(code, self.m.EXIT_REFUSED)
+        self.assertIn('needs confirmation', err.getvalue())
+        self.assertEqual(self.calls, [], 'nothing may be run before confirmation')
+        self.assertEqual(self.spawned, [])
+
+    def test_terminal_refuses_when_a_job_already_holds_the_lock(self):
+        import contextlib
+        import io
+        with self.mock.patch.object(self.m, '_update_lock_held_by_other', lambda: True):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = self.m.cmd_update_all_terminal(self.options(yes=True))
+        self.assertEqual(code, self.m.EXIT_BUSY)
+        self.assertIn('REFUSING', err.getvalue())
+        self.assertEqual(self.calls, [])
+
+    def test_run_update_in_terminal_falls_back_without_an_emulator(self):
+        recorded = []
+
+        def fake_call(command, *args, **kwargs):
+            recorded.append(list(command))
+            return 0
+        log = self.home / 'state' / 'fallback.log'
+        with self.mock.patch.object(self.m, 'find_terminal', lambda which=None: ('', [])), \
+                self.mock.patch.object(self.m.sys.stdin, 'isatty', lambda: False), \
+                self.mock.patch.object(self.m.sys.stdout, 'isatty', lambda: False), \
+                self.mock.patch.object(self.m.subprocess, 'call', fake_call):
+            used, how, path, argv = self.m.run_update_in_terminal(['/bin/true'], log_path=log)
+        self.assertEqual(used, 'subprocess')
+        self.assertIn('no terminal emulator found', how)
+        self.assertIn('without a window', how)
+        self.assertEqual(argv, [])
+        self.assertEqual(recorded, [['/bin/true']])
+        self.assertTrue(path.is_file())
+
+    def test_run_update_in_terminal_uses_this_terminal_when_one_is_available(self):
+        recorded = []
+
+        def fake_call(command, *args, **kwargs):
+            recorded.append(list(command))
+            return 3
+        with self.mock.patch.object(self.m, 'find_terminal', lambda which=None: ('', [])), \
+                self.mock.patch.object(self.m.sys.stdin, 'isatty', lambda: True), \
+                self.mock.patch.object(self.m.sys.stdout, 'isatty', lambda: True), \
+                self.mock.patch.object(self.m.subprocess, 'call', fake_call):
+            used, how, _path, _argv = self.m.run_update_in_terminal(['/bin/true'])
+        self.assertEqual(used, 'current-terminal')
+        self.assertIn('ran in this terminal (exit 3)', how)
+        self.assertEqual(recorded[0][:2], ['bash', '-lc'])
+
+    def test_update_all_plan_says_the_steam_client_is_unchanged(self):
+        import contextlib
+        import io
+        self.m.write_json_file(self.m.steam_pin_path(), {'clientBuild': '1620000000'})
+        out = io.StringIO()
+        with self.mock.patch.object(self.m, 'base_state', lambda: 'ready'), contextlib.redirect_stdout(out):
+            self.assertEqual(self.m.cmd_update_all(self.options(dry_run=True, terminal=False)), 0)
+        text = out.getvalue()
+        self.assertIn('Steam client: unchanged (pinned 1620000000)', text)
+        self.assertIn('update-all: would', text)
+        self.assertFalse(self.m.steam_pending_path().exists(), 'update-all must queue no Steam client work')
+        self.assertEqual(self.m.read_steam_pending(), {})
 
 
 class VendorTestCase(unittest.TestCase):

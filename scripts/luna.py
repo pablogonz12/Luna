@@ -18,13 +18,25 @@ Commands:
     luna preflight [--only NAME]        read-only environment and state report
     luna status [--only NAME]           what is installed, and whether it matches
     luna install [--only NAME] [--force] [--dry-run]
-    luna hook on|off|status|repair       automatic bridge recovery after Lumen updates
+    luna host status|cutover|rollback    show / switch the plugin host (Luna's luna-host vs. Lumen)
+    luna lumen status|update|cancel|restore [--dry-run] [--yes] [--queue]
+                                        update the Lumen base (Lumen host only): back up, run the
+                                        base installer, re-attach Luna; `restore` undoes it
+    luna lumen channels [set stable|beta] [--only NAME]
+                                        show or change the per-component update channels
+                                        (update-channels.json), written atomically
+    luna lumen update --terminal        plan, confirm, close Steam (steam -shutdown) and run the
+                                        same update in a terminal window, teed to
+                                        ~/.local/share/Luna/state/update-<timestamp>.log
     luna uninstall [--only NAME]
     luna verify [--sources]             manifest, payload and drift checks
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
     luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
                                         verify and install a released bundle
+    luna update-all [--base-latest] [--yes] [--terminal] [--dry-run]
+                                        update Luna's add-ons and re-verify the Lumen base;
+                                        never touches the Steam client build
     luna reconcile [--dry-run]          merge Syncthing sync-conflict copies of
                                         Steam's localconfig.vdf (newest timestamp wins)
     luna backup [--out DIR]             snapshot Luna user data (playtime ledgers,
@@ -45,6 +57,16 @@ Commands:
     luna refresh [--dry-run]            update Steam to Valve's latest, pin and
                                         cache it, then reinstall Luna on top
                                         (Steam closed; never kills anything)
+
+Exit codes (scripts can rely on these):
+    0  success / healthy
+    1  corrupt or incomplete state (also: a failed run)
+    2  refused by an environment guard (Steam or a Lumen sidecar is running)
+    3  installed payloads differ; re-run with --force
+    4  the boot.lua patcher refused or failed
+    5  another luna command holds the single-writer lock; nothing was changed
+    6  `luna status`: payloads differ from the pinned copy (a local edit or
+       drift); corruption always reports 1 instead
 """
 import argparse
 import contextlib
@@ -57,6 +79,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -72,6 +95,15 @@ import zlib
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
+# install_bundle runs luna.py from an unpacked bundle, and write_tooling copies
+# it to <luna_tools_dir()>/luna.py. Neither place is a checkout, so the support
+# tree (patch-lumen.py, bridge, add-on sources) is deployed beside the copy as
+# <tools>/runtime and becomes ROOT. Without this an installed copy found no
+# patcher and a Lumen update could not re-attach Luna.
+_INSTALLED_ROOT = Path(__file__).resolve().parent / 'runtime'
+if (not (ROOT / 'scripts' / 'patch-lumen.py').is_file()
+        and (_INSTALLED_ROOT / 'scripts' / 'patch-lumen.py').is_file()):
+    ROOT = _INSTALLED_ROOT
 MANIFEST_PATH = ROOT / 'vendor' / 'MANIFEST.json'
 BRIDGE_SOURCE = ROOT / 'bridge' / 'bridge.lua'
 PATCHER = ROOT / 'scripts' / 'patch-lumen.py'
@@ -121,9 +153,19 @@ ADDON_FILES = {
 }
 
 EXIT_OK = 0
+EXIT_CORRUPT = 1
 EXIT_REFUSED = 2
 EXIT_NEEDS_FORCE = 3
 EXIT_PATCH = 4
+EXIT_BUSY = 5
+EXIT_MODIFIED = 6
+EXIT_EPILOG = ('exit codes: 0 ok, 1 corrupt or failed, 2 refused, 3 needs --force, '
+               '4 patcher failed, 5 another luna command is running, '
+               '6 status: payload differs from the pinned copy (local edit or drift; '
+               'pass --strict to report it as 1)')
+# Set for a child `install` spawned by an owner that already holds the lock
+# (install_bundle, the timer): the lock is ours, a second acquire would refuse.
+LOCK_HELD_ENV = 'LUNA_LOCK_HELD'
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +430,7 @@ def cmd_reconcile(options):
     replaces last-writer-wins with max-wins for recency. Refuses while Steam or
     the Lumen sidecar runs; consumed conflicts are archived next to the file.
     """
-    if process_running('steam') or process_running('steamwebhelper') or process_running('lumen'):
+    if steam_running() or lumen_running():
         print('REFUSING to reconcile: Steam or the Lumen sidecar is running. '
               'Close it completely (Steam -> Exit), let Syncthing settle, then retry.')
         return EXIT_REFUSED
@@ -459,13 +501,39 @@ def data_dir():
     return home() / '.local/share/slssteam-integrations'
 
 
+def luna_home():
+    """Luna's own home: the plugin host, its Lua tree, add-ons and host state."""
+    return Path(os.environ.get('LUNA_HOME') or (home() / '.local/share/Luna'))
+
+
+def host_state_path():
+    return luna_home() / 'host.json'
+
+
+def active_host():
+    """'luna' once `luna host cutover` ran, otherwise the third-party 'lumen'."""
+    try:
+        data = json.loads(host_state_path().read_text())
+    except (OSError, ValueError):
+        return 'lumen'
+    return 'luna' if isinstance(data, dict) and data.get('active') == 'luna' else 'lumen'
+
+
+def lumen_tools_dir():
+    return lumen_root() / 'sls-luna'
+
+
 def luna_tools_dir():
     """Machine-local Luna tooling: the standalone updater copy and its units.
 
-    It sits under the Lumen directory on purpose: that tree is excluded from the
-    user's Syncthing folders, so two machines never fight over the copies.
+    While Lumen is the active host it sits under the Lumen directory on purpose:
+    that tree is excluded from the user's Syncthing folders, so two machines
+    never fight over the copies. After `luna host cutover` it is
+    `$LUNA_HOME/state` (also machine-local), matching the backend.
     """
-    return lumen_root() / 'sls-luna'
+    if active_host() == 'luna':
+        return luna_home() / 'state'
+    return lumen_tools_dir()
 
 
 def machine_id():
@@ -505,7 +573,7 @@ def write_heartbeat():
         directory.mkdir(parents=True, exist_ok=True)
         entry = {'machine': machine_id(),
                  'at': int(time.time()),
-                 'steamRunning': bool(process_running('steam') or process_running('steamwebhelper')),
+                 'steamRunning': bool(steam_running()),
                  'luna': installed_version()}
         (directory / (entry['machine'] + '.json')).write_text(json.dumps(entry) + '\n')
         now = time.time()
@@ -651,6 +719,25 @@ def addon_version(name):
 
 # --------------------------------------------------------------------------- refusals
 
+def lumen_running():
+    """The single answer to "is Lumen up?".
+
+    Every refusal, doctor line and install decision goes through this helper so
+    a pgrep result and a unit state can never tell two different stories.
+    """
+    return bool(process_running('lumen'))
+
+
+def steam_running():
+    """The single answer to "is Steam up?" (client or its webhelper)."""
+    return bool(process_running('steam') or process_running('steamwebhelper'))
+
+
+def luna_host_running():
+    """True while a luna-host helper serves the menu (host cutover active)."""
+    return bool(process_running('luna-host') or process_running('luna_host'))
+
+
 def stop_lumen_sidecar(wait=10):
     """Stop this user's lingering `lumen` sidecar (pkill -u uid -x lumen).
 
@@ -658,17 +745,17 @@ def stop_lumen_sidecar(wait=10):
     would keep the old boot.lua / client in memory. Returns True when none is
     left running.
     """
-    if not process_running('lumen'):
+    if not lumen_running():
         return True
     try:
         subprocess.run(['pkill', '-u', str(os.getuid()), '-x', 'lumen'], capture_output=True)
     except FileNotFoundError:
-        return not process_running('lumen')
+        return not lumen_running()
     for _ in range(max(1, int(wait * 4))):
-        if not process_running('lumen'):
+        if not lumen_running():
             return True
         time.sleep(0.25)
-    return not process_running('lumen')
+    return not lumen_running()
 
 
 def refuse_reasons(for_install, stop_sidecar=False):
@@ -683,16 +770,20 @@ def refuse_reasons(for_install, stop_sidecar=False):
         reasons.append('Lumen lua/boot.lua not found under %s (is the LuaTools-Moon stack installed?)' % root)
     if not (root / 'luatools' / 'backend' / 'main.lua').is_file():
         reasons.append('LuaTools-Moon backend not found under %s' % root)
-    if process_running('steam') or process_running('steamwebhelper'):
+    if steam_running():
         reasons.append('Steam is running. Close it completely (Steam -> Exit) before changing Lumen.')
+    # With the luna-host cutover the menu is served from Luna's tree, so an
+    # add-on write aimed at Lumen is invisible until the two are mirrored again.
+    if active_host() == 'luna' and luna_host_running() and not steam_running():
+        print('host      : luna-host is serving; payloads are mirrored after this run')
     # A sidecar from an earlier session keeps the old boot.lua in memory, which
     # makes a successful install look ineffective. Plain install reports it;
     # lock/unlock/recover/refresh stop it once Steam is closed.
-    if (stop_sidecar and not (process_running('steam') or process_running('steamwebhelper'))
-            and process_running('lumen')):
+    if (stop_sidecar and not (steam_running())
+            and lumen_running()):
         if stop_lumen_sidecar():
             print('lumen     : stopped a lingering sidecar from an earlier session')
-    if process_running('lumen'):
+    if lumen_running():
         reasons.append('A Lumen sidecar is still running (pid owner: %s). Stop it first:\n'
                        '    pkill -u $(id -u) -x lumen' % os.getuid())
     return reasons
@@ -809,6 +900,54 @@ def print_component_inventory():
 
 # --------------------------------------------------------------------------- apply
 
+def install_marker_path():
+    return luna_tools_dir() / 'install-in-progress.json'
+
+
+def write_install_marker(targets, force=False):
+    """Record that payloads are being written, before the first byte changes.
+
+    A kill -9 (or a power cut) leaves this file behind, so `luna status` and
+    `luna doctor` can say "the last install was interrupted" instead of
+    pretending a half-written tree is installed.
+    """
+    path = install_marker_path()
+    try:
+        write_json_file(path, {'pid': os.getpid(), 'at': int(time.time()),
+                               'addons': list(targets), 'force': bool(force)})
+    except OSError as error:
+        print('  WARN: could not write the install marker: %s' % error, file=sys.stderr)
+    return path
+
+
+def clear_install_marker():
+    try:
+        install_marker_path().unlink()
+    except OSError:
+        pass
+
+
+def archive_previous(differing, reason='undo'):
+    """Copy every payload --force is about to overwrite; returns the root dir.
+
+    The bytes stay under <tools>/undo/<timestamp>/ with the same relative
+    layout, so a local hotfix can always be recovered by hand.
+    """
+    if not differing:
+        return None
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    root = luna_tools_dir() / reason / stamp
+    suffix = 0
+    while root.exists():
+        suffix += 1
+        root = luna_tools_dir() / reason / ('%s-%d' % (stamp, suffix))
+    for addon, label, source, dest, state in differing:
+        target = root / addon / label
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(dest, target)
+    return root
+
+
 class Apply:
     """Write files, remembering how to put the previous state back."""
 
@@ -822,11 +961,18 @@ class Apply:
             self.undo.append(('restore', dest, dest.read_bytes()))
         else:
             self.undo.append(('remove', dest, None))
-        tmp = dest.with_name(dest.name + '.luna-tmp')
         data = source.read_bytes()
-        tmp.write_bytes(data)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, dest)
+        # Per-run unique name: two writers can never share one temp file.
+        fd, temporary = tempfile.mkstemp(prefix='.%s.' % dest.name, suffix='.luna-tmp',
+                                         dir=dest.parent)
+        try:
+            with os.fdopen(fd, 'wb') as out:
+                out.write(data)
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, dest)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def mkdir(self, path):
         if not path.is_dir():
@@ -834,6 +980,8 @@ class Apply:
             self.undo.append(('rmdir', path, None))
 
     def rollback(self):
+        """Undo every recorded step; returns how many could not be undone."""
+        failures = 0
         for action, target, payload in reversed(self.undo):
             try:
                 if action == 'restore':
@@ -844,12 +992,15 @@ class Apply:
                 elif action == 'rmdir':
                     shutil.rmtree(target, ignore_errors=True)
             except OSError as error:
+                failures += 1
                 print('  WARN: rollback could not restore %s: %s' % (target, error), file=sys.stderr)
         if self.did_patch:
             result = patcher('uninstall')
             if result.returncode != 0:
+                failures += 1
                 print('  WARN: could not revert the boot.lua patch: %s'
                       % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
+        return failures
 
 
 # --------------------------------------------------------------------------- commands
@@ -927,6 +1078,54 @@ def cmd_preflight(options):
     return EXIT_OK
 
 
+def bridge_heartbeat_path():
+    return luna_state_dir() / 'bridge-heartbeat.json'
+
+
+def bridge_status():
+    """(level, lines): what the bridge's heartbeat says, against whether Lumen runs now.
+
+    The bridge writes the file when it loads (time, host pid, add-ons that loaded, add-ons
+    that failed with the error). Level is 'ok', 'warn' or 'info'.
+    """
+    data = read_json_file(bridge_heartbeat_path())
+    data = data if isinstance(data, dict) else {}
+    when = int(data.get('time') or 0)
+    stamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(when)) if when else 'unknown time'
+    pid = int(data.get('pid') or 0)
+    host_alive = bool(pid) and pid_alive(pid)
+    running = lumen_running()
+    failed = [item for item in data.get('failed') or [] if isinstance(item, dict)]
+    lines, level = [], 'ok'
+    if data and host_alive:
+        lines.append('attached: %d add-ons, loaded at %s' % (len(data.get('addons') or []), stamp))
+    elif running:
+        level = 'warn'
+        lines.append('WARN: Lumen is running but the bridge has not loaded since Steam started%s'
+                     % (' (last heartbeat %s is from a process that is gone)' % stamp if data
+                        else ' (no heartbeat file yet)'))
+        lines.append('      repair: luna hook repair, then restart Steam')
+    elif data:
+        level = 'info'
+        lines.append('not attached now (Lumen is not running); last load: %d add-ons at %s'
+                     % (len(data.get('addons') or []), stamp))
+    else:
+        level = 'info'
+        lines.append('no bridge heartbeat yet (it appears the first time Steam loads Luna)')
+    for item in failed:
+        level = 'warn'
+        lines.append('WARN: add-on %s did not load: %s' % (item.get('name') or '?', item.get('error') or 'unknown error'))
+    return level, lines
+
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except OSError:
+        return False
+    return True
+
+
 def cmd_status(options):
     targets = selected_addons(options)
     manifest = load_manifest()
@@ -938,15 +1137,27 @@ def cmd_status(options):
           % ('patched' if patched else 'unpatched', content.count(MARKER),
              'present' if boot.with_name('boot.lua.sls-addons.original').is_file() else 'absent'))
     print('processes  : steam=%s lumen=%s'
-          % (process_running('steam') or process_running('steamwebhelper'), process_running('lumen')))
+          % (steam_running(), lumen_running()))
+    for line in bridge_status()[1]:
+        print('bridge     : %s' % line)
     print_component_inventory()
+    interrupted = read_json_file(install_marker_path()) or {}
+    if interrupted:
+        print('note       : last install was interrupted (pid %s, started %s); run: luna install --force'
+              % (interrupted.get('pid') or '?',
+                 time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(interrupted.get('at') or 0)))
+                 if interrupted.get('at') else 'unknown time'))
     rows = plan(targets)
     print('%-9s %-22s %s' % ('add-on', 'file', 'state'))
-    degraded = False
+    degraded = bool(interrupted)
+    modified = False
     for addon, label, source, dest, state in rows:
         print('%-9s %-22s %s' % (addon, label, state))
-        if state == 'differs' and addon in installed:
-            degraded = True
+        if state == 'differs':
+            # Somebody (or another tool) changed an installed payload. That is
+            # a local edit or drift, not corruption: its own exit code, so a
+            # script can tell "review this" from "this tree is broken".
+            modified = True
         if state == 'missing-source':
             degraded = True
         if state == 'new' and addon in installed:
@@ -967,7 +1178,13 @@ def cmd_status(options):
     print('manifest   : %d add-on(s) pinned from %s'
           % (len(manifest.get('addons', {})), ', '.join(
               sorted({entry.get('source_repo', '?') for entry in manifest.get('addons', {}).values()}))))
-    return 1 if degraded else EXIT_OK
+    if degraded:
+        return EXIT_CORRUPT
+    if modified:
+        if getattr(options, 'strict', False):
+            return EXIT_CORRUPT
+        return EXIT_MODIFIED
+    return EXIT_OK
 
 
 def write_install_snapshot():
@@ -1059,11 +1276,20 @@ def cmd_release(options):
         ('addons', ROOT / 'addons'),
         ('vendor/MANIFEST.json', MANIFEST_PATH),
          ('scripts/luna.py', ROOT / 'scripts' / 'luna.py'),
-        ('scripts/lumen-hook.py', ROOT / 'scripts' / 'lumen-hook.py'),
         ('scripts/steam-machine.py', ROOT / 'scripts' / 'steam-machine.py'),
         ('scripts/patch-lumen.py', PATCHER),
         ('bridge/bridge.lua', BRIDGE_SOURCE),
     ]
+    # Luna's own plugin host: prebuilt binary + Lua tree, so a bundle install
+    # needs no compiler. Not manifest-pinned (built locally); verified by bundle sha256.
+    host_bin = host_source() / 'bin' / 'luna-host'
+    if not host_bin.is_file() and (host_source() / 'Makefile').is_file():
+        ensure_host_built()
+    if host_bin.is_file() and (host_source() / 'lua').is_dir():
+        entries.append(('host/bin/luna-host', host_bin))
+        entries.append(('host/lua', host_source() / 'lua'))
+    else:
+        print('warning: no luna-host binary; the bundle will not carry the host', file=sys.stderr)
     readme = ROOT / 'README.md'
     if readme.is_file():
         entries.append(('README.md', readme))
@@ -1108,7 +1334,7 @@ def cmd_update(options):
     acquired, reason = _acquire_lock(lock_path)
     if not acquired:
         print('REFUSING: %s' % reason, file=sys.stderr)
-        return 1
+        return EXIT_BUSY
     temp_dir = Path(tempfile.mkdtemp(prefix='luna-update-'))
     try:
         bundle = None
@@ -1173,6 +1399,22 @@ def latest_release():
     return str(data.get('tagName') or ''), ''
 
 
+def update_source():
+    """Where the latest version comes from (shown beside the version)."""
+    return 'GitHub releases of %s (via gh)' % LUNA_REPO
+
+
+def _compare_fields(installed, latest):
+    """available / newerThanLatest / note for an installed version against the latest release."""
+    if not latest:
+        return {'available': False, 'newerThanLatest': False, 'note': ''}
+    newer = version_key(latest) > version_key(installed)
+    ahead = version_key(installed) > version_key(latest)
+    return {'available': newer, 'newerThanLatest': ahead,
+            'note': 'installed %s is newer than the latest release %s; nothing to update' % (installed, latest)
+            if ahead else ''}
+
+
 def check_updates(force=False):
     """Compare the installed version with the newest release; cached for 6h."""
     cache_path = luna_tools_dir() / 'update-check.json'
@@ -1182,7 +1424,8 @@ def check_updates(force=False):
     if (not force and cached.get('latest') and cached.get('checkedAt') and not cached.get('checkError')
             and now - int(cached['checkedAt']) < UPDATE_TTL):
         cached['installed'] = installed
-        cached['available'] = version_key(cached.get('latest')) > version_key(installed)
+        cached.update(_compare_fields(installed, str(cached.get('latest') or '')))
+        cached['source'] = update_source()
         return cached
     latest, error = latest_release()
     if not latest and error:
@@ -1194,8 +1437,9 @@ def check_updates(force=False):
         'latest': latest,
         'checkedAt': now,
         'checkError': error,
-        'available': bool(latest) and version_key(latest) > version_key(installed),
+        'source': update_source(),
     }
+    report.update(_compare_fields(installed, latest))
     write_json_file(cache_path, report)
     return report
 
@@ -1271,7 +1515,8 @@ def install_bundle(bundle, only=None, dry_run=False):
             command += ['--only', name]
         if dry_run:
             command.append('--dry-run')
-        result = subprocess.run(command, env=dict(os.environ, LUNA_KEEP_STEAM_CLIENT='1'))
+        result = subprocess.run(command, env=dict(os.environ, LUNA_KEEP_STEAM_CLIENT='1',
+                                                  **{LOCK_HELD_ENV: '1'}))
         return result.returncode
 
 
@@ -1302,7 +1547,12 @@ def download_release(tag, work):
 
 
 def _update_lock():
-    """Single-writer lock so timer, menu and shell never update concurrently."""
+    """Single writer lock for *every* mutating command.
+
+    Timer, menu, `luna install`, uninstall, launchers, host, backup and restore
+    all take this one file, so two writers can never interleave payload bytes
+    or fight over boot.lua. The name is historical (tests and old units know it).
+    """
     tools = luna_tools_dir()
     try:
         tools.mkdir(parents=True, exist_ok=True)
@@ -1312,10 +1562,77 @@ def _update_lock():
 
 
 LOCK_TTL = 3600
+CHECK_LOCK_TTL = 600
 
 
-def _acquire_lock(lock_path):
-    """Claim the update lock; clear it when stale (dead owner or too old).
+def _lock_owner(lock_path):
+    """(pid, started) recorded by the lock owner, or (0, 0) when unreadable."""
+    try:
+        info = json.loads(lock_path.read_text())
+        return int(info.get('pid') or 0), int(info.get('at') or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0, 0
+
+
+def _pid_cmdline(pid):
+    """/proc/<pid>/cmdline as one string; '' when unreadable."""
+    try:
+        return Path('/proc/%d/cmdline' % int(pid)).read_bytes().replace(b'\0', b' ').decode('utf-8', 'replace')
+    except (OSError, ValueError):
+        return ''
+
+
+def _proc_start(pid):
+    """Start time (clock ticks since boot) of a process; 0 when unknown."""
+    try:
+        text = Path('/proc/%d/stat' % int(pid)).read_text()
+        return int(text[text.rindex(')') + 2:].split()[19])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def pid_is_live_luna(pid, start=0):
+    """True only for a live, non-zombie luna process with the recorded start time.
+
+    A bare kill(pid, 0) is fooled by pid reuse after a reboot or a long
+    outage; the command line and the start time are checked as well.
+    """
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        stat_text = Path('/proc/%d/stat' % pid).read_text()
+        if stat_text[stat_text.rindex(')') + 2:].split()[0] == 'Z':
+            return False
+    except (OSError, ValueError, IndexError):
+        pass
+    # An empty command line (exiting process, kernel thread, unreadable) is NOT proof of a
+    # luna process: only a positive match counts, or a recycled pid reads as alive.
+    if 'luna' not in _pid_cmdline(pid).lower():
+        return False
+    if start and _proc_start(pid) and _proc_start(pid) != int(start):
+        return False
+    return True
+
+
+def _busy_message(lock_path):
+    """One wording for every refusal, so callers and the panel agree."""
+    pid, started = _lock_owner(lock_path)
+    when = (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started))
+            if started else 'unknown time')
+    return ('another luna command is already running (pid %s, started %s); '
+            'nothing was changed, try again when it finishes' % (pid or '?', when))
+
+
+def _acquire_lock(lock_path, ttl=LOCK_TTL):
+    """Claim the lock; clear it when stale (dead owner or too old).
 
     Returns (True, '') on success or (False, reason). A kill -9 between
     acquire and release must never wedge updates forever.
@@ -1333,11 +1650,7 @@ def _acquire_lock(lock_path):
         finally:
             os.close(fd)
         return True, ''
-    try:
-        info = json.loads(lock_path.read_text())
-        owner, started = int(info.get('pid') or 0), int(info.get('at') or 0)
-    except (OSError, ValueError, TypeError, AttributeError):
-        owner, started = 0, 0
+    owner, started = _lock_owner(lock_path)
     alive = False
     if owner > 0:
         try:
@@ -1345,8 +1658,15 @@ def _acquire_lock(lock_path):
             alive = True
         except (OSError, ProcessLookupError, PermissionError):
             alive = False
-    if alive and time.time() - started < LOCK_TTL:
-        return False, 'another update is already running (%s)' % lock_path
+    if alive and time.time() - started >= ttl:
+        # Never take the lock from a live luna process: a stalled installer must
+        # be killed by its own timeout, not raced by a second writer. Only an
+        # unrelated process that inherited a reused pid is treated as stale.
+        cmdline = _pid_cmdline(owner)
+        if cmdline and 'luna' not in cmdline.lower():
+            alive = False
+    if alive:
+        return False, _busy_message(lock_path)
     try:
         lock_path.unlink()
     except OSError:
@@ -1354,7 +1674,7 @@ def _acquire_lock(lock_path):
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except (FileExistsError, OSError):
-        return False, 'another update is already running (%s)' % lock_path
+        return False, _busy_message(lock_path)
     try:
         os.write(fd, json.dumps({'pid': os.getpid(), 'at': int(time.time())}).encode())
     finally:
@@ -1369,41 +1689,216 @@ def _release_lock(lock_path):
         pass
 
 
+def lock_inherited():
+    """True when an owner that already holds the lock spawned this process."""
+    return os.environ.get(LOCK_HELD_ENV) == '1'
+
+
+def run_locked(func, options):
+    """Run a mutating handler under the single writer lock.
+
+    Non-blocking: a second invocation reports who holds the lock and exits
+    EXIT_BUSY (distinct from success and from every refusal code).
+    """
+    if lock_inherited():
+        return func(options)
+    lock_path = _update_lock()
+    acquired, reason = _acquire_lock(lock_path)
+    if not acquired:
+        print('REFUSING: %s' % reason, file=sys.stderr)
+        return EXIT_BUSY
+    try:
+        return func(options)
+    finally:
+        _release_lock(lock_path)
+
+
+def locked(func):
+    """Decorator form used by the dispatch table."""
+    def wrapper(options):
+        return run_locked(func, options)
+    wrapper.__name__ = getattr(func, '__name__', 'locked')
+    wrapper.__doc__ = func.__doc__
+    return wrapper
+
+
 CLI_LAUNCHER = '''#!/bin/sh
-# Managed by SLS Luna CLI v1
-# Recovery remains available even if a base update replaces Lumen's tooling.
-if [ "${1:-}" = hook ] && [ -f "$HOME/.local/share/slssteam-luna/lumen-hook.py" ]; then
-    shift
-    action="${1:-status}"
-    case "$action" in on) action=enable;; off) action=disable;; esac
-    [ "$#" -eq 0 ] || shift
-    exec python3 "$HOME/.local/share/slssteam-luna/lumen-hook.py" "$action" "$@"
+# Managed by SLS Luna CLI v3
+# Runs the copy of luna.py kept by the active plugin host (see: luna host status); when a
+# base install replaced the Lumen tree, the rescue copy in Luna's own state dir is used.
+LUNA_HOME="${LUNA_HOME:-$HOME/.local/share/Luna}"
+if grep -q '"active": *"luna"' "$LUNA_HOME/host.json" 2>/dev/null && [ -f "$LUNA_HOME/state/luna.py" ]; then
+  exec python3 "$LUNA_HOME/state/luna.py" "$@"
+fi
+for copy in "$HOME/.local/share/Lumen/sls-luna/luna.py" "$LUNA_HOME/state/rescue/luna.py"; do
+  [ -f "$copy" ] && exec python3 "$copy" "$@"
+done
+echo "luna: no Luna tooling copy found (a base install may have replaced ~/.local/share/Lumen/sls-luna)." >&2
+echo "Get Luna back: unpack a Luna release (or use the checkout) and run: python3 scripts/luna.py install --force" >&2
+exit 1
+'''
+
+# Earlier launcher bytes Luna wrote itself: still ours, safe to upgrade in place.
+LEGACY_CLI_LAUNCHERS = ('''#!/bin/sh
+# Managed by SLS Luna CLI v2
+# Runs the copy of luna.py kept by the active plugin host (see: luna host status).
+LUNA_HOME="${LUNA_HOME:-$HOME/.local/share/Luna}"
+if grep -q '"active": *"luna"' "$LUNA_HOME/host.json" 2>/dev/null && [ -f "$LUNA_HOME/state/luna.py" ]; then
+  exec python3 "$LUNA_HOME/state/luna.py" "$@"
 fi
 exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
-'''
+''', '''#!/bin/sh
+# Managed by SLS Luna CLI v1
+exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
+''',)
+
+
+def ours_cli_launcher(launcher):
+    try:
+        data = launcher.read_bytes()
+    except OSError:
+        return False
+    return data in [CLI_LAUNCHER.encode()] + [text.encode() for text in LEGACY_CLI_LAUNCHERS]
+
+
+def runtime_sources():
+    """(relative path, source) for the support tree an installed copy needs."""
+    rels = ['scripts/patch-lumen.py', 'scripts/steam-machine.py',
+            'bridge/bridge.lua', 'vendor/MANIFEST.json']
+    for name in ADDONS:
+        for source_rel, _dest in ADDON_FILES[name]:
+            rels.append('addons/%s/%s' % (name, source_rel))
+    return [(rel, ROOT / rel) for rel in rels]
+
+
+RUNTIME_MANIFEST = 'RUNTIME.json'
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def deploy_runtime(tools=None, luna_source=None):
+    """Copy patcher, bridge, add-on sources and manifest to <tools>/runtime.
+
+    Staged in runtime.new, RUNTIME.json (sha256 of the luna.py it belongs to and of
+    every file) written last, then swapped in with renames, so an interrupted
+    install never leaves a half-new tree that looks complete. Returns the
+    relative paths whose source was missing.
+    """
+    tools = Path(tools or luna_tools_dir())
+    dest = tools / 'runtime'
+    luna_source = Path(luna_source or __file__).resolve()
+    missing = []
+    try:
+        if dest.resolve() == ROOT.resolve():  # running from the installed copy: nothing to stage
+            missing = [rel for rel, source in runtime_sources() if not source.is_file()]
+            if not (dest / RUNTIME_MANIFEST).is_file() and not missing:
+                _write_runtime_manifest(dest, [rel for rel, _s in runtime_sources()], luna_source)
+            return missing
+    except OSError:
+        pass
+    stage, old = tools / 'runtime.new', tools / 'runtime.old'
+    shutil.rmtree(stage, ignore_errors=True)
+    copied = []
+    for rel, source in runtime_sources():
+        if not source.is_file():
+            missing.append(rel)
+            continue
+        target = stage / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        copied.append(rel)
+    _write_runtime_manifest(stage, copied, luna_source)
+    shutil.rmtree(old, ignore_errors=True)
+    if dest.exists():
+        os.replace(dest, old)
+    os.replace(stage, dest)
+    shutil.rmtree(old, ignore_errors=True)
+    return missing
+
+
+def _write_runtime_manifest(directory, rels, luna_source):
+    manifest = {'lunaSha256': _file_sha256(luna_source),
+                'files': {rel: _file_sha256(Path(directory) / rel) for rel in rels
+                          if (Path(directory) / rel).is_file()}}
+    tmp = Path(directory) / (RUNTIME_MANIFEST + '.tmp')
+    tmp.write_text(json.dumps(manifest, sort_keys=True))
+    os.replace(tmp, Path(directory) / RUNTIME_MANIFEST)
+
+
+RUNTIME_REPAIR = ('repair: run `python3 <checkout or unpacked release>/scripts/luna.py install --force` '
+                  '(it redeploys the runtime tree)')
+
+
+def runtime_problems(full=False):
+    """Does <tools>/runtime belong to the luna.py that is running? Only the installed
+    copy is checked (a checkout has no runtime tree). Cheap: manifest, luna.py hash and
+    file presence; full also hashes every file and refuses an interrupted install."""
+    if ROOT != _INSTALLED_ROOT:
+        return []
+    tools = _INSTALLED_ROOT.parent
+    if not _INSTALLED_ROOT.is_dir() and (tools / 'runtime.old').is_dir():
+        with contextlib.suppress(OSError):  # interrupted swap: put the old tree back
+            os.replace(tools / 'runtime.old', _INSTALLED_ROOT)
+    manifest = read_json_file(_INSTALLED_ROOT / RUNTIME_MANIFEST)
+    bad = 'runtime tree does not match this luna.py'
+    if not isinstance(manifest, dict):
+        return ['%s (no %s); %s' % (bad, RUNTIME_MANIFEST, RUNTIME_REPAIR)]
+    problems = []
+    try:
+        if manifest.get('lunaSha256') != _file_sha256(Path(__file__).resolve()):
+            problems.append('%s (luna.py changed since the tree was deployed)' % bad)
+    except OSError:
+        problems.append('%s (luna.py unreadable)' % bad)
+    for rel, digest in sorted((manifest.get('files') or {}).items()):
+        path = _INSTALLED_ROOT / rel
+        try:
+            if not path.is_file() or (full and _file_sha256(path) != digest):
+                problems.append('%s (%s %s)' % (bad, rel, 'missing' if not path.is_file() else 'differs'))
+                if len(problems) > 3:
+                    break
+        except OSError:
+            problems.append('%s (%s unreadable)' % (bad, rel))
+    if full and install_marker_path().is_file():
+        problems.append('a previous Luna install was interrupted (%s present)' % install_marker_path())
+    return ['%s; %s' % (problems[0], RUNTIME_REPAIR)] + problems[1:] if problems else []
 
 
 def write_tooling():
     """Keep a standalone updater copy the timer can run without a checkout.
 
     Called both by the installer (from a checkout) and by the copy itself, so
-    the source is *this* file, never a fixed path relative to it.
+    the source is *this* file, never a fixed path relative to it. The support
+    tree beside it is what makes a Lumen update work from the installed copy.
     """
     tools = luna_tools_dir()
     tools.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):  # the bridge only writes its heartbeat here, it cannot mkdir
+        luna_state_dir().mkdir(parents=True, exist_ok=True)
     target = tools / 'luna.py'
     source = Path(__file__).resolve()
     try:
         same = source.samefile(target)
     except OSError:
         same = False
+    missing = deploy_runtime(tools, source)  # runtime first, luna.py last: RUNTIME.json names its hash
     if not same:
         shutil.copy2(source, target)
         target.chmod(0o755)
     launcher = home() / '.local/bin/luna'
     if launcher.is_symlink() or (launcher.exists() and
-                                (not launcher.is_file() or launcher.read_bytes() != CLI_LAUNCHER.encode())):
+                                (not launcher.is_file() or not ours_cli_launcher(launcher))):
         print('WARNING: custom luna command preserved; use the installed Python tooling directly.', file=sys.stderr)
+    elif launcher.is_file() and launcher.read_bytes() != CLI_LAUNCHER.encode():
+        tmp = launcher.with_name('luna.luna-tmp')
+        tmp.write_bytes(CLI_LAUNCHER.encode())
+        tmp.chmod(0o755)
+        os.replace(tmp, launcher)
     elif not launcher.exists():
         launcher.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1413,6 +1908,20 @@ def write_tooling():
         else:
             with os.fdopen(fd, 'wb') as out:
                 out.write(CLI_LAUNCHER.encode())
+    if luna_tools_dir() != luna_state_dir():
+        # A copy outside the Lumen tree: `luna lumen restore` and `luna install` still work
+        # after a base install replaced ~/.local/share/Lumen/sls-luna.
+        rescue = luna_state_dir() / 'rescue'
+        try:
+            deploy_runtime(rescue, source)
+            if not (rescue / 'luna.py').exists() or not source.samefile(rescue / 'luna.py'):
+                shutil.copy2(source, rescue / 'luna.py')
+                (rescue / 'luna.py').chmod(0o755)
+        except OSError as error:
+            print('WARNING: could not keep a rescue copy in %s: %s' % (rescue, error), file=sys.stderr)
+    if missing:
+        print('WARNING: installed tooling is incomplete; missing %s' % ', '.join(missing),
+              file=sys.stderr)
     return target
 
 
@@ -1421,11 +1930,86 @@ def unit_paths():
     return unit_dir, unit_dir / 'luna-autoupdate.service', unit_dir / 'luna-autoupdate.timer'
 
 
+APPLY_UNIT = 'luna-apply.service'
+
+
+def apply_unit_paths():
+    unit_dir = home() / '.config/systemd/user'
+    return unit_dir, unit_dir / APPLY_UNIT
+
+
+def systemd_available():
+    """True when a user manager can start the waiter unit."""
+    try:
+        result = subprocess.run(['systemctl', '--user', 'is-system-running'],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 or result.stdout.strip() in ('running', 'degraded', 'starting')
+
+
+def write_apply_unit():
+    """The prompt-apply unit: waits for Steam to stay closed, then updates.
+
+    A separate oneshot unit on purpose: it must NOT share lumen.service's
+    cgroup, because the update stops Lumen. Cancel stops this unit.
+    """
+    unit_dir, service = apply_unit_paths()
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    service.write_text(
+        '[Unit]\n'
+        'Description=Luna: apply a queued update once Steam has stayed closed\n'
+        'After=graphical-session.target\n'
+        '\n'
+        '[Service]\n'
+        'Type=oneshot\n'
+        'Environment=PATH=%%h/.local/bin:/usr/local/bin:/usr/bin\n'
+        'TimeoutStartSec=infinity\n'
+        # SIGTERM goes to luna.py only, so its `finally` blocks (steam lock,
+        # rollback) run; the installer is killed by luna itself, then by systemd.
+        'KillMode=mixed\n'
+        'TimeoutStopSec=300\n'
+        'ExecStart=%s %s autoupdate --wait-steam\n' % (sys.executable, luna_tools_dir() / 'luna.py'))
+    subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+    return service
+
+
+def start_apply_service():
+    """Start the waiter now; returns 'service' or 'timer' (degraded)."""
+    if not systemd_available():
+        return 'timer'
+    unit_dir, service = apply_unit_paths()
+    if not service.is_file():
+        write_apply_unit()
+    result = subprocess.run(['systemctl', '--user', 'start', '--no-block', APPLY_UNIT],
+                            capture_output=True, text=True)
+    return 'service' if result.returncode == 0 else 'timer'
+
+
+def stop_apply_service():
+    unit_dir, service = apply_unit_paths()
+    if service.is_file():
+        subprocess.run(['systemctl', '--user', 'stop', APPLY_UNIT], capture_output=True)
+
+
 def cmd_check(options):
-    """Print the update check as JSON (the Luna menu reads it)."""
-    write_heartbeat()
-    print(json.dumps(check_updates(force=getattr(options, 'force', False)), sort_keys=True))
-    return EXIT_OK
+    """Print the update check as JSON (the Luna menu reads it).
+
+    Single-flight: the menu can spawn `check` on every page load, but only one
+    may hold the check lock (pid liveness, not a timestamp window). A second
+    invocation answers "busy" instead of racing for the same gh release.
+    """
+    lock = luna_tools_dir() / 'check.lock'
+    acquired, reason = _acquire_lock(lock, ttl=CHECK_LOCK_TTL)
+    if not acquired:
+        print(json.dumps({'result': 'busy', 'reason': reason}, sort_keys=True))
+        return EXIT_OK
+    try:
+        write_heartbeat()
+        print(json.dumps(check_updates(force=getattr(options, 'force', False)), sort_keys=True))
+        return EXIT_OK
+    finally:
+        _release_lock(lock)
 
 
 def cmd_timer(options):
@@ -1442,6 +2026,7 @@ def cmd_timer(options):
         return EXIT_OK
     if options.action == 'on':
         write_tooling()
+        write_apply_unit()
         unit_dir.mkdir(parents=True, exist_ok=True)
         service.write_text(
             '[Unit]\n'
@@ -1481,26 +2066,418 @@ def cmd_timer(options):
     return 2
 
 
-def lumen_hook(action):
-    """Use the source worker or the independent installed copy; no full install."""
-    candidates = (ROOT / 'scripts/lumen-hook.py',
-                  home() / '.local/share/slssteam-luna/lumen-hook.py')
-    script = next((path for path in candidates if path.is_file()), None)
-    if script is None:
-        print('Lumen update hook worker missing; install Luna from a complete bundle.', file=sys.stderr)
-        return 1
-    return subprocess.run([sys.executable, str(script), action]).returncode
+def retire_lumen_hook():
+    """Remove the old automatic Lumen-update recovery (units + stored worker).
+
+    Nothing watches for a stock Lumen update any more: Luna's own host
+    (`luna host cutover`) replaces the third-party one.
+    Only units carrying Luna's own marker are touched; custom units stay.
+    """
+    mark = '# Managed by Luna: Lumen update recovery v1'
+    unit_dir = home() / '.config/systemd/user'
+    names = ['luna-lumen-hook.' + kind for kind in ('path', 'timer', 'service')]
+    found = [unit_dir / name for name in names if (unit_dir / name).is_file()]
+    if found:
+        subprocess.run(['systemctl', '--user', 'disable', '--now', names[0], names[1]],
+                       capture_output=True)
+        for path in found:
+            try:
+                if mark in path.read_text():
+                    path.unlink()
+                else:
+                    print('note: %s is not Luna-managed; left in place' % path, file=sys.stderr)
+            except OSError:
+                pass
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        print('hook      : retired the automatic Lumen recovery units')
+    store_dir = home() / '.local/share/slssteam-luna'
+    for stale in ('lumen-hook.py',):
+        try:
+            (store_dir / stale).unlink()
+        except OSError:
+            pass
+
+
+# --------------------------------------------------------------------------- Luna host
+#
+# luna-host is Luna's own Steam plugin host. It lives side by side with the
+# third-party Lumen host: install writes it (never enables it), `luna host
+# cutover` switches over, `luna host rollback` switches back. ~/.local/share/Lumen
+# is never deleted.
+
+HOST_UNIT_MARK = '# Managed by Luna: host v1'
+HOST_UNIT = 'luna-host.service'
+LUMEN_UNIT = 'lumen.service'
+
+
+def host_source():
+    """Where the host sources/binary come from: a checkout or an extracted bundle."""
+    return Path(os.environ.get('LUNA_HOST_SRC') or (ROOT / 'host'))
+
+
+def host_binary():
+    return luna_home() / 'bin' / 'luna-host'
+
+
+def host_unit_path():
+    return home() / '.config/systemd/user' / HOST_UNIT
+
+
+def systemctl_user(*args):
+    try:
+        return subprocess.run(['systemctl', '--user'] + list(args), capture_output=True, text=True)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(args, 127, '', 'systemctl not found')
+
+
+def unit_state(unit):
+    enabled = systemctl_user('is-enabled', unit).stdout.strip()
+    active = systemctl_user('is-active', unit).stdout.strip()
+    return {'enabled': enabled or 'unknown', 'active': active or 'unknown'}
+
+
+def ensure_host_built():
+    """Make sure the host binary exists (release bundles ship it prebuilt)."""
+    source = host_source()
+    binary = source / 'bin' / 'luna-host'
+    if binary.is_file():
+        return binary
+    if not (source / 'Makefile').is_file():
+        print('host      : no luna-host binary and no sources at %s; skipped' % source, file=sys.stderr)
+        return None
+    print('host      : building luna-host (make -C %s)' % source)
+    try:
+        result = subprocess.run(['make', '-C', str(source)], capture_output=True, text=True)
+    except FileNotFoundError:
+        print('host      : WARN: make is not installed; luna-host not built', file=sys.stderr)
+        return None
+    if result.returncode != 0 or not binary.is_file():
+        tail = (result.stderr or result.stdout).strip().splitlines()[-5:]
+        print('host      : WARN: the luna-host build failed:\n    %s' % '\n    '.join(tail), file=sys.stderr)
+        return None
+    return binary
+
+
+def _replace_tree(source, dest):
+    staging = dest.with_name(dest.name + '.luna-new')
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.copytree(source, staging, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    shutil.rmtree(dest, ignore_errors=True)
+    os.replace(staging, dest)
+
+
+def host_unit_text():
+    return (
+        HOST_UNIT_MARK + '\n'
+        '[Unit]\n'
+        "Description=Luna plugin host (injects Luna's add-ons into Steam)\n"
+        'After=graphical-session.target\n\n'
+        '[Service]\n'
+        'Type=simple\n'
+        'Environment=LUNA_HOME=%s\n'
+        'Environment=LUNA_LUA_DIR=%s\n'
+        'ExecStart=%s\n'
+        'Restart=always\n'
+        'RestartSec=5\n\n'
+        '[Install]\n'
+        'WantedBy=default.target\n' % (luna_home(), luna_home() / 'lua', host_binary()))
+
+
+def mirror_addons_to_host():
+    """Copy the installed add-ons (same layout as sls-addons) into $LUNA_HOME/addons."""
+    dest_root = luna_home() / 'addons'
+    dest_root.mkdir(parents=True, exist_ok=True)
+    for name in ADDONS:
+        source = addons_dir() / name
+        if source.is_dir():
+            _replace_tree(source, dest_root / name)
+    snapshot = addons_dir() / 'luna-manifest.json'
+    if snapshot.is_file():
+        shutil.copy2(snapshot, dest_root / 'luna-manifest.json')
+
+
+def write_legacy_plugins():
+    """Third-party plugins luna-host may also load: only LuaTools, only if present."""
+    target = luna_home() / 'legacy-plugins.json'
+    luatools = lumen_root() / 'luatools'
+    if target.exists() or not (luatools / 'plugin.json').is_file():
+        return
+    target.write_text(json.dumps([str(luatools)], indent=2) + '\n')
+
+
+def install_luna_host(dry_run=False):
+    """Deploy luna-host into LUNA_HOME next to Lumen. Never enables the unit
+    unless the cutover already happened. Failures warn; add-on install goes on."""
+    if dry_run:
+        print('host      : would install luna-host, its Lua tree, add-ons and %s into %s'
+              % (HOST_UNIT, luna_home()))
+        return
+    binary = ensure_host_built()
+    if binary is None:
+        return
+    source_lua = host_source() / 'lua'
+    if not source_lua.is_dir():
+        print('host      : WARN: %s is missing; luna-host not installed' % source_lua, file=sys.stderr)
+        return
+    try:
+        target_bin = host_binary()
+        target_bin.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target_bin.with_name('luna-host.luna-tmp')
+        shutil.copy2(binary, tmp)
+        tmp.chmod(0o755)
+        os.replace(tmp, target_bin)
+        _replace_tree(source_lua, luna_home() / 'lua')
+        mirror_addons_to_host()
+        write_legacy_plugins()
+        (luna_home() / 'state').mkdir(parents=True, exist_ok=True)
+        unit = host_unit_path()
+        text = host_unit_text()
+        changed = False
+        if unit.is_file() and HOST_UNIT_MARK not in unit.read_text(errors='replace'):
+            print('host      : %s is not Luna-managed; left in place' % unit, file=sys.stderr)
+        elif not unit.is_file() or unit.read_text() != text:
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text(text)
+            changed = True
+        if changed:
+            systemctl_user('daemon-reload')
+    except OSError as error:
+        print('host      : WARN: could not install luna-host: %s' % error, file=sys.stderr)
+        return
+    print('host      : luna-host installed in %s (active host: %s)' % (luna_home(), active_host()))
+    if active_host() == 'luna':
+        patch_wrapper()
+        print('host      : restart %s to load this version' % HOST_UNIT)
+
+
+WRAPPER_BEGIN = '# >>> luna-patch: skip the Lumen sidecar when luna-host is active (luna host unpatch-wrapper)'
+WRAPPER_END = '# <<< luna-patch'
+WRAPPER_ANCHOR = 'if [ -x "$LUMEN_DIR/lumen" ] && ! pgrep -f "$LUMEN_DIR/lumen"'
+
+
+def wrapper_path():
+    return Path.home() / '.local/share/SLSsteam/path/steam'
+
+
+def wrapper_patch_block():
+    return '\n'.join([
+        WRAPPER_BEGIN,
+        '# luna-host needs Steam\'s CEF remote debugging; keep enabling it.',
+        'touch "$HOME/.steam/steam/.cef-enable-remote-debugging" 2>/dev/null || true',
+        'touch "$HOME/.steam/debian-installation/.cef-enable-remote-debugging" 2>/dev/null || true',
+        'if grep -qsE \'"active": *"luna"\' "${LUNA_HOME:-$HOME/.local/share/Luna}/host.json" 2>/dev/null; then',
+        '\tLUMEN_DIR=/nonexistent/luna-host-active',
+        'fi',
+        WRAPPER_END, ''])
+
+
+def wrapper_patched():
+    try:
+        return WRAPPER_BEGIN in wrapper_path().read_text(errors='replace')
+    except OSError:
+        return False
+
+
+def patch_wrapper():
+    """Idempotent. Returns True when the wrapper is patched afterwards."""
+    path = wrapper_path()
+    if not path.is_file():
+        return False
+    text = path.read_text(errors='replace')
+    if WRAPPER_BEGIN in text:
+        return True
+    lines = text.splitlines(keepends=True)
+    index = next((i for i, line in enumerate(lines) if line.startswith(WRAPPER_ANCHOR)), None)
+    if index is None:
+        if 'lumen' in text.lower():
+            print('host      : WARNING: %s changed shape (Lumen launch anchor not found); '
+                  'it may still start Lumen. Not patched.' % path, file=sys.stderr)
+        return False
+    backup = path.with_name(path.name + '.luna-orig')
+    try:
+        if not backup.exists():
+            shutil.copy2(path, backup)
+        lines.insert(index, wrapper_patch_block())
+        mode = path.stat().st_mode
+        tmp = path.with_name(path.name + '.luna-tmp')
+        tmp.write_text(''.join(lines))
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except OSError as error:
+        print('host      : WARNING: could not patch %s: %s' % (path, error), file=sys.stderr)
+        return False
+    return True
+
+
+def unpatch_wrapper():
+    path = wrapper_path()
+    if not wrapper_patched():
+        return False
+    out, skipping = [], False
+    for line in path.read_text(errors='replace').splitlines(keepends=True):
+        if line.startswith(WRAPPER_BEGIN):
+            skipping = True
+        if not skipping:
+            out.append(line)
+        if skipping and line.startswith(WRAPPER_END):
+            skipping = False
+    try:
+        mode = path.stat().st_mode
+        tmp = path.with_name(path.name + '.luna-tmp')
+        tmp.write_text(''.join(out))
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except OSError as error:
+        print('host      : WARNING: could not unpatch %s: %s' % (path, error), file=sys.stderr)
+        return True
+    return False
+
+
+def stop_lumen_process():
+    try:
+        subprocess.run(['pkill', '-u', str(os.getuid()), '-x', 'lumen'], capture_output=True, text=True)
+    except FileNotFoundError:
+        pass
+
+
+def host_status():
+    binary = host_binary()
+    version = ''
+    if binary.is_file():
+        try:
+            version = sha256(binary)[:12]
+        except OSError:
+            version = ''
+    try:
+        legacy = json.loads((luna_home() / 'legacy-plugins.json').read_text())
+    except (OSError, ValueError):
+        legacy = []
+    return {
+        'active': active_host(),
+        'home': str(luna_home()),
+        'addons': str(luna_home() / 'addons' if active_host() == 'luna' else addons_dir()),  # the ACTIVE host's real path
+        'state': str(luna_tools_dir()),
+        'lunaHostAddons': str(luna_home() / 'addons'),
+        'lunaState': str(luna_state_dir()),
+        'binary': {'path': str(binary), 'present': binary.is_file(), 'version': version},
+        'unit': {'path': str(host_unit_path()), 'present': host_unit_path().is_file()},
+        'units': {'luna': unit_state(HOST_UNIT), 'lumen': unit_state(LUMEN_UNIT)},
+        'legacyPlugins': legacy if isinstance(legacy, list) else [],
+        'lumenDir': str(lumen_root()),
+        'wrapperPatched': wrapper_patched(),
+        'lumenRunning': lumen_running(),
+    }
+
+
+def _write_host_state(active, previous):
+    path = host_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_file(path, {'active': active, 'previous': previous, 'at': int(time.time())})
+
+
+def _carry_state(source, dest, link_big=False):
+    """Copy the small machine-local state (json files, machine-id) between tools
+    dirs without overwriting. Large Steam client backups/cache are linked."""
+    if not source.is_dir():
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in sorted(source.iterdir()):
+        target = dest / path.name
+        if path.is_file() and not path.is_symlink() and (path.suffix == '.json' or path.name == 'machine-id'):
+            if not target.exists():
+                shutil.copy2(path, target)
+        elif link_big and path.is_dir() and path.name in ('steam-client-backups', 'steam-client-cache'):
+            if not target.exists() and not target.is_symlink():
+                target.symlink_to(path)
+
+
+def _refresh_tooling_after_switch():
+    write_tooling()
+    _, service, _timer = unit_paths()
+    if service.is_file():
+        cmd_timer(argparse.Namespace(action='on'))
+
+
+def cmd_host(options):
+    action = getattr(options, 'host_action', 'status')
+    if action == 'status':
+        print(json.dumps(host_status(), sort_keys=True))
+        return EXIT_OK
+    if action == 'cutover':
+        reasons = [reason for reason in refuse_reasons(for_install=True) if 'Steam is running' in reason]
+        if not host_binary().is_file() or not (luna_home() / 'lua').is_dir() or not host_unit_path().is_file():
+            reasons.append('luna-host is not installed in %s; run: luna install' % luna_home())
+        elif HOST_UNIT_MARK not in host_unit_path().read_text(errors='replace'):
+            reasons.append('%s is not Luna-managed; refusing to enable it' % host_unit_path())
+        if reasons:
+            print('REFUSING cutover:')
+            for reason in reasons:
+                print('  - %s' % reason)
+            return EXIT_REFUSED
+        previous_tools = luna_tools_dir()
+        _carry_state(lumen_tools_dir(), luna_home() / 'state', link_big=True)
+        if previous_tools != lumen_tools_dir():
+            _carry_state(previous_tools, luna_home() / 'state')
+        result = systemctl_user('disable', '--now', LUMEN_UNIT)
+        if result.returncode != 0:
+            print('host      : note: could not disable %s (%s)'
+                  % (LUMEN_UNIT, (result.stderr or result.stdout).strip() or 'no output'))
+        systemctl_user('daemon-reload')
+        stop_lumen_process()
+        result = systemctl_user('enable', '--now', HOST_UNIT)
+        if result.returncode != 0:
+            print('FAILED to start %s: %s' % (HOST_UNIT, (result.stderr or result.stdout).strip()),
+                  file=sys.stderr)
+            systemctl_user('enable', '--now', LUMEN_UNIT)
+            print('Lumen was re-enabled; nothing changed.', file=sys.stderr)
+            return 1
+        _write_host_state('luna', 'lumen')
+        patch_wrapper()
+        _refresh_tooling_after_switch()
+        print('host      : cutover done; luna-host is the active plugin host (restart Steam to attach)')
+        print('rollback  : luna host rollback')
+        return EXIT_OK
+    if action == 'rollback':
+        systemctl_user('disable', '--now', HOST_UNIT)
+        result = systemctl_user('enable', '--now', LUMEN_UNIT)
+        if result.returncode != 0:
+            print('FAILED to start %s: %s' % (LUMEN_UNIT, (result.stderr or result.stdout).strip()),
+                  file=sys.stderr)
+            systemctl_user('enable', '--now', HOST_UNIT)
+            return 1
+        _carry_state(luna_home() / 'state', lumen_tools_dir())
+        _write_host_state('lumen', 'luna')
+        unpatch_wrapper()
+        _refresh_tooling_after_switch()
+        print('host      : rolled back; Lumen is the active plugin host (restart Steam to attach)')
+        return EXIT_OK
+    if action == 'patch-wrapper':
+        ok = patch_wrapper()
+        print('wrapper   : %s' % ('patched' if ok else 'NOT patched'))
+        return EXIT_OK if ok else 1
+    if action == 'unpatch-wrapper':
+        unpatch_wrapper()
+        print('wrapper   : unpatched')
+        return EXIT_OK
+    print('unknown host action: %s' % action, file=sys.stderr)
+    return 2
 
 
 def cmd_hook(options):
-    return lumen_hook({'on': 'enable', 'off': 'disable'}.get(options.action, options.action))
+    """Retired: kept so old muscle memory gets a pointer instead of a traceback."""
+    if options.action == 'repair':
+        return cmd_install(argparse.Namespace(only=[], force=True, dry_run=False, keep_steam_client=True,
+                                              no_steam_machine=False, migrate_steam_machine=False))
+    retire_lumen_hook()
+    print('The automatic Lumen recovery hook is retired. To stop depending on Lumen, '
+          'see: luna host status')
+    return EXIT_OK
 
 
-def arm_lumen_hook():
-    if (addons_dir() / 'luna/backend/main.lua').is_file():
-        if lumen_hook('enable'):
-            print('WARNING: add-ons installed, but automatic Lumen recovery could not be armed. '
-                  'Inspect: luna hook status', file=sys.stderr)
+def _update_lock_held_by_other():
+    """A live luna command (a Steam lock/unlock/refresh, another update) owns the writer lock."""
+    owner, _started = _lock_owner(_update_lock())
+    return bool(owner and owner != os.getpid() and pid_is_live_luna(owner))
 
 
 def cmd_autoupdate(options):
@@ -1514,6 +2491,21 @@ def cmd_autoupdate(options):
     tools = luna_tools_dir()
     pending_path = tools / 'pending.json'
     result_path = tools / 'autoupdate.json'
+    if getattr(options, 'wait_steam', False):
+        # luna-apply.service entry point: a queued job starts seconds after
+        # Steam exits, not on the next 30-minute tick. Steam stays untouched.
+        wait = wait_for_steam_closed(probe=lambda: bool(steam_running() or _update_lock_held_by_other()))
+        if wait == 'timeout':
+            message = 'waited %d hours for Steam to stay closed; the update is still queued' % (
+                APPLY_WAIT_LIMIT // 3600)
+            if read_lumen_pending():
+                record_lumen_result('failed', message)
+            _notify('Luna update not applied', message)
+            print(message, file=sys.stderr)
+            return 1
+        if wait != 'ready':
+            return EXIT_OK
+        _notify('Luna update', 'Steam is closed; applying the queued update')
     lock_path = _update_lock()
     prefs = read_json_file(data_dir() / 'luna.json') or {}
     mode = str(prefs.get('auto_update') or 'off')
@@ -1528,8 +2520,14 @@ def cmd_autoupdate(options):
     except Exception as error:  # noqa: BLE001 - healing must never break the timer
         print('heal      : failed: %s' % error, file=sys.stderr)
     extra_result = {}
+    holding_lock = False
 
     def record(payload):
+        # Order for "Update everything": the Luna add-ons first (above), then the
+        # queued Lumen update, whose re-attach installs that fresh Luna. A failed
+        # Luna step skips it; Steam running just leaves it queued.
+        if payload.get('result') != 'failed' and holding_lock:
+            apply_queued_lumen(extra_result)
         payload.update(extra_result)
         payload['mode'] = mode
         payload['at'] = int(time.time())
@@ -1540,17 +2538,27 @@ def cmd_autoupdate(options):
         queued = read_steam_pending()
         payload['steamPending'] = str(queued.get('action') or '') if queued else ''
         write_json_file(result_path, payload)
+        if payload.get('result') in ('applied', 'failed'):
+            _notify('Luna update %s' % payload['result'],
+                    payload.get('reason') or payload.get('version') or '')
         if verbose:
             print(json.dumps(payload, sort_keys=True))
         return EXIT_OK
 
-    if mode not in ('notify', 'install') and not pending and not pending_refresh:
+    if (mode not in ('notify', 'install') and not pending and not pending_refresh and not read_lumen_pending()
+            and not lumen_running_record()):
         return EXIT_OK
     acquired, reason = _acquire_lock(lock_path)
     if not acquired:
         return record({'result': 'deferred', 'reason': reason})
     refresh_message = ''
+    holding_lock = True
     try:
+        recovery = recover_interrupted_lumen()
+        if recovery:
+            extra_result['lumenRecovery'] = '%s: %s' % recovery
+            if recovery[0] == 'busy':
+                return record({'result': 'deferred', 'reason': recovery[1]})
         # An explicit refresh request (Health page or `luna refresh --dry-run`
         # planned it, the timer applies it): Steam to Valve's latest, then pin
         # and cache, then hand the Luna add-ons to the normal bundle path
@@ -1644,6 +2652,8 @@ def cmd_autoupdate(options):
             if bundle is None:
                 return record({'result': 'error', 'reason': error, 'version': target})
             code = install_bundle(bundle)
+            if code == 0:
+                globals()['_LUNA_REPLACED'] = True
         finally:
             shutil.rmtree(work, ignore_errors=True)
         if code == 0 and pending_path.exists():
@@ -1722,7 +2732,7 @@ def cmd_restore(options):
     if not archive or not archive.is_file():
         print('backup archive not found: %s' % (options.archive or ''), file=sys.stderr)
         return 2
-    if process_running('steam') or process_running('steamwebhelper') or process_running('lumen'):
+    if steam_running() or lumen_running():
         print('REFUSING to restore: Steam or the Lumen sidecar is running. '
               'Close it completely (Steam -> Exit) first.')
         return EXIT_REFUSED
@@ -1972,9 +2982,33 @@ def steam_cache_dir():
     return luna_tools_dir() / 'steam-client-cache'
 
 
+def steam_pin_copy_path():
+    return luna_state_dir() / 'steam-pin.json'
+
+
 def read_steam_pin():
     pin = read_json_file(steam_pin_path())
+    if not isinstance(pin, dict) or not pin:
+        pin = read_json_file(steam_pin_copy_path())  # the tools dir was replaced by a base install
     return pin if isinstance(pin, dict) else {}
+
+
+def sync_steam_pin_copy():
+    """Keep a copy of the pin outside the Lumen tree (best effort, quiet)."""
+    try:
+        pin = read_json_file(steam_pin_path())
+        if isinstance(pin, dict) and pin and read_json_file(steam_pin_copy_path()) != pin:
+            write_json_file(steam_pin_copy_path(), pin)
+    except OSError:
+        pass
+
+
+def remove_steam_pin():
+    for path in (steam_pin_path(), steam_pin_copy_path()):
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def steam_hard_lock_active():
@@ -2184,7 +3218,7 @@ def _steam_force_update():
     # stay closed. Never kill processes; report if it is still up.
     note = ('; block re-applied' if had_block
             else '; updates currently allowed - pin the new build to block them')
-    if process_running('steam') or process_running('steamwebhelper'):
+    if steam_running():
         try:
             subprocess.run([str(steam_sh_path()), '-shutdown'],
                            capture_output=True, text=True, timeout=30)
@@ -2192,10 +3226,10 @@ def _steam_force_update():
             pass
         deadline = time.monotonic() + 60
         while deadline > time.monotonic():
-            if not (process_running('steam') or process_running('steamwebhelper')):
+            if not (steam_running()):
                 break
             time.sleep(2)
-        if process_running('steam') or process_running('steamwebhelper'):
+        if steam_running():
             return False, ('Steam updated but is still running after a shutdown request; '
                            'close it completely (Steam -> Exit) before pinning or installing' + note)
     return True, 'Steam client updated by Valve' + note
@@ -2380,7 +3414,7 @@ def _steam_client_closed():
     if any(process_running(name) for name in ('steam', 'steamwebhelper')):
         raise ValueError('Steam or the Lumen sidecar is running; close it completely first')
     # Steam is closed: a leftover sidecar is stopped rather than refused.
-    if process_running('lumen') and not stop_lumen_sidecar():
+    if lumen_running() and not stop_lumen_sidecar():
         raise ValueError('Steam or the Lumen sidecar is running; close it completely first')
 
 
@@ -3021,6 +4055,8 @@ def steamos_gaming_mode():
 
 def _notify(title, text):
     """Best-effort desktop notification; never fails the job."""
+    if os.environ.get('LUNA_NO_NOTIFY'):
+        return
     try:
         subprocess.run(['notify-send', '-a', 'Luna', title, text], capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
@@ -3055,7 +4091,7 @@ def _close_steam_gracefully(timeout=90):
 
 def _unlock_steam_client(now):
     """`luna steam unlock`: undo the hard lock and the pin."""
-    if not (process_running('steam') or process_running('steamwebhelper')) and stop_lumen_sidecar():
+    if not (steam_running()) and stop_lumen_sidecar():
         pass  # a lingering sidecar from an earlier session is stopped, never a reason to refuse
     package = steam_home() / 'package'
     if package.is_dir():
@@ -3067,6 +4103,7 @@ def _unlock_steam_client(now):
         print('note: Steam.cfg/steam.cfg left in place (they hold more than the Luna block)')
     try:
         steam_pin_path().unlink()
+        remove_steam_pin()
         print('pin and hard-lock marker removed')
     except OSError:
         print('no pin to remove')
@@ -3278,6 +4315,7 @@ def cmd_steam(options):
             return 1
         try:
             steam_pin_path().unlink()
+            remove_steam_pin()
             print('pin removed')
         except OSError:
             print('no pin to remove')
@@ -3287,7 +4325,7 @@ def cmd_steam(options):
             print('note: steam.cfg left untouched (it holds more than the Luna block)')
         return EXIT_OK
     if action == 'cache':
-        if process_running('steam') or process_running('steamwebhelper'):
+        if steam_running():
             # Queue it: the timer runs while Steam is closed and caches then.
             existing = read_steam_pending()
             if existing:
@@ -3321,7 +4359,7 @@ def cmd_steam(options):
                   file=sys.stderr)
             return 1
         if getattr(options, 'now', False):
-            if process_running('steam') or process_running('steamwebhelper') or process_running('lumen'):
+            if steam_running() or lumen_running():
                 print('REFUSING: Steam or the Lumen sidecar is running. '
                       'Close it completely (Steam -> Exit) first.')
                 return EXIT_REFUSED
@@ -3334,7 +4372,7 @@ def cmd_steam(options):
                   % existing.get('action', '?'), file=sys.stderr)
             return 1
         write_json_file(steam_pending_path(), {'action': 'update', 'at': int(time.time())})
-        if process_running('steam') or process_running('steamwebhelper'):
+        if steam_running():
             print('Steam update queued: it applies the next time Steam is closed '
                   '(timer), then updates are blocked again')
         else:
@@ -3348,7 +4386,7 @@ def cmd_steam(options):
             print('nothing queued')
         return EXIT_OK
     if action == 'recover':
-        if process_running('steam') or process_running('steamwebhelper'):
+        if steam_running():
             print('REFUSING to recover: Steam is running. '
                   'Close it completely (Steam -> Exit) first.')
             return EXIT_REFUSED
@@ -3429,6 +4467,12 @@ def heal_steam_lock(apply=True):
     pin = read_steam_pin()
     if not pin or not (pin.get('clientBuild') or pin.get('hardLock')):
         return result
+    if apply:
+        if not steam_pin_path().is_file():  # restore the primary from the copy
+            with contextlib.suppress(OSError):
+                write_json_file(steam_pin_path(), pin)
+                result['fixed'].append('steam-pin.json was missing; restored from %s' % steam_pin_copy_path())
+        sync_steam_pin_copy()
     if not steam_home().is_dir():
         return result
     result['pinned'] = True
@@ -3599,7 +4643,7 @@ def cmd_launchopts(options):
         print('\n%d option(s) affected. Close Steam, then: luna steam launchopts --fix '
               '(backs up localconfig.vdf, clears only these options)' % len(findings))
         return EXIT_OK
-    if process_running('steam') or process_running('steamwebhelper'):
+    if steam_running():
         print('REFUSING to fix: Steam is running and would overwrite localconfig.vdf on exit. '
               'Close it completely first.', file=sys.stderr)
         return EXIT_REFUSED
@@ -3832,6 +4876,11 @@ def detect_package_manager():
 
 def fetch_base_installer(ref, expected_sha, destination):
     """Download the LuaTools-Moon installer at `ref`; verify sha256 when one is expected."""
+    override = os.environ.get('LUNA_TEST_INSTALLER')  # tests only: a local fake installer
+    if override:
+        data = Path(override).read_bytes()
+        destination.write_bytes(data)
+        return hashlib.sha256(data).hexdigest()
     url = 'https://raw.githubusercontent.com/%s/%s/install.sh' % (UPSTREAM_REPO, ref)
     with urllib.request.urlopen(url, timeout=60) as response:
         data = response.read(4 * 1024 * 1024)
@@ -3842,12 +4891,68 @@ def fetch_base_installer(ref, expected_sha, destination):
     return digest
 
 
-def run_base_installer(ref, expected_sha, extra):
+INSTALLER_TIMEOUT = 30 * 60
+
+
+class InstallerTimeout(Exception):
+    """The upstream installer ran past INSTALLER_TIMEOUT and was killed."""
+
+
+def _kill_process_group(proc):
+    """TERM, then KILL, the installer's whole process group (it is its own session)."""
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        proc.wait(timeout=10)
+
+
+def _inhibit_prefix():
+    """systemd-inhibit command prefix that blocks shutdown/sleep, or [] (silent fallback)."""
+    if os.environ.get('LUNA_NO_INHIBIT') or not shutil.which('systemd-inhibit'):
+        return []
+    prefix = ['systemd-inhibit', '--what=shutdown:sleep', '--mode=block', '--who=Luna',
+              '--why=Updating Lumen: do not shut down']
+    try:
+        probe = subprocess.run(prefix + ['true'], capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return prefix if probe.returncode == 0 else []
+
+
+def verify_base_installer(ref, expected_sha):
+    """Download the installer once, verify it, return its sha256 (nothing is run)."""
+    with tempfile.TemporaryDirectory(prefix='luna-base-') as work:
+        return fetch_base_installer(ref, expected_sha, Path(work) / 'install.sh')
+
+
+def run_base_installer(ref, expected_sha, extra, timeout=None):
+    """Run the upstream installer in its own session with a time limit.
+
+    Returns its exit code; raises InstallerTimeout after killing the process
+    group, and kills the group on any other exception too (SIGTERM included).
+    """
+    timeout = INSTALLER_TIMEOUT if timeout is None else timeout
     with tempfile.TemporaryDirectory(prefix='luna-base-') as work:
         script = Path(work) / 'luatools-moon-install.sh'
         digest = fetch_base_installer(ref, expected_sha, script)
-        print('base      : installer %s@%s sha256 %s' % (UPSTREAM_REPO, ref[:12], digest))
-        return subprocess.run(['bash', str(script), '--nolaunch'] + list(extra)).returncode
+        print('base      : installer %s@%s sha256 %s' % (UPSTREAM_REPO, ref[:12], digest), flush=True)
+        command = _inhibit_prefix() + ['bash', str(script), '--nolaunch'] + list(extra)
+        proc = subprocess.Popen(command, start_new_session=True)
+        try:
+            return proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            raise InstallerTimeout('the base installer ran longer than %d minutes and was killed'
+                                   % max(1, int(timeout // 60)))
+        except BaseException:
+            _kill_process_group(proc)
+            raise
 
 
 def _base_extra(options):
@@ -3861,21 +4966,65 @@ def _base_extra(options):
     return extra
 
 
-def cmd_bootstrap(options):
-    """Fresh-PC setup: deps, Steam, pinned base, ubuntu12 lock, add-ons, heal, timer."""
-    dry = getattr(options, 'dry_run', False)
-    say = lambda text: print('bootstrap : %s' % text, flush=True)  # noqa: E731
-    if flatpak_steam_only():
-        say(FLATPAK_WARNING)
-    install_system_packages(options, say)
-    has_steam = (steam_home() / 'steam.sh').is_file()
-    if has_steam:
-        say('Steam directory exists (%s); not touched' % steam_home())
+def resume_command(options):
+    """The exact command that continues this pipeline after a failure."""
+    parts = ['luna', 'bootstrap']
+    if getattr(options, 'no_system_packages', False):
+        parts.append('--no-system-packages')
+    if getattr(options, 'keep_steam_client', False):
+        parts.append('--keep-steam-client')
+    if getattr(options, 'steam_build', ''):
+        parts += ['--steam-build', str(options.steam_build)]
+    for key, flag in (('slsteam_channel', '--slsteam-channel'),
+                      ('plugin_channel', '--plugin-channel'),
+                      ('lumen_channel', '--lumen-channel')):
+        value = getattr(options, key, '') or ''
+        if value:
+            parts += [flag, value]
+    if getattr(options, 'keep_millennium', False):
+        parts.append('--keep-millennium')
+    if getattr(options, 'no_steam_machine', False):
+        parts.append('--no-steam-machine')
+    return ' '.join(parts)
+
+
+def bootstrap_stop(options, step, reason, code=1):
+    """Stop the pipeline at `step`, with the exact command that resumes it."""
+    print('\nbootstrap : STOPPED at %s: %s' % (step, reason), file=sys.stderr)
+    print('bootstrap : fix that, then resume with: %s' % resume_command(options), file=sys.stderr)
+    return code
+
+
+def bootstrap_channels(options):
+    """The owner's channels file when it exists, CLI flags on top, stable otherwise."""
+    channels = lumen_channels_effective()
+    flags = {'slsteam_moon': 'slsteam_channel', 'plugin': 'plugin_channel', 'lumen': 'lumen_channel'}
+    for key, _flag in LUMEN_CHANNEL_FLAGS:
+        value = getattr(options, flags[key], '') or ''
+        if value:
+            channels[key] = value
+    return channels
+
+
+def bootstrap_steam(options, say, dry):
+    """Step 1: pin and hard-lock the Steam client. Never moves it to Valve's latest."""
+    keep = getattr(options, 'keep_steam_client', False)
+    steam_build = getattr(options, 'steam_build', '') or ''
+    if keep:
+        say('Steam client: kept as is (--keep-steam-client); not pinned')
+        return EXIT_OK
+    if (steam_home() / 'steam.sh').is_file():
+        say('Steam directory exists (%s)' % steam_home())
     elif dry:
         say('would run `steam -exitsteam` once to create %s (timeout 30 min)' % steam_home())
+        say('would then pin and hard-lock the ubuntu12 client %s' % KNOWN_GOOD_UBUNTU12_BUILD)
+        return EXIT_OK
     elif not shutil.which('steam'):
-        say('Steam is not installed (see the system package step above); install it, then re-run: luna bootstrap')
-        return 1
+        return bootstrap_stop(options, 'Steam', (
+            'Steam is not installed for this user (%s is missing). Install native Steam first '
+            '(Arch: sudo pacman -S steam with [multilib] enabled; Debian/Ubuntu: sudo apt install '
+            'steam-installer), launch it once so it finishes its first update, then resume'
+            % steam_home()))
     else:
         say('running Steam once to create %s (steam -exitsteam)' % steam_home())
         try:
@@ -3883,64 +5032,166 @@ def cmd_bootstrap(options):
         except (OSError, subprocess.SubprocessError) as error:
             say('Steam first run did not finish: %s' % error)
         if not (steam_home() / 'steam.sh').is_file():
-            say('%s still missing; launch Steam once, then re-run' % steam_home())
-            return 1
+            return bootstrap_stop(options, 'Steam', (
+                '%s is still missing; launch Steam once, then resume' % steam_home()))
+    if steam_build:
+        if steam_build != STEAM_COMPAT_BUILD:
+            return bootstrap_stop(options, 'Steam', '--steam-build supports only the verified '
+                                  'historical build %s' % STEAM_COMPAT_BUILD, EXIT_REFUSED)
+        if dry:
+            say('would install/verify build %s, pin it and block updates' % STEAM_COMPAT_BUILD)
+            return EXIT_OK
+        ok, message = ensure_compatible_steam()
+        say(message)
+        if not ok:
+            return bootstrap_stop(options, 'Steam', message)
+        ensure_steam_cfg_block()
+        sync_steam_pin_copy()
+    elif (steam_hard_lock_active() and read_steam_pin().get('clientBuild')
+          and steam_state().get('binariesMatch') is not False):
+        say('Steam client: ubuntu12 hard lock already active (build %s); kept'
+            % read_steam_pin().get('clientBuild'))
+        print_heal(heal_steam_lock(), 'bootstrap ')
+    else:
+        if dry:
+            say('would roll back to the ubuntu12 client %s, pin, cache and hard-lock it '
+                '(Steam.cfg + steam.cfg, package/ read-only)' % KNOWN_GOOD_UBUNTU12_BUILD)
+            return EXIT_OK
+        code, message = _lock_steam_client(False, lambda: False)
+        say(message)
+        if code != EXIT_OK:
+            return bootstrap_stop(options, 'Steam', message, code)
+        sync_steam_pin_copy()
+    pin = read_steam_pin()
+    build = str(pin.get('clientBuild') or '')
+    cfg = steam_cfg_path()
+    if not build or not cfg.is_file() or not steam_updates_blocked():
+        return bootstrap_stop(options, 'Steam', (
+            'the pin or steam.cfg is missing (pin %r, %s, blocked=%s)'
+            % (build or 'none', cfg, steam_updates_blocked())))
+    say('verified: Steam client pinned to %s and update-locked (%s)' % (build, cfg))
+    return EXIT_OK
+
+
+def bootstrap_lumen(options, say, dry):
+    """Step 2: the pinned LuaTools-Moon base, with the owner's channels."""
     state = base_state()
     if state == 'partial':
-        print('REFUSING: a partial Moon/Lumen installation was found. Repair the base with its '
-              'upstream installer first; Luna will not clean or replace it.', file=sys.stderr)
-        return EXIT_REFUSED
+        return bootstrap_stop(options, 'Lumen', (
+            'a partial Moon/Lumen installation was found; repair it with its upstream installer '
+            'first (Luna never removes or replaces base components)'), EXIT_REFUSED)
     if state == 'ready':
         say('Moon/Lumen/LuaTools base already installed; kept')
-    elif dry:
-        say('would install the pinned LuaTools-Moon base (commit %s, sha256 %s)'
-            % (UPSTREAM_INSTALLER_COMMIT, UPSTREAM_INSTALLER_SHA256))
-    else:
-        reasons = refuse_reasons(for_install=False)
-        reasons = [reason for reason in reasons if 'Steam is running' in reason]
-        if reasons:
-            print('REFUSING: %s' % reasons[0], file=sys.stderr)
-            return EXIT_REFUSED
+        return EXIT_OK
+    channels = bootstrap_channels(options)
+    listing = ', '.join('%s=%s' % item for item in channels.items())
+    if dry:
+        say('would install the pinned LuaTools-Moon base (commit %s, sha256 %s) with channels: %s'
+            % (UPSTREAM_INSTALLER_COMMIT[:12], UPSTREAM_INSTALLER_SHA256[:12], listing))
+        return EXIT_OK
+    reasons = [reason for reason in refuse_reasons(for_install=False) if 'Steam is running' in reason]
+    if reasons:
+        return bootstrap_stop(options, 'Lumen', reasons[0], EXIT_REFUSED)
+    channels_file = lumen_channels_path()
+    saved = channels_file.read_bytes() if channels_file.is_file() else None
+    extra = lumen_installer_extra(channels, lumen_millennium_choice())
+    say('installing the pinned LuaTools-Moon base (commit %s, sha256 %s) with channels: %s'
+        % (UPSTREAM_INSTALLER_COMMIT[:12], UPSTREAM_INSTALLER_SHA256[:12], listing))
+    try:
+        code = run_base_installer(UPSTREAM_INSTALLER_COMMIT, UPSTREAM_INSTALLER_SHA256, extra)
+    except InstallerTimeout as error:
+        return bootstrap_stop(options, 'Lumen', str(error))
+    except (OSError, ValueError) as error:
+        return bootstrap_stop(options, 'Lumen', str(error), EXIT_REFUSED)
+    if saved is not None and (not channels_file.is_file()
+                              or channels_file.read_bytes() != saved):
         try:
-            code = run_base_installer(UPSTREAM_INSTALLER_COMMIT, UPSTREAM_INSTALLER_SHA256,
-                                      _base_extra(options))
-        except (OSError, ValueError) as error:
-            print('REFUSING: %s' % error, file=sys.stderr)
-            return 1
-        if code != 0:
-            print('base installer failed (exit %d)' % code, file=sys.stderr)
-            return 1
-    keep = getattr(options, 'keep_steam_client', False)
-    steam_build = getattr(options, 'steam_build', '') or ''
-    say('Steam client: %s' % ('kept as is' if keep else 'historical build %s' % steam_build
-                              if steam_build else 'ubuntu12 hard lock (default), pinned + cached'))
+            channels_file.parent.mkdir(parents=True, exist_ok=True)
+            channels_file.write_bytes(saved)
+            say('restored the owner channels file (the installer rewrote it)')
+        except OSError:
+            pass
+    if code != 0:
+        return bootstrap_stop(options, 'Lumen',
+                              'the pinned base installer failed (exit %d)' % code)
+    if base_state() != 'ready':
+        return bootstrap_stop(options, 'Lumen', (
+            'the base installer exited 0 but boot.lua, the LuaTools backend or SLSsteam is missing'))
+    say('verified: Lumen boot.lua, LuaTools backend and SLSsteam are installed')
+    # The base installer drops steam.cfg and may replace Lumen/sls-luna. The pin
+    # was taken first on purpose; re-assert the block without moving Steam.
+    pin = read_steam_pin()
+    if pin:
+        if not steam_pin_path().is_file():
+            write_json_file(steam_pin_path(), pin)
+        ensure_steam_cfg_block()
+        sync_steam_pin_copy()
+        if not steam_updates_blocked() or not steam_cfg_path().is_file():
+            return bootstrap_stop(options, 'Lumen',
+                                  'the Steam update block was lost during the base install')
+        say('verified: the Steam pin and update block survived the base install')
+    return EXIT_OK
+
+
+def bootstrap_luna(options, say, dry):
+    """Step 3: Luna on top, then check the bridge, the block and `luna status`."""
     install_options = argparse.Namespace(
-        only=getattr(options, 'only', []) or [], force=getattr(options, 'force', False),
-        dry_run=dry, keep_steam_client=keep, steam_build=steam_build,
+        only=[], force=getattr(options, 'force', False), dry_run=dry,
+        keep_steam_client=True, steam_build='',
         no_steam_machine=getattr(options, 'no_steam_machine', False),
         migrate_steam_machine=getattr(options, 'migrate_steam_machine', False))
-    if dry and base_state() != 'ready':
-        say('would verify and install the Luna add-ons (needs the base first), then pin, verify known-good '
-            'build %s, heal, IgnorePkg, install the timer, run doctor' % KNOWN_GOOD_UBUNTU12_BUILD)
-        print('\nDRY RUN: nothing was written.')
+    if dry:
+        say('would verify the payloads and install the Luna add-ons, bridge, tooling, '
+            'shortcuts and the update timer')
         return EXIT_OK
-    code = cmd_verify(argparse.Namespace(sources=False, source_dir=None))
+    problems = _manifest_problems(load_manifest(), ROOT)
+    missing = [problem for problem in problems if problem.startswith('missing ')]
+    if missing:
+        return bootstrap_stop(options, 'Luna', (
+            'the checkout is incomplete: %s' % missing[0]))
+    if problems:
+        say('WARN: %d payload(s) differ from vendor/MANIFEST.json (development checkout); '
+            'the installed bytes are still verified below' % len(problems))
+    say('installing Luna on top (Steam stays at its pin)')
+    code = cmd_install(install_options)
+    if code != EXIT_OK:
+        return bootstrap_stop(options, 'Luna', 'the add-on install failed (exit %d)' % code, code)
+    check = patcher('check')
+    if check.returncode != 0 or 'bridge installed' not in (check.stdout or ''):
+        return bootstrap_stop(options, 'Luna', 'the bridge patch is not installed (%s)'
+                              % (check.stderr.strip() or check.stdout.strip()), EXIT_PATCH)
+    if 'lumen self-update blocked' not in (check.stdout or ''):
+        return bootstrap_stop(options, 'Luna', "Lumen's own updater is not blocked", EXIT_PATCH)
+    status = cmd_status(argparse.Namespace(only=[], strict=False))
+    if status != EXIT_OK:
+        return bootstrap_stop(options, 'Luna', (
+            'luna status reports drift or an incomplete install (exit %d)' % status), status)
+    say('verified: bridge installed, Lumen self-update blocked, luna status clean')
+    return EXIT_OK
+
+
+def cmd_bootstrap(options):
+    """Fresh-PC setup, in order: packages, Steam pin+lock, pinned base, Luna."""
+    dry = getattr(options, 'dry_run', False)
+    say = lambda text: print('bootstrap : %s' % text, flush=True)  # noqa: E731
+    if flatpak_steam_only():
+        say(FLATPAK_WARNING)
+    install_system_packages(options, say)
+    code = bootstrap_steam(options, say, dry)
     if code != EXIT_OK:
         return code
-    code = cmd_install(install_options)
+    code = bootstrap_lumen(options, say, dry)
+    if code != EXIT_OK:
+        return code
+    code = bootstrap_luna(options, say, dry)
     if code != EXIT_OK:
         return code
     if dry:
-        say('would then pin (if not pinned), verify known-good ubuntu12 build %s, heal, set IgnorePkg '
-            '(prompt, interactive only), enable the timer, run doctor' % KNOWN_GOOD_UBUNTU12_BUILD)
+        say('would then heal the lock, install 32-bit libcrypto if missing, suggest IgnorePkg '
+            '(interactive only), enable the update timer and run doctor')
         print('\nDRY RUN: nothing was written.')
         return EXIT_OK
-    if not read_steam_pin() and not keep:
-        build = steam_client_build()
-        if build:
-            write_json_file(steam_pin_path(), new_steam_pin(build))
-            ensure_steam_cfg_block()
-            say('pinned Steam client %s' % build)
+    keep = getattr(options, 'keep_steam_client', False)
     print_heal(heal_steam_lock())
     if not keep and libcrypto_status()[0] == 'missing':
         code, note = install_libcrypto(False)
@@ -3953,13 +5204,18 @@ def cmd_bootstrap(options):
         cmd_ignore_pkg(argparse.Namespace(apply=sys.stdin.isatty()))
     cmd_timer(argparse.Namespace(action='on'))
     print('\n== luna doctor ==')
-    code = cmd_doctor(argparse.Namespace())
+    cmd_doctor(argparse.Namespace())
     print('\nbootstrap : done. Start Steam to load Luna. Update later with: luna update-all')
-    return code
+    return EXIT_OK
 
 
 def cmd_update_all(options):
-    """Update Luna add-ons, re-verify the base, keep the lock; never upgrades Steam."""
+    """Update Luna add-ons, re-verify the base, keep the lock; never upgrades Steam.
+
+    Scope: only Luna's own add-ons and (with --base-latest) the Moon/Lumen base.
+    The Steam client is never touched: the add-on path runs `install` with
+    LUNA_KEEP_STEAM_CLIENT=1 and the base path re-applies the lock afterwards.
+    """
     dry = getattr(options, 'dry_run', False)
     base_latest = getattr(options, 'base_latest', False)
     if base_latest and not getattr(options, 'yes', False) and not dry:
@@ -3975,8 +5231,13 @@ def cmd_update_all(options):
         if base_latest:
             print('update-all: would fetch the upstream MAIN installer, show its sha256 and run it (--yes)')
         print('update-all: would re-apply the Steam lock/heal; Steam itself is never upgraded while locked')
+        print('update-all: ' + steam_plan_line())
         print('\nDRY RUN: nothing was written.')
         return EXIT_OK
+    if getattr(options, 'terminal', False):
+        return cmd_update_all_terminal(options)
+    pin_before = str(read_steam_pin().get('clientBuild') or '')
+    print('update-all: ' + steam_plan_line())
     status = EXIT_OK
     code = cmd_update(argparse.Namespace(
         bundle=getattr(options, 'bundle', None), url=getattr(options, 'url', None),
@@ -3989,21 +5250,11 @@ def cmd_update_all(options):
         print('update-all: the Moon/Lumen base is not complete; run: luna bootstrap', file=sys.stderr)
         status = status or 1
     elif base_latest:
-        reasons = [reason for reason in refuse_reasons(for_install=True, stop_sidecar=True)
-                   if 'Steam is running' in reason]
-        if reasons:
-            print('REFUSING base update: %s' % reasons[0], file=sys.stderr)
-            return EXIT_REFUSED
-        try:
-            code = run_base_installer('main', None, [])
-        except (OSError, ValueError) as error:
-            print('update-all: base update failed: %s' % error, file=sys.stderr)
-            return 1
-        if code != 0:
-            return code
-        # A base update replaces boot.lua and drops steam.cfg; put both back.
-        code = cmd_install(argparse.Namespace(only=[], force=True, dry_run=False, keep_steam_client=True,
-                                              no_steam_machine=False, migrate_steam_machine=False))
+        # Same lock, same code path as `luna lumen update --installer-latest --yes`.
+        code = cmd_lumen_guard(argparse.Namespace(
+            lumen_action='update', dry_run=False, yes=True, queue=False, json=False, check=False, backup='',
+            installer_latest=True, reinstall=False, keep_millennium=False, remove_millennium=False,
+            with_settings=False))
         status = status or code
     else:
         try:
@@ -4017,9 +5268,1763 @@ def cmd_update_all(options):
                   file=sys.stderr)
     print_heal(heal_steam_lock(), 'update-all')
     print('update-all: ' + known_good_line()[1])
+    pin_after = str(read_steam_pin().get('clientBuild') or '')
+    if pin_before and pin_after != pin_before:
+        print('update-all: SCOPE VIOLATION: the update path moved the Steam client pin %s -> %s; '
+              'the Steam client must not move here. Re-pin with: luna steam lock'
+              % (pin_before, pin_after), file=sys.stderr)
+        status = status or 1
+    if read_steam_pending():
+        print('update-all: note: a Steam client job was queued by something else (%s); update-all '
+              'never queues Steam client work and leaves it alone'
+              % (read_steam_pending().get('action') or 'unknown'), file=sys.stderr)
+    print('update-all: ' + steam_plan_line())
     if not steam_hard_lock_active() and not read_steam_pin():
         print('update-all: Steam is not locked; to freeze the client run: luna steam lock')
     return status
+
+
+# --------------------------------------------------------------------------- visible terminal updates
+#
+# `luna update-all --terminal` and `luna lumen update --terminal` do the planning
+# and the Steam shutdown here, then run the ordinary command (without --terminal)
+# inside a terminal emulator so the owner watches it. The child output is teed to
+# a log under Luna's state dir; the parent never holds the writer lock while the
+# child needs it.
+
+STEAM_SHUTDOWN_TIMEOUT = 60
+TERMINAL_EMULATORS = ('foot', 'alacritty', 'kitty', 'wezterm', 'gnome-terminal', 'konsole', 'xterm')
+
+
+def steam_plan_line():
+    """The scope line: updating Luna never moves the Steam client build."""
+    build = str(read_steam_pin().get('clientBuild') or '')
+    if build:
+        return 'Steam client: unchanged (pinned %s)' % build
+    return ('Steam client: unchanged (no pin recorded; Steam is not touched - '
+            'run: luna steam lock to pin it)')
+
+
+def steam_update_processes():
+    """The processes an update needs gone: the client and its web helper."""
+    return [name for name in ('steam', 'steamwebhelper') if process_running(name)]
+
+
+def close_steam_for_update(timeout=STEAM_SHUTDOWN_TIMEOUT, probe=None, run=None, sleep=None):
+    """Ask Steam itself to quit (`steam -shutdown`) and wait for it; never signals it.
+
+    Returns (ok, note). After `timeout` seconds with either process still up it
+    refuses with the processes named, so the caller changes nothing.
+    """
+    probe = probe or steam_update_processes
+    run = run or subprocess.run
+    sleep = sleep or time.sleep
+    if not probe():
+        return True, 'Steam is not running'
+    try:
+        run(['steam', '-shutdown'], capture_output=True, timeout=30)
+    except FileNotFoundError:
+        return False, ('could not run `steam -shutdown` (steam is not on PATH); '
+                       'close Steam with Steam -> Exit and run the command again')
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, ('could not run `steam -shutdown` (%s); close Steam with Steam -> Exit'
+                       % error)
+    deadline = time.monotonic() + max(0, int(timeout))
+    while time.monotonic() < deadline:
+        if not probe():
+            return True, 'Steam quit'
+        sleep(1)
+    return False, ('Steam was still running after %d s (%s); close it with Steam -> Exit and run '
+                   'the command again. Nothing was changed.'
+                   % (timeout, ', '.join(probe()) or 'steam'))
+
+
+def update_log_path(now=None):
+    """~/.local/share/Luna/state/update-<timestamp>.log ($LUNA_HOME aware)."""
+    stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(now) if now is not None else time.localtime())
+    return luna_state_dir() / ('update-%s.log' % stamp)
+
+
+def terminal_shell_command(command, log_path):
+    """One `bash -lc` line: run the command, tee into the log, keep the window open."""
+    inner = ' '.join(shlex.quote(str(part)) for part in command)
+    log = shlex.quote(str(log_path))
+    return ("%s 2>&1 | tee -a %s; status=${PIPESTATUS[0]}; "
+            "printf '\\n[luna] exit %%s; log: %%s\\n' \"$status\" %s; "
+            "read -r -p '[luna] press Enter to close this window ' _ || true"
+            % (inner, log, log))
+
+
+def terminal_argv(emulator, shell_command, prefix=None):
+    """The argv that opens `emulator` running one shell command."""
+    exe = list(prefix or [emulator])
+    run = ['bash', '-lc', shell_command]
+    if emulator == 'kitty':
+        return exe + run
+    if emulator == 'wezterm':
+        return exe + ['start', '--'] + run
+    if emulator == 'gnome-terminal':
+        return exe + ['--'] + run
+    return exe + ['-e'] + run  # foot, alacritty, konsole, xterm, and any $TERMINAL
+
+
+def find_terminal(which=None):
+    """(emulator, argv prefix) from $TERMINAL first, then the known list; ('', []) when none."""
+    which = which or shutil.which
+    requested = os.environ.get('TERMINAL', '').strip()
+    candidates = ([requested] if requested else []) + list(TERMINAL_EMULATORS)
+    for candidate in candidates:
+        try:
+            parts = shlex.split(candidate)
+        except ValueError:
+            continue
+        if not parts:
+            continue
+        found = which(parts[0])
+        if not found:
+            continue
+        return os.path.basename(parts[0]), [found] + parts[1:]
+    return '', []
+
+
+def run_update_in_terminal(command, log_path=None, spawn=None, which=None):
+    """Open `command` in a terminal, output teed to `log_path`.
+
+    Returns (used, how, log_path, argv). `used` is the emulator name,
+    'current-terminal' or 'subprocess' (so the caller can say which was used).
+    """
+    log_path = log_path or update_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    shell_command = terminal_shell_command(command, log_path)
+    emulator, prefix = find_terminal(which)
+    with contextlib.suppress(OSError):
+        with open(log_path, 'a') as log:
+            log.write('%s luna: %s (terminal: %s)\n'
+                      % (time.strftime('%Y-%m-%d %H:%M:%S'), ' '.join(str(p) for p in command),
+                         emulator or 'none found'))
+    if emulator:
+        argv = terminal_argv(emulator, shell_command, prefix)
+        spawn = spawn or (lambda args: subprocess.Popen(args, start_new_session=True))
+        try:
+            spawn(argv)
+        except OSError as error:
+            return '', 'could not start %s (%s)' % (emulator, error), log_path, argv
+        return emulator, 'opened %s; the update runs there and is teed to the log' % emulator, log_path, argv
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        code = subprocess.call(['bash', '-lc', shell_command])
+        return ('current-terminal', 'no terminal emulator found; ran in this terminal (exit %d)'
+                % code, log_path, [])
+    with open(log_path, 'ab') as log:
+        code = subprocess.call(command, stdout=log, stderr=subprocess.STDOUT)
+    return ('subprocess', 'no terminal emulator found; ran without a window (exit %d)' % code,
+            log_path, [])
+
+
+def confirm_terminal_update(options, label='this update'):
+    """Yes/--yes or refuse; never guesses when stdin is not a terminal."""
+    if getattr(options, 'yes', False):
+        return True
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print('REFUSING: %s needs confirmation; re-run with --yes. Nothing was changed.' % label,
+              file=sys.stderr)
+        return False
+    answer = input('Continue with %s? [y/N] ' % label).strip().lower()
+    if answer in ('y', 'yes'):
+        return True
+    print('REFUSING: not confirmed. Nothing was changed.', file=sys.stderr)
+    return False
+
+
+def refuse_while_busy():
+    """True (and refused, EXIT_BUSY) when another luna command owns the writer lock."""
+    if _update_lock_held_by_other():
+        print('REFUSING: another luna command (or a queued update) owns the update lock; '
+              'wait for it to finish. Nothing was changed.', file=sys.stderr)
+        return True
+    return False
+
+
+def report_terminal_launch(used, how, log_path):
+    if used:
+        print('terminal  : %s' % how)
+        print('log       : %s' % log_path)
+        return EXIT_OK
+    print('terminal  : %s' % how, file=sys.stderr)
+    return 1
+
+
+def cmd_update_all_terminal(options):
+    """`luna update-all --terminal`: plan, confirm, close Steam, run with a window."""
+    if refuse_while_busy():
+        return EXIT_BUSY
+    print('update-all: plan')
+    for line in update_all_plan_lines(options):
+        print(line)
+    if not confirm_terminal_update(options, label='update-all'):
+        return EXIT_REFUSED
+    ok, note = close_steam_for_update(timeout=getattr(options, 'steam_timeout', STEAM_SHUTDOWN_TIMEOUT))
+    print('steam     : %s' % note)
+    if not ok:
+        print('REFUSING: %s' % note, file=sys.stderr)
+        return EXIT_REFUSED
+    command = [sys.executable, str(Path(__file__).resolve()), 'update-all', '--yes']
+    for flag in ('bundle', 'url'):
+        value = getattr(options, flag, None)
+        if value:
+            command += ['--' + flag, value]
+    if getattr(options, 'base_latest', False):
+        command.append('--base-latest')
+    for name in getattr(options, 'only', None) or []:
+        command += ['--only', name]
+    used, how, log_path, _argv = run_update_in_terminal(command)
+    return report_terminal_launch(used, how, log_path)
+
+
+def update_all_plan_lines(options):
+    """The plan text `update-all --terminal` prints (and dry-run echoes)."""
+    source = ('bundle %s' % options.bundle if getattr(options, 'bundle', None)
+              else 'url %s' % options.url if getattr(options, 'url', None) else 'the latest release (gh)')
+    lines = ['update-all:   add-ons    : %s' % source,
+             'update-all:   channels   : %s' % ', '.join(
+                 '%s=%s' % item for item in lumen_channels_effective().items())]
+    if getattr(options, 'base_latest', False):
+        lines.append('update-all:   Lumen base : upstream MAIN installer (unpinned; its sha256 is shown first)')
+    else:
+        lines.append('update-all:   Lumen base : re-verify the pinned installer %s (pin not moved)'
+                     % UPSTREAM_INSTALLER_COMMIT[:12])
+    lines.append('update-all:   ' + steam_plan_line())
+    return lines
+
+
+def cmd_lumen_update_terminal(options):
+    """`luna lumen update --terminal`: plan, confirm, close Steam, run with a window."""
+    if getattr(options, 'queue', False):
+        print('REFUSING: --terminal and --queue cannot be combined. Nothing was changed.',
+              file=sys.stderr)
+        return EXIT_REFUSED
+    if refuse_while_busy():
+        return EXIT_BUSY
+    print('lumen     : plan')
+    for line in lumen_plan_lines():
+        print(line)
+    print('lumen     : channels: %s' % ', '.join(
+        '%s=%s' % item for item in lumen_channels_effective().items()))
+    print('lumen     : ' + steam_plan_line() + '; the base installer runs with --nolaunch')
+    latest = getattr(options, 'installer_latest', False)
+    if latest:
+        print('lumen     : would run the upstream MAIN installer (NOT pinned; its sha256 is shown first), '
+              'then re-attach Luna: bridge, self-update block, Steam lock')
+    else:
+        print('lumen     : would run the PINNED installer %s (sha256 %s), then re-attach Luna'
+              % (UPSTREAM_INSTALLER_COMMIT[:12], UPSTREAM_INSTALLER_SHA256[:12]))
+    if not confirm_terminal_update(options, label='the Lumen update'):
+        return EXIT_REFUSED
+    ok, note = close_steam_for_update(timeout=getattr(options, 'steam_timeout', STEAM_SHUTDOWN_TIMEOUT))
+    print('steam     : %s' % note)
+    if not ok:
+        print('REFUSING: %s' % note, file=sys.stderr)
+        return EXIT_REFUSED
+    command = [sys.executable, str(Path(__file__).resolve()), 'lumen', 'update', '--yes']
+    for flag in ('installer_latest', 'reinstall', 'keep_millennium', 'remove_millennium'):
+        option = '--' + flag.replace('_', '-')
+        if getattr(options, flag, False):
+            command.append(option)
+    used, how, log_path, _argv = run_update_in_terminal(command)
+    return report_terminal_launch(used, how, log_path)
+
+
+# --------------------------------------------------------------------------- Lumen base update
+#
+# `luna lumen update` is the Luna-driven way to move the Moon/Lumen base. Lumen's
+# own About-page updater is blocked (patch-lumen.py, BLOCK v1) because it would
+# replace the Lua tree and wipe the Luna bridge. The base installer
+# (swwayps/luatools-moon) is the same one `update-all --base-latest` runs; this
+# wraps it with a backup before and a re-attach (boot.lua bridge, update block,
+# Steam lock) after, and leaves a restorable backup if the new upstream cannot
+# be patched.
+
+# Everything the upstream installer replaces or deletes, as opaque trees/files:
+# (backup name, path, names inside it the installer itself keeps and we skip).
+LUMEN_KEEP_BACKUPS = 2
+LUMEN_JOB_ATTEMPTS = 3
+LUMEN_BIG_BYTES = 500 * 1024 * 1024
+SLSTEAM_KEPT = ('backup', 'system-launcher-backup')
+
+
+def lumen_backup_items():
+    root = lumen_root()
+    items = [(name, root / name, ()) for name in
+             ('lua', 'lumen', 'versions.json', 'update-channels.json', 'luatools')]
+    items.append(('slsteam', home() / '.local/share/SLSsteam', SLSTEAM_KEPT))
+    # Depot keys and settings: upstream says it leaves these alone; kept so a
+    # restore (and the post-update check) can prove it.
+    items.append(('slsteam-config', home() / '.config/SLSsteam', ()))
+    for name in ('steam.cfg', 'Steam.cfg'):
+        items.append((name, steam_home() / name, ()))
+    # The installer deletes these without asking (luatools data dirs always,
+    # Millennium unless it is kept); with them in the backup a rollback is whole.
+    for name, path in LUATOOLS_DATA_DIRS:
+        items.append((name, path(), ()))
+    if lumen_millennium_choice() != 'keep':
+        for name, path in MILLENNIUM_USER_DIRS:
+            items.append((name, path(), ()))
+    return items
+
+
+LUATOOLS_DATA_DIRS = (
+    ('luatools-data', lambda: home() / '.local/share/luatools'),
+    ('luatools-config', lambda: home() / '.config/luatools'),
+    ('luatools-home', lambda: home() / '.luatools'),
+)
+MILLENNIUM_USER_DIRS = (
+    ('millennium-config', lambda: Path(os.environ.get('XDG_CONFIG_HOME') or home() / '.config') / 'millennium'),
+    ('millennium-data', lambda: Path(os.environ.get('XDG_DATA_HOME') or home() / '.local/share') / 'millennium'),
+    ('millennium-steam', lambda: steam_home() / 'millennium'),
+)
+MILLENNIUM_SYSTEM_DIRS = (Path('/usr/lib/millennium'), Path('/usr/share/millennium'))
+
+
+def lumen_options_path():
+    return luna_tools_dir() / 'lumen-options.json'
+
+
+def lumen_millennium_choice():
+    """'keep', 'remove' or '' (no recorded choice)."""
+    data = read_json_file(lumen_options_path())
+    value = data.get('millennium') if isinstance(data, dict) else ''
+    return value if value in ('keep', 'remove') else ''
+
+
+def set_lumen_millennium_choice(choice):
+    data = read_json_file(lumen_options_path())
+    data = data if isinstance(data, dict) else {}
+    data['millennium'] = choice
+    write_json_file(lumen_options_path(), data)
+
+
+def millennium_present():
+    """Paths of an existing Millennium install the base installer would remove."""
+    found = [path() for _name, path in MILLENNIUM_USER_DIRS if path().exists()]
+    found += [path for path in MILLENNIUM_SYSTEM_DIRS if path.exists()]
+    return found
+
+
+LUMEN_CHANNEL_FLAGS = (('slsteam_moon', '--slsteam-channel'), ('plugin', '--plugin-channel'),
+                       ('lumen', '--lumen-channel'))
+LUMEN_CHANNEL_VALUES = ('stable', 'beta')
+
+
+def lumen_channels():
+    """The owner's update channels from Lumen's update-channels.json ({} when none)."""
+    data = read_json_file(lumen_channels_path())
+    if not isinstance(data, dict):
+        return {}
+    return {key: data[key] for key, _flag in LUMEN_CHANNEL_FLAGS if data.get(key) in LUMEN_CHANNEL_VALUES}
+
+
+def lumen_channels_path():
+    """Lumen's own channel file; the base installer reads it and is passed the flags too."""
+    return lumen_root() / 'update-channels.json'
+
+
+def lumen_channels_effective():
+    """The three component channels, with the default (stable) filled in."""
+    chosen = lumen_channels()
+    return {key: chosen.get(key) or 'stable' for key, _flag in LUMEN_CHANNEL_FLAGS}
+
+
+def set_lumen_channels(value, only=None):
+    """Write update-channels.json atomically (temp file + rename) and return the channels.
+
+    Raises ValueError for an unknown channel or component, so the CLI can refuse
+    before anything is written.
+    """
+    if value not in LUMEN_CHANNEL_VALUES:
+        raise ValueError('channel must be stable or beta, not %r' % value)
+    names = list(only or [key for key, _flag in LUMEN_CHANNEL_FLAGS])
+    unknown = [name for name in names if name not in [key for key, _flag in LUMEN_CHANNEL_FLAGS]]
+    if unknown:
+        raise ValueError('unknown component%s: %s (choose from %s)' % (
+            's' if len(unknown) > 1 else '', ', '.join(unknown),
+            ', '.join(key for key, _flag in LUMEN_CHANNEL_FLAGS)))
+    data = read_json_file(lumen_channels_path())
+    data = data if isinstance(data, dict) else {}
+    for key, _flag in LUMEN_CHANNEL_FLAGS:  # explicit defaults survive a hand-edited file
+        if data.get(key) not in LUMEN_CHANNEL_VALUES:
+            data[key] = 'stable'
+    for name in names:
+        data[name] = value
+    write_json_file(lumen_channels_path(), data)  # mkstemp + os.replace: never half a file
+    return lumen_channels_effective()
+
+
+def lumen_channels_audit_path():
+    """Where a channel change is recorded (same state/message/at shape as the update result)."""
+    return luna_tools_dir() / 'lumen-channels.json'
+
+
+def record_lumen_channels(message, **extra):
+    """Record a channel change in the CLI's audit form, in its own file so it never
+    overwrites the Lumen update result the Updates page shows."""
+    payload = {'state': 'applied', 'message': message, 'at': int(time.time())}
+    payload.update(extra)
+    write_json_file(lumen_channels_audit_path(), payload)
+    return payload
+
+
+def lumen_installer_extra(channels, millennium):
+    """Arguments for the base installer so the owner's choices survive the update."""
+    extra = []
+    for key, flag in LUMEN_CHANNEL_FLAGS:
+        extra += [flag, channels.get(key) or 'stable']
+    if millennium == 'keep':
+        extra.append('--keep-millennium')
+    return extra
+
+
+def _walk_files(path, ignore=()):
+    """(relative path, absolute path) for every file and symlink, sorted."""
+    if path.is_file() or path.is_symlink():
+        return [(path.name, path)]
+    found = []
+    for current, dirs, files in os.walk(path):
+        here = Path(current)
+        if here == path:
+            dirs[:] = [d for d in dirs if d not in ignore]
+            files = [f for f in files if f not in ignore]
+        for d in list(dirs):
+            if (here / d).is_symlink():  # a link to a directory is recorded, not followed
+                found.append(((here / d).relative_to(path).as_posix(), here / d))
+                dirs.remove(d)
+        for name in files:
+            found.append(((here / name).relative_to(path).as_posix(), here / name))
+    return sorted(found)
+
+
+def _tree_size(path, ignore=()):
+    total = 0
+    for _rel, entry in _walk_files(path, ignore):
+        with contextlib.suppress(OSError):
+            total += entry.lstat().st_size
+    return total
+
+
+def _human(size):
+    size = float(size)
+    for unit in ('B', 'K', 'M', 'G'):
+        if size < 1024 or unit == 'G':
+            return ('%d%s' % (size, unit)) if unit == 'B' else ('%.1f%s' % (size, unit))
+        size /= 1024
+
+
+def _entry_digest(entry):
+    if entry.is_symlink():
+        return 'link:' + os.readlink(entry)
+    digest = hashlib.sha256()
+    with entry.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_of(path, ignore=()):
+    return {rel: _entry_digest(entry) for rel, entry in _walk_files(path, ignore)}
+
+
+def lumen_backup_plan():
+    """[(name, path, bytes, present)] for the plan text and the backup."""
+    rows = []
+    for name, path, ignore in lumen_backup_items():
+        present = path.exists() or path.is_symlink()
+        rows.append((name, path, _tree_size(path, ignore) if present else 0, present))
+    return rows
+
+
+def lumen_pending_path():
+    return luna_tools_dir() / 'pending-lumen.json'
+
+
+def lumen_result_path():
+    return luna_tools_dir() / 'lumen-update.json'
+
+
+def luna_state_dir():
+    """Machine-local Luna state OUTSIDE ~/.local/share/Lumen: $LUNA_HOME/state
+    (default ~/.local/share/Luna/state). The upstream installer replaces the Lumen
+    tree, so backups and the Steam pin copy must not live in it."""
+    return luna_home() / 'state'
+
+
+def lumen_backup_root():
+    return luna_state_dir() / 'lumen-backups'
+
+
+def lumen_legacy_backup_root():
+    """Where backups lived before (inside the Lumen tree); still read, migrated on demand."""
+    return luna_tools_dir() / 'lumen-backups'
+
+
+def lumen_backup_roots():
+    roots = [lumen_backup_root()]
+    if lumen_legacy_backup_root() != roots[0]:
+        roots.append(lumen_legacy_backup_root())
+    return roots
+
+
+def lumen_backup_path(name):
+    """The directory of a backup by name, wherever it currently is."""
+    for root in lumen_backup_roots():
+        if (root / name / 'backup.json').is_file():
+            return root / name
+    return lumen_backup_root() / name
+
+
+def migrate_lumen_backups():
+    """Move old in-tree backups to the state dir. Safe to interrupt: copy to a hidden
+    name, verify, rename, and only then delete the old copy; leftovers are cleaned up."""
+    legacy, root = lumen_legacy_backup_root(), lumen_backup_root()
+    if legacy == root or not legacy.is_dir():
+        return []
+    moved = []
+    for old in sorted(legacy.iterdir()):
+        if not (old / 'backup.json').is_file():
+            continue
+        target = root / old.name
+        staging = root / ('.migrating-' + old.name)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+                shutil.copytree(old, staging, symlinks=True)
+                os.replace(staging, target)
+            ok, _problem = verify_lumen_backup(target)
+            if ok:
+                shutil.rmtree(old, ignore_errors=True)
+                moved.append(old.name)
+        except OSError as error:
+            print('lumen     : could not migrate backup %s yet (%s); it stays where it is' % (old.name, error),
+                  file=sys.stderr)
+    return moved
+
+
+def read_lumen_pending():
+    pending = read_json_file(lumen_pending_path())
+    return pending if isinstance(pending, dict) else {}
+
+
+def record_lumen_result(state, message='', **extra):
+    """Status the Updates page reads: queued | running | applied | failed | cancelled."""
+    payload = {'state': state, 'message': message, 'at': int(time.time())}
+    payload.update(extra)
+    write_json_file(lumen_result_path(), payload)
+    return payload
+
+
+def lumen_tooling_problems():
+    """Static check: files the running copy needs to re-attach and reinstall Luna."""
+    problems = []
+    if not PATCHER.is_file():
+        problems.append('scripts/patch-lumen.py is missing (%s)' % PATCHER)
+    if not BRIDGE_SOURCE.is_file():
+        problems.append('bridge/bridge.lua is missing (%s)' % BRIDGE_SOURCE)
+    if not MANIFEST_PATH.is_file():
+        problems.append('vendor/MANIFEST.json is missing (%s)' % MANIFEST_PATH)
+    if not (ROOT / 'scripts' / 'steam-machine.py').is_file():
+        problems.append('scripts/steam-machine.py is missing (%s)' % (ROOT / 'scripts'))
+    problems += runtime_problems()
+    absent = ['%s/%s' % (name, rel) for name in ADDONS for rel, _dest in ADDON_FILES[name]
+              if not payload_path(name, rel).is_file()]
+    if absent:
+        problems.append('add-on sources are missing: %s%s'
+                        % (', '.join(absent[:6]), '…' if len(absent) > 6 else ''))
+    return problems
+
+
+def lumen_preflight():
+    """Everything a base update needs, checked before anything is touched.
+
+    A missing patcher or source tree used to surface only after the upstream
+    installer had already replaced Lumen, which loses Luna. Refuse first.
+    """
+    problems = lumen_tooling_problems() + runtime_problems(full=True)
+    if not problems:
+        check = patcher('check')
+        detail = check.stderr.strip() or check.stdout.strip()
+        if check.returncode != 0:
+            problems.append('the installed Lumen tree cannot be patched: %s'
+                            % (detail or 'patch-lumen.py check failed'))
+    if problems:
+        return problems
+    rows = lumen_backup_plan()
+    needed = sum(row[2] for row in rows) + 32 * 1024 * 1024
+    root = lumen_backup_root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        probe = root / '.write-probe'
+        probe.write_text('ok')
+        probe.unlink()
+        free = shutil.disk_usage(root).free
+    except OSError as error:
+        return ['the backup directory %s is not writable: %s' % (root, error)]
+    if free < needed:
+        problems.append('not enough free space for the backup in %s (%s needed, %s free)'
+                        % (root, _human(needed), _human(free)))
+    return problems
+
+
+APPLY_WAIT_LIMIT = 6 * 3600
+STEAM_CLOSED_STABLE_SECONDS = 10
+
+
+def queued_update_exists():
+    return bool(read_lumen_pending() or read_refresh_pending() or read_steam_pending()
+                or read_json_file(luna_tools_dir() / 'pending.json'))
+
+
+def wait_for_steam_closed(limit=APPLY_WAIT_LIMIT, stable=STEAM_CLOSED_STABLE_SECONDS,
+                          probe=None, has_work=None, clock=time.monotonic, sleep=time.sleep):
+    """Wait for Steam to stay shut, so a self-restart cannot trigger the update.
+
+    Returns 'ready' once steam and steamwebhelper have both been gone for
+    `stable` seconds continuously, 'cancelled' when the queued job is removed,
+    or 'timeout' after `limit`. Never signals Steam.
+    """
+    probe = probe or (lambda: steam_running())
+    has_work = has_work or queued_update_exists
+    deadline = clock() + limit
+    closed_since = None
+    while clock() < deadline:
+        if not has_work():
+            return 'cancelled'
+        if probe():
+            closed_since = None
+        else:
+            if closed_since is None:
+                closed_since = clock()
+            elif clock() - closed_since >= stable:
+                return 'ready'
+        sleep(1)
+    return 'timeout'
+
+
+
+def read_lumen_versions():
+    """{component: tag} from Lumen's own versions.json; empty when unreadable."""
+    data = read_json_file(lumen_root() / 'versions.json')
+    if not isinstance(data, dict):
+        return {}
+    return {str(name): str(entry.get('tag') or '') for name, entry in data.items()
+            if isinstance(entry, dict)}
+
+
+def read_lumen_fingerprints():
+    """{component: {tag, id, size, channel}} as the installer stamped it in versions.json."""
+    data = read_json_file(lumen_root() / 'versions.json')
+    if not isinstance(data, dict):
+        return {}
+    return {str(name): {key: entry.get(key) for key in ('tag', 'id', 'size', 'channel', 'asset_at')}
+            for name, entry in data.items() if isinstance(entry, dict)}
+
+
+# (versions.json key, repo, beta file on the repo's beta branch, stable asset regex, stable mode)
+LUMEN_COMPONENTS = (
+    ('slsteam_moon', 'swwayps/slsteam-moon', 'dist/slsteam-moon-linux.zip',
+     r'^slsteam-moon-linux-.*-lumen\.zip$', 'any'),
+    ('lumen', 'swwayps/lumen', 'dist/lumen-linux.zip', r'^lumen-linux\.zip$', 'latest'),
+    ('plugin', 'swwayps/luatools-moon', 'dist/luatools-linux.zip', r'^luatools-linux\.zip$', 'latest'),
+)
+UPSTREAM_META_TIMEOUT = 8
+
+
+def _public_json(url):
+    """GET public release metadata: no credentials, no cookies, generic user agent."""
+    request = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json',
+                                                   'User-Agent': 'luna-update-check'})
+    with urllib.request.urlopen(request, timeout=UPSTREAM_META_TIMEOUT) as response:
+        return json.loads(response.read(8 * 1024 * 1024).decode('utf-8'))
+
+
+def _upstream_component(repo, beta_path, glob, mode, channel):
+    """(info, note): what the installer would fetch for one component, or (None, why)."""
+    note = ''
+    if channel == 'beta':
+        try:
+            meta = _public_json('https://api.github.com/repos/%s/contents/%s?ref=beta' % (repo, beta_path))
+            if isinstance(meta, dict) and meta.get('sha') and meta.get('download_url'):
+                return {'tag': 'beta', 'id': meta['sha'], 'size': meta.get('size'), 'channel': 'beta'}, ''
+        except urllib.error.HTTPError as error:
+            if error.code not in (404, 422):
+                return None, 'beta lookup failed (HTTP %s)' % error.code
+        except (OSError, ValueError) as error:
+            return None, 'beta lookup failed (%s)' % error
+        note = 'no beta build published, the installer falls back to stable'
+    try:
+        if mode == 'any':
+            releases = _public_json('https://api.github.com/repos/%s/releases?per_page=50' % repo)
+            candidates = [(release, asset) for release in releases if not release.get('draft')
+                          and not release.get('prerelease') for asset in release.get('assets') or []
+                          if re.search(glob, asset.get('name') or '')]
+            release, asset = candidates[0] if candidates else ({}, {})
+        else:
+            release = _public_json('https://api.github.com/repos/%s/releases/latest' % repo)
+            matches = [a for a in release.get('assets') or [] if re.search(glob, a.get('name') or '')]
+            asset = matches[0] if matches else {}
+    except urllib.error.HTTPError as error:
+        return None, 'release lookup failed (HTTP %s%s)' % (
+            error.code, ', rate limited' if error.code in (403, 429) else '')
+    except (OSError, ValueError, AttributeError, TypeError) as error:
+        return None, 'release lookup failed (%s)' % error
+    if not asset:
+        return None, 'no matching release asset found'
+    return {'tag': release.get('tag_name'), 'id': asset.get('id'), 'size': asset.get('size'),
+            'channel': 'stable'}, note
+
+
+def lumen_upstream_state(channels=None, installed=None, fetch=None):
+    """Per component: installed vs what upstream has on the owner's channel.
+
+    Only public, unauthenticated release metadata is read. Each row:
+    {component, channel, installed, available, status, note} with status
+    'newer', 'current' or 'unknown'. Overall 'newer' when any component is
+    newer, 'current' when all are, else 'unknown' (offline, rate limited).
+    """
+    channels = lumen_channels() if channels is None else channels
+    installed = read_lumen_fingerprints() if installed is None else installed
+    fetch = fetch or _upstream_component
+    rows = []
+    for key, repo, beta_path, glob, mode in LUMEN_COMPONENTS:
+        channel = channels.get(key) or 'stable'
+        have = installed.get(key) or {}
+        info, note = fetch(repo, beta_path, glob, mode, channel)
+        row = {'component': key, 'channel': channel, 'installed': have or None, 'available': info,
+               'note': note}
+        if info is None:
+            row['status'] = 'unknown'
+        elif not have:
+            row['status'] = 'newer'
+            row['note'] = (note + '; ' if note else '') + 'no installed record in versions.json'
+        elif (str(have.get('tag')) == str(info.get('tag')) and str(have.get('id')) == str(info.get('id'))
+              and str(have.get('size')) == str(info.get('size'))):
+            row['status'] = 'current'
+        else:
+            row['status'] = 'newer'
+        rows.append(row)
+    statuses = {row['status'] for row in rows}
+    overall = 'newer' if 'newer' in statuses else 'unknown' if 'unknown' in statuses else 'current'
+    return {'overall': overall, 'components': rows, 'channels': channels}
+
+
+def describe_upstream_row(row):
+    have = row['installed'] or {}
+    got = row['available'] or {}
+    label = lambda item: ('%s %s' % (item.get('tag') or '?', item.get('channel') or '?')) if item else '?'  # noqa: E731
+    text = '%-12s %-6s installed %-14s available %-14s %s' % (
+        row['component'], row['channel'], label(have), label(got) if got else 'unknown', row['status'])
+    return text + ('  (%s)' % row['note'] if row['note'] else '')
+
+
+def lumen_changed(before, after):
+    """{component: 'old -> new'} for what the installer actually changed; {} when nothing."""
+    changed = {}
+    for key in sorted(set(before) | set(after)):
+        old, new = before.get(key) or {}, after.get(key) or {}
+        if (old.get('tag'), old.get('id'), old.get('size'), old.get('channel')) != \
+                (new.get('tag'), new.get('id'), new.get('size'), new.get('channel')):
+            changed[key] = '%s %s -> %s %s' % (old.get('tag') or '-', old.get('channel') or '',
+                                                new.get('tag') or '-', new.get('channel') or '')
+    return changed
+
+
+def lumen_backups():
+    """Backups newest first (directory names are timestamps)."""
+    found = {}
+    for root in lumen_backup_roots():
+        if root.is_dir():
+            for path in root.iterdir():
+                if (path / 'backup.json').is_file():
+                    found.setdefault(path.name, path)  # the state dir wins over a half-migrated copy
+    return sorted(found.values(), key=lambda path: path.name, reverse=True)
+
+
+def lumen_backup_info():
+    rows = []
+    for path in lumen_backups():
+        meta = read_json_file(path / 'backup.json') or {}
+        rows.append({'name': path.name, 'at': int(meta.get('at') or 0),
+                     'bytes': int(meta.get('bytes') or 0), 'failed': bool(meta.get('failed')),
+                     'items': meta.get('items') or []})
+    return rows
+
+
+def verify_lumen_backup(path):
+    """(ok, problem): file count and sha256 of every file against backup.json."""
+    meta = read_json_file(path / 'backup.json') or {}
+    manifest = meta.get('manifest')
+    if not isinstance(manifest, dict):
+        return False, 'backup %s has no manifest' % path.name
+    count = 0
+    for item in meta.get('items') or []:
+        recorded = manifest.get(item)
+        if not isinstance(recorded, dict) or not (path / item).exists() and not (path / item).is_symlink():
+            return False, 'backup %s is missing %s' % (path.name, item)
+        actual = _manifest_of(path / item)
+        if actual != recorded:
+            gone = sorted(set(recorded) - set(actual))[:3]
+            odd = sorted(k for k in actual if k in recorded and actual[k] != recorded[k])[:3]
+            return False, 'backup %s does not match its manifest in %s (%s)' % (
+                path.name, item, ', '.join(gone + odd) or 'extra files')
+        count += len(actual)
+    if count != int(meta.get('files') or -1):
+        return False, 'backup %s file count %d != %s' % (path.name, count, meta.get('files'))
+    return True, ''
+
+
+def backup_lumen_tree():
+    """Copy (cp -a semantics) everything the installer replaces or deletes and
+    verify the copy against a sha256 manifest; returns the backup directory."""
+    dest = lumen_backup_root() / time.strftime('%Y%m%d-%H%M%S')
+    n = 0
+    while dest.exists():
+        n += 1
+        dest = lumen_backup_root() / ('%s-%d' % (time.strftime('%Y%m%d-%H%M%S'), n))
+    dest.mkdir(parents=True)
+    items, absent, manifest, total, files = [], [], {}, 0, 0
+    try:
+        for name, source, ignore in lumen_backup_items():
+            if not (source.exists() or source.is_symlink()):
+                absent.append(name)
+                continue
+            if source.is_dir() and not source.is_symlink():
+                shutil.copytree(source, dest / name, symlinks=True,
+                                ignore=(shutil.ignore_patterns(*ignore) if ignore else None))
+            else:
+                shutil.copy2(source, dest / name, follow_symlinks=False)
+            expected = _manifest_of(source, ignore)
+            copied = _manifest_of(dest / name)
+            if expected != copied:
+                raise OSError('copy of %s does not match the source' % source)
+            items.append(name)
+            manifest[name] = copied
+            files += len(copied)
+            total += _tree_size(dest / name)
+        write_json_file(dest / 'backup.json', {
+            'at': int(time.time()), 'items': items, 'absent': absent, 'versions': read_lumen_versions(),
+            'manifest': manifest, 'files': files, 'bytes': total,
+            'sources': {name: str(path) for name, path, _i in lumen_backup_items()}})
+    except OSError:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+    return dest
+
+
+def prune_lumen_backups(keep=LUMEN_KEEP_BACKUPS):
+    """After a successful update: keep the newest `keep`; failed-update backups stay."""
+    good = [path for path in lumen_backups() if not (read_json_file(path / 'backup.json') or {}).get('failed')]
+    for stale in good[keep:]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
+def mark_lumen_backup_failed(path):
+    meta = read_json_file(path / 'backup.json') or {}
+    meta['failed'] = True
+    write_json_file(path / 'backup.json', meta)
+
+
+def _swap_in(source, target, keep=()):
+    """Stage a copy next to the target, then rename into place."""
+    staged = target.with_name('.%s.luna-restore' % target.name)
+    trash = target.with_name('.%s.luna-replaced' % target.name)
+    for leftover in (staged, trash):
+        if leftover.is_dir() and not leftover.is_symlink():
+            shutil.rmtree(leftover, ignore_errors=True)
+        elif leftover.exists() or leftover.is_symlink():
+            leftover.unlink()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir() and not source.is_symlink():
+        shutil.copytree(source, staged, symlinks=True)
+    else:
+        shutil.copy2(source, staged, follow_symlinks=False)
+    for name in keep:  # what the installer left in place stays in place
+        if (target / name).exists() or (target / name).is_symlink():
+            if (staged / name).exists() or (staged / name).is_symlink():
+                shutil.rmtree(staged / name, ignore_errors=True)
+            os.replace(target / name, staged / name)
+    if target.exists() or target.is_symlink():
+        os.replace(target, trash)
+    os.replace(staged, target)
+    if trash.is_dir() and not trash.is_symlink():
+        shutil.rmtree(trash, ignore_errors=True)
+    elif trash.exists() or trash.is_symlink():
+        trash.unlink()
+
+
+def restore_lumen_backup(name='', skip=(), record=True):
+    """Put a backup back (Steam and Lumen stopped). Returns (ok, message).
+
+    `skip` names backup items to leave alone (an automatic rollback leaves the
+    user's SLSsteam settings alone); `record=False` leaves the result file to
+    the caller.
+    """
+    backups = lumen_backups()
+    chosen = next((path for path in backups if not name or path.name == name), None)
+    if chosen is None:
+        return False, 'no Lumen backup found in %s' % lumen_backup_root()
+    if steam_running() or lumen_running():
+        return False, 'close Steam and stop the Lumen sidecar first'
+    ok, problem = verify_lumen_backup(chosen)
+    if not ok:
+        return False, 'refusing to restore, nothing was changed: %s' % problem
+    meta = read_json_file(chosen / 'backup.json') or {}
+    wanted = {item_name: (path, ignore) for item_name, path, ignore in lumen_backup_items()}
+    for item in meta.get('items') or []:
+        if item in wanted and item not in skip:
+            _swap_in(chosen / item, wanted[item][0], wanted[item][1])
+    for item in meta.get('absent') or []:  # it did not exist before the update
+        if item in wanted and item not in skip and (wanted[item][0].exists() or wanted[item][0].is_symlink()):
+            if wanted[item][0].is_dir() and not wanted[item][0].is_symlink():
+                shutil.rmtree(wanted[item][0], ignore_errors=True)
+            else:
+                wanted[item][0].unlink()
+    if record:
+        record_lumen_result('restored', 'restored the Lumen backup %s' % chosen.name, backup=chosen.name,
+                            changed={}, changedText='none')
+    return True, 'restored the Lumen backup %s (%d files verified; Lumen, luatools, SLSsteam and its settings as they were)' % (
+        chosen.name, int(meta.get('files') or 0))
+
+
+def check_user_config_after_update(backup):
+    """Settings the user had vs now. Missing files come back verbatim; files the
+    installer changed are left alone and listed (config vs program files cannot
+    be told apart without reading upstream code, so nothing is guessed)."""
+    restored, changed = [], []
+    meta = read_json_file(backup / 'backup.json') or {}
+    base = home() / '.config/SLSsteam'
+    for rel, digest in sorted((meta.get('manifest') or {}).get('slsteam-config', {}).items()):
+        current = base / rel
+        if not (current.exists() or current.is_symlink()):
+            current.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup / 'slsteam-config' / rel, current, follow_symlinks=False)
+            restored.append(str(current))
+        elif _entry_digest(current) != digest:
+            changed.append(str(current))
+    return restored, changed
+
+
+def lumen_plan_lines():
+    rows = lumen_backup_plan()
+    lines = ['lumen: would back up (verified, sha256 manifest) to %s:' % lumen_backup_root()]
+    for name, path, size, present in rows:
+        note = ' (installer keeps %s)' % ', '.join(SLSTEAM_KEPT) if name == 'slsteam' else ''
+        big = '  ** over 500 MB **' if size > LUMEN_BIG_BYTES else ''
+        lines.append('lumen:   %-15s %-8s %s%s%s' % (name, _human(size) if present else 'absent', path, note, big))
+    lines.append('lumen: total %s; the newest %d backups are kept (a failed update\'s is never pruned)'
+                 % (_human(sum(row[2] for row in rows)), LUMEN_KEEP_BACKUPS))
+    return lines
+
+
+def lumen_update_blockers():
+    """Why a Lumen update cannot run now (empty list: it can)."""
+    if active_host() != 'lumen':
+        return ['luna-host is the active host; Lumen is not in use. Switch back with: luna host rollback']
+    if base_state() != 'ready':
+        return ['the Moon/Lumen base is not complete; run: luna bootstrap']
+    # A lingering sidecar is stopped by the update itself (Steam is closed then).
+    return [reason for reason in refuse_reasons(for_install=True)
+            if 'Lumen sidecar is still running' not in reason]
+
+
+class _UpdateFailed(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+PHASE_TEXT = {'backup': 'backing up Lumen before the update (do not shut down)',
+              'installer': 'running the base installer (do not shut down)',
+              'reattach': 're-attaching Luna to the new Lumen (do not shut down)',
+              'rollback': 'rolling back to the pre-update Lumen (do not shut down)'}
+
+
+def _journal(ctx, phase):
+    """Write the `running` record: pid, phase and (once it exists) the backup."""
+    ctx['phase'] = phase
+    fields = {key: ctx[key] for key in ('backup', 'before', 'beforeFp', 'lumenWasActive', 'startedAt', 'installer')
+              if ctx.get(key) is not None}
+    return record_lumen_result('running', PHASE_TEXT[phase], pid=os.getpid(),
+                               pidStart=_proc_start(os.getpid()), phase=phase, **fields)
+
+
+def _heal_quietly():
+    try:
+        heal_steam_lock()
+    except Exception as error:  # noqa: BLE001 - the lock repair must never mask the real failure
+        print('heal      : failed: %s' % error, file=sys.stderr)
+
+
+def _queue_lumen_job(action, ctx, reason=''):
+    job = {'action': action, 'at': int(time.time()), 'id': '%d-%d' % (os.getpid(), time.time_ns()),
+           'reason': reason, 'ctx': {key: ctx.get(key) for key in
+                                     ('backup', 'before', 'beforeFp', 'lumenWasActive', 'startedAt', 'installer')}}
+    write_json_file(lumen_pending_path(), job)
+    return start_apply_service()
+
+
+def _restart_lumen(ctx, restart=True):
+    if restart and ctx.get('lumenWasActive'):
+        systemctl_user('start', LUMEN_UNIT)
+
+
+def _rollback(ctx, reason):
+    """Put the verified pre-update backup back. Returns (rolled_back, message)."""
+    name = ctx['backup']
+    path = lumen_backup_path(name)
+    _journal(ctx, 'rollback')
+    _heal_quietly()
+    if steam_running() or not stop_lumen_sidecar():
+        mark_lumen_backup_failed(path)
+        _queue_lumen_job('rollback', ctx, reason)
+        return False, ('Steam or the Lumen sidecar is running, so the rollback could not run now; '
+                       'it is queued and starts when Steam is closed (or run: luna lumen restore --backup %s)' % name)
+    try:
+        ok, message = restore_lumen_backup(name, skip=('slsteam-config',), record=False)
+    except Exception as error:  # noqa: BLE001
+        ok, message = False, 'rollback failed: %s' % error
+    _heal_quietly()
+    if ok:
+        meta = read_json_file(path / 'backup.json') or {}
+        meta['rolledBack'] = True
+        write_json_file(path / 'backup.json', meta)
+    else:
+        mark_lumen_backup_failed(path)
+    return ok, message
+
+
+def _changed_fields(ctx, rolled=False):
+    changed = {} if rolled else lumen_changed(ctx.get('beforeFp') or {}, read_lumen_fingerprints())
+    return {'changed': changed, 'changedText': '; '.join('%s %s' % item for item in sorted(changed.items())) or 'none'}
+
+
+def _fail(ctx, reason, code):
+    """Every failure after the backup ends here, in a known state."""
+    print('FAILED: %s' % reason, file=sys.stderr)
+    if not ctx.get('installerStarted'):
+        shutil.rmtree(lumen_backup_path(ctx['backup']), ignore_errors=True)
+        _restart_lumen(ctx)
+        record_lumen_result('failed', '%s (nothing was changed)' % reason, before=ctx.get('before'),
+                            changed={}, changedText='none')
+        _notify('Lumen update failed', '%s (nothing was changed)' % reason)
+        return code
+    rolled, message = _rollback(ctx, reason)
+    if rolled:
+        _restart_lumen(ctx)
+    record_lumen_result('failed', '%s; %s' % (reason, 'rolled back to the pre-update Lumen' if rolled else message),
+                        backup=ctx['backup'], before=ctx.get('before'), rolledBack=rolled,
+                        rollbackPending=bool(read_lumen_pending().get('action') == 'rollback'),
+                        reason=reason, **_changed_fields(ctx, rolled))
+    _notify('Lumen update failed', '%s. %s' % (reason, 'Rolled back to the previous Lumen.' if rolled else message))
+    print('lumen     : %s' % ('rolled back' if rolled else message), file=sys.stderr)
+    return code
+
+
+def _complete_update(ctx, restart_lumen=True):
+    """The re-attach half; raises _UpdateFailed. Returns an exit code."""
+    backup = lumen_backup_path(ctx['backup'])
+    _journal(ctx, 'reattach')
+    problems = lumen_tooling_problems()
+    if problems:
+        raise _UpdateFailed('tooling incomplete after the installer: %s' % '; '.join(problems), EXIT_PATCH)
+    if steam_running():  # started again meanwhile: finish when it is closed once more
+        _heal_quietly()
+        applier = _queue_lumen_job('reattach', ctx, 'Steam was started during the update')
+        record_lumen_result('queued', 'Lumen was updated; close Steam once more to finish re-attaching Luna',
+                            backup=ctx['backup'], before=ctx.get('before'), applier=applier)
+        print('lumen     : Steam is running; re-attach is queued for when it closes', file=sys.stderr)
+        return EXIT_OK
+    check = patcher('check')
+    if check.returncode != 0:
+        raise _UpdateFailed('Lumen upstream changed; Luna cannot patch the new version yet (%s)'
+                            % (check.stderr.strip() or check.stdout.strip() or 'no detail'), EXIT_PATCH)
+    # no_steam_machine: the base installer never touches Luna's SteamOS shortcuts (H6).
+    code = cmd_install(argparse.Namespace(only=[], force=True, dry_run=False, keep_steam_client=True,
+                                          no_steam_machine=True, migrate_steam_machine=False))
+    after = patcher('check')
+    if code != 0 or 'bridge installed' not in after.stdout:
+        raise _UpdateFailed('Lumen was updated but Luna could not re-attach (install exit %d)' % code,
+                            code or EXIT_PATCH)
+    warnings = []
+    if active_host() == 'lumen' and wrapper_patched():
+        unpatch_wrapper()
+        print('base      : wrapper unpatched for the lumen host')
+    restored, changed = check_user_config_after_update(backup)
+    for path in restored:
+        print('config    : restored (verbatim from the backup): %s' % path)
+    for path in changed:
+        print('config    : changed by the installer, left as is: %s' % path)
+    if changed:
+        warnings.append('SLSsteam settings differ from before; compare %s with %s'
+                        % (backup / 'slsteam-config', home() / '.config/SLSsteam'))
+        print('WARNING: %s' % warnings[-1], file=sys.stderr)
+    if 'lumen self-update blocked' not in after.stdout:
+        warnings.append("Lumen's own updater is NOT blocked after this update")
+        print('WARNING: %s' % warnings[-1], file=sys.stderr)
+    _restart_lumen(ctx, restart_lumen)
+    prune_lumen_backups()
+    before = ctx.get('before') or {}
+    record_lumen_result('applied', 'Lumen updated and Luna re-attached', backup=ctx['backup'],
+                        before=before, after=read_lumen_versions(), warnings=warnings,
+                        configRestored=restored, configChanged=changed,
+                        preserved=ctx.get('preserved') or [], **_changed_fields(ctx))
+    with contextlib.suppress(OSError):  # supersede any stale queued job and its text
+        lumen_pending_path().unlink()
+    _notify('Lumen update finished', 'Lumen %s -> %s; Luna re-attached. Restart Steam to load it.'
+            % (before.get('lumen') or '?', read_lumen_versions().get('lumen') or '?'))
+    print('lumen     : updated and Luna re-attached; restart Steam to load it')
+    return EXIT_OK
+
+
+def lumen_installer_choice(installer_latest):
+    """(ref, sha256, label, error): the pinned verified installer unless `main` was asked for."""
+    try:
+        if installer_latest:
+            digest = verify_base_installer('main', None)
+            return 'main', digest, 'upstream main (sha256 %s, NOT pinned)' % digest, ''
+        verify_base_installer(UPSTREAM_INSTALLER_COMMIT, UPSTREAM_INSTALLER_SHA256)
+    except (OSError, ValueError) as error:
+        return '', '', '', 'could not verify the base installer: %s' % error
+    return (UPSTREAM_INSTALLER_COMMIT, UPSTREAM_INSTALLER_SHA256,
+            'pinned %s (sha256 %s, verified)' % (UPSTREAM_INSTALLER_COMMIT[:12], UPSTREAM_INSTALLER_SHA256[:12]), '')
+
+
+def _refuse_update(message):
+    record_lumen_result('failed', message)
+    _notify('Lumen update refused', message)
+    print('REFUSING base update: %s' % message, file=sys.stderr)
+    print('Nothing was changed.', file=sys.stderr)
+    return EXIT_REFUSED
+
+
+def apply_base_update(restart_lumen=True, installer_latest=False, reinstall=False):
+    """Preflight, backup, installer, re-attach. Steam must be closed.
+
+    Every failure after the installer started ends in a known state: the
+    pre-update backup is put back automatically, the Steam lock is re-applied
+    in a `finally`, and the result file says failed + rolledBack. Never ends
+    with Lumen replaced and Luna detached unless a queued job says so.
+    """
+    early = lumen_tooling_problems() + runtime_problems(full=True)  # local and cheap: refuse before any network call
+    if early:
+        return _refuse_update('tooling incomplete: %s' % '; '.join(early))
+    if not reinstall:
+        verdict = lumen_upstream_state()
+        compared = [{'component': row['component'], 'channel': row['channel'], 'status': row['status'],
+                     'installed': row['installed'], 'available': row['available'], 'note': row['note']}
+                    for row in verdict['components']]
+        lines = [describe_upstream_row(row) for row in verdict['components']]
+        if verdict['overall'] == 'current':
+            message = 'already current on your channels; nothing was changed'
+            record_lumen_result('current', message, compared=compared, changed={}, changedText='none')
+            with contextlib.suppress(OSError):
+                lumen_pending_path().unlink()
+            print('lumen     : %s' % message)
+            print('\n'.join('lumen     : ' + line for line in lines))
+            return EXIT_OK
+        if verdict['overall'] == 'unknown':
+            why = '; '.join('%s: %s' % (row['component'], row['note'] or 'unknown')
+                            for row in verdict['components'] if row['status'] == 'unknown')
+            message = 'could not tell whether upstream has anything newer (%s); nothing was changed. ' \
+                      'Try again later, or force it with --reinstall' % why
+            record_lumen_result('unknown', message, compared=compared, changed={}, changedText='none')
+            print('lumen     : %s' % message, file=sys.stderr)
+            return 1
+    if steam_running():
+        message = 'Steam is running. Close it completely (Steam -> Exit) before changing Lumen.'
+        record_lumen_result('failed', message)
+        print('REFUSING base update: %s' % message, file=sys.stderr)
+        return EXIT_REFUSED
+    problems = lumen_preflight()
+    if problems:
+        return _refuse_update('tooling incomplete: %s' % '; '.join(problems))
+    ref, sha, label, error = lumen_installer_choice(installer_latest)
+    if error:
+        return _refuse_update(error)
+    millennium = lumen_millennium_choice()
+    if millennium_present() and not millennium:
+        return _refuse_update(
+            'Millennium is installed and the base installer removes it by default; no choice is recorded. '
+            'Re-run with --keep-millennium or --remove-millennium')
+    channels = lumen_channels()
+    extra = lumen_installer_extra(channels, millennium)
+    channels_file = lumen_root() / 'update-channels.json'
+    try:
+        channels_bytes = channels_file.read_bytes()
+    except OSError:
+        channels_bytes = None
+    ctx = {'before': read_lumen_versions(), 'beforeFp': read_lumen_fingerprints(), 'startedAt': int(time.time()), 'installer': label,
+           'lumenWasActive': systemctl_user('is-active', LUMEN_UNIT).stdout.strip() == 'active',
+           'installerStarted': False, 'preserved': []}
+    _journal(ctx, 'backup')
+    _notify('Lumen update started', 'Backing up, then updating Lumen. Do not shut down or log out.')
+    if ctx['lumenWasActive']:
+        systemctl_user('stop', LUMEN_UNIT)
+    refuse_reasons(for_install=True, stop_sidecar=True)
+    try:
+        backup = backup_lumen_tree()
+    except OSError as error_:
+        _restart_lumen(ctx)
+        record_lumen_result('failed', 'could not back up Lumen first: %s' % error_)
+        print('REFUSING base update: could not back up Lumen first: %s' % error_, file=sys.stderr)
+        return 1
+    ctx['backup'] = backup.name
+    print('base      : backed up Lumen, luatools, SLSsteam, its settings and steam.cfg to %s (verified)' % backup)
+    try:
+        _journal(ctx, 'installer')
+        if steam_running():  # H2: nothing has changed yet, so abort cleanly
+            shutil.rmtree(backup, ignore_errors=True)
+            _restart_lumen(ctx)
+            record_lumen_result('queued', 'Steam was started before the installer began; nothing was changed. '
+                                          'It runs again when Steam is closed')
+            print('REFUSING base update: Steam started; nothing was changed.', file=sys.stderr)
+            return EXIT_REFUSED
+        if read_steam_pin():
+            ensure_steam_cfg_block()
+        ctx['installerStarted'] = True
+        code = run_base_installer(ref, sha, extra)
+        if code != 0:
+            raise _UpdateFailed('the base installer exited with %d' % code, code)
+        if channels_bytes is not None:
+            try:
+                if channels_file.read_bytes() != channels_bytes:
+                    channels_file.write_bytes(channels_bytes)
+                    ctx['preserved'].append('update-channels.json')
+                    print('base      : restored update-channels.json (the installer rewrote it)')
+            except OSError:
+                channels_file.write_bytes(channels_bytes)
+                ctx['preserved'].append('update-channels.json')
+        return _complete_update(ctx, restart_lumen)
+    except _UpdateFailed as failure:
+        return _fail(ctx, str(failure), failure.code)
+    except InstallerTimeout as failure:
+        return _fail(ctx, str(failure), 1)
+    except BaseException as failure:  # SystemExit from SIGTERM included: roll back, then propagate
+        code = _fail(ctx, 'base update %s: %s' % ('interrupted' if not isinstance(failure, Exception)
+                                                  else 'failed', failure or type(failure).__name__), 1)
+        if not isinstance(failure, Exception):
+            raise
+        return code
+    finally:
+        if ctx.get('installerStarted'):
+            _heal_quietly()
+
+
+def lumen_running_record():
+    record = read_json_file(lumen_result_path())
+    return record if isinstance(record, dict) and record.get('state') == 'running' else {}
+
+
+def recover_interrupted_lumen():
+    """Recover a `running` record whose writer died. Returns (action, message) or None.
+
+    action: 'busy' (a live luna still owns it, left alone), 'recovered' or 'failed'.
+    """
+    record = lumen_running_record()
+    if not record:
+        return None
+    pid = int(record.get('pid') or 0)
+    if pid == os.getpid():
+        return None
+    if pid_is_live_luna(pid, record.get('pidStart') or 0):
+        return 'busy', 'another luna process (pid %d) is still updating Lumen' % pid
+    ctx = {key: record.get(key) for key in ('backup', 'before', 'beforeFp', 'lumenWasActive', 'startedAt', 'installer')}
+    ctx['installerStarted'] = bool(ctx.get('backup'))
+    phase = record.get('phase') or ''
+    print('lumen     : recovering an interrupted update (phase %s, pid %s is gone)' % (phase or '?', pid))
+    if not ctx['backup'] or phase == 'backup':
+        for stray in (lumen_backup_root().iterdir() if lumen_backup_root().is_dir() else []):
+            if stray.name.startswith('.migrating-') or not (stray / 'backup.json').is_file() and stray.is_dir():
+                shutil.rmtree(stray, ignore_errors=True)
+        _restart_lumen(ctx)
+        record_lumen_result('failed', 'the update was interrupted before the installer started; nothing was changed')
+        return 'recovered', 'interrupted before the installer; nothing was changed'
+    if phase == 'reattach':
+        try:
+            code = _complete_update(ctx)
+            return ('recovered' if code == 0 else 'failed'), 'finished the interrupted re-attach'
+        except _UpdateFailed as failure:
+            return 'failed', 'exit %d' % _fail(ctx, str(failure), failure.code)
+        finally:
+            _heal_quietly()
+    rolled, message = _rollback(ctx, 'the update was interrupted during phase %s' % (phase or '?'))
+    if rolled:
+        _restart_lumen(ctx)
+    record_lumen_result('failed', 'the update was interrupted; %s' % (
+        'rolled back to the pre-update Lumen' if rolled else message),
+        backup=ctx['backup'], before=ctx.get('before'), rolledBack=rolled,
+        rollbackPending=bool(read_lumen_pending().get('action') == 'rollback'))
+    return ('recovered' if rolled else 'failed'), message
+
+
+def lumen_status(check=False):
+    """Everything the CLI and the Updates page show about the Lumen base."""
+    host = active_host()
+    tooling = lumen_tooling_problems()
+    state = {'host': host, 'baseState': base_state(), 'versions': read_lumen_versions(),
+             'pending': bool(read_lumen_pending()), 'result': read_json_file(lumen_result_path()) or {},
+             'backups': lumen_backup_info(),
+             'installerPinned': UPSTREAM_INSTALLER_COMMIT[:12], 'steamRunning': bool(
+                 steam_running()),
+             'tooling': {'ok': not tooling, 'problems': tooling},
+             'toolingIncomplete': ('tooling incomplete: ' + '; '.join(tooling)) if tooling else '',
+             'applyService': APPLY_UNIT if systemd_available() else 'timer-only'}
+    result = patcher('check') if not tooling and boot_file().is_file() else None
+    out = result.stdout if result is not None else ''
+    state['bridge'] = ('tooling incomplete' if tooling else
+                       'installed' if 'bridge installed' in out else
+                       'not installed' if out else 'unknown')
+    state['selfUpdateBlocked'] = (not tooling) and 'lumen self-update blocked' in out
+    state['patchable'] = bool(result is not None and result.returncode == 0)
+    state['channels'] = lumen_channels_effective()
+    state['channelsFile'] = str(lumen_channels_path())
+    state['millennium'] = {'choice': lumen_millennium_choice(), 'present': [str(p) for p in millennium_present()]}
+    state['installer'] = {'mode': 'pinned', 'commit': UPSTREAM_INSTALLER_COMMIT,
+                          'sha256': UPSTREAM_INSTALLER_SHA256}
+    pending = read_lumen_pending()
+    state['job'] = {'action': pending.get('action'), 'attempts': int(pending.get('attempts') or 0),
+                    'lastError': pending.get('lastError') or ''} if pending else None
+    record = lumen_running_record()
+    state['interrupted'] = bool(record and not pid_is_live_luna(record.get('pid'), record.get('pidStart') or 0))
+    if check:
+        state['upstream'] = lumen_upstream_state()
+        try:
+            with tempfile.TemporaryDirectory(prefix='luna-base-') as work:
+                digest = fetch_base_installer('main', None, Path(work) / 'install.sh')
+            state['installerMainSha'] = digest[:12]
+            state['upstreamMoved'] = digest != UPSTREAM_INSTALLER_SHA256
+        except (OSError, ValueError) as error:
+            state['upstreamError'] = str(error)
+    return state
+
+
+def cmd_lumen_channels(options):
+    """`luna lumen channels [set <stable|beta> [--only NAME]]`."""
+    action = (getattr(options, 'channels_action', '') or '').strip().lower()
+    names = [name for name in (getattr(options, 'only', None) or [])]
+    if action in ('', 'show', 'status'):
+        channels = lumen_channels_effective()
+        for key, _flag in LUMEN_CHANNEL_FLAGS:
+            print('%-12s %s' % (key, channels[key]))
+        print('file      : %s%s' % (lumen_channels_path(),
+                                   '' if lumen_channels_path().is_file() else ' (not written; stable applies)'))
+        print('change    : luna lumen channels set <stable|beta> [--only NAME]')
+        return EXIT_OK
+    if action != 'set':
+        print('unknown channels action: %s (choose from show, set)' % action, file=sys.stderr)
+        return 2
+    value = (getattr(options, 'channels_value', '') or '').strip().lower()
+    if value not in LUMEN_CHANNEL_VALUES:
+        print('REFUSING: channel must be stable or beta, not %r. Nothing was changed.' % (value or ''), file=sys.stderr)
+        return EXIT_REFUSED
+    if getattr(options, 'dry_run', False):
+        print('channels  : would set %s for %s' % (value, ', '.join(names or [key for key, _flag in LUMEN_CHANNEL_FLAGS])))
+        print('file      : %s' % lumen_channels_path())
+        print('\nDRY RUN: nothing was written.')
+        return EXIT_OK
+    try:
+        channels = set_lumen_channels(value, names)
+    except ValueError as error:
+        print('REFUSING: %s. Nothing was changed.' % error, file=sys.stderr)
+        return EXIT_REFUSED
+    except OSError as error:
+        print('REFUSING: could not write %s (%s). Nothing was changed.'
+              % (lumen_channels_path(), error), file=sys.stderr)
+        return 1
+    changed = names or [key for key, _flag in LUMEN_CHANNEL_FLAGS]
+    message = 'channels set to %s for %s' % (value, ', '.join(changed))
+    record_lumen_channels(message, channels=channels, changed={name: value for name in changed})
+    for key, _flag in LUMEN_CHANNEL_FLAGS:
+        print('%-12s %s' % (key, channels[key]))
+    print('channels  : %s' % message)
+    print('file      : %s (written atomically)' % lumen_channels_path())
+    if value == 'beta':
+        print('note      : a component with no beta build published upstream stays on stable; '
+              '`luna lumen status --check` says so per component')
+    return EXIT_OK
+
+
+def cmd_lumen(options):
+    action = getattr(options, 'lumen_action', 'status')
+    if action == 'channels':
+        return cmd_lumen_channels(options)
+    if action == 'status':
+        state = lumen_status(check=getattr(options, 'check', False))
+        if getattr(options, 'json', False):
+            print(json.dumps(state, sort_keys=True))
+            return EXIT_OK
+        print('host      : %s%s' % (state['host'], '' if state['host'] == 'lumen'
+                                    else ' (Lumen updates only apply while Lumen is the active host)'))
+        print('base      : %s' % state['baseState'])
+        print('versions  : %s' % (', '.join('%s %s' % item for item in sorted(state['versions'].items())) or 'unknown'))
+        print('channels  : %s' % ', '.join('%s=%s' % (key, value)
+                                          for key, value in state['channels'].items()))
+        if state['toolingIncomplete']:
+            print(state['toolingIncomplete'])
+            print('bridge    : unknown (tooling incomplete)')
+            print('self-update block: unknown (tooling incomplete)')
+        else:
+            print('bridge    : %s' % state['bridge'])
+            print('self-update block: %s' % ('in place' if state['selfUpdateBlocked'] else 'NOT in place'))
+        print('apply     : %s' % ('prompt (luna-apply.service waits for Steam to exit)'
+                                  if state['applyService'] == APPLY_UNIT
+                                  else 'timer-only (systemd user manager unavailable)'))
+        if 'upstream' in state:
+            print('upstream  : %s' % state['upstream']['overall'])
+            for row in state['upstream']['components']:
+                print('  ' + describe_upstream_row(row))
+        print('installer : pinned %s (default; main only with --installer-latest --yes)%s' % (state['installerPinned'], '' if 'upstreamMoved' not in state else
+              ('; upstream main has moved (sha %s)' % state['installerMainSha'] if state['upstreamMoved']
+               else '; upstream main is the same')))
+        pending = read_lumen_pending()
+        print('update    : %s' % ('queued, applies when Steam is closed%s' % (
+            ' (starts on its own when Steam exits)' if (state['applyService'] == APPLY_UNIT)
+            else ' (30-minute timer; systemd unavailable)') if pending
+            else (state['result'].get('state', 'none') + (': ' + state['result']['message']
+                  if state['result'].get('message') else ''))))
+        print('backups   : %s' % ('; '.join('%s (%s, %s%s)' % (
+            item['name'], time.strftime('%Y-%m-%d %H:%M', time.localtime(item['at'])), _human(item['bytes']),
+            ', failed update' if item['failed'] else '') for item in state['backups']) or 'none'))
+        return EXIT_OK
+    if action == 'cancel':
+        if not read_lumen_pending():
+            print('lumen     : nothing is queued')
+            return EXIT_OK
+        stop_apply_service()
+        with contextlib.suppress(OSError):
+            lumen_pending_path().unlink()
+        record_lumen_result('cancelled', 'the queued Lumen update was cancelled')
+        print('lumen     : queued update cancelled')
+        return EXIT_OK
+    if action in ('restore', 'update') and not getattr(options, 'dry_run', False):
+        for name in migrate_lumen_backups():
+            print('lumen     : moved backup %s to %s' % (name, lumen_backup_root()))
+        recovery = recover_interrupted_lumen()
+        if recovery and recovery[0] == 'busy':
+            print('REFUSING: %s' % recovery[1], file=sys.stderr)
+            return EXIT_BUSY
+        if recovery:
+            print('lumen     : %s; check `luna lumen status`, then run the command again' % recovery[1])
+            return EXIT_OK if recovery[0] == 'recovered' else 1
+    if action == 'restore':
+        name = getattr(options, 'backup', '') or ''
+        chosen = next((b for b in lumen_backup_info() if not name or b['name'] == name), None)
+        if chosen is None:
+            print('lumen     : no Lumen backup found in %s' % lumen_backup_root(), file=sys.stderr)
+            return 1
+        with_settings = getattr(options, 'with_settings', False)
+        overwrites = [item for item in chosen['items'] if with_settings or item != 'slsteam-config']
+        print('lumen     : restore backup %s (%s, %s) -> overwrites: %s%s' % (
+            chosen['name'], time.strftime('%Y-%m-%d %H:%M', time.localtime(chosen['at'])), _human(chosen['bytes']),
+            ', '.join(overwrites), '' if with_settings else '; ~/.config/SLSsteam is left alone (--with-settings)'))
+        if not getattr(options, 'yes', False):
+            answer = ''
+            if sys.stdin.isatty():
+                answer = input('Type the backup name %s to restore it: ' % chosen['name']).strip()
+            if answer != chosen['name']:
+                print('REFUSING: restoring replaces the current Lumen; re-run with --yes (or confirm '
+                      'interactively). Nothing was changed.', file=sys.stderr)
+                return EXIT_REFUSED
+        ok, message = restore_lumen_backup(chosen['name'], skip=() if with_settings else ('slsteam-config',))
+        print('lumen     : %s' % message, file=sys.stdout if ok else sys.stderr)
+        return EXIT_OK if ok else 1
+    if action != 'update':
+        print('unknown lumen action: %s' % action, file=sys.stderr)
+        return 2
+    dry = getattr(options, 'dry_run', False)
+    latest = getattr(options, 'installer_latest', False)
+    if getattr(options, 'terminal', False) and not dry:
+        # The child (same command without --terminal) is the one that takes the
+        # writer lock, so this parent only plans, confirms and closes Steam.
+        return cmd_lumen_update_terminal(options)
+    if latest and (getattr(options, 'queue', False) or not (getattr(options, 'yes', False) or dry)):
+        print('REFUSING: --installer-latest runs the unpinned upstream main; it needs --yes, '
+              'a terminal run and cannot be queued.', file=sys.stderr)
+        return EXIT_REFUSED
+    if getattr(options, 'keep_millennium', False) and getattr(options, 'remove_millennium', False):
+        print('REFUSING: choose one of --keep-millennium and --remove-millennium', file=sys.stderr)
+        return EXIT_REFUSED
+    if not dry:
+        for flag, choice in (('keep_millennium', 'keep'), ('remove_millennium', 'remove')):
+            if getattr(options, flag, False):
+                set_lumen_millennium_choice(choice)
+    blockers = lumen_update_blockers()
+    steam_only = bool(blockers) and all('Steam is running' in reason for reason in blockers)
+    if dry:
+        print('\n'.join(lumen_plan_lines()))
+        if getattr(options, 'installer_latest', False):
+            print('lumen: would run the upstream MAIN installer (NOT pinned; its sha256 is shown first), '
+                  'then re-attach Luna: bridge, self-update block, Steam lock')
+        else:
+            print('lumen: would run the PINNED installer %s (sha256 %s, verified before anything changes), '
+                  'then re-attach Luna: bridge, self-update block, Steam lock'
+                  % (UPSTREAM_INSTALLER_COMMIT[:12], UPSTREAM_INSTALLER_SHA256[:12]))
+        print('lumen: the installer fetches the newest component releases on your channels: %s'
+              % ', '.join('%s=%s' % item for item in lumen_channels_effective().items()))
+        print('lumen: update-channels.json is passed on and restored if the installer rewrites it')
+        print('lumen: %s; the base installer runs with --nolaunch' % steam_plan_line())
+        print('lumen: afterwards: settings the installer removed come back verbatim, changed ones are listed, '
+              'the wrapper is unpatched for the lumen host')
+        print('lumen: on any failure after the installer starts the backup is put back automatically '
+              '(result: failed, rolledBack); the Steam lock is re-applied either way')
+        for reason in blockers:
+            print('lumen: would refuse now: %s' % reason)
+        print('\nDRY RUN: nothing was written.')
+        return EXIT_OK
+    if getattr(options, 'queue', False) and (not blockers or steam_only):
+        problems = lumen_tooling_problems()
+        if problems:
+            message = 'tooling incomplete: %s' % '; '.join(problems)
+            record_lumen_result('failed', message)
+            print('REFUSING to queue the Lumen update: %s' % message, file=sys.stderr)
+            return EXIT_REFUSED
+        write_json_file(lumen_pending_path(), {'action': 'update', 'at': int(time.time())})
+        applier = start_apply_service()
+        message = ('will update when Steam is closed; it starts on its own once Steam exits'
+                   if applier == 'service' else
+                   'will update when Steam is closed (next 30-minute timer check; systemd unavailable)')
+        record_lumen_result('queued', message, applier=applier)
+        print('lumen     : update queued; %s' % message)
+        return EXIT_OK
+    if blockers:
+        print('REFUSING Lumen update:', file=sys.stderr)
+        for reason in blockers:
+            print('  - %s' % reason, file=sys.stderr)
+        if steam_only:
+            print('Close Steam, or queue it with: luna lumen update --queue', file=sys.stderr)
+        return EXIT_REFUSED
+    if not getattr(options, 'yes', False):
+        print('REFUSING: this moves the Moon/Lumen base to the upstream main installer. '
+              'Re-run with --yes (see --dry-run for the plan).', file=sys.stderr)
+        return EXIT_REFUSED
+    return apply_base_update(installer_latest=latest, reinstall=getattr(options, 'reinstall', False))
+
+
+def run_lumen_recovery_job(job):
+    """A queued re-attach or rollback left by a run that could not finish with Steam open."""
+    ctx = dict(job.get('ctx') or {})
+    ctx['installerStarted'] = True
+    if not ctx.get('backup'):
+        return 1
+    if job.get('action') == 'rollback':
+        rolled, message = _rollback(ctx, job.get('reason') or 'queued rollback')
+        if rolled:
+            _restart_lumen(ctx)
+        record_lumen_result('failed', 'queued rollback: %s' % ('rolled back to the pre-update Lumen' if rolled else message),
+                            backup=ctx['backup'], rolledBack=rolled, reason=job.get('reason') or '')
+        return 0 if rolled else 1
+    try:
+        return _complete_update(ctx)
+    except _UpdateFailed as failure:
+        return _fail(ctx, str(failure), failure.code)
+    finally:
+        _heal_quietly()
+
+
+_LUNA_REPLACED = False  # set once this run installed a new Luna release
+
+
+def run_update_in_new_luna():
+    """The Luna release installed earlier in this run replaced luna.py and the runtime tree;
+    this process still runs the OLD code. Run the Lumen step with the NEW installed copy."""
+    command = [sys.executable, str(luna_tools_dir() / 'luna.py'), 'lumen', 'update', '--yes']
+    return subprocess.run(command, env=dict(os.environ, **{LOCK_HELD_ENV: '1'})).returncode
+
+
+def apply_queued_lumen(record_extra):
+    """Timer side of the queued update. Returns True when it ran (any outcome)."""
+    pending = read_lumen_pending()
+    if not pending:
+        return False
+    blockers = lumen_update_blockers()
+    if pending.get('action') in ('reattach', 'rollback'):
+        blockers = ['Steam is running. Close it completely (Steam -> Exit) before changing Lumen.'] \
+            if steam_running() else []
+    if blockers:
+        record_extra['lumenPending'] = True
+        record_extra['lumenReason'] = blockers[0]
+        record_lumen_result('queued', 'will update when Steam is closed (waiting: %s)' % blockers[0])
+        return False
+    action = pending.get('action')
+    try:
+        if action in ('reattach', 'rollback'):
+            code = run_lumen_recovery_job(pending)
+        else:
+            if _LUNA_REPLACED:
+                code = run_update_in_new_luna()
+            else:
+                code = apply_base_update(installer_latest=False)  # a queued job never runs upstream main
+    except Exception as error:  # noqa: BLE001 - bounded retries, then the job is dropped and reported
+        attempts = int(pending.get('attempts') or 0) + 1
+        message = '%s: %s' % (type(error).__name__, error)
+        if attempts >= LUMEN_JOB_ATTEMPTS:
+            with contextlib.suppress(OSError):
+                lumen_pending_path().unlink()
+            record_lumen_result('failed', 'the queued Lumen update raised an error %d times and was dropped '
+                                          '(last: %s); nothing is queued any more' % (attempts, message),
+                                attempts=attempts, lastError=message, dropped=True)
+            record_extra['lumen'] = 'dropped'
+            return True
+        pending['attempts'] = attempts
+        pending['lastError'] = message
+        write_json_file(lumen_pending_path(), pending)
+        record_lumen_result('failed', 'the queued Lumen update raised an error (attempt %d of %d, will retry): %s'
+                            % (attempts, LUMEN_JOB_ATTEMPTS, message), attempts=attempts, lastError=message)
+        record_extra['lumen'] = 'failed'
+        return True
+    with contextlib.suppress(OSError):
+        if read_lumen_pending() == pending and (read_json_file(lumen_result_path()) or {}).get('state') != 'queued':
+            lumen_pending_path().unlink()
+    record_extra['lumen'] = 'applied' if code == 0 else 'failed'
+    record_extra['lumenExit'] = code
+    return True
+
+
+# --------------------------------------------------------------------------- luna clean
+
+CLEAN_DAY = 86400
+
+
+def _age_text(seconds):
+    days = seconds / CLEAN_DAY
+    return '%.1f days' % days if days >= 1 else '%.1f hours' % (seconds / 3600)
+
+
+def _newest_mtime(path):
+    newest = 0.0
+    with contextlib.suppress(OSError):
+        newest = path.lstat().st_mtime
+        if path.is_dir() and not path.is_symlink():
+            for current, dirs, files in os.walk(path):
+                for name in dirs + files:
+                    with contextlib.suppress(OSError):
+                        newest = max(newest, (Path(current) / name).lstat().st_mtime)
+    return newest
+
+
+def clean_candidates(now=None):
+    """[(path, bytes, age_seconds, removable, reason)] for Luna's own housekeeping.
+
+    Only paths inside Luna's tools and state dirs are ever listed; the writer lock
+    decides about interrupted-stage leftovers. Kept items say why they are kept.
+    """
+    now = time.time() if now is None else now
+    tools, state = luna_tools_dir(), luna_state_dir()
+    lock_busy = _update_lock_held_by_other()
+    rows = []
+
+    def add(path, removable, reason):
+        size = _tree_size(path) if (path.exists() or path.is_symlink()) else 0
+        rows.append((path, size, max(0.0, now - _newest_mtime(path)), removable, reason))
+
+    if tools.is_dir():
+        for path in sorted(tools.glob('steam-client-stage-*')):
+            if lock_busy:
+                add(path, False, 'kept: a luna command holds the writer lock, it may be using this stage dir')
+            elif now - _newest_mtime(path) < CLEAN_DAY:
+                add(path, False, 'kept: modified in the last day')
+            else:
+                add(path, True, 'safe: leftover of an interrupted Steam client install; no luna holds the lock')
+        receipt = read_json_file(tools / 'steam-client-installed.json') or {}
+        installed_at = int(receipt.get('at') or 0)
+        backups = tools / 'steam-client-backups'
+        entries = sorted((e for e in backups.iterdir() if e.is_dir() and e.name.isdigit()),
+                         key=lambda e: int(e.name)) if backups.is_dir() else []
+        for index, path in enumerate(entries):
+            made = int(path.name) / 1e9
+            if index == len(entries) - 1:
+                add(path, False, 'kept: the newest client rollback copy')
+            elif made >= installed_at:
+                add(path, False, 'kept: made after the currently installed client')
+            else:
+                add(path, True, 'safe: an older rollback copy, from before the installed client; the newest is kept')
+        if (tools / 'steam-client-cache').exists():
+            add(tools / 'steam-client-cache', False, 'kept: `luna steam recover` and `lock` restore from this cache')
+        for pattern in ('luna.py.bak-*', 'steam-machine.py.bak-*'):
+            for path in sorted(tools.glob(pattern)):
+                old = now - _newest_mtime(path) >= 14 * CLEAN_DAY
+                add(path, old, 'safe: a hand-made copy of tooling older than 14 days' if old
+                    else 'kept: younger than 14 days')
+        for name in ('undo', 'archive'):
+            if (tools / name).is_dir():
+                for path in sorted((tools / name).iterdir()):
+                    old = now - _newest_mtime(path) >= 30 * CLEAN_DAY
+                    add(path, old, 'safe: %s entry older than 30 days' % name if old
+                        else 'kept: %s entries are kept for 30 days' % name)
+        for name in ('__pycache__', 'runtime.new', 'runtime.old'):
+            path = tools / name
+            if path.exists():
+                if name == '__pycache__':
+                    add(path, True, 'safe: bytecode cache, rebuilt on demand')
+                elif lock_busy:
+                    add(path, False, 'kept: a luna command holds the writer lock')
+                else:
+                    add(path, True, 'safe: leftover of an interrupted runtime deploy')
+    good = [path for path in lumen_backups()]
+    for index, path in enumerate(good):
+        meta = read_json_file(path / 'backup.json') or {}
+        if index < LUMEN_KEEP_BACKUPS:
+            add(path, False, 'kept: one of the newest %d Lumen backups' % LUMEN_KEEP_BACKUPS)
+        elif meta.get('failed') or lumen_running_record().get('backup') == path.name:
+            add(path, False, 'kept: a failed update\'s backup (or the running update\'s)')
+        else:
+            add(path, True, 'safe: older than the newest %d Lumen backups and not from a failed update' % LUMEN_KEEP_BACKUPS)
+    if state.is_dir():
+        for path in sorted(state.glob('lumen-backups/.migrating-*')):
+            add(path, not lock_busy, 'safe: leftover of an interrupted backup migration' if not lock_busy
+                else 'kept: a luna command holds the writer lock')
+    stray_dir = home() / '.config/systemd/user'
+    if stray_dir.is_dir():
+        for path in sorted(stray_dir.glob('.*.tmp.*')):
+            add(path, False, 'kept: outside Luna\'s own dirs; remove it by hand if you recognise it')
+    return rows
+
+
+def _inside_luna_dirs(path):
+    resolved = path.parent.resolve() / path.name
+    for root in (luna_tools_dir(), luna_state_dir()):
+        try:
+            resolved.relative_to(root.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def cmd_clean(options):
+    """List what Luna can tidy up; delete only with --yes."""
+    rows = clean_candidates()
+    yes = getattr(options, 'yes', False) and not getattr(options, 'dry_run', False)
+    removable = [row for row in rows if row[3] and _inside_luna_dirs(row[0])]
+    for path, size, age, can, reason in rows:
+        print('%-8s %9s %10s  %s\n          %s' % ('REMOVE' if can and _inside_luna_dirs(path) else 'keep',
+                                                   _human(size), _age_text(age), path, reason))
+    print('\ntotal removable %s in %d item(s); kept %s in %d item(s)' % (
+        _human(sum(row[1] for row in removable)), len(removable),
+        _human(sum(row[1] for row in rows if row not in removable)), len(rows) - len(removable)))
+    if not yes:
+        print('DRY RUN: nothing was deleted. Re-run with --yes to delete the REMOVE items.')
+        return EXIT_OK
+    for path, size, _age, _can, _reason in removable:
+        try:
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            else:
+                shutil.rmtree(path)
+            print('removed %s (%s)' % (path, _human(size)))
+        except OSError as error:
+            print('could not remove %s: %s' % (path, error), file=sys.stderr)
+    return EXIT_OK
+
+
+cmd_clean_guard = lambda options: (run_locked(cmd_clean, options) if getattr(options, 'yes', False)  # noqa: E731
+                                   and not getattr(options, 'dry_run', False) else cmd_clean(options))
 
 
 def cmd_doctor(options):
@@ -4037,6 +7042,9 @@ def cmd_doctor(options):
     print(libcrypto_status()[1])
     if flatpak_steam_only():
         print(FLATPAK_WARNING)
+    print('\n== bridge ==')
+    for line in bridge_status()[1]:
+        print(line)
     print('\n== launch options ==')
     findings = scan_launch_options()
     if not findings:
@@ -4046,6 +7054,22 @@ def cmd_doctor(options):
                                                    ', '.join(item['missing'])))
     print('\n== pacman ==')
     print(ignore_pkg_hint() or 'ok: nothing to do')
+    print('\n== payloads (local only, no network) ==')
+    problems = _manifest_problems(load_manifest(), ROOT)
+    if problems:
+        print('WARN: %d file(s) do not match vendor/MANIFEST.json:' % len(problems))
+        for problem in problems[:10]:
+            print('  - %s' % problem)
+        code = EXIT_CORRUPT
+    else:
+        print('ok: every payload matches vendor/MANIFEST.json')
+    marker = read_json_file(install_marker_path()) or {}
+    if marker:
+        print('WARN: the last install was interrupted (pid %s, started %s); run: luna install --force'
+              % (marker.get('pid') or '?',
+                 time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(marker.get('at') or 0)))
+                 if marker.get('at') else 'unknown time'))
+        code = EXIT_CORRUPT
     return code
 
 
@@ -4085,6 +7109,7 @@ def cmd_install(options):
             else:
                 print('steam     : would roll back to the ubuntu12 client, pin, cache and hard-lock it '
                       '(Steam.cfg + steam.cfg, package/ read-only); skipped when already locked')
+        install_luna_host(dry_run=True)
         print('\nDRY RUN: %d file(s) would change%s.' % (len(to_write),
               ' + bridge reinstall' if needs_bridge else ', nothing was written'))
         return EXIT_OK
@@ -4116,24 +7141,37 @@ def cmd_install(options):
             print('steam     : %s' % message, file=sys.stdout if code == 0 else sys.stderr)
             if code != 0:
                 return 1
+    # Shortcuts run before any add-on byte changes: a helper failure must not
+    # report a successful install of the payloads as a failure (or the other way
+    # round), and the run stays repeatable.
+    if not getattr(options, 'no_steam_machine', False):
+        code = steam_machine_action('install', migrate=getattr(options, 'migrate_steam_machine', False))
+        if code:
+            print('FAILED: SteamOS Mode shortcuts could not be updated; '
+                  'no add-on files were changed by this run.', file=sys.stderr)
+            return code
     if not to_write and not needs_bridge:
-        if not getattr(options, 'no_steam_machine', False):
-            code = steam_machine_action('install', migrate=getattr(options, 'migrate_steam_machine', False))
-            if code:
-                return code
         write_install_snapshot()
         write_tooling()
-        arm_lumen_hook()
+        write_apply_unit()
+        retire_lumen_hook()
+        install_luna_host()
         if read_steam_pin():
             ensure_steam_cfg_block()
         print('\nAlready installed and identical to the pinned payloads. Nothing to do.')
+        clear_install_marker()
         hint = ignore_pkg_hint()
         if hint:
             print(hint)
         return EXIT_OK
     only_bridge = needs_bridge and not to_write
 
+    undo_root = archive_previous(differing, 'undo')
+    if undo_root:
+        print('undo      : previous copies of %d differing file(s) saved to %s'
+              % (len(differing), undo_root))
     apply = Apply()
+    write_install_marker(targets, force=bool(getattr(options, 'force', False)))
     try:
         apply.mkdir(addons_dir())
         for addon, label, source, dest, state in rows:
@@ -4143,23 +7181,29 @@ def cmd_install(options):
         if result.returncode != 0:
             raise RuntimeError('boot.lua patch failed: %s' % (result.stderr.strip() or result.stdout.strip()))
         apply.did_patch = True
-    except Exception as error:  # noqa: BLE001 - report and undo whatever was done
-        apply.rollback()
+    except BaseException as error:  # noqa: BLE001 - Ctrl-C/SIGTERM must roll back too
+        failures = apply.rollback()
+        if not failures:
+            # The tree is consistent again, so the marker would be a lie.
+            clear_install_marker()
         print('FAILED: %s' % error, file=sys.stderr)
-        print('Every add-on change made by this run was rolled back.', file=sys.stderr)
+        if failures:
+            print('%d change(s) could not be undone; `luna status` now reports an '
+                  'interrupted install.' % failures, file=sys.stderr)
+        else:
+            print('Every add-on change made by this run was rolled back.', file=sys.stderr)
         if not getattr(options, 'keep_steam_client', False):
             print('The separately verified Steam client installation remains in place; '
                   'its rollback backup was retained.', file=sys.stderr)
-        return 1
+        if isinstance(error, Exception):
+            return 1
+        raise
 
     write_install_snapshot()
     write_tooling()
-    arm_lumen_hook()
-    if not getattr(options, 'no_steam_machine', False):
-        code = steam_machine_action('install', migrate=getattr(options, 'migrate_steam_machine', False))
-        if code:
-            print('Add-ons installed, but SteamOS Mode shortcuts need attention; no custom launchers were overwritten.', file=sys.stderr)
-            return code
+    write_apply_unit()
+    retire_lumen_hook()
+    install_luna_host()
     if read_steam_pin():
         # Base installers drop steam.cfg; a pin means updates must stay
         # blocked, so re-apply Luna's block right away (Steam is closed here).
@@ -4174,6 +7218,7 @@ def cmd_install(options):
     if hint:
         print(hint)
     print('\nRestart Steam (Steam -> Exit, then launch it again) to load the add-ons.')
+    clear_install_marker()
     return EXIT_OK
 
 
@@ -4189,11 +7234,8 @@ def cmd_uninstall(options):
         print('Nothing installed for the selected add-ons.')
         return EXIT_OK
     remaining = tuple(name for name in installed_addons() if name not in targets)
-    hook_config = home() / '.local/share/slssteam-luna/config.json'
-    if 'luna' in targets and hook_config.is_file() and (read_json_file(hook_config) or {}).get('enabled'):
-        if lumen_hook('disable'):
-            print('REFUSING uninstall: could not safely disable automatic Lumen recovery.', file=sys.stderr)
-            return EXIT_PATCH
+    if 'luna' in targets:
+        retire_lumen_hook()
     if remaining:
         for name in targets:
             shutil.rmtree(addons_dir() / name, ignore_errors=True)
@@ -4225,7 +7267,8 @@ def cmd_uninstall(options):
         unit_dir, service, timer = unit_paths()
         subprocess.run(['systemctl', '--user', 'disable', '--now', 'luna-autoupdate.timer'],
                        capture_output=True)
-        for path in (timer, service):
+        stop_apply_service()
+        for path in (timer, service, apply_unit_paths()[1]):
             try:
                 if path.exists():
                     path.unlink()
@@ -4243,7 +7286,7 @@ def cmd_uninstall(options):
         pass
     print('Local playtime and presence data were left untouched.')
     launcher = home() / '.local/bin/luna'
-    if launcher.is_file() and not launcher.is_symlink() and launcher.read_bytes() == CLI_LAUNCHER.encode():
+    if launcher.is_file() and not launcher.is_symlink() and ours_cli_launcher(launcher):
         launcher.unlink()
     if steam_machine_action('uninstall'):
         print('Some SteamOS Mode shortcuts could not be removed; custom edits were preserved.', file=sys.stderr)
@@ -4451,14 +7494,6 @@ def vendor_shared(manifest, shared_source, head, show, repo_commit):
     manifest['shared']['scripts/steam-machine.py'] = {
         'source_repo': 'https://github.com/pgm1207/Luna', 'source_commit': repo_commit,
         'source_path': 'scripts/steam-machine.py', 'sha256': sha256(ROOT / 'scripts/steam-machine.py')}
-    hook_rel = 'scripts/lumen-hook.py'
-    committed_hook = subprocess.run(['git', '-C', str(ROOT), 'show', repo_commit + ':' + hook_rel],
-                                    capture_output=True)
-    hook_clean = committed_hook.returncode == 0 and committed_hook.stdout == (ROOT / hook_rel).read_bytes()
-    manifest['shared'][hook_rel] = {
-        'source_repo': 'https://github.com/pgm1207/Luna',
-        'source_commit': repo_commit if hook_clean else 'uncommitted-worktree',
-        'source_path': hook_rel, 'sha256': sha256(ROOT / hook_rel)}
 
 
 def steam_machine_action(action, dry_run=False, migrate=False):
@@ -4482,27 +7517,72 @@ def cmd_launchers(options):
     return steam_machine_action('install', options.dry_run, options.migrate_legacy)
 
 
+def cmd_lumen_guard(options):
+    """Lumen's apply path mutates the base, so it takes the same writer lock."""
+    action = getattr(options, 'lumen_action', 'status')
+    dry = getattr(options, 'dry_run', False)
+    terminal = action == 'update' and getattr(options, 'terminal', False) and not dry
+    mutating = (action in ('update', 'restore', 'cancel')
+                or (action == 'channels' and getattr(options, 'channels_action', '') == 'set')) and not dry
+    if terminal:
+        # Never hold the lock here: the window runs `luna lumen update --yes`,
+        # which takes it itself.
+        return cmd_lumen(options)
+    if mutating:
+        return run_locked(cmd_lumen, options)
+    return cmd_lumen(options)
+
+
+STEAM_LOCKED_ACTIONS = ('lock', 'unlock', 'recover', 'update', 'cache')
+
+
+def cmd_steam_guard(options):
+    """Steam lock/unlock/recover/update/cache take the writer lock, so a queued Lumen or
+    Luna job (whose waiter polls for a closed Steam) cannot start in the middle of them."""
+    if getattr(options, 'steam_action', 'status') in STEAM_LOCKED_ACTIONS:
+        return run_locked(cmd_steam, options)
+    return cmd_steam(options)
+
+
+cmd_refresh_locked = locked(cmd_refresh)
+
+# One lock for every command that writes: timer, menu, shell.
+cmd_install_locked = locked(cmd_install)
+cmd_uninstall_locked = locked(cmd_uninstall)
+cmd_launchers_locked = locked(cmd_launchers)
+cmd_host_locked = locked(cmd_host)
+cmd_backup_locked = locked(cmd_backup)
+cmd_restore_locked = locked(cmd_restore)
+cmd_hook_locked = locked(cmd_hook)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog='luna', description=__doc__,
+                                     epilog=EXIT_EPILOG,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command')
     for name, handler in (('preflight', cmd_preflight), ('status', cmd_status),
-                          ('install', cmd_install), ('uninstall', cmd_uninstall),
+                          ('install', cmd_install_locked), ('uninstall', cmd_uninstall_locked),
                           ('verify', cmd_verify), ('vendor', cmd_vendor),
                           ('release', cmd_release), ('update', cmd_update),
                           ('check', cmd_check), ('autoupdate', cmd_autoupdate),
                           ('reconcile', cmd_reconcile),
-                          ('backup', cmd_backup), ('restore', cmd_restore),
-                          ('steam', cmd_steam),
-                          ('refresh', cmd_refresh),
-                          ('bootstrap', cmd_bootstrap), ('update-all', cmd_update_all),
+                          ('backup', cmd_backup_locked), ('restore', cmd_restore_locked),
+                          ('steam', cmd_steam_guard),
+                          ('refresh', cmd_refresh_locked),
+                          ('bootstrap', cmd_bootstrap),
+                          ('update-all', cmd_update_all),
                           ('doctor', cmd_doctor),
-                          ('launchers', cmd_launchers),
-                           ('timer', cmd_timer), ('hook', cmd_hook)):
+                          ('launchers', cmd_launchers_locked),
+                           ('timer', cmd_timer), ('hook', cmd_hook_locked), ('host', cmd_host_locked),
+                          ('lumen', cmd_lumen_guard), ('clean', cmd_clean_guard)):
         child = sub.add_parser(name, aliases=['up'] if name == 'update-all' else [])
         child.set_defaults(handler=handler)
         child.add_argument('--only', action='append', default=[],
                            help='restrict to one add-on (repeatable): %s' % ', '.join(ADDONS))
+        if name == 'status':
+            child.add_argument('--strict', action='store_true',
+                               help='exit 1 instead of 6 when a payload differs (CI gate)')
         if name == 'install':
             child.add_argument('--force', action='store_true',
                                help='replace installed files that differ from the pinned payloads')
@@ -4548,6 +7628,12 @@ def build_parser():
                                help='also move the Moon/Lumen base to upstream main (needs --yes; '
                                     'default: only re-verify the pinned installer)')
             child.add_argument('--yes', action='store_true', help='confirm --base-latest')
+            child.add_argument('--terminal', action='store_true',
+                               help='close Steam (steam -shutdown), then run the same update in a '
+                                    'terminal window with its output in ~/.local/share/Luna/state/')
+        if name == 'clean':
+            child.add_argument('--dry-run', action='store_true', help='list only (the default)')
+            child.add_argument('--yes', action='store_true', help='delete the REMOVE items')
         if name == 'refresh':
             child.add_argument('--dry-run', action='store_true',
                                help='print the plan without updating or writing')
@@ -4595,12 +7681,51 @@ def build_parser():
             child.add_argument('--force', action='store_true', help='ignore the 6h cache')
         if name == 'autoupdate':
             child.add_argument('--verbose', action='store_true', help='print the decision')
+            child.add_argument('--wait-steam', action='store_true',
+                               help='wait until Steam and steamwebhelper stay closed, then apply '
+                                    '(what luna-apply.service runs)')
         if name == 'timer':
             child.add_argument('action', choices=['on', 'off', 'status'],
                                 help='enable, disable or report the unattended-update timer')
         if name == 'hook':
             child.add_argument('action', choices=['on', 'off', 'status', 'repair'],
-                               help='manage bridge-only recovery after Lumen updates')
+                               help='retired: only "repair" still works (reinstalls the bridge)')
+        if name == 'host':
+            child.add_argument('host_action', nargs='?', default='status',
+                               choices=['status', 'cutover', 'rollback', 'patch-wrapper', 'unpatch-wrapper'],
+                               help='show the plugin host, switch to luna-host, or switch back to Lumen')
+        if name == 'lumen':
+            child.add_argument('lumen_action', nargs='?', default='status',
+                               choices=['status', 'update', 'cancel', 'restore', 'channels'],
+                               help='Lumen base: show status, update (Luna re-attaches after), '
+                                    'cancel a queued update, restore the pre-update backup, or '
+                                    'show/change the per-component update channels')
+            child.add_argument('channels_action', nargs='?', default='',
+                               help='channels: "set" to change a channel (default: show them)')
+            child.add_argument('channels_value', nargs='?', default='',
+                               help='channels set: stable or beta')
+            child.add_argument('--terminal', action='store_true',
+                               help='update: close Steam (steam -shutdown), then run the same update '
+                                    'in a terminal window with its output in ~/.local/share/Luna/state/')
+            child.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+            child.add_argument('--yes', action='store_true', help='confirm the update')
+            child.add_argument('--queue', action='store_true',
+                               help='queue the update for the timer instead of running it now')
+            child.add_argument('--installer-latest', action='store_true',
+                               help='update: run the unpinned upstream main installer (needs --yes; never queued)')
+            child.add_argument('--reinstall', action='store_true',
+                               help='update: run the full update even when nothing newer is published')
+            child.add_argument('--with-settings', action='store_true',
+                               help='restore: also put back ~/.config/SLSsteam (default: left alone)')
+            child.add_argument('--keep-millennium', action='store_true',
+                               help='update: keep an installed Millennium (recorded for later runs)')
+            child.add_argument('--remove-millennium', action='store_true',
+                               help='update: let the installer remove Millennium (recorded for later runs)')
+            child.add_argument('--json', action='store_true', help='status as JSON')
+            child.add_argument('--check', action='store_true',
+                               help='status: also compare installed vs upstream per component and channel '
+                                    '(public metadata, read-only)')
+            child.add_argument('--backup', default='', help='restore: backup name (default: newest)')
         if name == 'release':
             child.add_argument('--out', help='output directory (default: dist/)')
             child.add_argument('--publish', action='store_true',
@@ -4624,6 +7749,19 @@ def main(argv=None):
     if not getattr(options, 'handler', None):
         parser.print_help()
         return EXIT_OK
+    if getattr(options, 'command', '') in ('lumen', 'autoupdate', 'update-all'):
+        for problem in runtime_problems():
+            print('WARNING: %s' % problem, file=sys.stderr)
+    if getattr(options, 'command', '') in ('lumen', 'autoupdate', 'update-all', 'install') \
+            and threading.current_thread() is threading.main_thread():
+        def _stop(signum, _frame):
+            raise SystemExit(128 + signum)  # so `finally` blocks (Steam lock, rollback) run
+        old = {sig: signal.signal(sig, _stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
+        try:
+            return options.handler(options)
+        finally:
+            for sig, handler in old.items():
+                signal.signal(sig, handler)
     return options.handler(options)
 
 

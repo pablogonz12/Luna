@@ -5,6 +5,30 @@ Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 
 ## Unreleased
 
+- **Luna menu on Store and Community**: the menu opens clickable there now. On
+  those routes Steam composites a separate browser view above the shell
+  document, so the overlay was visible but received no clicks (it worked on the
+  Library only). Steam's view is now hidden while the menu is open and put back
+  on close, through the add-on's SharedJSContext agent (the manager lives in
+  that context, not in the panel's document). The menu no longer navigates the
+  user to the Library; that remains only as the fallback when the view API is
+  unavailable, with one short line explaining it.
+- **Luna host**: `luna install` now deploys Luna's own plugin host (`luna-host`)
+  into `~/.local/share/Luna` next to Lumen, with a `luna-host.service` user unit
+  that is not enabled until `luna host cutover`; `luna host status|cutover|rollback`
+  switch hosts safely (Steam closed, Lumen never deleted). Release bundles carry
+  the prebuilt binary and Lua tree. The backend resolves its state dir from
+  `$LUNA_HOME` under luna-host (`SlsLunaHost` RPC, Health/Settings "Host" line).
+  Luna now drives Lumen updates itself while Lumen's own updater stays blocked
+  (the `lua/about.lua` block is unchanged): `luna lumen status|update|cancel|restore`,
+  the `SlsLunaLumen` RPC and a new **Updates** page (after Health) with an
+  "Update Lumen" button and "Update everything". A Lumen update is queued while Steam
+  runs, backs Lumen up, runs the upstream installer, then re-attaches Luna on top.
+  Update controls moved from Health to Updates. The automatic recovery hook and its
+  systemd units are removed (`luna hook` is a stub).
+- **Steam gradient**: Steam's background gets a gradient built from the Noctalia
+  palette (`matugen.css`), updating live with the desktop theme. Settings →
+  Steam gradient turns it off.
 - **Pinned-manifest Steam rollback** (ideas from
   [SteamRollbackrLite](https://github.com/foodiemonster/SteamRollbackrLite)):
   `luna steam lock` serves the sha256-pinned ubuntu12 manifest from a local

@@ -14,10 +14,14 @@ import types
 import unittest
 from unittest import mock
 
+os.environ.setdefault('LUNA_NO_NOTIFY', '1')
 
 SPEC = importlib.util.spec_from_file_location('luna_steam_machine', Path(__file__).resolve().parents[1] / 'scripts/steam-machine.py')
 machine = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(machine)
+
+FIXTURES = Path(__file__).resolve().parent / 'fixtures'
+OLD_4K_LAUNCHER = FIXTURES / 'steamos-3840x2160-60.desktop'
 
 
 class SteamMachineTestCase(unittest.TestCase):
@@ -124,6 +128,142 @@ class SteamMachineTestCase(unittest.TestCase):
         self.install()
         self.assertEqual(entry.stat().st_ino, inode)
         self.assertEqual(entry.stat().st_mtime_ns, stamp)
+        self.assertFalse((self.tools / 'archive').exists(),
+                         'an identical launcher is neither rewritten nor archived')
+
+    LUNA_OUTPUTS = {'HDMI-A-2': {'current_mode': 0, 'modes': [
+        {'width': 3840, 'height': 2160, 'refresh_rate': 60000}]}}
+
+    def install_4k(self, **kwargs):
+        self.run_process.return_value = types.SimpleNamespace(returncode=0, stdout=json.dumps(self.LUNA_OUTPUTS))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = machine.install(**kwargs)
+        return code, out.getvalue()
+
+    def test_untouched_luna_written_file_upgrades_silently(self):
+        self.install_4k()
+        entry = self.apps / 'steamos-3840x2160-60.desktop'
+        older = entry.read_bytes().replace(b'TryExec=gamescope\n', b'')
+        entry.write_bytes(older)
+        state = machine.read_state()
+        state['files'][str(entry)]['sha256'] = machine.digest(older)  # Luna wrote the older text
+        machine.atomic_write(self.tools / 'steam-machine-shortcuts.json', json.dumps(state).encode(), 0o600)
+        code, output = self.install_4k()
+        self.assertEqual(code, 0)
+        self.assertIn(b'TryExec=gamescope', entry.read_bytes())
+        self.assertNotIn('kept', output)
+        self.assertFalse((self.tools / 'archive').exists())
+
+    def test_hand_edited_helper_is_kept_and_install_succeeds(self):
+        self.install()
+        helper = self.tools / 'steam-machine.py'
+        edited = helper.read_bytes() + b'# owner edit\n'
+        helper.write_bytes(edited)
+        code, output = self.install_4k()
+        self.assertEqual(code, 0)
+        self.assertEqual(helper.read_bytes(), edited)
+        self.assertIn('kept (edited outside Luna): %s' % helper, output)
+        self.assertIn('--adopt', output)
+        self.assertFalse((self.tools / 'archive').exists())
+
+    def test_wrapper_prefixed_launcher_is_kept_and_reports_when_behind(self):
+        self.install_4k()
+        entry = self.apps / 'steamos-3840x2160-60.desktop'
+        wrapped = entry.read_bytes().replace(b'Exec=', b'Exec=/home/u/.local/bin/on-desktop --show desktop -- ')
+        entry.write_bytes(wrapped)
+        # Luna's own record is of an older text, so its current version has moved on.
+        state = machine.read_state()
+        state['files'][str(entry)]['sha256'] = '1' * 64
+        machine.atomic_write(self.tools / 'steam-machine-shortcuts.json', json.dumps(state).encode(), 0o600)
+        code, output = self.install_4k()
+        self.assertEqual(code, 0)
+        self.assertEqual(entry.read_bytes(), wrapped)
+        self.assertIn('kept (edited outside Luna): %s' % entry, output)
+        self.assertIn('behind', output)
+
+    def test_second_run_is_quiet_and_status_still_lists_kept_files(self):
+        self.install_4k()
+        helper = self.tools / 'steam-machine.py'
+        helper.write_bytes(helper.read_bytes() + b'# owner edit\n')
+        self.install_4k()
+        code, output = self.install_4k()
+        self.assertEqual(code, 0)
+        self.assertNotIn('kept', output)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(machine.status(show_diff=True), 0)
+        self.assertIn('kept (edited outside Luna): %s' % helper, out.getvalue())
+        self.assertIn('owner edit', out.getvalue())
+        self.assertIn(str(helper), machine.read_state()['kept'])
+
+    def test_dry_run_reports_kept_files_without_writing(self):
+        self.install()
+        helper = self.tools / 'steam-machine.py'
+        helper.write_bytes(helper.read_bytes() + b'# owner edit\n')
+        before = self.snapshot()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(machine.install(dry_run=True), 0)
+        self.assertIn('would keep: kept (edited outside Luna): %s' % helper, out.getvalue())
+        self.assertEqual(self.snapshot(), before)
+
+    def test_explicit_adopt_archives_then_overwrites(self):
+        self.install_4k()
+        entry = self.apps / 'steamos-3840x2160-60.desktop'
+        wrapped = entry.read_bytes().replace(b'Exec=', b'Exec=on-desktop -- ')
+        entry.write_bytes(wrapped)
+        code, output = self.install_4k(adopt=[str(entry)])
+        self.assertEqual(code, 0)
+        self.assertNotEqual(entry.read_bytes(), wrapped)
+        self.assertNotIn(b'on-desktop', entry.read_bytes())
+        archived = list((self.tools / 'archive').glob('steamos-3840x2160-60.desktop.*'))
+        self.assertEqual([path.read_bytes() for path in archived], [wrapped])
+        self.assertNotIn(str(entry), machine.read_state()['kept'])
+        self.assertEqual(machine.read_state()['files'][str(entry)]['sha256'], machine.digest(entry.read_bytes()))
+
+    def test_adopt_of_unknown_path_is_refused_and_nothing_changes(self):
+        self.install()
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, 'not a file Luna manages'):
+            self.install(adopt=['/etc/passwd'])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_install_force_style_arguments_do_not_adopt(self):
+        parser_calls = []
+        with mock.patch.object(machine, 'install', side_effect=lambda *a: parser_calls.append(a) or 0):
+            with mock.patch.object(machine.sys, 'argv', ['x', 'install', '--migrate-legacy']):
+                machine.main()
+        self.assertEqual(parser_calls, [(False, True, [])])
+
+    def test_unmarked_foreign_launcher_is_untouched(self):
+        self.install()
+        entry = self.apps / 'steamos-1920x1080-60.desktop'
+        foreign = OLD_4K_LAUNCHER.read_bytes().replace(b'X-Luna-SteamOS=true\n', b'')
+        entry.write_bytes(foreign)
+        state = machine.read_state()
+        del state['files'][str(entry)]
+        machine.atomic_write(self.tools / 'steam-machine-shortcuts.json', json.dumps(state).encode(), 0o600)
+        code, output = self.install_4k()
+        self.assertEqual(code, 0)
+        self.assertEqual(entry.read_bytes(), foreign)
+        self.assertIn('kept (not a Luna file): %s' % entry, output)
+        self.assertFalse((self.tools / 'archive').exists())
+
+    def test_marker_without_a_record_is_kept_not_overwritten(self):
+        self.install_4k()
+        entry = self.apps / 'steamos-3840x2160-60.desktop'
+        drifted = OLD_4K_LAUNCHER.read_bytes()
+        self.assertIn(b'X-Luna-SteamOS=true', drifted)
+        entry.write_bytes(drifted)
+        state = machine.read_state()
+        del state['files'][str(entry)]
+        machine.atomic_write(self.tools / 'steam-machine-shortcuts.json', json.dumps(state).encode(), 0o600)
+        code, output = self.install_4k()
+        self.assertEqual(code, 0)
+        self.assertEqual(entry.read_bytes(), drifted)
+        self.assertIn('kept (edited outside Luna): %s' % entry, output)
+        self.assertNotIn(str(entry), machine.read_state()['files'])
 
     def test_legacy_profiles_are_not_overwritten_without_explicit_migration(self):
         entry = self.legacy()
@@ -185,23 +325,22 @@ class SteamMachineTestCase(unittest.TestCase):
         self.assertEqual(edited.read_text(), 'user edited old shortcut',
                          'edited shortcuts are never silently replaced')
 
-    def test_custom_edits_to_managed_entries_are_never_silently_overwritten(self):
+    def test_custom_edits_to_managed_entries_are_never_overwritten(self):
         self.install()
         entry = self.apps / 'steamos-1920x1080-60.desktop'
         entry.write_text('user custom launcher')
-        with self.assertRaisesRegex(ValueError, 'changed outside Luna'):
-            self.install()
+        self.assertEqual(self.install(), 0)
+        self.assertEqual(entry.read_text(), 'user custom launcher')
         with contextlib.redirect_stdout(io.StringIO()):
             machine.uninstall()
         self.assertEqual(entry.read_text(), 'user custom launcher')
 
-    def test_unmanaged_wrapper_collision_refuses_without_modifying_anything(self):
+    def test_unmanaged_wrapper_collision_is_kept_untouched(self):
         self.wrapper.parent.mkdir(parents=True)
         self.wrapper.write_text('custom user wrapper')
-        before = self.snapshot()
-        with self.assertRaisesRegex(ValueError, 'unmanaged launcher'):
-            self.install()
-        self.assertEqual(before, self.snapshot())
+        self.assertEqual(self.install(), 0)
+        self.assertEqual(self.wrapper.read_text(), 'custom user wrapper')
+        self.assertNotIn(str(self.wrapper), machine.read_state()['files'])
 
     def test_launcher_symlink_is_not_followed_or_overwritten(self):
         outside = self.home / 'private'
@@ -254,14 +393,60 @@ class SteamMachineTestCase(unittest.TestCase):
         for value in ('SDL_VIDEODRIVER=x11', 'SDL_VIDEO_DRIVER=x11', 'GDK_BACKEND=x11', 'QT_QPA_PLATFORM=xcb'):
             self.assertIn(value, command[separator + 1:])
 
-    def test_existing_cpu_policy_helper_is_preserved_when_available(self):
-        cpu = self.home / '.local/bin/ccd-launch'
-        cpu.parent.mkdir(parents=True)
-        cpu.write_text('#!/bin/sh\nexec "$@"\n')
-        cpu.chmod(0o755)
+    def make_tool(self, name):
+        tool = self.home / '.local/bin' / name
+        tool.parent.mkdir(parents=True, exist_ok=True)
+        tool.write_text('#!/bin/sh\nexec "$@"\n')
+        tool.chmod(0o755)
+        return tool
+
+    def test_cpu_group_pinning_is_used_only_when_the_tool_exists(self):
+        plain = machine.launch_command(self.options())
+        self.assertNotIn('--group', plain)
+        self.assertNotIn('/bin/sh', plain)
+        self.assertEqual(plain[0], '/usr/bin/gamescope')
+        cpu = self.make_tool('ccd-launch')
         command = machine.launch_command(self.options())
-        start = command.index(str(cpu))
-        self.assertEqual(command[start:start + 4], [str(cpu), '--group', 'auto', '--'])
+        self.assertEqual(command[:4], [str(cpu), '--group', 'all', '--'])
+        start = command.index('e')
+        self.assertEqual(command[start - 1:start + 2], ['--group', 'e', '--'])
+        self.assertEqual(command[-2:], [str(self.steam), '-gamepadui'])
+
+    def test_mangoapp_flag_and_env_scrub_do_not_need_extra_tools(self):
+        command = machine.launch_command(self.options())
+        self.assertIn('--mangoapp', command[:command.index('--')])
+        tail = command[command.index('--') + 1:]
+        for value in ('MANGOHUD=0', 'MANGOHUD', 'MANGOHUD_CONFIG', 'STEAM_USE_MANGOAPP'):
+            self.assertIn(value, tail)
+
+    def test_mangoapp_hotkey_helper_is_optional(self):
+        self.assertNotIn('"$0" & exec "$@"', machine.launch_command(self.options()))
+        hotkey = self.make_tool('mangoapp-hotkey')
+        command = machine.launch_command(self.options())
+        start = command.index('/bin/sh')
+        self.assertEqual(command[start:start + 4], ['/bin/sh', '-c', '"$0" & exec "$@"', str(hotkey)])
+        hotkey.chmod(0o644)
+        self.assertNotIn('/bin/sh', machine.launch_command(self.options()), 'a non-executable helper is skipped')
+
+    def test_run_pins_mangohud_config_and_parks_toggle_only_with_the_hotkey_helper(self):
+        seen = []
+        self.run_process.side_effect = lambda command, **kw: seen.append(kw.get('env')) or types.SimpleNamespace(returncode=0)
+        options = self.options(print_command=False)
+        with mock.patch.object(machine, 'steam_running', return_value=False), contextlib.redirect_stdout(io.StringIO()):
+            machine.run(options)
+            self.make_tool('mangoapp-hotkey')
+            machine.run(options)
+        pinned = str(self.home / '.config/MangoHud/MangoHud.conf')
+        self.assertEqual(seen[0]['MANGOHUD_CONFIGFILE'], pinned)
+        self.assertNotIn('MANGOHUD_CONFIG', seen[0])
+        self.assertEqual(seen[1]['MANGOHUD_CONFIG'], 'read_cfg,toggle_hud=F24')
+
+    def test_run_mouse_mode_defaults_to_free(self):
+        captured = []
+        with mock.patch.object(machine, 'run', side_effect=lambda o: captured.append(o.mouse_mode) or 0):
+            with mock.patch.object(machine.sys, 'argv', ['x', 'run']):
+                machine.main()
+        self.assertEqual(captured, ['free'])
 
     def test_missing_gamescope_or_moon_wrapper_reports_clear_errors(self):
         self.which.side_effect = lambda name: None

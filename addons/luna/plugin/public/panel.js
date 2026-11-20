@@ -14,8 +14,15 @@
   if (root && root.document) api.mount(root);
 })(typeof window !== 'undefined' ? window : null, function () {
   'use strict';
+  const PANEL_BUILD = 'bv-5';
+  // Every RPC is bounded: a restarted or dead Lumen must never leave a busy
+  // flag (or a polling loop) waiting on a promise that never settles.
+  const RPC_TIMEOUT = 15000;
   const BTN_ID = 'sls-luna-btn';
   const OVERLAY_ID = 'sls-luna-overlay';
+  // Backends differ on whether a list field arrives as an array, a single item
+  // or a string; page builders must never throw on the shape.
+  const asList = value => (Array.isArray(value) ? value : (value === null || value === undefined ? [] : [value]));
   const STYLE_ID = 'sls-luna-styles';
   const ACCENT = '#1a9fff';
   // Inline 16px glyphs, matching the size of Lumen's sidebar icons.
@@ -39,6 +46,10 @@
       + '<path d="M9 20h6M12 16v4M7 8h4M7 11h8" stroke="currentColor" stroke-width="2"/>',
     health: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M6.5 12h2.5l1.5-3 2.5 6 2-4 1 1h1.5" fill="none" stroke="currentColor" stroke-width="2"/>',
+    updates: '<path d="M12 4v10m0 0-4-4m4 4 4-4" fill="none" stroke="currentColor" stroke-width="2"/>'
+      + '<path d="M5 18h14" stroke="currentColor" stroke-width="2"/>',
+    lumen: '<path d="M15.5 4a8 8 0 1 0 4.5 12.5A7 7 0 0 1 15.5 4z" fill="none" '
+      + 'stroke="currentColor" stroke-width="2"/>',
     about: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>'
       + '<path d="M12 11v5m0-8v.5" stroke="currentColor" stroke-width="2"/>',
   };
@@ -51,6 +62,8 @@
     { id: 'steamgrid', label: 'SteamGridDB', beta: true },
     { id: 'graphics', label: 'Graphics', beta: true },
     { id: 'health', label: 'Health' },
+    { id: 'updates', label: 'Updates' },
+    { id: 'lumen', label: 'Lumen' },
     { id: 'settings', label: 'Settings' },
     { id: 'about', label: 'About' },
   ];
@@ -59,6 +72,11 @@
                     'sls-presence-panel-button', 'sls-presence-panel',
                     'sls-compressor-panel-button', 'sls-compressor-panel'];
 
+  const errorText = error => {
+    const text = String(error && error.message ? error.message : error);
+    // A timeout is retryable: name the retry so the row is actionable.
+    return error && error.code === 'timeout' ? text + ' (press Refresh to retry)' : text;
+  };
   const parse = raw => (typeof raw === 'string' ? JSON.parse(raw) : raw);
   const hours = seconds => ((Number(seconds) || 0) / 3600).toFixed(2);
   /* The lifetime total the playtime backend publishes: for games Steam tracks
@@ -145,15 +163,34 @@
       'justify-content:center;background:rgba(0,0,0,.55);font-family:"Motiva Sans",Arial,Helvetica,sans-serif;}',
       '.sls-luna-win{display:flex;width:900px;max-width:94vw;height:620px;max-height:88vh;border-radius:4px;',
       'overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);border:1px solid rgba(0,0,0,.5);}',
-      '.sls-luna-side{flex:0 0 200px;background:#2a2d34;display:flex;flex-direction:column;padding-top:8px;}',
+      '.sls-luna-side{flex:0 0 200px;background:#2a2d34;display:flex;flex-direction:column;padding-top:8px;',
+      'overflow-y:auto;}',
       '.sls-luna-side-title{color:' + ACCENT + ';font-size:17px;font-weight:700;text-transform:uppercase;padding:14px 24px 16px;}',
-      '.sls-luna-tab{display:flex;align-items:center;gap:12px;padding:10px 8px 10px 24px;height:20px;color:#b8bcbf;',
-      'font-size:14px;cursor:pointer;}',
+      // `flex:0 0 auto` matters: the sidebar is a flex column, and without it a
+      // row with `overflow:hidden` shrinks to 0px as soon as the list is full.
+      '.sls-luna-tab{display:flex;align-items:center;gap:12px;padding:10px 8px 10px 24px;height:20px;',
+      'flex:0 0 auto;color:#b8bcbf;font-size:14px;cursor:pointer;}',
       '.sls-luna-tab:hover{background:rgba(255,255,255,.04);}',
       '.sls-luna-tab.active{background:#3d4450;color:#fff;}',
+      // Nested list under Lumen: Lumen's own pages, one line each, indented
+      // under the category and built by the same row builder as the categories
+      // (this rule only changes indent, type and colour, never the height).
+      '.sls-luna-subpage{padding:6px 8px 6px 46px;color:#9aa4ae;font-size:13px;flex:0 0 auto;',
+      'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '.sls-luna-subpage:hover{background:rgba(255,255,255,.04);color:#dcdedf;}',
+      '.sls-luna-subpage.active{background:rgba(61,68,80,.7);color:#fff;}',
       '.sls-luna-spacer{flex:1 1 auto;min-height:18px;}',
       '.sls-luna-account{display:flex;align-items:center;gap:10px;padding:13px 14px 14px;',
-      'border-top:1px solid rgba(255,255,255,.07);color:#e6e9ec;font-size:13px;}',
+      'border-top:1px solid rgba(255,255,255,.07);color:#e6e9ec;font-size:13px;',
+      'background:transparent;border:0;border-top:1px solid rgba(255,255,255,.07);',
+      'font:inherit;width:100%;text-align:left;cursor:pointer;}',
+      '.sls-luna-account:hover{background:rgba(255,255,255,.04);}',
+      '.sls-luna-account:focus-visible{outline:1px solid #1a9fff;outline-offset:-1px;}',
+      '.sls-luna-account:focus{outline-color:rgba(26,159,255,.7);}',
+      '.sls-luna-account .sls-luna-avatar{width:24px;height:24px;border-radius:50%;flex:0 0 24px;',
+      'object-fit:cover;display:block;}',
+      '.sls-luna-account .sls-luna-state{margin-left:auto;font-size:12px;}',
+      '.sls-luna-account .sls-luna-state.ok{color:#57cb5c;}',
       '.sls-luna-dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px;background:#6b7280;}',
       '.sls-luna-dot.ok{background:#57cb5c;}',
       '.sls-luna-main{flex:1 1 auto;background:#1b1f24;color:#dcdedf;display:flex;flex-direction:column;min-width:0;}',
@@ -220,6 +257,7 @@
       '.sls-luna-chart-fill.alt{background:linear-gradient(90deg,#3d6b4a,#57cb5c);}',
       '.sls-luna-chart-value{flex:0 0 118px;text-align:right;color:#9aa4ae;font-size:11px;}',
       '.sls-luna-error{color:#ff8080;font-size:13px;margin:8px 0 0;}',
+      '.sls-luna-view-note{color:#e0b060;font-size:12px;line-height:1.35;max-width:340px;margin-left:10px;}',
       '.sls-luna-assets{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px;margin:10px 0 0;}',
       '.sls-luna-asset{cursor:pointer;border:1px solid rgba(255,255,255,.09);border-radius:3px;overflow:hidden;background:#10161c;}',
       '.sls-luna-asset:hover{border-color:#3cb0ff;}',
@@ -290,7 +328,255 @@
     return button;
   }
 
-  function mountButton(w, onOpen) {
+  /* On Store/Community Steam composites a separate browser view above the
+     shell document, so this overlay is visible but receives no clicks. Steam's
+     own modals hide that view with SetVisible(false). The manager that owns it
+     exists only in SharedJSContext, never in this document (and `opener` is
+     unusable there), so the ask travels over localStorage to the add-on's
+     agent in that context: one request key, one result key. The request is
+     answered by agent.js (viewStatus/viewSetVisible); nothing about a hidden
+     view is persisted, so a Steam restart always starts normal. */
+  const VIEW_REQUEST_KEY = 'slsLunaViewRequest';
+  const VIEW_RESULT_KEY = 'slsLunaViewResult';
+  const VIEW_TIMEOUT_MS = 700;
+  // Navigating takes longer than a status answer: Steam's router moves a view.
+  const VIEW_NAVIGATE_TIMEOUT_MS = 2500;
+  const VIEW_LIBRARY_NOTE = 'Steam stayed on the Store/Community page; press Steam\u2019s Library tab '
+    + 'once, then open Luna.';
+  // Last state SharedJSContext reported, and whether *this* panel hid the view.
+  let viewReported = null;
+  let viewHiddenByLuna = false;
+  let viewNote = '';
+  function findMainBrowser(w) {
+    const hosts = [w];
+    try { if (w && w.opener) hosts.push(w.opener); } catch (_) { /* cross-origin */ }
+    for (const h of hosts) {
+      try {
+        const b = h && h.MainWindowBrowserManager && h.MainWindowBrowserManager.m_browser;
+        if (b && typeof b.SetVisible === 'function') return b;
+      } catch (_) { /* keep looking */ }
+    }
+    return null;
+  }
+  /* Preferred route: Steam's own router. The browser view is only shown on
+     /browser/... routes (Store, Community, profiles, web tabs), so the menu
+     first moves Steam to the Library with SteamUIStore.Navigate and waits for
+     the route to change. Nothing is navigated back on close. */
+  function steamHosts(w) {
+    const hosts = [w];
+    try { if (w && w.opener) hosts.push(w.opener); } catch (_) { /* cross-origin */ }
+    return hosts;
+  }
+  function currentRoute(w) {
+    for (const h of steamHosts(w)) {
+      try {
+        const loc = h && h.MainWindowBrowserManager && h.MainWindowBrowserManager.m_history && h.MainWindowBrowserManager.m_history.location;
+        if (loc && typeof loc.pathname === 'string') return loc.pathname;
+      } catch (_) { /* keep looking */ }
+    }
+    return null;
+  }
+  function findNavigate(w) {
+    for (const h of steamHosts(w)) {
+      try {
+        const ui = h && h.SteamUIStore;
+        if (ui && typeof ui.Navigate === 'function') return p => ui.Navigate(p);
+      } catch (_) { /* keep looking */ }
+    }
+    return null;
+  }
+  function onBrowserRoute(w) {
+    return onBrowserRoutePath(currentRoute(w));
+  }
+  function onBrowserRoutePath(route) {
+    return typeof route === 'string' && /^\/(browser|store|community)(\/|$)/.test(route);
+  }
+  // Resolves true when no navigation was needed or it completed, false when
+  // no navigation API exists (caller falls back to hiding the view).
+  // Last resort only: the hide/show path above never navigates the user.
+  async function leaveBrowserRoute(w) {
+    if (!onBrowserRoute(w)) return true;
+    const navigate = findNavigate(w);
+    if (!navigate) return false;
+    try { navigate('/library/home'); } catch (_) { return true; }
+    const until = Date.now() + 1500;
+    while (onBrowserRoute(w) && Date.now() < until) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return true;
+  }
+
+  function viewStorage(w) {
+    try { return (w && w.localStorage) || null; } catch (_) { return null; }
+  }
+
+  // The last state the agent published, if any. Its route is the only route
+  // this document can read at all.
+  function rememberView(w) {
+    const storage = viewStorage(w);
+    if (!storage) { viewReported = null; return null; }
+    let raw = null;
+    try { raw = storage.getItem(VIEW_RESULT_KEY); } catch (_) { return viewReported; }
+    if (!raw) { viewReported = null; return null; }
+    let body = null;
+    try { body = JSON.parse(raw); } catch (_) { return viewReported; }
+    if (!body || typeof body !== 'object') return viewReported;
+    viewReported = body.ok === true
+      ? { ok: true, route: typeof body.route === 'string' ? body.route : null,
+        browserVisible: body.browserVisible !== false }
+      : { ok: false, route: null, browserVisible: false };
+    return viewReported;
+  }
+
+  /* One ask to the SharedJSContext agent, always settled: the storage event
+     normally answers it, the poll covers a listener registered after the
+     answer, and the timer rejects when nothing in that context is listening. */
+  function requestView(w, action, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const storage = viewStorage(w);
+      if (!storage) { reject(Error('Steam view control is unavailable.')); return; }
+      const id = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      let settled = false;
+      let timer = null;
+      let poll = null;
+      const finish = (error, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) { try { (w.clearTimeout || clearTimeout)(timer); } catch (_) { /* gone */ } }
+        if (poll !== null) { try { (w.clearInterval || clearInterval)(poll); } catch (_) { /* gone */ } }
+        try { w.removeEventListener('storage', onStorage); } catch (_) { /* gone */ }
+        if (error) reject(error); else resolve(value);
+      };
+      const read = () => {
+        if (settled) return;
+        let raw = null;
+        try { raw = storage.getItem(VIEW_RESULT_KEY); } catch (_) { return; }
+        if (!raw) return;
+        let body = null;
+        try { body = JSON.parse(raw); } catch (_) { return; }
+        if (!body || body.id !== id) return;
+        if (body.ok === true) {
+          viewReported = { ok: true, route: typeof body.route === 'string' ? body.route : null,
+            browserVisible: body.browserVisible !== false };
+        }
+        finish(null, body);
+      };
+      const onStorage = event => {
+        const key = event && typeof event.key === 'string' ? event.key : '';
+        if (key && key !== VIEW_RESULT_KEY) return;
+        read();
+      };
+      try { w.addEventListener('storage', onStorage); } catch (_) { /* no events */ }
+      try {
+        storage.setItem(VIEW_REQUEST_KEY, JSON.stringify({ id, action, at: Date.now() }));
+      } catch (error) {
+        finish(error instanceof Error ? error : Error('Steam view control is unavailable.'));
+        return;
+      }
+      poll = (w.setInterval || setInterval)(read, 40);
+      timer = (w.setTimeout || setTimeout)(() => finish(Error('Steam view control did not answer.')),
+        Number(timeoutMs) > 0 ? Number(timeoutMs) : VIEW_TIMEOUT_MS);
+      read();
+    });
+  }
+
+  // Synchronous path: the manager happened to be reachable from this document.
+  function hideMainView(w) {
+    if (viewHiddenByLuna) return true;
+    const b = findMainBrowser(w);
+    if (!b) return false;
+    try { b.SetVisible(false); viewHiddenByLuna = true; return true; } catch (_) { return false; }
+  }
+
+  /* Move Steam to the Library before the menu opens. Hiding the browser view
+     is not enough on its own: a hidden Store/Community view keeps taking input,
+     so clicks never reach this overlay. The agent asks Steam's own router and
+     reports the route it actually shows; the in-document router is the fallback
+     when no agent answers; a failure is one line in the window, never a menu
+     over a page that cannot be clicked. Nothing is navigated back on close. */
+  async function prepareView(w) {
+    // An older build could have left the view hidden: never leave it that way.
+    if (viewHiddenByLuna) restoreMainView(w);
+    let status = null;
+    try { status = await requestView(w, 'status'); } catch (_) { status = null; }
+    if (status && status.ok !== true) status = null;
+    const known = rememberView(w);
+    const route = status && typeof status.route === 'string' ? status.route
+      : (currentRoute(w) || (known && known.ok ? known.route : null));
+    if (!onBrowserRoutePath(route)) return true;
+    let navigated = false;
+    if (status) {
+      try {
+        const out = await requestView(w, 'navigate', VIEW_NAVIGATE_TIMEOUT_MS);
+        navigated = Boolean(out && out.ok === true);
+      } catch (_) { navigated = false; }
+    }
+    if (!navigated) navigated = await leaveBrowserRoute(w).catch(() => false);
+    if (!navigated) viewNote = VIEW_LIBRARY_NOTE;
+    else viewNote = '';
+    return true;
+  }
+
+  // Put the view back: once, and only if this panel hid it.
+  function restoreMainView(w) {
+    if (!viewHiddenByLuna) return;
+    viewHiddenByLuna = false;
+    if (viewReported) viewReported = { ...viewReported, browserVisible: true };
+    const b = findMainBrowser(w);
+    if (b) {
+      try { b.SetVisible(true); } catch (_) { /* view gone */ }
+      return;
+    }
+    requestView(w, 'show').catch(() => { /* Steam is closing */ });
+  }
+
+  /* One cleanup bag per panel generation. Every timer, listener and observer a
+     mount installs is recorded here, so replacing a panel (a newer build, or a
+     second mount of the same page) leaves no stale closure sweeping the DOM. */
+  function createLife(w) {
+    const intervals = [];
+    const timeouts = [];
+    const listeners = [];
+    const observers = [];
+    const clearIntervalOf = w.clearInterval || clearInterval;
+    const clearTimeoutOf = w.clearTimeout || clearTimeout;
+    return {
+      interval(fn, ms) {
+        const id = w.setInterval(fn, ms);
+        intervals.push(id);
+        return id;
+      },
+      timeout(fn, ms) {
+        const id = (w.setTimeout || setTimeout)(fn, ms);
+        timeouts.push(id);
+        return id;
+      },
+      listen(target, type, fn, options) {
+        if (!target || typeof target.addEventListener !== 'function') return;
+        target.addEventListener(type, fn, options);
+        listeners.push([target, type, fn, options]);
+      },
+      watch(observer) {
+        observers.push(observer);
+        return observer;
+      },
+      teardown() {
+        intervals.forEach(id => { try { clearIntervalOf(id); } catch (_) { /* already gone */ } });
+        timeouts.forEach(id => { try { clearTimeoutOf(id); } catch (_) { /* already fired */ } });
+        listeners.forEach(entry => {
+          try { entry[0].removeEventListener(entry[1], entry[2], entry[3]); }
+          catch (_) { /* the target went away with the page */ }
+        });
+        observers.forEach(observer => { try { observer.disconnect(); } catch (_) { /* already dropped */ } });
+        intervals.length = 0;
+        timeouts.length = 0;
+        listeners.length = 0;
+        observers.length = 0;
+      },
+    };
+  }
+
+  function mountButton(w, onOpen, life, onPlaced) {
     const document = w.document;
     const place = () => {
       const existing = document.getElementById(BTN_ID);
@@ -302,14 +588,15 @@
       // Next to Lumen when it is there, otherwise at the end of the menubar.
       if (lumen && lumen.parentNode === bar) bar.insertBefore(button, lumen.nextSibling);
       else bar.appendChild(button);
+      // Proven placed: now the Lumen launcher may give way (see hideLumenLauncher).
+      if (typeof onPlaced === 'function') onPlaced();
       return true;
     };
     if (place()) return;
     let tries = 0;
-    const clear = w.clearInterval || (() => {});
-    const timer = w.setInterval(() => {
+    const timer = life.interval(() => {
       tries += 1;
-      if (place() || tries > 120) clear(timer);
+      if (place() || tries > 120) { try { (w.clearInterval || clearInterval)(timer); } catch (_) { /* gone */ } }
     }, 500);
     return timer;
   }
@@ -321,8 +608,45 @@
     });
   }
 
+  /* One honest error surface: a small in-memory ring the Health page lists
+     and copies. It holds RPC failures, panel warnings and the outcome of the
+     last backend job; no file, no network, no cost when nothing fails. */
+  const PROBLEM_LIMIT = 20;
+  const PROBLEMS = [];
+
+  function addProblem(source, text) {
+    const value = String(text == null ? '' : text).replace(/\s+/g, ' ').trim().slice(0, 240);
+    if (!value) return;
+    const now = Date.now();
+    const key = String(source) + '\u0000' + value;
+    // The same failure seen again by the next poll updates its time instead of
+    // adding a row: one entry per distinct problem, not one per tick.
+    const known = PROBLEMS.find(entry => entry.key === key && now - entry.at < 60000);
+    if (known) { known.at = now; return; }
+    PROBLEMS.push({ key: key, at: now, source: String(source), text: value });
+    while (PROBLEMS.length > PROBLEM_LIMIT) PROBLEMS.shift();
+  }
+
+  function lunaWarn(text, w) {
+    const line = '[sls-luna] ' + String(text == null ? '' : text);
+    try {
+      const sink = (w && w.console) || (typeof console !== 'undefined' ? console : null);
+      if (sink && typeof sink.warn === 'function') sink.warn(line);
+    } catch (_) { /* no console */ }
+    addProblem('panel', line);
+  }
+
+  /* A bounded RPC. Lumen answers in milliseconds when healthy, so a call past
+     the budget means it was restarted or died; the promise always settles,
+     which is what keeps busy flags and polling loops from wedging for the life
+     of the page. A late answer is dropped: the race has already rejected, so a
+     response after the timeout can never repaint the page with stale state. */
   function rpc(w, method, args) {
-    return Promise.resolve(w.Millennium.callServerMethod('lumen', method, args || {}))
+    const configured = Number(w && w.__SlsLunaRpcTimeout);
+    const budget = configured > 0 ? configured : RPC_TIMEOUT;
+    let timer = null;
+    const answer = Promise.resolve()
+      .then(() => w.Millennium.callServerMethod('lumen', method, args || {}))
       .then(parse)
       .then(out => {
         if (out && out.success === false) {
@@ -333,6 +657,23 @@
           throw error;
         }
         return out;
+      });
+    const expiry = new Promise((resolve, reject) => {
+      timer = setTimeout(() => {
+        const error = Error('Luna did not answer ' + method + ' within '
+          + (budget >= 1000 ? Math.round(budget / 1000) + ' s' : budget + ' ms'));
+        error.code = 'timeout';
+        error.method = method;
+        reject(error);
+      }, budget);
+    });
+    const settle = () => { try { clearTimeout(timer); } catch (_) { /* already fired */ } };
+    return Promise.race([answer, expiry])
+      .then(out => { settle(); return out; }, error => {
+        settle();
+        addProblem('rpc', method + ': '
+          + String(error && error.message ? error.message : error));
+        throw error;
       });
   }
 
@@ -351,7 +692,7 @@
   // and the game pages themselves stay untouched on purpose.
   const STORE_QUIET = /^\/(search|app|account|login|join|checkout|cart|wishlist|points)(\/|$)/;
 
-  function mountStore(w) {
+  function mountStore(w, life) {
     const document = w.document;
     const state = { followed: null, show: false, interval: null, observer: null };
     let scheduled = false;
@@ -421,7 +762,7 @@
       if (scheduled || state.show) return;
       scheduled = true;
       const later = () => { scheduled = false; sweep(); };
-      if (typeof w.setTimeout === 'function') w.setTimeout(later, 350);
+      if (typeof w.setTimeout === 'function') life.timeout(later, 350);
       else later();
     }
 
@@ -445,23 +786,107 @@
       if (typeof w.MutationObserver === 'function' && root) {
         state.observer = new w.MutationObserver(schedule);
         state.observer.observe(root, { childList: true, subtree: true });
+        life.watch(state.observer);
       }
-      if (typeof w.setInterval === 'function') state.interval = w.setInterval(schedule, 4000);
+      if (typeof w.setInterval === 'function') state.interval = life.interval(schedule, 4000);
     }
 
     start();
   }
 
+  // Steam window gradient built from the Noctalia palette. The backend reads
+  // Noctalia's generated Steam colour file; this repaints when the file changes
+  // (polled, plus on focus) so the gradient follows the desktop theme live.
+  function mountGradient(w, life) {
+    const document = w.document;
+    const state = { sig: null, busy: false };
+    function css(colors) {
+      const c = name => {
+        const v = colors[name];
+        return v ? v.join(',') : null;
+      };
+      const primary = c('primary');
+      const secondary = c('secondary') || primary;
+      const tertiary = c('tertiary') || primary;
+      const base = c('surface-container') || c('surface') || '24,25,42';
+      const container = c('primary-container') || primary;
+      const bg = 'linear-gradient(135deg, rgba(' + base + ',1) 0%, rgba(' + container + ',0.9) 38%, '
+        + 'rgba(' + primary + ',0.55) 68%, rgba(' + secondary + ',0.5) 84%, rgba(' + tertiary + ',0.45) 100%)';
+      return 'html, body { background: ' + bg + ' fixed !important; background-color: rgb(' + base + ') !important; }\n'
+        // Opaque full-window shells would hide the gradient; make only those transparent.
+        + '.fullscreen, .mainbackground, .SteamDesktop, .bodyContainer, .DesktopUI, '
+        + '[class*="BasicUI"], [class*="mainbackground"] { background: transparent !important; }';
+    }
+    function apply(out) {
+      let node = document.getElementById('sls-luna-gradient');
+      if (!out || !out.success || !out.enabled || !out.available) {
+        if (node) node.remove();
+        state.sig = null;
+        return;
+      }
+      const sig = JSON.stringify(out.colors);
+      if (sig === state.sig && node) return;
+      state.sig = sig;
+      if (!node) {
+        node = document.createElement('style');
+        node.id = 'sls-luna-gradient';
+        (document.head || document.documentElement).appendChild(node);
+      }
+      node.textContent = css(out.colors);
+    }
+    async function refresh() {
+      if (state.busy) return;
+      state.busy = true;
+      try {
+        apply(await rpc(w, 'SlsLunaGradient'));
+      } catch (_) {
+        // Keep the last gradient; a timeout is retried on the next tick.
+      } finally {
+        state.busy = false;
+      }
+    }
+    refresh();
+    if (typeof w.setInterval === 'function') life.interval(refresh, 30000);
+    life.listen(w, 'focus', refresh);
+    return { refresh };
+  }
+
   function mount(w) {
     const document = w.document;
-    if (!document || w.__SlsLunaPanel) return;
+    if (!document) return;
+    // Each panel generation starts with an empty Problems list.
+    PROBLEMS.length = 0;
+    // One generation owns the page. A newer build (or a second mount) retires
+    // the previous generation first, so its interval, listeners and observers
+    // cannot stack against a stale closure.
+    if (typeof w.__SlsLunaTeardown === 'function') {
+      try { w.__SlsLunaTeardown(); } catch (_) { /* the old page is already gone */ }
+      w.__SlsLunaTeardown = null;
+    }
+    for (const id of [BTN_ID, OVERLAY_ID]) {
+      const old = document.getElementById(id);
+      if (old && typeof old.remove === 'function') old.remove();
+    }
+    const life = createLife(w);
     w.__SlsLunaPanel = true;
+    w.__SlsLunaPanelBuild = PANEL_BUILD;
+    const generation = (w.__SlsLunaPanelGen = (w.__SlsLunaPanelGen || 0) + 1);
+    const current = () => w.__SlsLunaPanelGen === generation;
     // Tells the feature add-ons to stay quiet in the shell: their settings live
     // in this menu while it is present.
     w.__SlsLunaUi = true;
     // The store is a different origin with no menubar: no menu there, just the
     // followed-games filter when the Settings switch asks for it.
-    if (isStoreWindow(w)) { mountStore(w); return; }
+    if (isStoreWindow(w)) {
+      w.__SlsLunaTeardown = () => {
+        life.teardown();
+        const style = document.getElementById('sls-luna-store-style');
+        if (style && typeof style.remove === 'function') style.remove();
+        removeFloating(document);
+      };
+      mountStore(w, life);
+      return;
+    }
     styled(document);
     removeFloating(document);
 
@@ -482,6 +907,11 @@
     let sgdbAssets = null;
     let sgdbBusy = false;
     let sgdbNotice = null;
+    let sgdbReadError = '';
+    // The detached artwork pass: its id, progress and the last per-slot
+    // results. Polled only while this tab is on screen.
+    let sgdbAuto = null;
+    let sgdbAutoTimer = null;
     let artworkRequest = '';
     let graphics = null;
     let lunaInfo = null;
@@ -489,8 +919,40 @@
     let lunaUpdate = null;
     let lunaSteam = null;
     let lunaRefresh = null;
+    let lunaLumen = null;
+    // Lumen's channel state, read through `luna lumen channels` once per page
+    // session and refreshed after every change; null means "not read yet".
+    let lunaChannels = null;
+    let channelsBusy = false;
+    let channelsError = '';
+    let channelsTried = false;
+    // Footer connection state, read from LuaTools' own session through the
+    // backend: {signedIn, name, expired, path} or {unavailable, error}.
+    let luatools = null;
+    let lumenBusy = false;
+    // Confirm step in front of every queue ({kind: 'lumen'|'everything'|'reinstall'}),
+    // the owner's Millennium pick for this page open, and the status poller's pace.
+    let lumenConfirm = null;
+    let millenniumPick = '';
+    let lumenNextPoll = 0;
+    let lumenIdlePolls = 0;
+    let tornDown = false;
+    // Lumen signpost: the explanation line when its menu cannot be opened, and
+    // the launcher node this generation hid (restored exactly on teardown).
+    let lumenOpenError = '';
+    // One line on the Lumen page after the account row handed over (or failed to).
+    let lumenSignInNote = '';
+    let hiddenLumenBtn = null;
+    let panelMounted = false;
+    // Per-RPC failure text for the Updates page (an error row, never a broken page).
+    let rpcErrors = {};
+    // "Update everything" bookkeeping: what this session queued, and when.
+    let everything = null;
+    let steamLatestArmed = false;
     let lunaCheckedAt = 0;
     let healthNotice = null;
+    // The last backend job's live line and outcome (repair, pin, shortcuts).
+    let jobNotice = '';
     let compressorTab = 'status';
     let compressorQuery = '';
     let pendingAction = null;
@@ -500,6 +962,8 @@
     let confirmAction = null;
     let steamLockArmed = null;
     let steamJobNotice = null;
+    let lunaHost = null;
+    const gradient = mountGradient(w, life);
     let cancelArmed = false;
     let cleanupArmed = false;
     let query = '';
@@ -559,7 +1023,7 @@
     }
     function startJobPolling() {
       if (jobTimer) return;
-      jobTimer = w.setInterval(async () => {
+      jobTimer = life.interval(async () => {
         if (!document.getElementById(OVERLAY_ID)) { stopJobPolling(); return; }
         await refresh();
         const job = compressor && compressor.job;
@@ -574,38 +1038,229 @@
       return Boolean(update.available || update.pending);
     }
 
-    const sidebar = () => visibleNav().map(entry => {
+    /* One sidebar row, used by the categories and by Lumen's nested pages: the
+       same builder means the same height, spacing and hover behaviour. A nested
+       row only adds `.sls-luna-subpage` for its indent and smaller type. */
+    function sidebarRow({ label, iconId, active, sub, onclick }) {
       const item = document.createElement('div');
-      item.className = 'sls-luna-tab' + (entry.id === tab ? ' active' : '');
-      const icon = document.createElement('span');
-      icon.className = 'ico';
-      icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + ICON[entry.id] + '</svg>';
-      const label = document.createElement('span');
-      label.textContent = entry.label + (entry.id === 'health' && updateBadge() ? ' \u2022' : '');
-      item.append(icon, label);
-      item.onclick = () => {
-        tab = entry.id;
-        confirmAction = null;
-        cancelArmed = false;
-        cleanupArmed = false;
-        paint();
-      };
+      item.className = 'sls-luna-tab' + (sub ? ' sls-luna-subpage' : '') + (active ? ' active' : '');
+      if (iconId) {
+        const icon = document.createElement('span');
+        icon.className = 'ico';
+        icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + ICON[iconId] + '</svg>';
+        item.appendChild(icon);
+      }
+      const text = document.createElement('span');
+      text.textContent = label;
+      item.appendChild(text);
+      item.onclick = onclick;
       return item;
-    });
+    }
+
+    let lumenSubtabsDrawn = false;
+    const sidebar = () => {
+      lumenSubtabsDrawn = false;
+      const items = [];
+      visibleNav().forEach(entry => {
+        const item = sidebarRow({
+          label: entry.label + (entry.id === 'updates' && updateBadge() ? ' \u2022' : ''),
+          iconId: entry.id,
+          active: entry.id === tab,
+          onclick: () => { selectCategory(entry.id); },
+        });
+        items.push(item);
+        if (entry.id === 'lumen' && lumenSubtabsWanted()) {
+          const subs = lumenSubEntries();
+          if (subs.length) lumenSubtabsDrawn = true;
+          items.push(...subs);
+        }
+      });
+      return items;
+    };
+
+    /* One footer row, like Lumen's: an avatar (or a dot), the LuaTools/Discord
+       name and a short label on the right. The row is the account button: it
+       closes this menu and hands over to Lumen's own sign-in UI, because Lumen
+       owns the LuaTools session and Luna must not reimplement it.
+       "Connected" is only rendered when the backend reports a signed-in
+       LuaTools session with a display name. An expires_at in the past is not a
+       state: that token lasts an hour and LuaTools refreshes it itself, so a
+       past value only means nothing has refreshed it yet. */
+    // The backend validates this too; the page repeats it so a stale or
+    // hand-edited value can never put a foreign URL on an <img>.
+    const DISCORD_AVATAR = /^https:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net)\//i;
+
+    function footerState(info) {
+      const state = info || {};
+      if (state.unavailable) {
+        return { name: 'LuaTools', label: 'Unavailable', ok: false, avatar: '',
+          why: String(state.error || 'the LuaTools state could not be read') };
+      }
+      if (state.signedIn === true) {
+        const name = String(state.name || '');
+        if (name) {
+          const avatar = String(state.avatar || '');
+          return { name: name, label: 'Connected', ok: true,
+            avatar: DISCORD_AVATAR.test(avatar) ? avatar : '',
+            why: 'Signed in through Discord via LuaTools.' };
+        }
+      }
+      return { name: 'LuaTools', label: 'Sign in', ok: false, avatar: '',
+        why: String(state.error || '') };
+    }
 
     function accountRow() {
-      const row = document.createElement('div');
+      const info = footerState(luatools);
+      const row = document.createElement('button');
       row.className = 'sls-luna-account';
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      row.title = info.why ? 'LuaTools account \u2014 ' + info.why : 'LuaTools account';
       const dot = document.createElement('span');
-      dot.className = 'sls-luna-dot' + (connected() ? ' ok' : '');
-      const label = document.createElement('span');
-      const account = (snapshot && snapshot.account) || '';
-      label.textContent = account ? ('Account ' + account.slice(-5)) : 'No ledger yet';
+      dot.className = 'sls-luna-dot' + (info.ok ? ' ok' : '');
+      dot.style.display = '';
+      row.appendChild(dot);
+      if (info.avatar) {
+        // The URL comes validated from the backend; still assigned through the
+        // property (never innerHTML) and without a referrer, so the Discord CDN
+        // never sees the Steam page and a broken URL degrades to the dot.
+        const img = document.createElement('img');
+        img.className = 'sls-luna-avatar';
+        img.width = 24;
+        img.height = 24;
+        img.alt = '';
+        img.referrerPolicy = 'no-referrer';
+        img.style.width = '24px';
+        img.style.height = '24px';
+        img.style.borderRadius = '50%';
+        img.style.objectFit = 'cover';
+        img.onerror = () => {
+          if (typeof img.remove === 'function') img.remove();
+          dot.style.display = '';
+        };
+        img.src = info.avatar;
+        dot.style.display = 'none';
+        row.appendChild(img);
+      }
+      const name = document.createElement('span');
+      name.textContent = info.name;
       const state = document.createElement('span');
-      state.style.color = '#8d97a1';
-      state.textContent = connected() ? 'Connected' : 'Offline';
-      row.append(dot, label, state);
+      state.className = 'sls-luna-state' + (info.ok ? ' ok' : '');
+      if (!info.ok) state.style.color = '#8d97a1';
+      state.textContent = info.label;
+      row.append(name, state);
+      row.onclick = openLuaToolsAccount;
+      row.onkeydown = event => {
+        const key = String((event && (event.key || event.code)) || '');
+        if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault();
+          openLuaToolsAccount();
+        }
+      };
       return row;
+    }
+
+    /* Lumen's sidebar footer button opens the account page, and a click works
+       even while that sidebar is hidden by the embed. `__lumenOpenLuaToolsAccount`
+       is NOT used here: it returns at once when the overlay already exists,
+       which is always the case once embedded. */
+    function lumenAccountButton(overlay) {
+      const root = overlay || document.getElementById('lumen-settings-overlay');
+      return root ? findClass(root, 'lumen-account-entry') : null;
+    }
+
+    function lumenAccountPanel() {
+      return document.getElementById('lumen-panel-account') || null;
+    }
+
+    /* The account panel counts as a Lumen page: Lumen shows it by display, and
+       marks its own sidebar entry, exactly like the other panels. */
+    function lumenAccountVisible() {
+      const panel = lumenAccountPanel();
+      if (!panel) return false;
+      const style = panel.style || {};
+      if (panel.hidden === true || style.display === 'none') return false;
+      if (classTokens(panel).indexOf('hidden') >= 0) return false;
+      return (typeof style.display === 'string' && style.display !== '')
+        || classTokens(panel).indexOf('active') >= 0;
+    }
+
+    /* Open the account page inside the embed: click Lumen's own entry; if it is
+       gone, Lumen's supported open path with the account tab pre-selected (its
+       overlay has to be rebuilt for that, and the observer re-embeds it). */
+    function openLumenAccountPage() {
+      const button = lumenAccountButton();
+      if (button && typeof button.click === 'function') {
+        try { button.click(); } catch (error) {
+          lunaWarn('Lumen\u2019s account entry did not open: ' + errorText(error), w);
+        }
+        return true;
+      }
+      if (typeof w.__lumenOpenOverlay !== 'function') return false;
+      try {
+        w.__lumenSettingsInitialTab = 'account';
+        if (typeof w.__lumenCloseOverlay === 'function') w.__lumenCloseOverlay();
+        w.__lumenOpenOverlay();
+        return true;
+      } catch (error) {
+        lunaWarn('Lumen\u2019s account page did not open: ' + errorText(error), w);
+        return false;
+      }
+    }
+
+    /* The account lives in Lumen, but the click must keep everything inside
+       Luna. With embedding on: switch to the Lumen category, wait until the
+       pane is laid in, then open Lumen's account page in it. With embedding
+       off, or after this session fell back, the old hand-over runs: close Luna
+       and let Lumen show its own window. */
+    function openLuaToolsAccount() {
+      if (!lumenEmbedWanted() || lumenEmbedBlocked) { handOverToLumenAccount(); return; }
+      const entered = selectCategory('lumen');
+      if (entered === 'door' || !document.getElementById(OVERLAY_ID)) {
+        // Embedding fell back to Lumen's own window, which is in front of Luna.
+        handOverToLumenAccount();
+        return;
+      }
+      const started = Date.now();
+      const step = () => {
+        if (tornDown || tab !== 'lumen' || !document.getElementById(OVERLAY_ID)) return;
+        if (lumenEmbedState) {
+          lumenSignInNote = openLumenAccountPage()
+            ? '' : 'Open the account from Lumen\u2019s own menu.';
+          repaintIfOpen();
+          return;
+        }
+        if (Date.now() - started > 3000) {
+          lumenSignInNote = 'Open the account from Lumen\u2019s own menu.';
+          repaintIfOpen();
+          return;
+        }
+        life.timeout(step, 50);
+      };
+      life.timeout(step, 0);
+    }
+
+    // Embedding off (Settings) or blocked this session: the old door.
+    function handOverToLumenAccount() {
+      closeMenu();
+      let open = null;
+      try {
+        open = typeof w.__lumenOpenLuaToolsAccount === 'function' ? w.__lumenOpenLuaToolsAccount : null;
+      } catch (_) { open = null; }
+      let note = 'Open the account from Lumen\u2019s own menu.';
+      if (open) {
+        try {
+          open();
+          return;
+        } catch (error) {
+          note = 'Lumen\u2019s account window did not open: ' + errorText(error);
+          lunaWarn(note, w);
+        }
+      }
+      showMenu();
+      selectCategory('lumen');
+      lumenSignInNote = note;
+      repaintIfOpen();
     }
 
     function connected() {
@@ -801,6 +1456,61 @@
       };
       sessionRow.append(sessionText, sessionSwitch);
       body.appendChild(sessionRow);
+
+      // Discord Rich Presence: Luna talks to the local Discord client itself.
+      const dTxt = (prefValue('lang') === 'es') ? {
+        title: 'Discord', sub: 'Muestra el nombre real del juego en Discord mientras juegas.',
+        hint: 'Crea una aplicación con el nombre de tu launcher en discord.com/developers y pega su Application ID',
+        placeholder: 'Application ID de Discord', save: 'Guardar',
+      } : {
+        title: 'Discord', sub: 'Shows the real game name in Discord while you play.',
+        hint: 'Create an application named after your launcher at discord.com/developers and paste its Application ID',
+        placeholder: 'Discord Application ID', save: 'Save',
+      };
+      const discordOn = state.discordEnabled !== false;
+      const discordRow = document.createElement('div');
+      discordRow.className = 'sls-luna-row';
+      const discordText = document.createElement('div');
+      discordText.className = 'txt';
+      const discordName = document.createElement('div');
+      discordName.className = 'name';
+      discordName.textContent = dTxt.title;
+      const discordSub = document.createElement('div');
+      discordSub.className = 'sub';
+      discordSub.textContent = dTxt.sub;
+      discordText.append(discordName, discordSub);
+      const discordSwitch = document.createElement('div');
+      discordSwitch.className = 'sls-luna-switch' + (discordOn ? ' on' : '');
+      discordSwitch.appendChild(document.createElement('span'));
+      discordSwitch.onclick = async () => {
+        try {
+          await rpc(w, 'SlsPresenceSetDiscord', { raw: JSON.stringify({ enabled: !discordOn }) });
+          await refresh();
+        } catch (error) { showError(body, error); }
+      };
+      discordRow.append(discordText, discordSwitch);
+      body.appendChild(discordRow);
+      const discordIdRow = document.createElement('div');
+      discordIdRow.className = 'sls-luna-row';
+      const discordInput = document.createElement('input');
+      discordInput.className = 'sls-luna-search';
+      discordInput.placeholder = dTxt.placeholder;
+      discordInput.value = String(state.discordAppId || '');
+      const discordSave = document.createElement('button');
+      discordSave.className = 'sls-luna-btn';
+      discordSave.textContent = dTxt.save;
+      discordSave.onclick = async () => {
+        try {
+          await rpc(w, 'SlsPresenceSetDiscord', { raw: JSON.stringify({ appId: discordInput.value.trim() }) });
+          await refresh();
+        } catch (error) { showError(body, error); }
+      };
+      discordIdRow.append(discordInput, discordSave);
+      body.appendChild(discordIdRow);
+      const discordHint = document.createElement('p');
+      discordHint.className = 'sls-luna-note';
+      discordHint.textContent = dTxt.hint;
+      body.appendChild(discordHint);
 
       const owned = Object.keys(state.owned || {}).length;
       const running = Object.keys(state.running || {}).length;
@@ -1689,6 +2399,9 @@
     // reset); localStorage stays the fast mirror the agent reads.
     const HLTB_ORDER_KEY = 'slsLunaHltbOrder';
     const BETA_KEY = 'slsLunaBeta';
+    // Local mirror of the Lumen embedding switch, so the choice holds in the
+    // first seconds of a session, before SlsLunaInfo has answered.
+    const LUMEN_EMBED_KEY = 'slsLunaLumenEmbed';
     let betaNotice = null;
     let steamosNotice = null;
     function localItem(key) {
@@ -1745,6 +2458,7 @@
       const patch = {};
       if (prefs.beta === undefined && localItem(BETA_KEY) === '1') patch.beta = true;
       if (prefs.hltb_order === undefined && localItem(HLTB_ORDER_KEY) === 'long') patch.hltb_order = 'long';
+      if (prefs.lumen_button === undefined && localItem(LUMEN_BTN_KEY) === '1') patch.lumen_button = true;
       for (const key of Object.keys(patch)) {
         try {
           const out = await rpc(w, 'SlsLunaPrefsSet',
@@ -1757,6 +2471,8 @@
       if (fresh.hltb_order !== undefined) {
         setLocalItem(HLTB_ORDER_KEY, fresh.hltb_order === 'long' ? 'long' : 'short');
       }
+      if (fresh.lumen_button !== undefined) setLocalItem(LUMEN_BTN_KEY, fresh.lumen_button ? '1' : '0');
+      if (fresh.lumen_embed !== undefined) setLocalItem(LUMEN_EMBED_KEY, fresh.lumen_embed ? '1' : '0');
     }
 
     // ---- HowLongToBeat page: cached times, missing games, on-demand fetch --
@@ -2054,7 +2770,7 @@
       if (hltbQueue && hltbQueue.running) return;
       if (!hltbBackground()) return;
       const records = (hltb && hltb.games) || {};
-      const library = (hltb && hltb.library) || [];
+      const library = asList(hltb && hltb.library);
       const missing = buildHltbRows(records, library, '').filter(row => !row.record);
       if (!missing.length) {
         setHltbBackground(false);
@@ -2161,7 +2877,7 @@
     function hltbBody() {
       const body = document.createElement('div');
       const records = (hltb && hltb.games) || {};
-      const library = (hltb && hltb.library) || [];
+      const library = asList(hltb && hltb.library);
       const all = buildHltbRows(records, library, '');
       const missing = all.filter(row => !row.record);
       const noMatch = all.filter(row => row.record && row.record.match === 'none');
@@ -2306,8 +3022,10 @@
     async function refreshSgdb() {
       try {
         sgdb = await rpc(w, 'SlsSgdbGet');
+        sgdbReadError = '';
       } catch (error) {
         sgdb = sgdb || {};
+        sgdbReadError = String(error && error.message ? error.message : error);
       }
       repaintIfOpen();
     }
@@ -2325,7 +3043,8 @@
         sgdbKeyInput.value = '';
         sgdbNotice = key ? 'Key saved.' : 'Key cleared.';
       } catch (error) {
-        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbNotice = 'Could not save the key: '
+          + String(error && error.message ? error.message : error);
       }
       sgdbBusy = false;
       repaintIfOpen();
@@ -2339,7 +3058,8 @@
         await rpc(w, 'SlsSgdbTest');
         sgdbNotice = 'SteamGridDB is reachable and the key works.';
       } catch (error) {
-        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbNotice = 'Key test failed: '
+          + String(error && error.message ? error.message : error);
       }
       sgdbBusy = false;
       repaintIfOpen();
@@ -2364,7 +3084,8 @@
           loadSgdbAssets();
         }
       } catch (error) {
-        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbNotice = 'Search failed: '
+          + String(error && error.message ? error.message : error);
       }
       sgdbBusy = false;
       repaintIfOpen();
@@ -2392,7 +3113,8 @@
           sgdbNotice = 'No usable ' + sgdbKind + ' images for this game (PNG or JPEG only).';
         }
       } catch (error) {
-        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbNotice = 'Could not load artwork: '
+          + String(error && error.message ? error.message : error);
       }
       sgdbBusy = false;
       repaintIfOpen();
@@ -2415,7 +3137,8 @@
         repaintIfOpen();
         if (at) finishLiveNotice(at, 'Applied and refreshed in Steam right away.');
       } catch (error) {
-        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbNotice = 'Could not apply artwork: '
+          + String(error && error.message ? error.message : error);
         sgdbBusy = false;
         repaintIfOpen();
       }
@@ -2461,28 +3184,122 @@
       }, 2500);
     }
 
+    /* The auto pass is a backend job now: SlsSgdbAuto only creates it, and
+       each SlsSgdbAutoStatus call advances it by one bounded request. Follow
+       it while this tab is visible; stop on a tab switch, on close, on
+       teardown and at the job's own 180 s deadline. */
+    const SGDB_AUTO_POLL = 700;
+    const SGDB_AUTO_TTL = 180000;
+
+    function stopSgdbAuto() {
+      if (sgdbAutoTimer === null) return;
+      const id = sgdbAutoTimer;
+      sgdbAutoTimer = null;
+      try { (w.clearTimeout || clearTimeout)(id); } catch (_) { /* already fired */ }
+    }
+
+    function normalizeSgdbAuto(out) {
+      const job = (out && out.job) || {};
+      return {
+        id: job.id != null ? job.id : (sgdbAuto && sgdbAuto.id),
+        state: String((out && out.state) || job.state || 'running'),
+        done: Number(job.done) || 0,
+        total: Number(job.total) || 0,
+        results: Array.isArray(out && out.results) ? out.results : [],
+        startedAt: job.startedAt || (sgdbAuto && sgdbAuto.startedAt) || 0,
+        begunAt: (sgdbAuto && sgdbAuto.begunAt) || Date.now(),
+      };
+    }
+
+    function sgdbAutoResults() {
+      const list = asList(sgdbAuto && sgdbAuto.results);
+      return { settled: list.filter(entry => entry && !entry.pending),
+        pending: list.filter(entry => entry && entry.pending) };
+    }
+
+    function finishSgdbAuto() {
+      const { settled } = sgdbAutoResults();
+      const ok = settled.filter(entry => entry.ok);
+      const failed = settled.filter(entry => !entry.ok);
+      sgdbBusy = false;
+      sgdbNotice = 'Applied the best match to ' + ok.length + ' of ' + settled.length + ' slots'
+        + (failed.length ? ' (' + failed.map(entry => entry.kind).join(', ')
+          + ' had nothing usable)' : '') + '.';
+      if (sgdbGame) {
+        const liveKinds = ok.filter(entry => entry.live).map(entry => entry.kind);
+        const at = liveKinds.length ? requestLiveArtwork(sgdbGame.appid, liveKinds) : null;
+        repaintIfOpen();
+        if (at) finishLiveNotice(at, 'Steam refreshed every slot live.');
+        return;
+      }
+      repaintIfOpen();
+    }
+
+    function scheduleSgdbAuto(step) {
+      stopSgdbAuto();
+      const schedule = w.setTimeout || setTimeout;
+      sgdbAutoTimer = schedule(() => { sgdbAutoTimer = null; step(); }, SGDB_AUTO_POLL);
+    }
+
+    function pollSgdbAuto() {
+      if (!sgdbAuto || sgdbAuto.state !== 'running') return;
+      if (tab !== 'steamgrid' || !document.getElementById(OVERLAY_ID)) { stopSgdbAuto(); return; }
+      if (Date.now() - (sgdbAuto.begunAt || Date.now()) > SGDB_AUTO_TTL) {
+        stopSgdbAuto();
+        sgdbAuto.state = 'timeout';
+        sgdbBusy = false;
+        sgdbNotice = 'The artwork pass stopped after 180 s; nothing else was changed.';
+        addProblem('SteamGridDB', sgdbNotice);
+        repaintIfOpen();
+        return;
+      }
+      scheduleSgdbAuto(async () => {
+        if (!sgdbAuto || sgdbAuto.state !== 'running') return;
+        if (tab !== 'steamgrid' || !document.getElementById(OVERLAY_ID)) { stopSgdbAuto(); return; }
+        try {
+          const out = await rpc(w, 'SlsSgdbAutoStatus',
+            { raw: JSON.stringify({ id: sgdbAuto.id }) });
+          sgdbAuto = normalizeSgdbAuto(out);
+          repaintIfOpen();
+          if (sgdbAuto.state === 'running') pollSgdbAuto();
+          else finishSgdbAuto();
+        } catch (error) {
+          const message = String(error && error.message ? error.message : error);
+          sgdbNotice = 'Artwork pass failed: ' + message;
+          sgdbBusy = false;
+          if (sgdbAuto) sgdbAuto.state = 'failed';
+          stopSgdbAuto();
+          repaintIfOpen();
+        }
+      });
+    }
+
     async function autoApplySgdb() {
       if (!sgdbGame || !sgdbGame.sgdbId) return;
+      stopSgdbAuto();
       sgdbNotice = null;
       sgdbBusy = true;
+      sgdbAuto = { id: null, state: 'starting', done: 0, total: 0, results: [], begunAt: Date.now() };
       repaintIfOpen();
       try {
         const out = await rpc(w, 'SlsSgdbAuto', {
           raw: JSON.stringify({ appid: Number(sgdbGame.appid), gameId: sgdbGame.sgdbId }),
         });
-        const results = Array.isArray(out.results) ? out.results : [];
-        const ok = results.filter(entry => entry.ok);
-        const failed = results.filter(entry => !entry.ok);
-        sgdbNotice = 'Applied the best match to ' + ok.length + ' of ' + results.length + ' slots'
-          + (failed.length ? ' (' + failed.map(entry => entry.kind).join(', ') + ' had nothing usable)' : '') + '.';
-        const liveKinds = ok.filter(entry => entry.live).map(entry => entry.kind);
-        const at = liveKinds.length ? requestLiveArtwork(sgdbGame.appid, liveKinds) : null;
-        sgdbBusy = false;
+        if (!out || out.success === false) {
+          throw Error((out && out.error) || 'The artwork pass did not start.');
+        }
+        sgdbAuto = normalizeSgdbAuto(out);
+        sgdbBusy = sgdbAuto.state === 'running';
         repaintIfOpen();
-        if (at) finishLiveNotice(at, 'Steam refreshed every slot live.');
+        if (sgdbAuto.state === 'running') pollSgdbAuto();
+        else finishSgdbAuto();
       } catch (error) {
-        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbNotice = 'Artwork pass failed: '
+          + String(error && error.message ? error.message : error);
+        addProblem('SteamGridDB', sgdbNotice);
+        sgdbAuto = null;
         sgdbBusy = false;
+        stopSgdbAuto();
         repaintIfOpen();
       }
     }
@@ -2505,7 +3322,8 @@
         repaintIfOpen();
         if (at) finishLiveNotice(at, '');
       } catch (error) {
-        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbNotice = 'Could not undo: '
+          + String(error && error.message ? error.message : error);
         sgdbBusy = false;
         repaintIfOpen();
       }
@@ -2524,7 +3342,8 @@
           ? 'Custom artwork removed; Steam shows its own again.'
           : 'Nothing custom in this slot; Steam already shows its own.';
       } catch (error) {
-        sgdbNotice = String(error && error.message ? error.message : error);
+        sgdbNotice = 'Could not remove the custom artwork: '
+          + String(error && error.message ? error.message : error);
       }
       sgdbBusy = false;
       repaintIfOpen();
@@ -2616,15 +3435,52 @@
 
       if (sgdbNotice) {
         const notice = document.createElement('p');
-        notice.className = /(fail|reject|unavailable|error)/i.test(sgdbNotice) ? 'sls-luna-error' : 'sls-luna-note';
+        notice.className = /(fail|reject|unavailable|error|could not)/i.test(sgdbNotice)
+          ? 'sls-luna-error' : 'sls-luna-note';
         notice.textContent = sgdbNotice;
         body.appendChild(notice);
+      }
+      if (sgdbReadError) {
+        const readError = document.createElement('p');
+        readError.className = 'sls-luna-error';
+        readError.textContent = 'Could not read SteamGridDB settings: ' + sgdbReadError;
+        body.appendChild(readError);
       }
       if (sgdbBusy) {
         const busy = document.createElement('p');
         busy.className = 'sls-luna-note';
         busy.textContent = 'Working\u2026';
         body.appendChild(busy);
+      }
+
+      // The pass now runs as a job: counts and the slot in flight while it
+      // runs, then one row per slot with what really happened.
+      if (sgdbAuto) {
+        const { settled, pending } = sgdbAutoResults();
+        const running = sgdbAuto.state === 'running' || sgdbAuto.state === 'starting';
+        const total = Number(sgdbAuto.total) || 0;
+        const done = Number(sgdbAuto.done) || 0;
+        const progress = document.createElement('p');
+        progress.className = 'sls-luna-note';
+        progress.textContent = running
+          ? 'SteamGridDB: ' + done + ' of ' + (total || '?') + ' slot(s)'
+            + (pending.length ? ' \u00b7 working on ' + pending[0].kind : '') + '\u2026'
+          : 'SteamGridDB artwork pass: ' + String(sgdbAuto.state || 'done') + '.';
+        body.appendChild(progress);
+        if (running && total) body.appendChild(progressBar((done / total) * 100, true));
+        if (settled.length) {
+          const list = document.createElement('div');
+          settled.forEach(entry => {
+            const row = document.createElement('p');
+            const failed = !entry.ok;
+            row.className = failed ? 'sls-luna-error' : 'sls-luna-note';
+            row.textContent = String(entry.kind || '?') + ': ' + (failed
+              ? (entry.code ? entry.code + ' \u2014 ' : '') + (entry.error || 'nothing usable')
+              : 'applied' + (entry.live ? ' (live)' : ''));
+            list.appendChild(row);
+          });
+          body.appendChild(list);
+        }
       }
 
       if (!hasKey) return body;
@@ -2728,6 +3584,8 @@
       close.className = 'sls-luna-btn secondary';
       close.textContent = 'Close picker';
       close.onclick = () => {
+        stopSgdbAuto();
+        sgdbAuto = null;
         sgdbGame = null; sgdbAssets = null; sgdbResults = null; sgdbNotice = null;
         repaintIfOpen();
       };
@@ -2886,6 +3744,13 @@
         confirmUnblock: 'Yes, restart Steam and update',
         cancel: 'Cancel',
         steamJobStarted: 'Started. Steam will close and reopen by itself; progress is in the Luna steam job log.',
+        hostTitle: 'Plugin host',
+        hostRunning: 'Running on',
+        hostPending: 'switches after a Steam restart (luna host cutover / rollback)',
+        gradientTitle: 'Steam gradient',
+        gradientLabel: 'Desktop-colour gradient',
+        gradientSub: 'Paints a soft gradient behind Steam from your Noctalia palette and follows it when the '
+          + 'desktop theme changes. Needs the Noctalia Steam template.',
         issueUpdateAvailable: (latest, installed) => 'Luna update available: ' + latest + ' (you have '
           + installed + '). Press Install update below, then restart Steam.',
         issueUpdateQueued: tag => 'Luna update queued (' + tag + '): it lands the next time Steam is closed.',
@@ -2975,6 +3840,13 @@
         confirmUnblock: 'Sí, reiniciar Steam y actualizar',
         cancel: 'Cancelar',
         steamJobStarted: 'Iniciado. Steam se cerrará y reabrirá solo; el progreso está en el log de la tarea de Luna.',
+        hostTitle: 'Host de plugins',
+        hostRunning: 'Funcionando con',
+        hostPending: 'cambia tras reiniciar Steam (luna host cutover / rollback)',
+        gradientTitle: 'Degradado de Steam',
+        gradientLabel: 'Degradado con los colores del escritorio',
+        gradientSub: 'Pinta un degradado suave detrás de Steam con tu paleta de Noctalia y lo sigue cuando '
+          + 'cambia el tema del escritorio. Requiere la plantilla de Steam de Noctalia.',
         issueUpdateAvailable: (latest, installed) => 'Actualización de Luna disponible: ' + latest + ' (tienes '
           + installed + '). Pulsa Instalar actualización abajo y reinicia Steam.',
         issueUpdateQueued: tag => 'Actualización de Luna en cola (' + tag + '): se aplicará con Steam cerrado.',
@@ -3039,6 +3911,12 @@
       const health = lunaHealth || null;
       const healthPrefs = ((health && health.data && health.data.prefs) || {});
       const T = HEALTH_TEXT[healthPrefs.lang] || HEALTH_TEXT.en;
+      if (jobNotice) {
+        const running = document.createElement('p');
+        running.className = 'sls-luna-note';
+        running.textContent = jobNotice;
+        body.appendChild(running);
+      }
       if (healthNotice) {
         const notice = document.createElement('p');
         notice.className = 'sls-luna-error';
@@ -3103,8 +3981,8 @@
       if (lunaRefresh && lunaRefresh.refreshPending) {
         issues.push(T.issueRefreshQueued);
       }
-      if ((install.drift || []).length) {
-        issues.push(T.issueDrift(install.drift.slice(0, 2).join('; '),
+      if (asList(install.drift).length) {
+        issues.push(T.issueDrift(asList(install.drift).slice(0, 2).join('; '),
           install.drift.length > 2 ? install.drift.length - 2 : 0));
       }
       if ((upd.autoUpdate || 'off') !== 'off' && !upd.timerUnits && !upd.pending) {
@@ -3140,18 +4018,21 @@
 
       section(T.addons);
       const pinned = install.versions || {};
-      (lumen.addons || []).forEach(entry => {
+      asList(lumen.addons).forEach(entry => {
         const want = pinned[entry.name];
         line(entry.name + ' ' + (entry.version || '?')
           + (want && String(want) !== String(entry.version) ? ' \u00b7 pinned ' + want : '')
           + ' \u00b7 ' + (entry.files || 0) + ' entries');
       });
-      if ((install.drift || []).length) line('Drift: ' + install.drift.join('; '));
+      if (asList(install.drift).length) line('Drift: ' + asList(install.drift).join('; '));
 
       section(T.paths);
       line('Lumen: ' + (lumen.root || '?') + (lumen.binary ? ' (binary present)' : ' (binary missing)')
         + (lumen.luatools ? ' \u00b7 LuaTools present' : ' \u00b7 LuaTools missing')
         + (lumen.bridge ? ' \u00b7 bridge present' : ' \u00b7 bridge missing'));
+      const hostInfo = health.host || {};
+      line('Host: ' + (hostInfo.running || '?') + (hostInfo.configured && hostInfo.configured !== hostInfo.running
+        ? ' (configured: ' + hostInfo.configured + ')' : ''));
       line('Boot: ' + (boot.path || '?'));
       line('Steam: ' + (steam.root || '?') + (steam.exists ? '' : ' (steam.sh missing)'));
       if (steamClient.build || steamClient.pinned) {
@@ -3169,7 +4050,7 @@
       line('Data: ' + (data.dir || '?'));
       if (install.installedAt || install.generated) {
         line('Last install: ' + (install.installedAt ? clock(install.installedAt) : '?')
-          + (install.generated ? ' \u00b7 manifest ' + String(install.generated).slice(0, 10) : '')
+          + (install.generated ? ' \u00b7 bundle built ' + String(install.generated).slice(0, 10) : '')
           + (install.source ? ' \u00b7 ' + install.source : ''));
       } else {
         line('Last install: not recorded by this installer version (run install --force once).');
@@ -3183,131 +4064,88 @@
         + ' \u00b7 SteamGridDB key: ' + (data.sgdb && data.sgdb.hasKey ? 'stored' : 'not set'));
 
       section(T.dataFiles);
-      (data.files || []).forEach(entry => {
+      asList(data.files).forEach(entry => {
         line(entry.name + (entry.directory
           ? '/ (' + (entry.files != null ? entry.files : 0) + ' entries)'
           : ' \u00b7 ' + formatBytes(entry.size || 0)));
       });
 
+      /* Updates, the Steam client controls and the auto-update switch live on
+         the Updates page now; Health keeps the diagnostics and the repair. */
       section(T.updates);
-      const update = lunaUpdate || {};
-      line('Installed: ' + (update.installed || '?') + ' \u00b7 latest: ' + (update.latest || 'unknown')
-        + (update.available ? ' \u00b7 update available' : (update.latest ? ' \u00b7 up to date' : ''))
-        + (update.checkedAt ? ' \u00b7 checked ' + age(update.checkedAt) + ' ago' : ''));
-      if (update.checking) line('Checking GitHub for a newer release\u2026');
-      else if (update.checkError) line('Check: ' + update.checkError);
-      if (update.pending) line('Queued: ' + (update.pendingTag || 'latest')
-        + ' - it lands the next time Steam is closed.');
-      if (update.last) {
-        line('Last unattended run: ' + (update.last.result || '?')
-          + (update.last.version ? ' ' + update.last.version : '')
-          + (update.last.reason ? ' \u00b7 ' + update.last.reason : '')
-          + (update.last.at ? ' \u00b7 ' + age(update.last.at) + ' ago' : ''));
-      }
-      const updateActions = document.createElement('div');
-      updateActions.className = 'sls-luna-row';
-      const checkButton = document.createElement('button');
-      checkButton.className = 'sls-luna-btn secondary';
-      checkButton.textContent = update.checking ? T.checking : T.checkNow;
-      checkButton.disabled = Boolean(update.checking);
-      checkButton.onclick = () => runUpdateAction({ action: 'check' });
-      const installButton = document.createElement('button');
-      installButton.className = 'sls-luna-btn';
-      installButton.textContent = update.pending ? T.queued : T.installUpdate;
-      installButton.disabled = !update.available || update.pending;
-      installButton.onclick = () => runUpdateAction({ action: 'install', tag: update.latest });
-      const cancelButton = document.createElement('button');
-      cancelButton.className = 'sls-luna-btn secondary';
-      cancelButton.textContent = T.cancelQueued;
-      cancelButton.disabled = !update.pending;
-      cancelButton.onclick = () => runUpdateAction({ action: 'cancel' });
+      const repairRow = document.createElement('div');
+      repairRow.className = 'sls-luna-row';
       const repairButton = document.createElement('button');
       repairButton.className = 'sls-luna-btn secondary';
       repairButton.textContent = T.repairBridge;
       repairButton.title = T.repairTitle;
       repairButton.disabled = !((lumen.addons || []).length && !boot.patched);
       repairButton.onclick = () => runUpdateAction({ action: 'repair' });
-      updateActions.append(checkButton, installButton, cancelButton, repairButton);
-      body.appendChild(updateActions);
-      line(T.applyNeedsClosed);
-      const modeRow = document.createElement('div');
-      modeRow.className = 'sls-luna-subtabs';
-      [['off', 'Off'], ['notify', 'Notify me'], ['install', 'Install automatically']]
-        .forEach(pair => {
-          const button = document.createElement('button');
-          button.className = 'sls-luna-subtab' + ((update.autoUpdate || 'off') === pair[0] ? ' active' : '');
-          button.textContent = pair[1];
-          button.onclick = () => runUpdateAction({ action: 'mode', value: pair[0] });
-          modeRow.appendChild(button);
-        });
-      body.appendChild(modeRow);
-      if (update.pending && !update.timerUnits) {
-        line(T.noTimerYet);
-      } else if ((update.autoUpdate || 'off') !== 'off') {
-        line(update.timerUnits ? T.timerReady : T.timerMissing);
-      }
+      repairRow.appendChild(repairButton);
+      body.appendChild(repairRow);
+      line('Looking for Health > Lumen? Updating Lumen and Luna is on the Updates page, the next tab.');
 
-      /* Steam client, updated only from here. The bootstrapper is blocked
-         everywhere else, so these are the only sanctioned paths: pin the
-         working build now, queue an update or a fresh cache for the next
-         closed-Steam window, or cancel the queue. */
-      section(T.steamClient);
-      const steamCtl = lunaSteam || (health.steam && health.steam.client) || {};
-      line('Client: ' + (steamCtl.build || '?')
-        + (steamCtl.pinned ? (steamCtl.match ? ' \u00b7 ' + T.pinnedOk + ' ' + steamCtl.pinned + ' \u2713' : ' \u00b7 PINNED ' + steamCtl.pinned + ' \u2014 ' + T.drifted) : ' \u00b7 ' + T.notPinned)
-        + ' \u00b7 updates ' + (steamCtl.updatesBlocked ? T.updatesBlocked : T.updatesAllowed)
-        + (steamCtl.cacheReady ? ' \u00b7 ' + T.cacheReady : ''));
-      if (steamCtl.pending) {
-        line(T.queuedTask(steamCtl.pending));
+      /* Problems: the last few failures from every layer (RPCs, this panel's
+         own warnings, the agent's ring and the last backend job), compact and
+         copyable. Read from memory and one localStorage key: no RPC, so the
+         page opens as fast as before. */
+      const problemEntries = () => {
+        const list = PROBLEMS.slice();
+        try {
+          const raw = w.localStorage && w.localStorage.getItem('slsLunaDiag');
+          const agent = raw ? JSON.parse(raw) : [];
+          if (Array.isArray(agent)) {
+            agent.forEach(item => {
+              if (item && item.text) {
+                list.push({ at: Number(item.at) || 0, source: 'agent', text: String(item.text) });
+              }
+            });
+          }
+        } catch (_) { /* a malformed diag is not itself a problem */ }
+        // The repair job's last outcome comes from the state file the Health
+        // RPC already returned, so it survives a reopen without another call.
+        const repairJob = (lunaHealth && lunaHealth.repair) || null;
+        if (repairJob && repairJob.message && repairJob.state !== 'idle') {
+          const already = list.some(entry => entry.text === repairJob.message);
+          if (!already) {
+            list.push({ at: (repairJob.result && repairJob.result.at) * 1000
+              || (repairJob.startedAt || 0) * 1000, source: 'repair', text: repairJob.message });
+          }
+        }
+        list.sort((a, b) => (a.at || 0) - (b.at || 0));
+        return list.slice(-PROBLEM_LIMIT);
+      };
+      section('Problems');
+      const problems = problemEntries();
+      if (!problems.length) {
+        line('Nothing recorded this session.');
+      } else {
+        const clock = at => {
+          try { return new Date(at || Date.now()).toLocaleTimeString(); } catch (_) { return ''; }
+        };
+        problems.slice(-6).forEach(entry => {
+          line(clock(entry.at) + ' \u00b7 ' + entry.source + ': ' + entry.text);
+        });
+        if (problems.length > 6) line('and ' + (problems.length - 6) + ' older entries in Copy details.');
+        const copyProblems = document.createElement('button');
+        copyProblems.className = 'sls-luna-btn secondary';
+        copyProblems.textContent = 'Copy details';
+        copyProblems.onclick = () => {
+          const area = document.createElement('textarea');
+          area.rows = 10;
+          area.style.width = '100%';
+          area.value = problems.map(entry =>
+            clock(entry.at) + ' \u00b7 ' + entry.source + ': ' + entry.text).join('\n');
+          body.insertBefore(area, body.firstChild ? body.firstChild.nextSibling : null);
+          area.focus();
+          area.select();
+          try { if (document.execCommand) document.execCommand('copy'); } catch (_) { /* select-only */ }
+        };
+        const problemRow = document.createElement('div');
+        problemRow.className = 'sls-luna-row';
+        problemRow.appendChild(copyProblems);
+        body.appendChild(problemRow);
       }
-      if (lunaRefresh && lunaRefresh.refreshPending) {
-        line(T.queuedRefresh);
-      }
-      if (update.last && update.last.steamDrift) {
-        line(T.lastNoticed(update.last.steamDrift));
-      }
-      const steamActions = document.createElement('div');
-      steamActions.className = 'sls-luna-row';
-      const pinButton = document.createElement('button');
-      pinButton.className = 'sls-luna-btn secondary';
-      pinButton.textContent = T.pinBuild;
-      pinButton.onclick = () => runSteamAction({ action: 'pin' });
-      const steamUpdateButton = document.createElement('button');
-      steamUpdateButton.className = 'sls-luna-btn';
-      steamUpdateButton.textContent = steamCtl.pending ? T.queued : T.updateClient;
-      steamUpdateButton.disabled = Boolean(steamCtl.pending);
-      steamUpdateButton.onclick = () => runSteamAction({ action: 'queue-update' });
-      const steamCacheButton = document.createElement('button');
-      steamCacheButton.className = 'sls-luna-btn secondary';
-      steamCacheButton.textContent = T.cacheNow;
-      steamCacheButton.title = T.cacheTitle;
-      steamCacheButton.disabled = Boolean(steamCtl.pending);
-      steamCacheButton.onclick = () => runSteamAction({ action: 'queue-cache' });
-      const steamCancelButton = document.createElement('button');
-      steamCancelButton.className = 'sls-luna-btn secondary';
-      steamCancelButton.textContent = T.cancelSteamTask;
-      steamCancelButton.disabled = !steamCtl.pending;
-      steamCancelButton.onclick = () => runSteamAction({ action: 'cancel' });
-      steamActions.append(pinButton, steamUpdateButton, steamCacheButton, steamCancelButton);
-      body.appendChild(steamActions);
-      const refreshRow = document.createElement('div');
-      refreshRow.className = 'sls-luna-row';
-      const refreshButton = document.createElement('button');
-      refreshButton.className = 'sls-luna-btn';
-      refreshButton.textContent = (lunaRefresh && lunaRefresh.refreshPending) ? T.queued : T.refreshBoth;
-      refreshButton.title = T.refreshTitle;
-      refreshButton.disabled = Boolean(steamCtl.pending) || Boolean((upd.pending))
-        || Boolean(lunaRefresh && lunaRefresh.refreshPending);
-      refreshButton.onclick = () => runRefreshAction({ action: 'queue' });
-      const refreshCancelButton = document.createElement('button');
-      refreshCancelButton.className = 'sls-luna-btn secondary';
-      refreshCancelButton.textContent = T.cancelRefresh;
-      refreshCancelButton.disabled = !(lunaRefresh && lunaRefresh.refreshPending);
-      refreshCancelButton.onclick = () => runRefreshAction({ action: 'cancel' });
-      refreshRow.append(refreshButton, refreshCancelButton);
-      body.appendChild(refreshRow);
-      line(T.refreshExplainer);
-      body.appendChild(steamActions);
 
       const copy = document.createElement('button');
       copy.className = 'sls-luna-btn secondary';
@@ -3355,12 +4193,61 @@
       schedule(step, 2000);
     }
 
+    /* Backend jobs run detached, so the start call returns in milliseconds.
+       This loop follows the job's small state file through the status action
+       the page already has: a cheap poll, a live line in the page, and the
+       outcome in the Problems block. Closing the menu leaves the job running. */
+    function jobText(job, label) {
+      const state = String((job && job.state) || '');
+      const message = String((job && job.message) || '').replace(/\s+/g, ' ').trim();
+      if (state === 'ok' || state === 'done') return message || (label + ' finished.');
+      if (state === 'timeout') {
+        return message || (label + ' timed out at ' + ((job && job.limit) || 180)
+          + ' s; its process group was stopped.');
+      }
+      if (state === 'failed') return message || (label + ' failed.');
+      if (state === 'idle') return message || (label + ' has not run yet.');
+      return label + ' is still running in the background; it continues if this menu closes.';
+    }
+
+    async function followJob(label, start, status) {
+      const first = await start();
+      if (!first || first.success === false) {
+        throw Error((first && first.error) || (label + ' did not start'));
+      }
+      let job = first.job || { state: 'running' };
+      for (let tries = 0; tries < 320; tries += 1) {
+        jobNotice = (job.state === 'running' || job.state === 'finishing' || job.state === 'starting')
+          ? label + ' in progress' + (job.age ? ' (' + job.age + ' s)' : '') + '\u2026'
+          : jobText(job, label);
+        repaintIfOpen();
+        if (job.state !== 'running' && job.state !== 'finishing' && job.state !== 'starting') break;
+        if (!document.getElementById(OVERLAY_ID)) return job; // it keeps running
+        await sleep(600);
+        try {
+          const out = await status();
+          if (out && out.job) job = out.job;
+        } catch (error) {
+          addProblem('job', label + ' status: '
+            + String(error && error.message ? error.message : error));
+          break;
+        }
+      }
+      jobNotice = jobText(job, label);
+      addProblem('job', jobNotice);
+      repaintIfOpen();
+      return job;
+    }
+
     async function runUpdateAction(payload) {
       try {
         if (payload.action === 'repair') {
-          const out = await rpc(w, 'SlsLunaRepair', {});
-          if (out && out.health) lunaHealth = out.health;
-          healthNotice = (out && out.message) ? String(out.message).slice(-200) : 'Bridge repaired.';
+          healthNotice = 'Repair started in the background; Steam stays responsive.';
+          repaintIfOpen();
+          const job = await followJob('Repair',
+            () => rpc(w, 'SlsLunaRepair', { raw: JSON.stringify({ action: 'start' }) }),
+            () => rpc(w, 'SlsLunaRepair', { raw: JSON.stringify({ action: 'status' }) }));
+          healthNotice = jobText(job, 'Repair');
           await refresh();
           repaintIfOpen();
           return;
@@ -3368,8 +4255,12 @@
         if (payload.action === 'mode') {
           await rpc(w, 'SlsLunaPrefsSet',
             { raw: JSON.stringify({ key: 'auto_update', value: payload.value }) });
-          await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'timer',
-            value: payload.value === 'off' ? 'off' : 'on' }) });
+          const job = await followJob('Auto-update timer',
+            () => rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'timer',
+              value: payload.value === 'off' ? 'off' : 'on' }) }),
+            () => rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'status' }) })
+              .then(out => { if (out && out.update) lunaUpdate = out.update; return out; }));
+          healthNotice = jobText(job, 'Auto-update timer');
           await refresh();
           repaintIfOpen();
           return;
@@ -3410,20 +4301,785 @@
     }
     async function runSteamAction(payload) {
       try {
+        if (payload.action === 'pin') {
+          healthNotice = 'Pinning in the background; Steam stays responsive.';
+          repaintIfOpen();
+          const job = await followJob('Steam pin',
+            () => rpc(w, 'SlsLunaSteam', { raw: JSON.stringify(payload) }),
+            () => rpc(w, 'SlsLunaSteam', { raw: JSON.stringify({ action: 'status' }) })
+              .then(out => { if (out && out.steam) lunaSteam = out.steam; return out; }));
+          healthNotice = jobText(job, 'Steam pin');
+          await refresh();
+          repaintIfOpen();
+          return;
+        }
         const out = await rpc(w, 'SlsLunaSteam', { raw: JSON.stringify(payload) });
         if (out && out.steam) lunaSteam = out.steam;
         await refresh();
-        if (payload.action === 'pin') {
-          healthNotice = (out && out.message) ? String(out.message).slice(0, 200) : 'Pinned.';
-        } else {
-          healthNotice = null;
-        }
+        healthNotice = null;
         repaintIfOpen();
       } catch (error) {
         healthNotice = 'Steam action failed: '
           + String(error && error.message ? error.message : error);
         repaintIfOpen();
       }
+    }
+
+    /* ------------------------------------------------------------ Updates
+       The one place for versions and updating. Nothing here runs an update
+       while Steam is open: every action either queues a job the
+       `luna autoupdate` timer applies with Steam closed, or is read-only.
+       Each RPC failure shows as its own error row; the rest still renders. */
+    /* ---- One state for the Lumen job. Everything the page shows about Lumen
+       comes from deriveLumen(): a single key, its sentence, and the allowed
+       actions with a reason for each disabled one. */
+    const LUMEN_FINAL = ['applied', 'failed', 'current', 'unknown', 'cancelled', 'restored'];
+    const LUMEN_RESTORE_CMD = name => 'luna lumen restore --backup ' + name + ' --yes';
+    const LUMEN_REINSTALL_CMD = 'luna lumen update --yes --reinstall';
+
+    function versionParts(value) {
+      const found = String(value || '').replace(/^v/i, '').match(/\d+/g);
+      return found ? found.map(Number) : null;
+    }
+    // -1, 0, 1, or null when either side is not a version number.
+    function compareVersions(a, b) {
+      const x = versionParts(a);
+      const y = versionParts(b);
+      if (!x || !y) return null;
+      for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+        const d = (x[i] || 0) - (y[i] || 0);
+        if (d) return d < 0 ? -1 : 1;
+      }
+      return 0;
+    }
+    // The Luna release job: an update is offered only when the latest release is
+    // really newer; an installed build that is ahead of it is never "updated".
+    function lunaRelease(update) {
+      const relation = compareVersions(update.installed, update.latest);
+      const newer = update.available === true && relation !== 0 && relation !== 1;
+      return { newer: newer, ahead: relation === 1 && Boolean(update.latest),
+        known: Boolean(update.latest) };
+    }
+    function arrowText(text) { return String(text || '').replace(/\s*->\s*/g, ' → '); }
+    function changedEntries(result) {
+      const out = [];
+      const changed = result && result.changed;
+      if (changed && typeof changed === 'object') {
+        Object.keys(changed).sort().forEach(name => out.push([name, arrowText(changed[name])]));
+      } else {
+        const before = (result && result.before) || {};
+        const after = (result && result.after) || {};
+        Object.keys(after).sort().forEach(name => {
+          if (before[name] && String(before[name]) !== String(after[name])) {
+            out.push([name, before[name] + ' → ' + after[name]]);
+          }
+        });
+      }
+      return out;
+    }
+    function componentText(item) {
+      const installed = String(item.installed || '?');
+      const available = String(item.available || '?');
+      if (item.status === 'newer') {
+        return item.component + ': ' + installed + ' → ' + available
+          + (available === installed || available === 'beta' ? ' (newer build)' : '');
+      }
+      return item.component + ': ' + installed + (item.status === 'current' ? ' (current)'
+        : ' (unknown' + (item.note ? ': ' + item.note : '') + ')');
+    }
+
+    function deriveLumen(lumen) {
+      const result = lumen.result || {};
+      const rs = String(result.state || '');
+      const at = Number(result.at) || 0;
+      const started = Number(lumen.sessionStartedAt) || 0;
+      const pending = Boolean(lumen.pending);
+      const job = lumen.job || {};
+      const history = at > 0 && started > 0 && at < started && LUMEN_FINAL.indexOf(rs) >= 0;
+      const fresh = Boolean(rs) && !history;
+      const check = lumen.check || {};
+      const upstream = (check.status || {}).upstream || null;
+      const checkedAt = Number(check.checkedAt) || 0;
+      const checkUsable = Boolean(upstream) && (!fresh || LUMEN_FINAL.indexOf(rs) < 0
+        || rs === 'current' || rs === 'unknown' || checkedAt >= at);
+      const view = { key: 'idle', text: '', components: [], checkedAt: checkedAt,
+        checkFailed: Boolean(check.failed || (check.status && check.status.upstreamError)),
+        checking: Boolean(check.checking) };
+      view.components = (checkUsable ? asList(upstream.components)
+        : (fresh && (rs === 'current' || rs === 'unknown') ? asList(result.compared) : []));
+      const phases = { backup: 'Updating: taking a backup. Nothing has changed yet.',
+        installer: 'Updating: replacing Lumen. Do not shut the computer down.',
+        reattach: 'Updating: attaching Luna again.',
+        rollback: 'Rolling back: putting the backup back.' };
+      const say = (key, text) => { view.key = key; view.text = text; return view; };
+      if (rs === 'running' && lumen.interrupted) {
+        return pending
+          ? say('recovering', 'An update was interrupted. It will be recovered after you exit Steam.')
+          : say('interrupted', 'An update was interrupted. Close Steam and run: luna lumen update --yes '
+            + '(it recovers first).');
+      }
+      if (rs === 'running') return say('running', phases[result.phase] || 'Updating…');
+      if (rs === 'failed' && result.rollbackPending) {
+        return say('failed-rollback-pending', 'The update failed. The previous version comes back '
+          + 'after you exit Steam; until then Lumen stays as it is.');
+      }
+      if (pending) {
+        return say('queued', job.action === 'reattach'
+          ? 'Waiting for you to exit Steam to finish attaching Luna.'
+          : job.action === 'rollback' ? 'Waiting for you to exit Steam to put the previous version back.'
+          : 'Queued. The update starts after you exit Steam.');
+      }
+      if (lumen.toolingIncomplete) {
+        return say('tooling', 'Lumen updates are off: ' + lumen.toolingIncomplete
+          + '. Repair with: luna install --force');
+      }
+      if (fresh && rs === 'applied') {
+        const changes = changedEntries(result);
+        return say('applied', changes.length
+          ? 'Updated: ' + changes.map(pair => pair[0] + ' ' + pair[1]).join(', ')
+          : 'Reinstalled. Nothing changed.');
+      }
+      if (fresh && rs === 'failed') {
+        const why = result.message ? ' ' + result.message : '';
+        if (result.rolledBack === true) {
+          return say('failed-rolled-back', 'The update failed and Lumen was rolled back to the '
+            + 'previous version.' + why);
+        }
+        if (result.backup) {
+          return say('failed-not-rolled-back', 'The update failed and was NOT rolled back.' + why);
+        }
+        return say('failed', 'The update failed before anything was changed.' + why);
+      }
+      if (checkUsable) {
+        if (upstream.overall === 'newer') {
+          return say('update-available', 'Update available: ' + (view.components
+            .filter(item => item.status === 'newer').map(componentText).join(', ') || 'newer build'));
+        }
+        if (upstream.overall === 'current') return say('current', 'Up to date. Nothing newer on your channels.');
+        return say('unknown', 'Could not tell whether an update exists. Nothing was changed.');
+      }
+      if (fresh && rs === 'current') return say('current', 'Up to date. Nothing newer on your channels.');
+      if (fresh && rs === 'unknown') {
+        return say('unknown', 'Could not check for updates. ' + (result.message || '') + ' Nothing was changed.');
+      }
+      if (check.failed) return say('unknown', 'Could not check for updates. Nothing was changed.');
+      return say('idle', 'Not checked yet. Press "Check for updates" to see what an update would change.');
+    }
+
+    // What the owner may do now. A disabled action carries the reason as text.
+    function lumenActions(lumen, view, pick) {
+      const present = asList((lumen.millennium || {}).present);
+      const choice = (lumen.millennium || {}).choice || '';
+      const millenniumNeeded = present.length > 0 && !choice && !pick;
+      const result = lumen.result || {};
+      const busy = view.key === 'running' || view.key === 'recovering' || view.key === 'interrupted';
+      const actions = {
+        check: { enabled: !busy && !view.checking && !lumenBusy,
+          reason: busy ? 'An update is in progress.' : view.checking ? 'Checking…' : '' },
+        update: { label: view.key === 'current' ? 'Up to date' : 'Update Lumen', enabled: false, reason: '' },
+        cancel: { show: false, enabled: false, reason: '' },
+        reinstall: { show: view.key === 'current' && !lumen.toolingIncomplete && !lumen.pending },
+        restore: { show: false, name: '', command: '' },
+        choice: { show: millenniumNeeded || (present.length > 0 && !choice),
+          picked: pick || choice || '' },
+      };
+      const reasons = {
+        idle: 'Check for updates first.', current: 'Everything is current.',
+        unknown: 'Check again when you are online.', tooling: 'Repair the Lumen tooling first.',
+        running: 'An update is running.', recovering: 'An interrupted update is waiting to be recovered.',
+        interrupted: 'Recover the interrupted update first.', queued: 'An update is already queued.',
+        'failed-rollback-pending': 'A rollback is waiting for you to exit Steam.',
+      };
+      if (view.key === 'update-available' || view.key === 'applied' || view.key.indexOf('failed') === 0) {
+        // After a final result only a fresh check can say something is newer.
+        actions.update.reason = view.key === 'update-available' ? '' : 'Check for updates first.';
+      } else {
+        actions.update.reason = reasons[view.key] || '';
+      }
+      if (view.key === 'update-available' && millenniumNeeded) {
+        actions.update.reason = 'Choose what to do with Millennium first.';
+      }
+      actions.update.enabled = view.key === 'update-available' && !millenniumNeeded && !lumenBusy;
+      if (view.key === 'queued' || view.key === 'failed-rollback-pending') {
+        const updateJob = view.key === 'queued' && ((lumen.job || {}).action || 'update') === 'update';
+        actions.cancel = { show: true, enabled: updateJob && !lumenBusy,
+          reason: updateJob ? '' : 'This step finishes the work already started and cannot be cancelled.' };
+      }
+      const changes = changedEntries(result);
+      const wanted = result.backup && result.rolledBack !== true && view.key !== 'running'
+        && !busy && ((view.key === 'applied' && changes.length > 0) || view.key === 'failed-not-rolled-back');
+      if (wanted) {
+        const known = asList(lumen.backups).find(item => item.name === result.backup) || {};
+        actions.restore = { show: true, name: String(result.backup), at: known.at || 0,
+          bytes: known.bytes || 0, command: LUMEN_RESTORE_CMD(result.backup) };
+      }
+      return actions;
+    }
+
+    function lumenView() {
+      return deriveLumen(lunaLumen || {});
+    }
+
+    async function runLumenAction(action, extra) {
+      // Instant visible response: the page repaints with a working line and
+      // disabled buttons before the RPC round-trip, and an RPC error always
+      // lands as an error row instead of silence.
+      lumenBusy = true;
+      lumenConfirm = null;
+      delete rpcErrors.lumenAction;
+      repaintIfOpen();
+      try {
+        const out = await rpc(w, 'SlsLunaLumen',
+          { raw: JSON.stringify(Object.assign({ action: action }, extra || {})) });
+        if (out && out.lumen) lunaLumen = out.lumen;
+        if (out && out.success === false) throw new Error(out.error || 'refused');
+        delete rpcErrors.lumenAction;
+      } catch (error) {
+        rpcErrors.lumenAction = (action === 'cancel' ? 'Could not cancel: '
+          : action === 'update' ? 'Could not queue the Lumen update: '
+          : action === 'check' ? 'Could not check for updates: ' : 'Lumen action failed: ')
+          + errorText(error);
+      }
+      lumenBusy = false;
+      lumenNextPoll = 0;
+      lumenIdlePolls = 0;
+      await refresh();
+      repaintIfOpen();
+    }
+
+    /* A channel change goes through `luna lumen channels set`, which owns
+       update-channels.json and refuses bad values with its own text. The re-read
+       afterwards plus a fresh `status --check` is what updates the available
+       column: this page never writes the channels file itself. */
+    async function runChannelSet(component, channel) {
+      lumenConfirm = null;
+      channelsBusy = true;
+      delete rpcErrors.lumenAction;
+      repaintIfOpen();
+      try {
+        const out = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'channels-set',
+          component: component, channel: channel, confirmed: true }) });
+        if (out && out.channels) lunaChannels = out.channels;
+        if (out && out.lumen) lunaLumen = out.lumen;
+        if (out && out.success === false) throw new Error(out.error || 'refused');
+        try {
+          const check = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'check' }) });
+          if (check && check.lumen) lunaLumen = check.lumen;
+        } catch (_) { /* the channel stands; the page says the check failed */ }
+      } catch (error) {
+        rpcErrors.lumenAction = 'Could not change the channel: ' + errorText(error);
+      }
+      channelsBusy = false;
+      lumenNextPoll = 0;
+      lumenIdlePolls = 0;
+      await refresh();
+      repaintIfOpen();
+    }
+
+    /* The visible-terminal update. Only `update-all --terminal` runs: the CLI
+       asks Steam itself to quit, opens the window and writes the log. Exit 0
+       only means the window opened, so the page says that and shows the log. */
+    async function runTerminalUpdate() {
+      lumenConfirm = null;
+      lumenBusy = true;
+      delete rpcErrors.lumenAction;
+      repaintIfOpen();
+      try {
+        const out = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'terminal',
+          confirmed: true }) });
+        if (out && out.lumen) lunaLumen = out.lumen;
+        if (out && out.success === false) throw new Error(out.error || 'refused');
+      } catch (error) {
+        rpcErrors.lumenAction = 'Could not start the terminal update: ' + errorText(error);
+      }
+      lumenBusy = false;
+      lumenNextPoll = 0;
+      lumenIdlePolls = 0;
+      await refresh();
+      repaintIfOpen();
+    }
+
+    // The status RPC reads files only, so following it is cheap; the network
+    // check is never started from here.
+    async function pollLumen() {
+      try {
+        const out = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'status' }) });
+        if (out && out.lumen && !lumenBusy) {
+          const before = JSON.stringify(lunaLumen);
+          lunaLumen = out.lumen;
+          lumenIdlePolls = JSON.stringify(lunaLumen) === before ? lumenIdlePolls + 1 : 0;
+          repaintIfOpen();
+        }
+      } catch (_) { /* keep the last known state */ }
+    }
+
+    /* Queue, in order: the Luna add-ons/tooling update, then (Lumen host only)
+       the Lumen update, whose re-attach installs that Luna on top. Never Steam. */
+    async function runEverything() {
+      lumenConfirm = null;
+      const queuedAt = Math.floor(Date.now() / 1000);
+      const state = { queuedAt: queuedAt, luna: {}, lumen: null };
+      everything = state;
+      const update = lunaUpdate || {};
+      const release = lunaRelease(update);
+      // Only what is really newer is queued: a current Luna is not reinstalled.
+      if (release.newer) {
+        try {
+          const out = await rpc(w, 'SlsLunaUpdate',
+            { raw: JSON.stringify({ action: 'install', tag: update.latest || '' }) });
+          if (out && out.success === false) throw new Error(out.error || 'refused');
+          if (out && out.update) lunaUpdate = out.update;
+          if (!(lunaUpdate && lunaUpdate.timerUnits)) {
+            try {
+              await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'timer', value: 'on' }) });
+            } catch (_) { /* the queue stands; the page explains the timer */ }
+          }
+        } catch (error) {
+          state.luna.error = errorText(error);
+        }
+      } else {
+        state.luna.skipped = true;
+      }
+      const onLumen = ((lunaHost || {}).configured || (lunaHost || {}).running) === 'lumen';
+      const wantLumen = onLumen && lumenView().key === 'update-available';
+      if (wantLumen && !state.luna.error) {
+        state.lumen = {};
+        try {
+          const choice = ((lunaLumen || {}).millennium || {}).choice || millenniumPick;
+          const out = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify(Object.assign(
+            { action: 'update', confirmed: true }, choice ? { millennium: choice } : {})) });
+          if (out && out.lumen) lunaLumen = out.lumen;
+          if (out && out.success === false) throw new Error(out.error || 'refused');
+        } catch (error) {
+          state.lumen.error = errorText(error);
+        }
+      }
+      await refresh();
+      repaintIfOpen();
+    }
+
+    function everythingSteps() {
+      if (!everything) return [];
+      const update = lunaUpdate || {};
+      const lumen = lunaLumen || {};
+      const steps = [];
+      const luna = everything.luna;
+      const last = update.last || {};
+      let lunaStep;
+      if (luna.error) lunaStep = ['failed', luna.error];
+      else if (luna.skipped) lunaStep = ['skipped', 'already current'];
+      else if (update.pending) lunaStep = ['pending', 'queued; lands when Steam is closed'];
+      else if (last.at && Number(last.at) >= everything.queuedAt) {
+        lunaStep = /error|fail/.test(String(last.result || ''))
+          ? ['failed', String(last.reason || last.result)]
+          : ['done', String(last.result || 'done') + (last.version ? ' ' + last.version : '')];
+      } else lunaStep = ['running', 'applying'];
+      steps.push({ label: 'Luna add-ons and tooling', state: lunaStep[0], message: lunaStep[1] });
+      if (everything.lumen) {
+        let lumenStep;
+        const view = deriveLumen(lumen);
+        if (everything.lumen.error) lumenStep = ['failed', everything.lumen.error];
+        else if (view.key === 'running') lumenStep = ['running', view.text];
+        else if (lumen.pending) lumenStep = ['pending', 'queued after the Luna update'];
+        else if (view.key === 'applied') lumenStep = ['done', view.text];
+        else if (view.key.indexOf('failed') === 0) lumenStep = ['failed', view.text];
+        else lumenStep = ['pending', 'waiting'];
+        steps.push({ label: 'Lumen update + Luna re-install', state: lumenStep[0], message: lumenStep[1] });
+      }
+      return steps;
+    }
+
+    function updatesBody() {
+      const body = document.createElement('div');
+      const text = (className, value) => {
+        const node = document.createElement('p');
+        node.className = className;
+        node.textContent = value;
+        body.appendChild(node);
+        return node;
+      };
+      const line = value => text('sls-luna-note', value);
+      const section = title => {
+        const node = document.createElement('p');
+        node.className = 'sls-luna-note';
+        const strong = document.createElement('strong');
+        strong.textContent = title;
+        node.appendChild(strong);
+        body.appendChild(node);
+      };
+      const button = (label, onclick, secondary, disabled) => {
+        const node = document.createElement('button');
+        node.className = 'sls-luna-btn' + (secondary ? ' secondary' : '');
+        node.textContent = label;
+        node.disabled = Boolean(disabled);
+        node.onclick = onclick;
+        return node;
+      };
+      const row = (...buttons) => {
+        const node = document.createElement('div');
+        node.className = 'sls-luna-row';
+        buttons.forEach(item => node.appendChild(item));
+        body.appendChild(node);
+      };
+      // The shared confirm step: what changes, when it runs, what protects it.
+      // `notes` replaces the queue-specific lines for actions that do something
+      // else (a channel switch, the visible-terminal update).
+      const confirmBlock = (changes, yesLabel, onYes, notes) => {
+        const box = document.createElement('div');
+        box.className = 'sls-luna-confirm';
+        box.style.cssText = 'padding:10px 12px;margin:6px 0;border:1px solid #d9a441;border-radius:8px';
+        const add = value => {
+          const node = document.createElement('p');
+          node.className = 'sls-luna-note';
+          node.textContent = value;
+          box.appendChild(node);
+        };
+        changes.forEach(add);
+        (notes || ['It runs after you exit Steam. Steam is not closed for you.',
+          'A backup is taken first. If the update fails, it is rolled back automatically.'])
+          .forEach(add);
+        const kept = (notes ? '' : (((lunaLumen || {}).millennium || {}).choice || millenniumPick));
+        if (kept && (((lunaLumen || {}).millennium || {}).present || []).length) {
+          add('Millennium will be ' + (kept === 'keep' ? 'kept.' : 'removed.'));
+        }
+        const buttons = document.createElement('div');
+        buttons.className = 'sls-luna-row';
+        buttons.appendChild(button(yesLabel, onYes, false, lumenBusy));
+        buttons.appendChild(button('Not now', () => { lumenConfirm = null; repaintIfOpen(); }, true, false));
+        box.appendChild(buttons);
+        body.appendChild(box);
+      };
+      if (healthNotice) { line(healthNotice); healthNotice = null; }
+      const labels = { info: 'Luna info', health: 'Luna health', update: 'Luna updates',
+        steam: 'the Steam client', host: 'the plugin host', lumen: 'Lumen', refresh: 'refresh state',
+        lumenAction: '' };
+      Object.keys(rpcErrors).forEach(key => {
+        if (!rpcErrors[key]) return;
+        text('sls-luna-error', key === 'lumenAction' ? rpcErrors[key]
+          : 'Could not read ' + labels[key] + ': ' + rpcErrors[key]);
+      });
+
+      const update = lunaUpdate || {};
+      const steam = lunaSteam || {};
+      const hostInfo = lunaHost || {};
+      const health = lunaHealth || {};
+      const lumen = lunaLumen || {};
+      const onLumen = (hostInfo.configured || hostInfo.running) === 'lumen';
+      const mode = update.autoUpdate || 'off';
+      const lumenView_ = onLumen ? deriveLumen(lumen) : null;
+      const acts = onLumen ? lumenActions(lumen, lumenView_, millenniumPick) : null;
+      const release = lunaRelease(update);
+      const lumenIncomplete = String(lumen.toolingIncomplete || '');
+      if (lumenBusy) line('Lumen: working…');
+      if (lumenView_ && (lumenView_.key === 'queued' || lumenView_.key === 'failed-rollback-pending'
+          || lumenView_.key === 'running' || lumenView_.key === 'recovering')) {
+        const banner = document.createElement('div');
+        banner.className = 'sls-luna-banner';
+        banner.style.cssText = 'padding:10px 12px;margin:0 0 10px;border:1px solid #d9a441;'
+          + 'border-radius:8px;background:rgba(217,164,65,.16)';
+        const head = document.createElement('p');
+        head.className = 'sls-luna-note';
+        const strong = document.createElement('strong');
+        strong.textContent = lumenView_.text + (lumenView_.key === 'queued'
+          ? ' Steam is not closed for you.' : '');
+        head.appendChild(strong);
+        banner.appendChild(head);
+        body.insertBefore(banner, body.firstChild);
+      }
+
+      // Everything that is newer, in one go: what would change, then one confirm.
+      // Scope is fixed: Luna's add-ons/tooling plus the Lumen base, and the
+      // Steam client is named as untouched in both the description and the
+      // confirm so nobody can read this as "update Steam".
+      const everythingLumen = Boolean(lumenView_) && lumenView_.key === 'update-available';
+      const newerComponents = everythingLumen
+        ? lumenView_.components.filter(item => item.status === 'newer') : [];
+      const newerItems = (release.newer ? ['Luna ' + (update.installed || '?') + ' → ' + update.latest] : [])
+        .concat(newerComponents.map(componentText));
+      const steamPin = String(steam.pinned || 'not recorded');
+      const steamScope = 'Steam client: unchanged (pinned ' + steamPin + ').';
+      const busyLumen = Boolean(lumenView_ && ['running', 'recovering', 'interrupted', 'queued',
+        'failed-rollback-pending', 'tooling'].indexOf(lumenView_.key) >= 0);
+      const everythingKnown = (release.known && !release.ahead) || Boolean(lumenView_
+        && (lumenView_.key === 'current' || lumenView_.key === 'update-available'));
+      const everythingReady = !update.pending && !lumenBusy && !busyLumen && !lumenIncomplete
+        && !(lumenView_ && acts.choice.show && !acts.choice.picked) && everythingKnown;
+      section('Update everything');
+      line('Queues Luna\u2019s add-ons and tooling' + (onLumen
+        ? ', then the Lumen base update with Luna re-installed on top' : '')
+        + ', only for what is newer on your channels. Both wait for you to exit Steam. '
+        + steamScope);
+      row(button('Update everything', () => { lumenConfirm = { kind: 'everything' }; repaintIfOpen(); },
+        false, !everythingReady));
+      if (!everythingReady) {
+        line(update.pending ? 'Reason: a Luna update is already queued.'
+          : lumenIncomplete ? 'Reason: ' + lumenIncomplete + '. Repair with: luna install --force'
+          : busyLumen && lumenView_ ? 'Reason: ' + (acts.update.reason || lumenView_.text)
+          : lumenView_ && acts.choice.show && !acts.choice.picked ? 'Reason: choose what to do with Millennium first.'
+          : !everythingKnown ? 'Reason: not checked yet; press "Check now" or "Check for updates".' : '');
+      }
+      if (lumenConfirm && lumenConfirm.kind === 'everything') {
+        const scope = ['Scope: Luna\u2019s add-ons and tooling'
+          + (onLumen ? ', then the Lumen base (it is re-verified, not replaced by a newer installer)' : '')
+          + '.', steamScope];
+        if (!newerItems.length) {
+          // A full reinstall when nothing is newer is exactly what this button
+          // must not do: say so, and queue nothing.
+          confirmBlock(['Nothing to do: nothing newer on your channels.'].concat(scope),
+            'Close', () => { lumenConfirm = null; repaintIfOpen(); }, []);
+        } else {
+          confirmBlock(['This will update:'].concat(newerItems, scope),
+            'Yes, queue the updates', () => runEverything());
+        }
+      }
+      everythingSteps().forEach(step => {
+        text(step.state === 'failed' ? 'sls-luna-error' : 'sls-luna-note',
+          step.label + ': ' + step.state + (step.message ? ' · ' + step.message : ''));
+      });
+
+      // The visible-terminal twin of the queue above. It is the only path that
+      // closes Steam: the CLI asks Steam itself to quit, so this page runs no
+      // steam/lock command and kills nothing.
+      const terminalJob = (lunaLumen || {}).terminal || {};
+      const terminalStarting = terminalJob.state === 'starting';
+      section('Update in terminal');
+      line('Runs luna update-all --terminal: Luna\u2019s add-ons and the Lumen base, live in a terminal '
+        + 'window that writes a log. This closes Steam first \u2014 the CLI asks Steam to quit itself and '
+        + 'waits up to 60 s \u2014 then opens the window. ' + steamScope);
+      row(button('Update in terminal', () => { lumenConfirm = { kind: 'terminal' }; repaintIfOpen(); },
+        false, terminalStarting || lumenBusy));
+      if (terminalStarting) {
+        line('Starting: the CLI is asking Steam to quit and opening the window\u2026');
+      }
+      if (terminalJob.state === 'opened') {
+        line('Window opened. The update runs there: exit 0 means the window opened, not that it finished.');
+        if (terminalJob.log) line('Log: ' + terminalJob.log);
+        if (terminalJob.window) line('Terminal: ' + terminalJob.window);
+      }
+      if (terminalJob.state === 'refused') {
+        line('The CLI refused: ' + (String(terminalJob.output || '').replace(/\s+/g, ' ').trim()
+          || 'no text; Steam was probably still running'));
+        if (terminalJob.log) line('Log: ' + terminalJob.log);
+      }
+      if (lumenConfirm && lumenConfirm.kind === 'terminal') {
+        confirmBlock(['Luna\u2019s add-ons and tooling and the Lumen base (the pinned installer is re-verified, not replaced).',
+          steamScope,
+          'This closes Steam first: the CLI asks Steam itself to quit and waits up to 60 s for steam and '
+            + 'steamwebhelper before it opens the window.',
+          'The window stays open at the end; the log path is shown here so you can reopen it.'],
+          'Yes, close Steam and update', () => runTerminalUpdate(), []);
+      }
+
+      line('Auto-update: ' + mode + (update.timerUnits ? '' : ' (timer not set up on this machine)'));
+      const modeRow = document.createElement('div');
+      modeRow.className = 'sls-luna-subtabs';
+      [['off', 'Off'], ['notify', 'Notify me'], ['install', 'Install automatically']].forEach(pair => {
+        const item = document.createElement('button');
+        item.className = 'sls-luna-subtab' + (mode === pair[0] ? ' active' : '');
+        item.textContent = pair[1];
+        item.onclick = () => runUpdateAction({ action: 'mode', value: pair[0] });
+        modeRow.appendChild(item);
+      });
+      body.appendChild(modeRow);
+
+      section('Luna');
+      line('Luna ' + (update.installed || '?') + ' · latest: ' + (update.latest || 'unknown')
+        + (release.newer ? ' · update available'
+          : release.ahead ? ' · newer than the latest release'
+          : update.latest ? ' · up to date' : '')
+        + (update.checkedAt ? ' · checked ' + age(update.checkedAt) + ' ago' : ''));
+      if (update.checking) line('Checking GitHub for a newer release…');
+      else if (update.checkError) line('Check: ' + update.checkError);
+      if (update.pending) line('Queued: ' + (update.pendingTag || 'latest') + ' - it lands the next time Steam is closed.');
+      if (update.last) {
+        line('Last run: ' + (update.last.result || '?')
+          + (update.last.version ? ' ' + update.last.version : '')
+          + (update.last.reason ? ' · ' + update.last.reason : '')
+          + (update.last.at ? ' · ' + age(update.last.at) + ' ago' : ''));
+      }
+      const pinned = update.pinned || ((health.install || {}).versions) || {};
+      const installedAddons = asList((health.lumen || {}).addons);
+      ['luna', 'sgdb', 'graphics', 'playtime', 'presence', 'compressor'].forEach(name => {
+        const entry = installedAddons.find(item => item.name === name);
+        const want = pinned[name];
+        const have = entry ? entry.version : (name === 'luna' ? update.installed : '');
+        line('Add-on ' + name + ': installed ' + (have || 'not installed') + ' · pinned ' + (want || '?')
+          + (have && want && String(have) !== String(want) ? ' — differs' : ''));
+      });
+      line('luna-host: ' + (hostInfo.running || '?')
+        + (hostInfo.configured && hostInfo.configured !== hostInfo.running
+          ? ' (configured: ' + hostInfo.configured + ')' : '')
+        + ' · binary ' + (hostInfo.binary ? 'installed' : 'not installed') + ' (no separate version)');
+      line('CLI/tooling: ' + (update.toolsInstalled ? 'installed' : 'not installed')
+        + (update.source ? ' · from ' + update.source : '')
+        + (update.installedAt ? ' · installed ' + age(update.installedAt) + ' ago' : ''));
+      row(button(update.checking ? 'Checking…' : 'Check now', () => runUpdateAction({ action: 'check' }),
+          true, update.checking),
+        button(update.pending ? 'Queued' : 'Install Luna update',
+          () => runUpdateAction({ action: 'install', tag: update.latest }), false,
+          !release.newer || update.pending),
+        button('Cancel queued', () => runUpdateAction({ action: 'cancel' }), true, !update.pending));
+
+      if (onLumen) {
+        section('Lumen');
+        const versions = lumen.versions || {};
+        line('Versions: ' + (Object.keys(versions).sort().map(key => key + ' ' + versions[key]).join(' · ')
+          || 'unknown'));
+        line('Self-update block: ' + (lumen.blockInPlace ? 'in place' : 'NOT in place')
+          + ' · Luna bridge: ' + (lumen.bridge ? 'installed' : 'missing'));
+        const result = lumen.result || {};
+        const view = lumenView_;
+        const chan = lumen.channels || {};
+        const flag = (view.key.indexOf('failed') === 0 || view.key === 'interrupted') ? 'sls-luna-error'
+          : 'sls-luna-note';
+        text(flag, 'Status: ' + view.text);
+        asList(result.warnings).forEach(item => { if (view.key === 'applied') line('Warning: ' + item); });
+        // Older or superseded results are history, never the current state.
+        const shownAsState = ['applied', 'failed', 'failed-rolled-back', 'failed-not-rolled-back',
+          'failed-rollback-pending', 'running', 'recovering', 'interrupted'].indexOf(view.key) >= 0
+          || (view.key === 'queued' && result.state === 'queued');
+        if (result.state && result.at && !shownAsState) {
+          line('Last run: ' + arrowText(result.state === 'applied' ? 'updated'
+            : result.state) + (result.message ? ' · ' + result.message : '')
+            + ' · ' + age(result.at) + ' ago');
+        }
+        // What an update would do: installed vs available per component.
+        if (view.components.length) {
+          view.components.forEach(item => line('  ' + componentText(item)
+            + (item.channel ? ' · channel ' + item.channel : '')));
+          if (view.checkedAt) line('Checked ' + age(view.checkedAt) + ' ago.');
+        } else if (Object.keys(lumen.channels || {}).length) {
+          line('Channels: ' + Object.keys(chan).sort().map(name => name + ' ' + chan[name]).join(' · '));
+        }
+        if (view.checkFailed && !view.components.length) {
+          line('The last check did not finish. Try again when you are online.');
+        }
+        if (acts.choice.show) {
+          text('sls-luna-error', 'Millennium is installed on this machine. An update would remove it '
+            + 'unless you keep it. Choose before updating (nothing is chosen for you):');
+          const pickRow = (value, label) => button(label + (acts.choice.picked === value ? ' ✓' : ''),
+            () => { millenniumPick = value; repaintIfOpen(); }, acts.choice.picked !== value, false);
+          row(pickRow('keep', 'Keep Millennium'), pickRow('remove', 'Remove Millennium'));
+        }
+        const buttons = [
+          button(view.checking ? 'Checking…' : 'Check for updates', () => runLumenAction('check'), true,
+            !acts.check.enabled),
+          button(acts.update.label, () => { lumenConfirm = { kind: 'lumen' }; repaintIfOpen(); }, false,
+            !acts.update.enabled),
+        ];
+        if (acts.cancel.show) {
+          buttons.push(button('Cancel queued update', () => runLumenAction('cancel'), true, !acts.cancel.enabled));
+        }
+        row(...buttons);
+        if (!acts.update.enabled && acts.update.reason) line(acts.update.label + ' is off. ' + acts.update.reason);
+        if (acts.cancel.show && !acts.cancel.enabled && acts.cancel.reason) line('Cancel is off. ' + acts.cancel.reason);
+        if (!acts.check.enabled && acts.check.reason && !view.checking) line('Check is off. ' + acts.check.reason);
+        if (lumenConfirm && lumenConfirm.kind === 'lumen' && acts.update.enabled) {
+          confirmBlock(['This will update:'].concat(
+            view.components.filter(item => item.status === 'newer').map(componentText)),
+            'Yes, queue the update', () => runLumenAction('update', Object.assign({ confirmed: true },
+              acts.choice.picked ? { millennium: acts.choice.picked } : {})));
+        }
+        if (acts.reinstall.show) {
+          row(button('Reinstall…', () => { lumenConfirm = { kind: 'reinstall' }; repaintIfOpen(); }, true, false));
+          if (lumenConfirm && lumenConfirm.kind === 'reinstall') {
+            const same = Object.keys(lumen.versions || {}).sort()
+              .map(name => name + ' ' + lumen.versions[name]).join(', ');
+            line('Reinstall puts the same versions back (' + (same || 'unchanged') + '). Nothing newer is installed. '
+              + 'It cannot be queued from here: close Steam completely, then run in a terminal:');
+            line(LUMEN_REINSTALL_CMD);
+            row(button('Close', () => { lumenConfirm = null; repaintIfOpen(); }, true, false));
+          }
+        }
+        if (acts.restore.show) {
+          const when = acts.restore.at ? clock(acts.restore.at) : '';
+          line('Go back: backup ' + acts.restore.name + (when ? ' (' + when + (acts.restore.bytes
+            ? ', ' + formatBytes(acts.restore.bytes) : '') + ')' : '')
+            + '. Restoring needs Steam closed and keeps your settings as they are. Close Steam, then run:');
+          line(acts.restore.command);
+        }
+        if (view.key === 'update-available' || view.key === 'idle') {
+          line('An update backs Lumen up first, runs the installer and attaches Luna again. '
+            + 'If it fails, the backup is put back automatically.');
+        }
+      }
+
+      // Channels: which release each Lumen part follows. Read and written only
+      // through the CLI, which owns update-channels.json; the page never writes
+      // that file and never guesses a value it has not read.
+      if (onLumen) {
+        section('Channels');
+        const labelsByName = { lumen: 'Lumen base', plugin: 'Lumen plugin',
+          slsteam_moon: 'SLSsteam Moon' };
+        const values = (lunaChannels && lunaChannels.values) || null;
+        line('Which channel each Lumen part follows. Changes go through luna lumen channels set; '
+          + 'the Steam client is never touched by a channel change.');
+        if (!values) {
+          line(channelsError ? 'Could not read the channels: ' + channelsError
+            : 'Reading the channels\u2026');
+          if (channelsError) {
+            row(button('Retry', () => { channelsTried = false; repaintIfOpen(); refresh(); },
+              true, channelsBusy));
+          }
+        } else {
+          ['lumen', 'plugin', 'slsteam_moon'].forEach(name => {
+            const current = String(values[name] || 'stable');
+            const item = document.createElement('div');
+            item.className = 'sls-luna-row';
+            const cell = document.createElement('div');
+            cell.className = 'txt';
+            const title = document.createElement('div');
+            title.className = 'name';
+            title.textContent = labelsByName[name] + ' (' + name + ')';
+            const sub = document.createElement('div');
+            sub.className = 'sub';
+            sub.textContent = 'Channel: ' + current;
+            cell.append(title, sub);
+            item.appendChild(cell);
+            [['stable', 'Stable'], ['beta', 'Beta']].forEach(pair => {
+              item.appendChild(button(pair[1], () => {
+                lumenConfirm = { kind: 'channel', component: name, channel: pair[0] };
+                repaintIfOpen();
+              }, pair[0] === current, channelsBusy || pair[0] === current));
+            });
+            body.appendChild(item);
+          });
+          if (lunaChannels && lunaChannels.file) line('Channels file: ' + lunaChannels.file);
+          if (lumenConfirm && lumenConfirm.kind === 'channel') {
+            const pick = lumenConfirm;
+            const current = String(values[pick.component] || 'stable');
+            confirmBlock([labelsByName[pick.component] + ' (' + pick.component + '): ' + current
+              + ' → ' + pick.channel,
+              'This only changes which channel the installer follows for that component. Nothing is installed '
+                + 'now and the Steam client is unchanged.'],
+            'Yes, switch to ' + pick.channel,
+            () => runChannelSet(pick.component, pick.channel), []);
+          }
+        }
+      }
+
+      section('Steam client');
+      line('Build ' + (steam.build || '?')
+        + (steam.pinned ? ' · known-good ' + steam.pinned + (steam.match ? ' ✓' : ' — drifted') : ' · no known-good build pinned')
+        + ' · updates ' + (steam.updatesBlocked ? 'blocked (steam.cfg lock)' : 'allowed'));
+      if (steam.pending) line('Queued Steam task: ' + steam.pending);
+      line('Stay on the known-good build — Recommended. This is the default; nothing moves Steam unless you choose below.');
+      row(button('Pin this build as known-good', () => runSteamAction({ action: 'pin' }), true,
+          Boolean(steam.pinned && steam.match)),
+        button('Cancel Steam task', () => runSteamAction({ action: 'cancel' }), true, !steam.pending));
+      if (!steamLatestArmed) {
+        row(button('Move to Valve’s latest…', () => { steamLatestArmed = true; repaintIfOpen(); },
+          true, Boolean(steam.pending)));
+      } else {
+        text('sls-luna-error', 'Risk: Valve’s newest client may break the current setup until Luna supports '
+          + 'that build. It is queued and applied when Steam is closed.');
+        row(button('Yes, queue the latest Steam client', () => {
+            steamLatestArmed = false;
+            runSteamAction({ action: 'queue-update' });
+          }, false, Boolean(steam.pending)),
+          button('Keep the known-good build', () => { steamLatestArmed = false; repaintIfOpen(); }, true));
+      }
+      return body;
     }
 
     function settingsBody() {
@@ -3485,6 +5141,20 @@
         + 'appear in the menu under this same switch once their detection and installers are ready.';
       body.appendChild(planned);
 
+      const lumenHeader = document.createElement('p');
+      lumenHeader.className = 'sls-luna-note';
+      lumenHeader.innerHTML = '<strong>Lumen</strong>';
+      body.appendChild(lumenHeader);
+      switchRow(body, 'Embed Lumen in Luna\u2019s window',
+        'Lumen\u2019s pages open inside this window, with Lumen\u2019s own pages listed in the sidebar and '
+        + 'one Esc closing both. Turn this off to send the Lumen page back to Lumen\u2019s own window; the '
+        + 'moon button below is a separate switch.',
+        lumenEmbedWanted(), setLumenEmbed);
+      switchRow(body, 'Show Lumen\u2019s own menu button',
+        'Luna\u2019s menu has a Lumen page, so the moon beside Luna is hidden by default: one launcher, '
+        + 'one menu. Turn this on to keep both; the Lumen page reaches Lumen either way.',
+        lumenButtonWanted(), setLumenOwnButton);
+
       const storeHeader = document.createElement('p');
       storeHeader.className = 'sls-luna-note';
       storeHeader.innerHTML = '<strong>Store</strong>';
@@ -3495,6 +5165,12 @@
         + 'untouched, and the followed list is read from the store session on this machine. Takes effect on '
         + 'the next store page load.',
         storeOn, setStoreHide);
+      const gradHeader = document.createElement('p');
+      gradHeader.className = 'sls-luna-note';
+      gradHeader.innerHTML = '<strong>' + settingsT.gradientTitle + '</strong>';
+      body.appendChild(gradHeader);
+      switchRow(body, settingsT.gradientLabel, settingsT.gradientSub,
+        !(lunaInfo && lunaInfo.prefs && lunaInfo.prefs.steam_gradient === false), setGradient);
       const langHeader = document.createElement('p');
       langHeader.className = 'sls-luna-note';
       langHeader.innerHTML = '<strong>Language / Idioma</strong>';
@@ -3587,7 +5263,33 @@
       unblockButton.onclick = () => { steamLockArmed = 'unlock'; steamJobNotice = null; repaintIfOpen(); };
       updRow.append(blockButton, unblockButton);
       body.appendChild(updRow);
+
+      // Which plugin host runs Luna (read-only; switching is `luna host`).
+      const hs = lunaHost || {};
+      const hostHeader = document.createElement('p');
+      hostHeader.className = 'sls-luna-note';
+      hostHeader.innerHTML = '<strong>' + settingsT.hostTitle + '</strong>';
+      body.appendChild(hostHeader);
+      const hostLine = document.createElement('p');
+      hostLine.className = 'sls-luna-note';
+      hostLine.textContent = settingsT.hostRunning + ' ' + (hs.running || '?')
+        + (hs.configured && hs.running && hs.configured !== hs.running
+          ? ' \u00b7 ' + hs.configured + ' ' + settingsT.hostPending : '');
+      body.appendChild(hostLine);
       return body;
+    }
+
+    async function setGradient(value) {
+      try {
+        const out = await rpc(w, 'SlsLunaPrefsSet',
+          { raw: JSON.stringify({ key: 'steam_gradient', value: Boolean(value) }) });
+        lunaInfo = Object.assign({}, lunaInfo || {}, { prefs: out.prefs });
+      } catch (error) {
+        betaNotice = 'Could not save the gradient preference: '
+          + String(error && error.message ? error.message : error);
+      }
+      gradient.refresh();
+      repaintIfOpen();
     }
 
     async function runSteamLockJob(action) {
@@ -3607,9 +5309,12 @@
     // .desktop entries and the managed helper, so it never needs Steam closed.
     async function createSteamosShortcuts() {
       try {
-        const out = await rpc(w, 'SlsLunaLaunchers', { raw: JSON.stringify({ action: 'create' }) });
-        steamosNotice = (out && out.message) ? String(out.message).slice(-200)
-          : 'SteamOS Mode shortcuts created.';
+        steamosNotice = 'Creating shortcuts in the background\u2026';
+        repaintIfOpen();
+        const job = await followJob('Shortcuts',
+          () => rpc(w, 'SlsLunaLaunchers', { raw: JSON.stringify({ action: 'create' }) }),
+          () => rpc(w, 'SlsLunaLaunchers', { raw: JSON.stringify({ action: 'status' }) }));
+        steamosNotice = jobText(job, 'Shortcuts');
       } catch (error) {
         steamosNotice = 'Could not create SteamOS Mode shortcuts: '
           + String(error && error.message ? error.message : error);
@@ -3668,6 +5373,750 @@
       return body;
     }
 
+    /* ---- Lumen: one window, one menu -----------------------------------
+       Lumen is the plugin host; its settings (LuaTools, SLSsteam) stay in
+       Lumen's own UI, and Luna neither copies nor re-parents it. The Lumen
+       page opens Lumen through Lumen's own public entry point and, by default,
+       lays it into Luna's content area (see "Embedded Lumen" below) so Lumen's
+       pages look like Luna's pages. With embedding switched off the page is a
+       signpost that closes Luna and leaves Lumen's own window up. The one thing
+       Luna takes over either way is the launcher: once its own button is placed
+       in the menubar, Lumen's moon is hidden (a Settings switch brings it
+       back), so there is one menu and one launcher. Also the only place Lumen's
+       pending-update pill is still readable when its button is hidden. */
+    const LUMEN_BTN_KEY = 'slsLunaLumenButton';
+    const LUMEN_BTN_PREF = 'lumen_button';
+    const LUMEN_HID_ATTR = 'data-sls-luna-hid-display';
+
+    function lumenButtonWanted() {
+      const stored = prefValue(LUMEN_BTN_PREF);
+      if (typeof stored === 'boolean') return stored;
+      return localItem(LUMEN_BTN_KEY) === '1';
+    }
+    function restoreLumenLauncher() {
+      const btn = hiddenLumenBtn;
+      hiddenLumenBtn = null;
+      if (!btn || typeof btn.getAttribute !== 'function') return;
+      const previous = btn.getAttribute(LUMEN_HID_ATTR);
+      try { btn.removeAttribute(LUMEN_HID_ATTR); } catch (_) { /* gone */ }
+      if (btn.style) btn.style.display = previous || '';
+    }
+    /* Idempotent: Lumen re-injects its button after menu opens and route
+       changes, so the observer calls this again on every menubar mutation. A
+       re-injected node is a new element, so the old reference is restored
+       first (it is detached, which is a no-op) and the new one recorded. */
+    function hideLumenLauncher() {
+      if (tornDown || !panelMounted) return;
+      const btn = document.getElementById('lumen-moon-btn');
+      if (!btn) { restoreLumenLauncher(); return; }
+      if (lumenButtonWanted()) { restoreLumenLauncher(); return; }
+      if (hiddenLumenBtn && hiddenLumenBtn !== btn) restoreLumenLauncher();
+      if (hiddenLumenBtn !== btn) {
+        if (typeof btn.setAttribute !== 'function') return;
+        hiddenLumenBtn = btn;
+        btn.setAttribute(LUMEN_HID_ATTR, (btn.style && btn.style.display) || '');
+      }
+      if (btn.style) btn.style.display = 'none';
+    }
+    function watchLumenLauncher() {
+      if (typeof w.MutationObserver !== 'function') return;
+      const bar = findMenubar(document);
+      if (!bar) return;
+      try {
+        const observer = new w.MutationObserver(() => { hideLumenLauncher(); });
+        observer.observe(bar, { childList: true, subtree: true });
+        life.watch(observer);
+      } catch (_) { /* without an observer the button is still hidden once */ }
+    }
+    function setLumenOwnButton(on) {
+      setLocalItem(LUMEN_BTN_KEY, on ? '1' : '0');
+      savePref(LUMEN_BTN_PREF, Boolean(on));
+      hideLumenLauncher();
+      repaintIfOpen();
+    }
+    // Lumen's overlay and Luna's share a z-index; only one may be up. Close
+    // Lumen through its own entry point so its focus trap and listeners run
+    // down with it.
+    function closeLumenMenu() {
+      if (!document.getElementById('lumen-settings-overlay')) return;
+      if (typeof w.__lumenCloseOverlay === 'function') {
+        try { w.__lumenCloseOverlay(); } catch (_) { /* already gone */ }
+        return;
+      }
+      // No public closer (an old Lumen): leave its DOM alone. Luna's overlay is
+      // appended after it and paints on top, and Esc still closes Luna first.
+    }
+    /* Lumen builds its menu on demand and rebuilds it on every open, so Luna
+       opens Lumen through Lumen's own entry points and never reparents it.
+       The launcher is only clicked on the first attempt: it is a toggle in some
+       Lumen builds, and a retry loop must not flick it shut again. */
+    function openLumenOverlay(allowButton) {
+      if (document.getElementById('lumen-settings-overlay')) return true;
+      if (allowButton !== false) {
+        const btn = document.getElementById('lumen-moon-btn');
+        if (btn && typeof btn.click === 'function') {
+          try { btn.click(); } catch (_) { /* try the entry point below */ }
+        }
+        if (document.getElementById('lumen-settings-overlay')) return true;
+      }
+      if (typeof w.__lumenOpenOverlay === 'function') {
+        try { w.__lumenOpenOverlay(); } catch (_) { /* reported by the caller */ }
+      }
+      return Boolean(document.getElementById('lumen-settings-overlay'));
+    }
+    /* Door mode: Luna's teardown first (its close path restores the hidden
+       Steam view), then Lumen's own window - its own element, its own handler.
+       Nothing is re-parented, resized or restyled. Used when embedding is
+       switched off, when the switch flipped this session, and by "Open Lumen". */
+    function openLumenMenu() {
+      lumenOpenError = '';
+      closeMenu();
+      if (openLumenOverlay()) return;
+      // Neither door opened: say so in Luna rather than leaving a blank page.
+      lumenOpenError = "Lumen's menu is not available right now \u2014 start Steam with Lumen running";
+      showMenu();
+    }
+
+    /* ---- Embedded Lumen: Luna's window is the shell ---------------------
+       The Lumen page no longer closes Luna. Lumen's overlay is opened once and
+       then restyled into Luna's content rect: its sidebar hidden (Luna's
+       sidebar lists Lumen's pages instead), its window filling the area, its
+       backdrop gone and its z-index under Luna's. Every inline style this code
+       writes is recorded first and restored on the way out, and the whole
+       contract (overlay, .lumen-win, .lumen-side, .lumen-content, one
+       .lumen-tab) is checked before a single style changes, so Lumen is never
+       left half-restyled: any mismatch falls back to the door and says why. */
+    const LUMEN_EMBED_PREF = 'lumen_embed';
+    const LUMEN_EMBED_NOTE_ID = 'sls-luna-embed-note';
+    const LUMEN_EMBED_HINT = 'Embed Lumen in Luna\u2019s window and Show Lumen\u2019s own menu button are both on the Settings page.';
+    let lumenEmbedState = null;
+    let lumenEmbedBlocked = '';
+    let lumenEmbedObserver = null;
+    let lumenEmbedProbe = '';
+    let lumenLastTabNode = null;
+    let lumenEmbedPending = false;
+    let lumenEmbedRetry = null;
+    let lumenEmbedRetryTries = 0;
+    let lumenEmbedLogged = false;
+    // Lumen's overlay can go away after it was embedded: Lumen tears its own
+    // menu down when an action inside it throws, and its self-updater is
+    // patched shut by Luna. Recovery is bounded per visit, never a loop.
+    let lumenEmbedRecoveries = 0;
+    let lumenEmbedUpdateHint = false;
+    // Luna's content rect: measured once per open and again only after a
+    // resize (rAF-throttled), never on every paint.
+    let lumenRectCache = null;
+    let lumenRectFrame = null;
+    // Lumen opens its menu a moment after the click (it injects styles first),
+    // so the embed gets ~2 s of short attempts before the page explains itself.
+    const LUMEN_EMBED_TRIES = 20;
+    const LUMEN_EMBED_EVERY = 100;
+    const LUMEN_EMBED_RECOVERIES = 2;
+    const LUMEN_UPDATER_NOTE = 'Lumen\u2019s own updater is blocked; use Luna \u2192 Updates';
+
+    function lumenEmbedWanted() {
+      const stored = prefValue(LUMEN_EMBED_PREF);
+      if (typeof stored === 'boolean') return stored;
+      return localItem(LUMEN_EMBED_KEY) !== '0';
+    }
+
+    /* One short line over Lumen's window: why embedding was skipped this
+       session, and where the switch lives. Not a modal, not clickable, and it
+       removes itself. */
+    function showLumenEmbedNote(text) {
+      const body = document.body;
+      if (!body) return;
+      const old = document.getElementById(LUMEN_EMBED_NOTE_ID);
+      if (old && typeof old.remove === 'function') old.remove();
+      const note = document.createElement('div');
+      note.id = LUMEN_EMBED_NOTE_ID;
+      note.className = 'sls-luna-embed-note';
+      note.textContent = text;
+      note.style.position = 'fixed';
+      note.style.left = '50%';
+      note.style.bottom = '28px';
+      note.style.transform = 'translateX(-50%)';
+      note.style.zIndex = '100001';
+      note.style.maxWidth = '620px';
+      note.style.padding = '10px 14px';
+      note.style.borderRadius = '4px';
+      note.style.background = '#26313c';
+      note.style.color = '#e6e9ec';
+      note.style.font = '13px/1.45 "Motiva Sans",Arial,Helvetica,sans-serif';
+      note.style.boxShadow = '0 12px 32px rgba(0,0,0,.45)';
+      note.style.pointerEvents = 'none';
+      body.appendChild(note);
+      life.timeout(() => {
+        if (note.parentNode && typeof note.remove === 'function') note.remove();
+      }, 9000);
+    }
+
+    const classTokens = node => String((node && node.className) || '').split(/\s+/).filter(Boolean);
+    function findClasses(root, cls) {
+      const hits = [];
+      const walk = node => {
+        if (!node) return;
+        if (classTokens(node).indexOf(cls) >= 0) hits.push(node);
+        const kids = node.children || [];
+        for (let index = 0; index < kids.length; index += 1) walk(kids[index]);
+      };
+      walk(root);
+      return hits;
+    }
+    const findClass = (root, cls) => {
+      const hits = findClasses(root, cls);
+      return hits.length ? hits[0] : null;
+    };
+
+    /* The shape embedding needs from Lumen. A reason means "do not touch":
+       the caller takes the door instead. */
+    function lumenShape() {
+      const overlay = document.getElementById('lumen-settings-overlay');
+      if (!overlay) return { reason: 'Lumen\u2019s menu is not in the page' };
+      const win = findClass(overlay, 'lumen-win');
+      if (!win) return { reason: 'Lumen\u2019s window (.lumen-win) is missing' };
+      const side = findClass(overlay, 'lumen-side');
+      if (!side) return { reason: 'Lumen\u2019s sidebar (.lumen-side) is missing' };
+      const content = findClass(overlay, 'lumen-content');
+      if (!content) return { reason: 'Lumen\u2019s content area (.lumen-content) is missing' };
+      const tabs = findClasses(overlay, 'lumen-tab');
+      if (!tabs.length) return { reason: 'Lumen\u2019s pages (.lumen-tab) are missing' };
+      return { overlay: overlay, win: win, side: side, content: content, tabs: tabs };
+    }
+
+    const dashed = prop => String(prop).replace(/[A-Z]/g, ch => '-' + ch.toLowerCase());
+    function styleOf(node, prop) {
+      const style = node && node.style;
+      if (!style) return '';
+      if (typeof style.getPropertyValue === 'function') return style.getPropertyValue(dashed(prop)) || '';
+      return style[prop] == null ? '' : String(style[prop]);
+    }
+    /* Records the original once per node and property, then writes ours. */
+    function embedStyle(state, node, prop, value) {
+      if (!node || !node.style) return;
+      let bag = state.records.get(node);
+      if (!bag) { bag = new Map(); state.records.set(node, bag); }
+      if (!bag.has(prop)) bag.set(prop, styleOf(node, prop));
+      try { node.style[prop] = value; } catch (_) { /* detached node */ }
+    }
+
+    /* Luna's content area (its scrolling body) in viewport coordinates. Cached:
+       the shell is measured once when it opens, and again only after a resize.
+       A paint never measures - it reuses the rect it was given. */
+    function measureContentRect(force) {
+      if (lumenRectCache && !force) return lumenRectCache;
+      lumenRectCache = lumenContentRect();
+      return lumenRectCache;
+    }
+
+    function lumenContentRect() {
+      const luna = document.getElementById(OVERLAY_ID);
+      if (!luna) return null;
+      const slot = findClass(luna, 'sls-luna-body');
+      if (!slot || typeof slot.getBoundingClientRect !== 'function') return null;
+      let rect = null;
+      try { rect = slot.getBoundingClientRect(); } catch (_) { rect = null; }
+      if (!rect) return null;
+      const width = Number(rect.width) || (Number(rect.right) - Number(rect.left)) || 0;
+      const height = Number(rect.height) || (Number(rect.bottom) - Number(rect.top)) || 0;
+      if (!(width > 0) || !(height > 0)) return null;
+      return { top: Number(rect.top) || 0, left: Number(rect.left) || 0, width: width, height: height };
+    }
+
+    /* Apply (or re-apply) the embedded layout. Idempotent: calling it twice
+       never re-records an original, and never stacks a second overlay. */
+    function applyLumenEmbed() {
+      if (!lumenEmbedWanted() || lumenEmbedBlocked) return false;
+      const shape = lumenShape();
+      if (!shape.overlay || shape.reason) return false;
+      const rect = measureContentRect(false);
+      if (!rect) return false; // Luna is not painted yet; paint() calls again
+      if (lumenEmbedState && lumenEmbedState.overlay !== shape.overlay) restoreLumenEmbed();
+      if (!lumenEmbedState) lumenEmbedState = { overlay: shape.overlay, records: new Map() };
+      const state = lumenEmbedState;
+      const px = value => value + 'px';
+      embedStyle(state, shape.overlay, 'position', 'fixed');
+      embedStyle(state, shape.overlay, 'top', px(rect.top));
+      embedStyle(state, shape.overlay, 'left', px(rect.left));
+      embedStyle(state, shape.overlay, 'right', 'auto');
+      embedStyle(state, shape.overlay, 'bottom', 'auto');
+      embedStyle(state, shape.overlay, 'width', px(rect.width));
+      embedStyle(state, shape.overlay, 'height', px(rect.height));
+      embedStyle(state, shape.overlay, 'boxSizing', 'border-box');
+      embedStyle(state, shape.overlay, 'padding', '0');
+      embedStyle(state, shape.overlay, 'margin', '0');
+      embedStyle(state, shape.overlay, 'border', '0');
+      embedStyle(state, shape.overlay, 'background', 'transparent');
+      embedStyle(state, shape.overlay, 'boxShadow', 'none');
+      // Above Luna's window: Lumen's pane is the content, Luna's frame is the
+      // shell around it (Luna's own overlay stays at the stylesheet's 99999).
+      embedStyle(state, shape.overlay, 'zIndex', '100000');
+      // Only Lumen's window takes input: a click on the rest of the rect (or a
+      // stale rect) reaches Luna's sidebar instead of dying on a backdrop.
+      embedStyle(state, shape.overlay, 'pointerEvents', 'none');
+      embedStyle(state, shape.win, 'width', '100%');
+      embedStyle(state, shape.win, 'height', '100%');
+      embedStyle(state, shape.win, 'maxWidth', 'none');
+      embedStyle(state, shape.win, 'maxHeight', 'none');
+      embedStyle(state, shape.win, 'borderRadius', '0');
+      embedStyle(state, shape.win, 'boxShadow', 'none');
+      embedStyle(state, shape.win, 'pointerEvents', 'auto');
+      // Luna's sidebar replaces Lumen's: one list, one window.
+      embedStyle(state, shape.side, 'display', 'none');
+      embedStyle(state, shape.content, 'flex', '1 1 auto');
+      embedStyle(state, shape.content, 'width', '100%');
+      embedStyle(state, shape.content, 'minWidth', '0');
+      state.rect = rect;
+      attachLumenOverlayWatch();
+      return true;
+    }
+
+    function restoreLumenEmbed() {
+      const state = lumenEmbedState;
+      lumenEmbedState = null;
+      if (!state) return;
+      state.records.forEach((bag, node) => {
+        bag.forEach((value, prop) => {
+          try {
+            const style = node && node.style;
+            if (!style) return;
+            if (typeof style.removeProperty === 'function') {
+              if (value) style.setProperty(dashed(prop), value);
+              else style.removeProperty(dashed(prop));
+            } else style[prop] = value || '';
+          } catch (_) { /* the node went away with Lumen's overlay */ }
+        });
+      });
+      state.records.clear();
+    }
+
+    /* Refuse to half-restyle. Sets the session flag so later visits take the
+       door immediately, explains it once, and then does what the page did
+       before embedding existed: close Luna and leave Lumen's own window up. */
+    function fallBackFromLumenEmbed(reason) {
+      lumenEmbedBlocked = String(reason || 'Lumen\u2019s menu did not match the embedded layout');
+      lumenLastTabNode = null;
+      restoreLumenEmbed();
+      showLumenEmbedNote('Embedded Lumen is unavailable this session: ' + lumenEmbedBlocked
+        + '. Lumen opens in its own window; the switch is Settings \u2192 Embed Lumen in Luna\u2019s window.');
+      if (current() && document.getElementById(OVERLAY_ID)) closeMenu();
+    }
+
+    /* Leaving the page: stop the retry, put every style back, then close Lumen
+       through its own entry point (that also runs its listeners and focus trap
+       down). A pending open that Luna started is closed too: it was ours. */
+    function leaveLumenEmbed() {
+      const had = Boolean(lumenEmbedState) || lumenEmbedPending;
+      stopLumenEmbedRetry();
+      lumenEmbedPending = false;
+      lumenLastTabNode = null;
+      restoreLumenEmbed();
+      detachLumenOverlayWatch();
+      if (had) closeLumenMenu();
+    }
+
+    function stopLumenEmbedRetry() {
+      if (lumenEmbedRetry === null) return;
+      const id = lumenEmbedRetry;
+      lumenEmbedRetry = null;
+      try { (w.clearInterval || clearInterval)(id); } catch (_) { /* already gone */ }
+    }
+
+    /* Nothing could be embedded inside the budget: say why in the page (not a
+       floating note), keep the door button, and log the reason once. */
+    function embedNever(reason) {
+      const why = String(reason || 'Lumen\u2019s menu did not settle into Luna\u2019s window');
+      lumenEmbedPending = false;
+      lumenEmbedBlocked = why;
+      detachLumenOverlayWatch();
+      if (!lumenEmbedLogged) {
+        lumenEmbedLogged = true;
+        lunaWarn('embedding Lumen is unavailable this session: ' + why, w);
+      }
+      if (tab === 'lumen') repaintIfOpen();
+    }
+
+    /* Lumen's menu appears a beat after it is asked for. Try the embed for a
+       bounded time; the first success repaints so the sidebar grows Lumen's
+       pages, and running out of attempts explains itself in the page. */
+    function startLumenEmbedRetry() {
+      if (lumenEmbedRetry !== null || lumenEmbedState || lumenEmbedBlocked) return;
+      lumenEmbedPending = true;
+      lumenEmbedRetryTries = 0;
+      lumenEmbedRetry = life.interval(() => {
+        lumenEmbedRetryTries += 1;
+        if (lumenEmbedBlocked || !lumenEmbedWanted()) { stopLumenEmbedRetry(); lumenEmbedPending = false; return; }
+        if (!document.getElementById('lumen-settings-overlay')) {
+          openLumenOverlay(lumenEmbedRetryTries <= 1);
+        }
+        const shape = lumenShape();
+        if (shape.overlay && shape.reason) {
+          // Lumen is there but not the shape embedding needs. Give it the rest
+          // of the budget in case it is still building, then take the door.
+          if (lumenEmbedRetryTries >= LUMEN_EMBED_TRIES) {
+            stopLumenEmbedRetry();
+            lumenEmbedPending = false;
+            fallBackFromLumenEmbed(shape.reason);
+          }
+          return;
+        }
+        if (applyLumenEmbed()) {
+          stopLumenEmbedRetry();
+          lumenEmbedPending = false;
+          lumenOpenError = '';
+          if (tab === 'lumen') repaintIfOpen();
+          return;
+        }
+        if (lumenEmbedRetryTries >= LUMEN_EMBED_TRIES) {
+          stopLumenEmbedRetry();
+          embedNever(shape.reason || 'Luna could not measure the space for it');
+        }
+      }, LUMEN_EMBED_EVERY);
+    }
+
+    const lumenSubtabsWanted = () => tab === 'lumen' && lumenEmbedWanted() && !lumenEmbedBlocked
+      && Boolean(document.getElementById('lumen-settings-overlay'));
+
+    /* Which Lumen page is showing: the one last clicked here, else the first
+       visible panel (Lumen builds all panels and toggles them by display). */
+    function lumenActiveIndex(shape) {
+      const tabs = (shape && shape.tabs) || [];
+      if (!tabs.length) return -1;
+      if (lumenLastTabNode) {
+        const known = tabs.indexOf(lumenLastTabNode);
+        if (known >= 0) return known;
+      }
+      const panels = findClasses(shape.overlay, 'lumen-tab-panel');
+      for (let index = 0; index < panels.length && index < tabs.length; index += 1) {
+        const style = panels[index].style || {};
+        if ((style.display && style.display !== 'none')
+          || classTokens(panels[index]).indexOf('active') >= 0) return index;
+      }
+      return -1;
+    }
+
+    /* Select a Lumen page from Luna's sidebar: highlight it, make sure the pane
+       is actually laid into Luna's window (retrying like the entry does), then
+       forward the click to Lumen's own tab - by index, because Lumen may have
+       rebuilt its overlay since this sub-entry was drawn. */
+    function selectLumenSubPage(tabNode, index) {
+      lumenLastTabNode = tabNode || lumenLastTabNode;
+      if (!lumenEmbedState && !lumenEmbedBlocked && lumenEmbedWanted()) {
+        if (!document.getElementById('lumen-settings-overlay')) openLumenOverlay();
+        applyLumenEmbed();
+        if (!lumenEmbedState) { lumenEmbedPending = true; startLumenEmbedRetry(); }
+      }
+      const shape = lumenShape();
+      const tabs = shape.tabs || [];
+      const target = tabs[index] || (tabNode && tabs.indexOf(tabNode) >= 0 ? tabNode : null);
+      if (target) {
+        lumenLastTabNode = target;
+        if (typeof target.click === 'function') { try { target.click(); } catch (_) { /* gone */ } }
+        else if (typeof target.onclick === 'function') { try { target.onclick(); } catch (_) { /* gone */ } }
+      }
+      repaintIfOpen();
+    }
+
+    /* Lumen's own page names, live from its sidebar, one nested entry each.
+       Built with the same row builder as the categories: the only difference is
+       `.sls-luna-subpage` (indent, smaller type). */
+    function lumenSubEntries() {
+      const shape = lumenShape();
+      if (!shape.overlay || shape.reason) return [];
+      const accountActive = lumenAccountVisible();
+      const active = accountActive ? -1 : lumenActiveIndex(shape);
+      const rows = shape.tabs.map((tabNode, index) => {
+        const sub = sidebarRow({
+          label: String(tabNode.textContent || '').trim() || ('Page ' + (index + 1)),
+          active: index === active,
+          sub: true,
+          onclick: event => {
+            if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+            selectLumenSubPage(tabNode, index);
+          },
+        });
+        sub.tabIndex = 0;
+        return sub;
+      });
+      // Lumen's account page is the sixth panel and has no tab of its own; the
+      // entry exists only while Lumen's sidebar carries that button.
+      if (lumenAccountButton(shape.overlay)) {
+        const account = sidebarRow({
+          label: 'lua.tools account',
+          active: accountActive,
+          sub: true,
+          onclick: event => {
+            if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+            openLumenAccountPage();
+            repaintIfOpen();
+          },
+        });
+        account.tabIndex = 0;
+        rows.push(account);
+      }
+      return rows;
+    }
+
+    /* Lumen rebuilds its overlay on every open and removes it on close, and it
+       takes the overlay away when something inside it acts (its updater is
+       patched shut). While Lumen is *our* content area, watch the direct
+       children of the document body - the only place Lumen's overlay is added
+       or removed - and nothing else. The observer is disconnected whenever
+       nothing is embedded, so an idle Luna costs no callbacks at all. */
+    function attachLumenOverlayWatch() {
+      if (!lumenEmbedState || lumenEmbedBlocked || !lumenEmbedWanted()) return;
+      if (tornDown || tab !== 'lumen' || !document.getElementById(OVERLAY_ID)) return;
+      if (typeof w.MutationObserver !== 'function') return;
+      const body = document.body;
+      if (!body) return;
+      if (!lumenEmbedObserver) {
+        try {
+          lumenEmbedObserver = new w.MutationObserver(() => onLumenOverlayMutations());
+          life.watch(lumenEmbedObserver);
+        } catch (_) { lumenEmbedObserver = null; return; }
+      }
+      if (lumenEmbedObserver.slsWatching) return;
+      try {
+        lumenEmbedObserver.observe(body, { childList: true });
+        lumenEmbedObserver.slsWatching = true;
+      } catch (_) { /* without the observer the retry below still runs */ }
+    }
+
+    function detachLumenOverlayWatch() {
+      if (!lumenEmbedObserver || !lumenEmbedObserver.slsWatching) return;
+      lumenEmbedObserver.slsWatching = false;
+      try { lumenEmbedObserver.disconnect(); } catch (_) { /* already gone */ }
+    }
+
+    function onLumenOverlayMutations() {
+      if (tornDown || !current()) return;
+      if (tab !== 'lumen' || lumenEmbedBlocked || !lumenEmbedWanted()) {
+        detachLumenOverlayWatch();
+        return;
+      }
+      if (!document.getElementById(OVERLAY_ID)) { detachLumenOverlayWatch(); return; }
+      const live = document.getElementById('lumen-settings-overlay');
+      if (live) {
+        // A fresh overlay (Lumen re-opens itself): lay it in, no recovery.
+        if (!lumenEmbedState || lumenEmbedState.overlay !== live) applyLumenEmbed();
+        return;
+      }
+      if (!lumenEmbedState) return;
+      recoverLumenEmbed();
+    }
+
+    /* The embedded overlay disappeared. Re-open Lumen and lay it in again (a
+       bounded number of times per visit); past that, say in plain words what
+       happened, keep the Open Lumen button and name the blocked updater. The
+       content area is never left empty. */
+    function recoverLumenEmbed() {
+      lumenLastTabNode = null;
+      restoreLumenEmbed();
+      lumenEmbedRecoveries += 1;
+      if (!lumenEmbedLogged) {
+        lumenEmbedLogged = true;
+        lunaWarn('Lumen\u2019s menu disappeared while it was embedded; re-opening it', w);
+      }
+      if (lumenEmbedRecoveries > LUMEN_EMBED_RECOVERIES) {
+        lumenEmbedUpdateHint = true;
+        embedNever('Lumen\u2019s menu disappeared while it was embedded');
+        return;
+      }
+      lumenEmbedPending = true;
+      if (tab === 'lumen') repaintIfOpen(); // "Opening Lumen…", never an empty slot
+      if (!openLumenOverlay(false)) { startLumenEmbedRetry(); return; }
+      if (!applyLumenEmbed()) { startLumenEmbedRetry(); return; }
+      lumenEmbedPending = false;
+      if (tab === 'lumen') repaintIfOpen();
+    }
+
+    /* Steam's focus trap was registered against Lumen's overlay when Lumen
+       opened it and is a closure that cannot be unbound from here. Ask Luna's
+       own sidebar to take focus; if focus lands inside Lumen's window instead,
+       embedding would leave the sidebar unreachable, so this session falls
+       back to the door and says so. */
+    function probeLumenTrap() {
+      if (lumenEmbedProbe || !lumenEmbedState || !document || document.activeElement === undefined) return;
+      lumenEmbedProbe = 'probing';
+      const overlay = lumenEmbedState.overlay;
+      life.timeout(() => {
+        lumenEmbedProbe = 'done';
+        if (!lumenEmbedState || lumenEmbedState.overlay !== overlay) return;
+        const luna = document.getElementById(OVERLAY_ID);
+        const target = luna && (findClass(luna, 'sls-luna-subpage')
+          || findClass(luna, 'sls-luna-tab active') || findClass(luna, 'sls-luna-tab'));
+        if (!target || typeof target.focus !== 'function') return;
+        try { target.focus(); } catch (_) { /* repainted away */ }
+        const active = document.activeElement;
+        if (!active) return;
+        if (active === overlay || (typeof overlay.contains === 'function' && overlay.contains(active))) {
+          fallBackFromLumenEmbed('Steam\u2019s focus trap keeps focus inside Lumen');
+        }
+      }, 150);
+    }
+
+    /* Returns 'embedded' (Lumen is in Luna's window), 'door' (this session fell
+       back; Luna is closed and Lumen's own window is up), 'off' (the switch is
+       off), 'pending' (no measurable slot yet; paint() re-applies) or
+       'missing' (Lumen is not running; the page explains it). */
+    function enterLumenPage() {
+      if (!lumenEmbedWanted() || lumenEmbedBlocked) return 'off';
+      // The door was just tried and Lumen was not there: keep that line and the
+      // button instead of starting another quiet retry behind the user's back.
+      if (lumenOpenError) return 'missing';
+      if (!openLumenOverlay()) {
+        // Lumen often opens a moment later (it injects styles first); retry
+        // instead of declaring it missing on the first look.
+        lumenOpenError = '';
+        lumenEmbedPending = true;
+        startLumenEmbedRetry();
+        return 'pending';
+      }
+      const shape = lumenShape();
+      if (shape.reason) { fallBackFromLumenEmbed(shape.reason); return 'door'; }
+      if (!applyLumenEmbed()) {
+        startLumenEmbedRetry();
+        return 'pending';
+      }
+      lumenEmbedPending = false;
+      probeLumenTrap();
+      return 'embedded';
+    }
+
+    /* The switch. Off restores Lumen's own window at once; on embeds the page
+       that is already open without a repaint first. */
+    function setLumenEmbed(on) {
+      setLocalItem(LUMEN_EMBED_KEY, on ? '1' : '0');
+      savePref(LUMEN_EMBED_PREF, Boolean(on));
+      if (!on) leaveLumenEmbed();
+      else if (tab === 'lumen' && document.getElementById(OVERLAY_ID)) enterLumenPage();
+      repaintIfOpen();
+    }
+    /* Lumen's own button carries its last known update state in a pill; while
+       that button is hidden this line is the only place it shows. Read-only
+       DOM and state the page already has: no new RPC, no network call. */
+    function lumenUpdateLine() {
+      const findPill = node => {
+        if (!node) return null;
+        if (String(node.className || '').indexOf('lumen-auto-fix-pill-copy') >= 0) return node;
+        for (const kid of (node.children || [])) {
+          const hit = findPill(kid);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      const pill = findPill(document.getElementById('lumen-moon-btn'));
+      const pillText = pill && String(pill.textContent || '').trim();
+      const lumen = lunaLumen || {};
+      const result = lumen.result || {};
+      let text = '';
+      if (pillText) text = 'Lumen reports: ' + pillText + '.';
+      else if (lumen.job) text = 'A Lumen update is queued; it applies when Steam is closed.';
+      else if (lumen.interrupted) text = 'An earlier Lumen update was interrupted.';
+      else if (result.state === 'failed') text = 'The last Lumen update failed.';
+      if (!text) return null;
+      const line = document.createElement('p');
+      line.className = 'sls-luna-note';
+      line.textContent = text;
+      return line;
+    }
+
+    const lumenOpenButton = () => {
+      const open = document.createElement('button');
+      open.className = 'sls-luna-btn';
+      open.textContent = 'Open Lumen';
+      open.onclick = openLumenMenu;
+      return open;
+    };
+
+    function lumenBody() {
+      const body = document.createElement('div');
+      // The account hand-over line comes first, so it is visible even while the
+      // embedded Lumen page is still opening.
+      if (lumenSignInNote) {
+        const note = document.createElement('p');
+        note.className = 'sls-luna-note';
+        note.textContent = lumenSignInNote;
+        body.appendChild(note);
+      }
+      // Lumen's menu is on its way in: one short line, not the whole intro.
+      if (lumenEmbedPending) {
+        const opening = document.createElement('p');
+        opening.className = 'sls-luna-note';
+        opening.textContent = 'Opening Lumen\u2026';
+        body.appendChild(opening);
+        return body;
+      }
+      // Embedding could not land: the reason in plain words, then the door.
+      if (lumenEmbedBlocked) {
+        const blocked = document.createElement('p');
+        blocked.className = 'sls-luna-note';
+        blocked.textContent = 'Embedded Lumen is unavailable this session: ' + lumenEmbedBlocked
+          + '. Luna could not put Lumen\u2019s menu inside this window.';
+        body.appendChild(blocked);
+        if (lumenOpenError) {
+          const failed = document.createElement('p');
+          failed.className = 'sls-luna-error';
+          failed.textContent = lumenOpenError;
+          body.appendChild(failed);
+        }
+        const row = document.createElement('div');
+        row.className = 'sls-luna-row';
+        row.appendChild(lumenOpenButton());
+        body.appendChild(row);
+        if (lumenEmbedUpdateHint) {
+          // One line: the likely cause, and where the working update lives.
+          const hint = document.createElement('p');
+          hint.className = 'sls-luna-note';
+          hint.textContent = LUMEN_UPDATER_NOTE;
+          body.appendChild(hint);
+        }
+        const settings = document.createElement('p');
+        settings.className = 'sls-luna-note';
+        settings.textContent = LUMEN_EMBED_HINT;
+        body.appendChild(settings);
+        return body;
+      }
+
+      // Embedded: Lumen's pane covers this area, so Luna paints nothing behind
+      // it. No intro, no flash, and nothing shows through Lumen's transparent
+      // areas. The intro belongs to the door and to the blocked states above.
+      if (lumenEmbedState) return body;
+
+      const note = document.createElement('p');
+      note.className = 'sls-luna-note';
+      note.textContent = 'Lumen is the plugin host and owns the LuaTools / SLSsteam settings; '
+        + 'updates are on the Updates tab.';
+      body.appendChild(note);
+
+      const row = document.createElement('div');
+      row.className = 'sls-luna-row';
+      row.appendChild(lumenOpenButton());
+      body.appendChild(row);
+
+      if (lumenOpenError) {
+        const failed = document.createElement('p');
+        failed.className = 'sls-luna-error';
+        failed.textContent = lumenOpenError;
+        body.appendChild(failed);
+      }
+      const state = lumenUpdateLine();
+      if (state) body.appendChild(state);
+
+      const terminal = document.createElement('p');
+      terminal.className = 'sls-luna-note';
+      terminal.textContent = 'The same is available in a terminal: luna lumen status to see what is '
+        + 'installed, luna lumen update to update.';
+      body.appendChild(terminal);
+
+      // One line for both switches; no second settings sentence in the page.
+      const settings = document.createElement('p');
+      settings.className = 'sls-luna-note';
+      settings.textContent = LUMEN_EMBED_HINT;
+      body.appendChild(settings);
+      return body;
+    }
+
     function showError(body, error) {
       const line = document.createElement('p');
       line.className = 'sls-luna-error';
@@ -3677,17 +6126,29 @@
 
     const TITLES = { playtime: 'Playtime', presence: 'Presence', compressor: 'Compressor',
       hltb: 'HowLongToBeat', steamgrid: 'SteamGridDB artwork', graphics: 'Graphics (read-only)',
-      health: 'Health (local diagnostics)', settings: 'Settings', about: 'About SLS Luna' };
+      health: 'Health (local diagnostics)', updates: 'Updates', lumen: 'Lumen', settings: 'Settings', about: 'About SLS Luna' };
 
-    function paint() {
-      const nav = visibleNav();
-      if (!nav.some(entry => entry.id === tab)) tab = 'settings';
-      const restoreSearch = document.activeElement === search && tab === 'playtime';
-      const selection = [search.selectionStart, search.selectionEnd];
-      const existing = document.getElementById(OVERLAY_ID);
-      if (existing) existing.remove();
-      overlay = document.createElement('div');
-      overlay.id = OVERLAY_ID;
+    /* ---- Shell and page cache -------------------------------------------
+       The window (overlay, sidebar, header, body slot) is built once per open
+       and reused for every tab switch, so switching never destroys the DOM the
+       user is looking at and never flashes. Each category's page is built the
+       first time it is shown and cached; Luna's content rect is measured once,
+       when the shell opens, and only again after a resize. */
+    let shell = null;
+    let shellBodyCache = new Map();
+    let shellDataRev = 0;
+    let shellSideSig = '';
+    let pendingReveal = false;
+
+    function buildShell() {
+      if (shell && document.getElementById(OVERLAY_ID)) return shell;
+      shellBodyCache = new Map();
+      shellSideSig = '';
+      const node = document.createElement('div');
+      node.id = OVERLAY_ID;
+      // Laid out but not shown until showMenu's first frame: Lumen can be
+      // measured and embedded before anything flashes.
+      if (pendingReveal && node.style) node.style.visibility = 'hidden';
       const win = document.createElement('div');
       win.className = 'sls-luna-win';
       const side = document.createElement('div');
@@ -3696,42 +6157,171 @@
       title.className = 'sls-luna-side-title';
       title.textContent = 'Luna';
       side.appendChild(title);
-      sidebar().forEach(item => side.appendChild(item));
-      side.appendChild(Object.assign(document.createElement('div'), { className: 'sls-luna-spacer' }));
-      side.appendChild(accountRow());
-
       const main = document.createElement('div');
       main.className = 'sls-luna-main';
       const head = document.createElement('div');
       head.className = 'sls-luna-head';
       const heading = document.createElement('h3');
-      heading.textContent = TITLES[tab] || tab;
-      const close = document.createElement('button');
-      close.className = 'sls-luna-x';
-      close.textContent = '\u2715';
-      close.onclick = closeMenu;
+      // Only shown when the view could not be hidden and Steam had to be moved
+      // to the Library instead: one short line, never a permanent banner.
+      const viewLine = document.createElement('div');
+      viewLine.className = 'sls-luna-view-note';
+      if (viewNote) viewLine.textContent = viewNote;
+      else if (viewLine.style) viewLine.style.display = 'none';
       const refreshButton = document.createElement('button');
       refreshButton.className = 'sls-luna-btn secondary';
       refreshButton.textContent = 'Refresh';
       refreshButton.onclick = refresh;
-      head.append(heading, refreshButton, close);
-
+      const close = document.createElement('button');
+      close.className = 'sls-luna-x';
+      close.textContent = '\u2715';
+      close.onclick = closeMenu;
+      head.append(heading, viewLine, refreshButton, close);
       const body = document.createElement('div');
       body.className = 'sls-luna-body';
-      body.appendChild(tab === 'presence' ? presenceBody()
-        : tab === 'compressor' ? compressorBody()
-        : tab === 'hltb' ? hltbBody()
-        : tab === 'steamgrid' ? steamgridBody()
-        : tab === 'graphics' ? graphicsBody()
-        : tab === 'health' ? healthBody()
-        : tab === 'settings' ? settingsBody()
-        : tab === 'about' ? aboutBody() : playtimeBody());
-
       main.append(head, body);
       win.append(side, main);
-      overlay.appendChild(win);
-      overlay.addEventListener('click', event => { if (event.target === overlay) closeMenu(); });
-      document.body.appendChild(overlay);
+      node.appendChild(win);
+      node.addEventListener('click', event => { if (event.target === node) closeMenu(); });
+      document.body.appendChild(node);
+      shell = { overlay: node, win: win, side: side, main: main, head: head, heading: heading,
+        viewNote: viewLine, refreshButton: refreshButton, body: body, title: title,
+        spacer: null, account: null };
+      overlay = node;
+      return shell;
+    }
+
+    function revealShell() {
+      pendingReveal = false;
+      if (!shell || !shell.overlay.style) return;
+      shell.overlay.style.visibility = '';
+    }
+
+    // The fallback line can arrive after the shell is painted (the agent
+    // answered late), so it is refreshed on every open rather than only built.
+    function syncViewNote() {
+      if (!shell || !shell.viewNote) return;
+      if (viewNote) shell.viewNote.textContent = viewNote;
+      else if (shell.viewNote.style) shell.viewNote.style.display = 'none';
+    }
+
+    function bodyNode(id) {
+      return id === 'presence' ? presenceBody()
+        : id === 'compressor' ? compressorBody()
+        : id === 'hltb' ? hltbBody()
+        : id === 'steamgrid' ? steamgridBody()
+        : id === 'graphics' ? graphicsBody()
+        : id === 'health' ? healthBody()
+        : id === 'updates' ? updatesBody()
+        : id === 'lumen' ? lumenBody()
+        : id === 'settings' ? settingsBody()
+        : id === 'about' ? aboutBody() : playtimeBody();
+    }
+
+    /* The sidebar changes only when its labels, the active row or Lumen's page
+       list change. Rows are rebuilt then; a plain tab switch only moves the
+       `active` class, so the same DOM stays on screen. */
+    function sidebarSignature() {
+      const parts = visibleNav().map(entry => entry.id + ':' + entry.label
+        + (entry.id === 'updates' && updateBadge() ? ' *' : ''));
+      parts.push('>' + tab);
+      if (tab === 'lumen' && lumenSubtabsWanted()) {
+        const shape = lumenShape();
+        if (shape.overlay && !shape.reason) {
+          const active = lumenActiveIndex(shape);
+          parts.push('~' + shape.tabs.map((tabNode, index) =>
+            (index === active ? '[' : '') + String(tabNode.textContent || '').trim()).join('|')
+            + '^' + (lumenAccountVisible() ? 'account' : '')
+            + (lumenAccountButton(shape.overlay) ? '+entry' : ''));
+        }
+      }
+      const account = (snapshot && snapshot.account) || '';
+      parts.push('@' + account + (connected() ? ' ok' : ''));
+      parts.push('#' + (luatools ? String(luatools.labelKey || '') + ':' + String(luatools.name || '')
+        + ':' + String(luatools.avatar || '') : 'unknown'));
+      return parts.join(';');
+    }
+
+    function syncSidebar() {
+      const sig = sidebarSignature();
+      if (sig === shellSideSig) return;
+      shellSideSig = sig;
+      // HTMLCollection has no slice(): iterate a copy so removals are safe.
+      for (const node of Array.from(shell.side.children || [])) {
+        if (node === shell.title) continue;
+        if (typeof node.remove === 'function') node.remove();
+      }
+      sidebar().forEach(item => shell.side.appendChild(item));
+      shell.spacer = document.createElement('div');
+      shell.spacer.className = 'sls-luna-spacer';
+      shell.side.appendChild(shell.spacer);
+      shell.account = accountRow();
+      shell.side.appendChild(shell.account);
+    }
+
+    /* Show a category. `fresh` rebuilds that page from current state (a paint
+       after data landed); without it, a cached page is shown by toggling
+       display and only the first visit builds anything. */
+    function syncShell(fresh) {
+      syncSidebar();
+      shell.heading.textContent = TITLES[tab] || tab;
+      let entry = shellBodyCache.get(tab);
+      if (!entry || fresh || entry.rev !== shellDataRev || !entry.node.parentNode) {
+        const node = bodyNode(tab);
+        const pane = document.createElement('div');
+        pane.className = 'sls-luna-pane';
+        pane.appendChild(node);
+        if (entry && entry.node && typeof entry.node.remove === 'function') entry.node.remove();
+        shell.body.appendChild(pane);
+        entry = { node: pane, rev: shellDataRev };
+        shellBodyCache.set(tab, entry);
+      }
+      // Exactly one pane on screen: hide every other child of the body slot, so
+      // a stale or replaced pane can never stack under the active one.
+      Array.from(shell.body.children || []).forEach(node => {
+        if (node !== entry.node && node.style) node.style.display = 'none';
+      });
+      if (entry.node.style) entry.node.style.display = '';
+    }
+
+    function selectCategory(id) {
+      if (!document.getElementById(OVERLAY_ID)) return;
+      // The artwork pass is polled only while its tab is on screen.
+      if (id !== 'steamgrid') stopSgdbAuto();
+      const leaving = tab === 'lumen' && id !== 'lumen';
+      tab = id;
+      confirmAction = null;
+      cancelArmed = false;
+      cleanupArmed = false;
+      if (leaving) leaveLumenEmbed();
+      if (id === 'lumen') {
+        const entered = enterLumenPage();
+        // 'door': the page fell back to Lumen's own window, which closed Luna.
+        // Returned so a caller can tell whether the menu is still there.
+        if (entered === 'door') return 'door';
+      }
+      if (!shell || !document.getElementById(OVERLAY_ID)) { paint(); return; }
+      syncShell(false);
+      if (tab === 'lumen' && lumenEmbedState) applyLumenEmbed();
+      // Back on the tab: resume following the same job, no second start.
+      if (tab === 'steamgrid' && sgdbAuto && sgdbAuto.state === 'running') pollSgdbAuto();
+    }
+
+    function paint() {
+      const nav = visibleNav();
+      if (!nav.some(entry => entry.id === tab)) tab = 'settings';
+      // The "Lumen is not running" line belongs to one visit; leaving the page
+      // drops it, so a later open never shows a stale failure.
+      if (tab !== 'lumen') { lumenOpenError = ''; lumenSignInNote = ''; }
+      // Lumen's UI only lives in this window while its page is on screen.
+      if (tab !== 'lumen') leaveLumenEmbed();
+      if (tab !== 'steamgrid') stopSgdbAuto();
+      const restoreSearch = document.activeElement === search && tab === 'playtime';
+      const selection = [search.selectionStart, search.selectionEnd];
+      buildShell();
+      syncShell(true);
+      // The rect is cached: this re-lays Lumen into it, it never measures.
+      if (tab === 'lumen' && lumenEmbedState) applyLumenEmbed();
       if (restoreSearch) {
         search.focus();
         if (typeof search.setSelectionRange === 'function') search.setSelectionRange(...selection);
@@ -3776,8 +6366,10 @@
       try { refreshLibraryShelves(); } catch (_) { /* shelves render later */ }
       try {
         sgdb = await rpc(w, 'SlsSgdbGet');
+        sgdbReadError = '';
       } catch (error) {
         sgdb = sgdb || {};
+        sgdbReadError = String(error && error.message ? error.message : error);
       }
       try {
         graphics = await rpc(w, 'SlsGraphicsGet');
@@ -3786,32 +6378,89 @@
       }
       try {
         lunaInfo = await rpc(w, 'SlsLunaInfo');
+        delete rpcErrors.info;
       } catch (error) {
+        rpcErrors.info = errorText(error);
         lunaInfo = lunaInfo || {};
       }
       await migratePrefs();
       try {
         const report = await rpc(w, 'SlsLunaHealth');
         lunaHealth = (report && report.health) || report || {};
+        delete rpcErrors.health;
       } catch (error) {
+        rpcErrors.health = errorText(error);
         lunaHealth = lunaHealth || {};
       }
       try {
         const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'status' }) });
         lunaUpdate = (out && out.update) || lunaUpdate || {};
+        delete rpcErrors.update;
       } catch (error) {
+        rpcErrors.update = errorText(error);
         lunaUpdate = lunaUpdate || {};
       }
       try {
         const steamOut = await rpc(w, 'SlsLunaSteam', { raw: JSON.stringify({ action: 'status' }) });
         lunaSteam = (steamOut && steamOut.steam) || lunaSteam || {};
+        delete rpcErrors.steam;
       } catch (error) {
+        rpcErrors.steam = errorText(error);
         lunaSteam = lunaSteam || {};
+      }
+      try {
+        const hostOut = await rpc(w, 'SlsLunaHost', {});
+        lunaHost = (hostOut && hostOut.host) || lunaHost || {};
+        delete rpcErrors.host;
+      } catch (error) {
+        rpcErrors.host = errorText(error);
+        lunaHost = lunaHost || {};
+      }
+      if ((lunaHost.configured || lunaHost.running) === 'lumen') {
+        try {
+          const lumenOut = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'status' }) });
+          lunaLumen = (lumenOut && lumenOut.lumen) || lunaLumen || {};
+          delete rpcErrors.lumen;
+        } catch (error) {
+          rpcErrors.lumen = errorText(error);
+          lunaLumen = lunaLumen || {};
+        }
+        // The channels come from `luna lumen channels`, which starts a bounded
+        // CLI read: once per page session, not on every status poll.
+        if (lunaChannels === null && !channelsBusy && !channelsTried) {
+          channelsBusy = true;
+          channelsTried = true;
+          try {
+            const chanOut = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'channels' }) });
+            if (chanOut && chanOut.channels) lunaChannels = chanOut.channels;
+            channelsError = '';
+          } catch (error) {
+            channelsError = errorText(error);
+          }
+          channelsBusy = false;
+        }
+      }
+      // Footer connection: LuaTools' own signed-in session, read by the
+      // backend. A failed RPC is "unavailable", never "connected".
+      try {
+        const out = await rpc(w, 'SlsLunaLuaTools', {});
+        if (out && out.success === false) throw new Error(out.error || 'not available');
+        const state = (out && out.luatools) || {};
+        luatools = { signedIn: state.signedIn === true, name: String(state.name || ''),
+          avatar: String(state.avatar || ''), expired: state.expired === true,
+          path: String(state.path || ''),
+          error: String(state.error || ''),
+          labelKey: state.signedIn === true ? 'signedIn' : 'out' };
+      } catch (error) {
+        luatools = { unavailable: true, signedIn: false, name: '',
+          error: 'the LuaTools state is not readable here: ' + errorText(error), labelKey: 'unavailable' };
       }
       try {
         const refreshOut = await rpc(w, 'SlsLunaRefresh', { raw: JSON.stringify({ action: 'status' }) });
         lunaRefresh = refreshOut || lunaRefresh || {};
+        delete rpcErrors.refresh;
       } catch (error) {
+        rpcErrors.refresh = errorText(error);
         lunaRefresh = lunaRefresh || {};
       }
       // A real check talks to GitHub through the updater; the Python side caches
@@ -3827,13 +6476,123 @@
         } catch (_) { /* offline or gh missing; the status stays */ }
       }
       maybeAutoFetch();
+      // New data: cached pages built before this pass are stale and rebuild on
+      // their next visit; the visible one is refreshed now.
+      shellDataRev += 1;
       repaintIfOpen();
     }
 
+    let opening = false;
+    function showMenu() {
+      const existing = document.getElementById(OVERLAY_ID);
+      if (existing) {
+        // A hidden shell is a half-built one from a failed open: rebuild it
+        // instead of returning early and leaving the menu dead for the session.
+        if (existing.style && existing.style.visibility === 'hidden') {
+          existing.remove();
+          shell = null;
+          overlay = null;
+          shellBodyCache = new Map();
+          shellSideSig = '';
+        } else {
+          return;
+        }
+      }
+      lumenEmbedRecoveries = 0;
+      lumenEmbedUpdateHint = false;
+      lumenRectCache = null;
+      // If Lumen's own menu is already up and embedding is on, Luna opens on
+      // its Lumen page with that menu inside it instead of closing it.
+      const lumenAlreadyOpen = Boolean(document.getElementById('lumen-settings-overlay'));
+      if (lumenAlreadyOpen && lumenEmbedWanted() && !lumenEmbedBlocked) tab = 'lumen';
+      // One menu at a time. Lumen's overlay shares Luna's z-index, so it is
+      // closed through its own entry point before Luna paints - unless the
+      // Lumen page is about to embed it, in which case it stays up and is
+      // restyled after Luna paints.
+      const embedding = tab === 'lumen' && lumenEmbedWanted() && !lumenEmbedBlocked;
+      if (!embedding) closeLumenMenu();
+      // Hide the view when still on a browser route, or when the route is
+      // unknown: the overlay lives in Steam's shell document, and Store,
+      // Community and the built-in browser are drawn above it.
+      try {
+        // Build the window hidden, fill the first page, embed Lumen into the
+        // measured rect, and only then show the first frame. No flash, no
+        // empty content area and no second paint.
+        pendingReveal = true;
+        paint();
+        syncViewNote();
+        if (embedding) {
+          const entered = enterLumenPage();
+          if (entered === 'door') { pendingReveal = false; return; } // Lumen's own window is up
+          // Lumen's pane now covers this area (or the retry is on): fill the
+          // page slot once, still hidden, so the first frame is never the intro.
+          syncShell(true);
+        }
+        revealShell();
+        refresh();
+      } catch (err) {
+        pendingReveal = false;
+        restoreMainView(w);
+        // Never leave a hidden, half-built shell behind: it would make every
+        // later click a no-op.
+        const stale = document.getElementById(OVERLAY_ID);
+        if (stale) stale.remove();
+        shell = null;
+        overlay = null;
+        shellBodyCache = new Map();
+        shellSideSig = '';
+        throw err;
+      }
+    }
+
+    // Where the shell document is ours, the menu opens in place - Library,
+    // Store, Community, Profile: no navigation, nothing to wait for. The
+    // browser view is hidden first (through SharedJSContext), which is what
+    // makes the overlay clickable on Store and Community; navigation to the
+    /* Store/Community first: a browser view over the shell eats every click,
+       even when it is hidden, so Steam has to move to the Library before the
+       menu can be used. When the route is already known to be a browser one the
+       switch happens before the paint; when the only evidence is a cached
+       answer the menu opens at once and the live route confirms it - a stale
+       cache is corrected within a beat instead of leaving a dead menu. */
     function openMenu() {
-      if (document.getElementById(OVERLAY_ID)) return;
-      paint();
-      refresh();
+      if (opening) return;
+      const existing = document.getElementById(OVERLAY_ID);
+      // A hidden leftover is a failed open, not a menu: showMenu rebuilds it.
+      if (existing && !(existing.style && existing.style.visibility === 'hidden')) return;
+      const direct = currentRoute(w);
+      const known = rememberView(w);
+      const route = direct !== null ? direct : (known && known.ok ? known.route : null);
+      if (onBrowserRoutePath(route)) {
+        opening = true;
+        const done = () => {
+          opening = false;
+          if (tornDown) return;
+          showMenu();
+          syncViewNote();
+        };
+        // prepareView navigates (never hides) and only then is the menu painted.
+        prepareView(w).then(done, done);
+        return;
+      }
+      showMenu();
+      followView(w);
+    }
+
+    /* The menu is on screen: ask the live route and, on a browser page, ask
+       Steam to show the Library. Never hides the view, never navigates back. */
+    function followView(w) {
+      requestView(w, 'status').then(status => {
+        if (!status || status.ok !== true) return;
+        if (!onBrowserRoutePath(status.route)) return;
+        return requestView(w, 'navigate', VIEW_NAVIGATE_TIMEOUT_MS).then(out => {
+          viewNote = out && out.ok === true ? '' : VIEW_LIBRARY_NOTE;
+          syncViewNote();
+        }).catch(() => {
+          viewNote = VIEW_LIBRARY_NOTE;
+          syncViewNote();
+        });
+      }).catch(() => { /* no agent: nothing can be moved from here */ });
     }
 
     function closeMenu() {
@@ -3841,55 +6600,158 @@
       confirmAction = null;
       cancelArmed = false;
       cleanupArmed = false;
+      pendingReveal = false;
+      stopSgdbAuto();
+      // Lumen goes back to its own window (and every style Luna wrote on it is
+      // restored) before Luna's overlay goes away.
+      leaveLumenEmbed();
+      detachLumenOverlayWatch();
       // A fetch pass deliberately keeps running in the background; the menu
       // shows its progress again the next time it is opened.
       const node = document.getElementById(OVERLAY_ID);
       if (node) node.remove();
+      shell = null;
+      overlay = null;
+      shellBodyCache = new Map();
+      shellSideSig = '';
+      lumenRectCache = null;
+      lumenEmbedRecoveries = 0;
+      lumenEmbedUpdateHint = false;
+      viewNote = '';
+      restoreMainView(w);
     }
 
-    document.addEventListener('keydown', event => {
-      if (event.key === 'Escape') closeMenu();
+    // Retiring this generation: every handle below is registered with `life`,
+    // so the next mount (or a page reload) starts from a clean page.
+    w.__SlsLunaTeardown = () => {
+      tornDown = true;
+      // Give Lumen back its own inline styles and drop the overlay observer;
+      // Lumen's window itself is left where the user can see it.
+      lumenLastTabNode = null;
+      stopLumenEmbedRetry();
+      stopSgdbAuto();
+      lumenEmbedPending = false;
+      detachLumenOverlayWatch();
+      lumenEmbedObserver = null;
+      restoreLumenEmbed();
+      shell = null;
+      overlay = null;
+      shellBodyCache = new Map();
+      lumenRectCache = null;
+      pendingReveal = false;
+      // Give Lumen's launcher back before the observer that watches it goes.
+      restoreLumenLauncher();
+      life.teardown();
+      // The shelf refresh keeps one timeout of its own; drop it with the page.
+      if (shelfTimer) {
+        try { (w.clearTimeout || clearTimeout)(shelfTimer); } catch (_) { /* already fired */ }
+        shelfTimer = null;
+      }
+      try { stopJobPolling(); } catch (_) { /* never started */ }
+      const node = document.getElementById(OVERLAY_ID);
+      if (node && typeof node.remove === 'function') node.remove();
+      viewNote = '';
+      restoreMainView(w);
+    };
+
+    life.listen(w, 'pagehide', () => { restoreMainView(w); });
+
+    life.listen(document, 'keydown', event => {
+      if (event.key === 'Escape' && current()) closeMenu();
     });
 
-    mountButton(w, openMenu);
+    /* Lumen closes itself on a capture-phase document keydown. This one sits on
+       the window's capture phase, so it runs before Lumen's and can stop the
+       event there: while Lumen is embedded, one Esc closes Luna (and Lumen with
+       it), never Lumen alone. Lumen's own handler and Steam's focus trap stay
+       registered; nothing here tries to unbind them. */
+    life.listen(w, 'keydown', event => {
+      if (event.key !== 'Escape' || !lumenEmbedState || !current()) return;
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      if (typeof event.stopPropagation === 'function') event.stopPropagation();
+      closeMenu();
+    }, true);
+
+    // A resize is the only thing besides opening that re-measures Luna's
+    // content rect. One rAF at most is queued; nothing is measured per paint.
+    function onLunaResize() {
+      if (!shell) return;
+      const raf = typeof w.requestAnimationFrame === 'function'
+        ? w.requestAnimationFrame.bind(w) : null;
+      if (!raf) {
+        lumenRectCache = null;
+        if (lumenEmbedState) applyLumenEmbed();
+        return;
+      }
+      if (lumenRectFrame !== null) return;
+      lumenRectFrame = raf(() => {
+        lumenRectFrame = null;
+        if (tornDown || !shell) return;
+        lumenRectCache = null;
+        if (lumenEmbedState) applyLumenEmbed();
+      });
+    }
+    life.listen(w, 'resize', onLunaResize);
+
+    mountButton(w, openMenu, life, () => {
+      if (panelMounted) { hideLumenLauncher(); return; }
+      panelMounted = true;
+      hideLumenLauncher();
+      watchLumenLauncher();
+    });
     // Safety net: an add-on that mounted its floating panel before the flag was
     // set is removed on the next pass.
-    w.setInterval(() => { removeFloating(document); }, 4000);
+    life.interval(() => { removeFloating(document); }, 4000);
+
+    /* The Lumen job follows itself only while the Updates page is open and
+       visible. Fast while a job runs or a check is out, then slower and slower
+       when nothing changes; never the network check, only the status files. */
+    life.interval(() => {
+      if (tornDown || lumenBusy || document.hidden === true) return;
+      if (tab !== 'updates' || !document.getElementById(OVERLAY_ID)) return;
+      const terminalStarting = Boolean(lunaLumen && lunaLumen.terminal
+        && lunaLumen.terminal.state === 'starting');
+      if ((lunaHost && (lunaHost.configured || lunaHost.running)) !== 'lumen' && !terminalStarting) return;
+      const now = Date.now();
+      if (now < lumenNextPoll) return;
+      const view = lumenView();
+      const active = view.key === 'running' || view.key === 'recovering' || view.checking
+        || terminalStarting;
+      lumenNextPoll = now + (active ? 2000 : Math.min(60000, 10000 * (1 + lumenIdlePolls)));
+      pollLumen();
+    }, 2000);
     // The agent's "Change artwork" right-click lands here as a storage event
     // (SharedJSContext writes it; the panel owns the window and opens the UI).
     // Only artwork keys wake the consumer; anything else is unrelated traffic.
-    if (typeof w.addEventListener === 'function') {
-      w.addEventListener('storage', event => {
-        try {
-          if (event && typeof event.key === 'string') {
-            if (event.key === 'slsLunaArtworkRequest') { consumeArtworkRequest(); return; }
-            if (event.key === 'slsLunaHltbOrder') { scheduleShelfRefresh(0); return; }
-            return;
-          }
-        } catch (_) { /* a bare emitter without a key still consumes */ }
-        consumeArtworkRequest();
-      });
-    }
-    (w.setTimeout || setTimeout)(() => { consumeArtworkRequest(); }, 2500);
+    life.listen(w, 'storage', event => {
+      try {
+        if (event && typeof event.key === 'string') {
+          if (event.key === 'slsLunaArtworkRequest') { consumeArtworkRequest(); return; }
+          if (event.key === 'slsLunaHltbOrder') { scheduleShelfRefresh(0); return; }
+          return;
+        }
+      } catch (_) { /* a bare emitter without a key still consumes */ }
+      consumeArtworkRequest();
+    });
+    life.timeout(() => { consumeArtworkRequest(); }, 2500);
     // Home-shelf HLTB order lives in this window: re-scan after navigation and
     // re-apply after the cache or direction changes. No shared objects change.
-    (w.setTimeout || setTimeout)(() => { refreshLibraryShelves(); }, 3000);
-    (w.setTimeout || setTimeout)(() => { refreshLibraryShelves(); }, 9000);
-    w.setInterval(() => { if (document.hidden !== true) refreshLibraryShelves(); }, 15000);
-    if (typeof document.addEventListener === 'function') {
-      document.addEventListener('visibilitychange', () => {
-        if (document.hidden !== true) scheduleShelfRefresh(0);
-      });
-    }
+    life.timeout(() => { refreshLibraryShelves(); }, 3000);
+    life.timeout(() => { refreshLibraryShelves(); }, 9000);
+    life.interval(() => { if (document.hidden !== true) refreshLibraryShelves(); }, 15000);
+    life.listen(document, 'visibilitychange', () => {
+      if (document.hidden !== true) scheduleShelfRefresh(0);
+    });
     if (typeof w.MutationObserver === 'function') {
       try {
         const seen = new w.MutationObserver(() => { scheduleShelfRefresh(800); });
         seen.observe(document.body || document, { childList: true, subtree: true });
+        life.watch(seen);
       } catch (_) { /* a static view simply keeps its current order */ }
     }
     // Resume a background fetch pass after a Steam restart without making the
     // user open the menu: load the local times and continue where it left off.
-    (w.setTimeout || setTimeout)(async () => {
+    life.timeout(async () => {
       try {
         hltb = await rpc(w, 'SlsHltbGet');
       } catch (_) { /* the backend may still be starting */ }
@@ -3945,5 +6807,7 @@
         || (b.record.lastPlayed || 0) - (a.record.lastPlayed || 0) || a.name.localeCompare(b.name));
   }
 
-  return { mount, buildRows, buildHltbRows, findMenubar, hours };
+  return { mount, RPC_TIMEOUT, buildRows, buildHltbRows, findMenubar, hours, findMainBrowser,
+    hideMainView, restoreMainView, leaveBrowserRoute, prepareView, requestView, rememberView,
+    onBrowserRoutePath, VIEW_REQUEST_KEY, VIEW_RESULT_KEY };
 });

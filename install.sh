@@ -20,16 +20,17 @@ One-liner (fresh PC):
 Or run `bash install.sh` from a checkout.
 
 The installer keeps an existing LuaTools-Moon stack intact. If no complete base
-is found, it runs the pinned LuaTools-Moon installer with --nolaunch, then installs
-the sha256-verified SLS Luna add-ons. LuaTools is currently required by Luna's
-backend contract; --noplugin is therefore intentionally unsupported.
+is found, it pins and hard-locks the Steam client first, then runs the pinned
+LuaTools-Moon installer with --nolaunch, then installs the sha256-verified SLS
+Luna add-ons. LuaTools is currently required by Luna's backend contract;
+--noplugin is therefore intentionally unsupported.
 
 On a fresh PC this installs everything: native Steam (32-bit support enabled),
 32-bit libcrypto, mangohud, gamescope, gamemode (+32-bit parts), curl jq tar
 unzip git python3 zenity (pacman/apt/dnf; sudo is asked for only on an
-interactive terminal, otherwise the exact command is printed), then the base,
-the ubuntu12 lock on the known-good build, the add-ons, heal, IgnorePkg and the
-timer. Re-running changes nothing that is already in place.
+interactive terminal, otherwise the exact command is printed), then the ubuntu12
+lock + pin on the known-good build, the pinned base, the add-ons, heal, IgnorePkg
+and the timer. Re-running changes nothing that is already in place.
 
 By default Luna rolls Steam back to the ubuntu12 client and hard-locks it
 (Steam.cfg + steam.cfg, read-only package/). The historical build 1791918634 is

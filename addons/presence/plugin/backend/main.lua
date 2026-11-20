@@ -12,7 +12,7 @@ local function valid_id(v)
   local n = tonumber(v)
   return n and n >= 1 and n <= MAX and n == math.floor(n)
 end
-local function blank() return {enabled=false, sessionTime=true, owned={}, running={}, cleanup=0, account=nil, accountSource=nil} end
+local function blank() return {enabled=false, sessionTime=true, discordEnabled=true, discordAppId='', owned={}, running={}, cleanup=0, account=nil, accountSource=nil} end
 -- Only the 8-hex FNV digest of an account identity is ever persisted; the raw
 -- SteamID or account name must never reach this file or a log line.
 local function valid_account(v)
@@ -33,6 +33,10 @@ local function read_file()
   -- Enrichment: while a game runs, its hidden placeholder gains a session-time
   -- suffix (e.g. "(42m)"). On by default; only false disables it.
   data.sessionTime=value.sessionTime~=false
+  data.discordEnabled=value.discordEnabled~=false
+  if type(value.discordAppId)=='string' and value.discordAppId:match('^%d+$') and #value.discordAppId<=25 then
+    data.discordAppId=value.discordAppId
+  end
   if valid_account(value.account) then data.account=value.account end
   if valid_source(value.accountSource) then data.accountSource=value.accountSource end
   for original,shortcut in pairs(type(value.owned)=='table' and value.owned or {}) do
@@ -200,6 +204,176 @@ local identity_cache = {at = 0, value = nil}local function identity()
   identity_cache = {at = now, value = value}
   return value
 end
+-- Discord Rich Presence (pure helpers; no socket is opened here).
+-- Discord names an undetected game after its executable ("megabonk.x86_64").
+-- A SET_ACTIVITY over discord-ipc-N needs a registered Discord application ID
+-- (client_id); its application name is what Discord displays. Without one nothing
+-- can be sent, so the RPC below only plans the payload.
+local function acf_name(text)
+  if type(text) ~= 'string' then return nil end
+  local name = text:match('"name"%s*"([^"]+)"')
+  if name then name = name:gsub('\\(.)', '%1') end
+  return name
+end
+-- Name for a Steam app: add-on titles map first, then appmanifest_<id>.acf in
+-- each library dir. read_file(path) is injected so tests never touch disk.
+local function resolve_game_name(appid, titles, dirs, read)
+  if not valid_id(appid) then return nil end
+  local id = tostring(math.floor(tonumber(appid)))
+  if type(titles) == 'table' and type(titles[id]) == 'string' and #titles[id] > 0 then return titles[id] end
+  for _, dir in ipairs(dirs or {}) do
+    local ok, text = pcall(read, dir .. '/appmanifest_' .. id .. '.acf')
+    local name = ok and acf_name(text)
+    if name and #name > 0 then return name end
+  end
+  return nil
+end
+local function discord_socket_paths(getenv)
+  getenv = getenv or os.getenv
+  local base = getenv('XDG_RUNTIME_DIR') or ''
+  local out = {}
+  if base == '' then return out end
+  for n = 0, 9 do
+    for _, sub in ipairs({'', 'app/com.discordapp.Discord/', 'snap.discord/', '.flatpak/com.discordapp.Discord/xdg-run/'}) do
+      out[#out + 1] = base .. '/' .. sub .. 'discord-ipc-' .. n
+    end
+  end
+  return out
+end
+-- IPC frame: int32le opcode, int32le length, UTF-8 JSON. Opcode 0 = handshake, 1 = frame.
+local function discord_frame(op, body) return string.pack('<I4I4', op, #body) .. body end
+local function discord_handshake(client_id)
+  return discord_frame(0, json.encode({v = 1, client_id = tostring(client_id)}))
+end
+-- activity = nil clears the activity (send when the game stops).
+local function discord_set_activity(pid, name, started, nonce)
+  local activity = nil
+  if name then
+    activity = {name = name, details = name, type = 0, timestamps = {start = started}}
+  end
+  return discord_frame(1, json.encode({cmd = 'SET_ACTIVITY', nonce = tostring(nonce),
+    args = {pid = pid, activity = activity}}))
+end
+
+-- Discord Rich Presence session manager. The transport is injected (a
+-- luasocket-like unix client), so tests run against a fake. step() is called from
+-- the host's plugin tick; it never raises. Status: needs_app_id | no_discord |
+-- idle | connected.
+local RETRY_SECONDS = 15
+local function new_discord_session(deps)
+  local S = {conn = nil, status = 'idle', appid = nil, name = nil, started = nil,
+    sent = nil, next_try = 0, nonce = 0, path = nil}
+  local function close()
+    if S.conn then pcall(S.conn.close, S.conn) end
+    S.conn, S.sent, S.path = nil, nil, nil
+  end
+  local function send(frame)
+    if not S.conn then return false end
+    local ok, n = pcall(S.conn.send, S.conn, frame)
+    if not ok or not n then close(); return false end
+    return true
+  end
+  -- Reads one frame; nil, err on timeout or a dead connection.
+  local function read_frame(timeout)
+    local c = S.conn
+    c:settimeout(timeout)
+    local h, err = c:receive(8)
+    if not h then return nil, err end
+    local op, len = string.unpack('<I4I4', h)
+    if len > 65536 then return nil, 'oversized' end
+    local body = ''
+    if len > 0 then
+      c:settimeout(1)
+      body, err = c:receive(len)
+      if not body then return nil, err end
+    end
+    return op, body
+  end
+  local function try_connect(app_id)
+    for _, path in ipairs(deps.paths()) do
+      local c = deps.unix()
+      if not c then return false end
+      c:settimeout(0.5)
+      local ok = pcall(function() return c:connect(path) end) and c:getfd() >= 0
+      if ok then
+        S.conn, S.path = c, path
+        if send(discord_handshake(app_id)) then
+          local op, body = read_frame(2)
+          local okj, msg = pcall(json.decode, body or '')
+          if op == 1 and okj and type(msg) == 'table' and msg.evt == 'READY' then return true end
+        end
+        close()
+      else
+        pcall(c.close, c)
+      end
+    end
+    return false
+  end
+  local function pump()
+    while S.conn do
+      local op, body = read_frame(0)
+      if not op then
+        if body ~= 'timeout' then close() end
+        return
+      end
+      if op == 3 then send(discord_frame(4, body))
+      elseif op == 2 then close() end
+    end
+  end
+  local function clear()
+    if S.conn and S.sent then
+      S.nonce = S.nonce + 1
+      send(discord_set_activity(deps.pid(), nil, nil, S.nonce))
+    end
+    close()
+  end
+  -- settings = {enabled, app_id}; game = {appid, name} or nil. Returns status.
+  function S.step(settings, game, now)
+    local ok, err = pcall(function()
+      if type(settings.app_id) ~= 'string' or not settings.app_id:match('^%d+$') then
+        clear(); S.status = 'needs_app_id'; S.appid, S.name = nil, nil; return
+      end
+      if not settings.enabled or not game or not game.name then
+        clear(); S.status = 'idle'; S.appid, S.name = game and game.appid or nil, game and game.name or nil
+        S.started = nil; return
+      end
+      if S.appid ~= game.appid then S.started = now end
+      S.appid, S.name = game.appid, game.name
+      if S.conn then pump() end
+      if S.conn and S.sent and S.sent ~= game.appid then clear() end
+      if not S.conn then
+        if now < S.next_try then S.status = 'no_discord'; return end
+        if not deps.unix or not deps.unix() then S.status = 'no_discord'; return end
+        if not try_connect(settings.app_id) then
+          S.next_try = now + RETRY_SECONDS
+          S.status = 'no_discord'; return
+        end
+      end
+      if S.sent ~= game.appid then
+        S.nonce = S.nonce + 1
+        if send(discord_set_activity(deps.pid(), game.name, S.started, S.nonce)) then
+          S.sent = game.appid
+          pcall(read_frame, 0.5) -- consume the SET_ACTIVITY reply
+        end
+      end
+      S.status = S.conn and S.sent and 'connected' or 'no_discord'
+    end)
+    if not ok then close(); S.status = 'no_discord'; S.error = tostring(err) end
+    return S.status
+  end
+  function S.shutdown() pcall(clear) end
+  return S
+end
+local function proc_pid()
+  local f = io.open('/proc/self/stat', 'rb')
+  local line = f and f:read('*l'); if f then f:close() end
+  return tonumber(line and line:match('^(%d+)')) or 0
+end
+local function default_unix()
+  local ok, socket = pcall(require, 'socket')
+  if ok and type(socket) == 'table' and type(socket.unix) == 'function' then return socket.unix() end
+  return nil
+end
 local manifest_cache={at=0,apps={}}
 local function manifests()
   local now=os.time()
@@ -222,6 +396,7 @@ local function manifests()
   manifest_cache={at=now,apps=apps}
   return apps
 end
+local live = {}
 function M.register(registry)
   local state=read_file()
   local runtime={active=0,healthy=false,error='',activeIds={},reportedAt=0,
@@ -252,6 +427,74 @@ function M.register(registry)
     end)
     return response({success=complete, complete=complete, games=games, helpers=helpers, scannedAt=os.time()})
   end
+  -- Read-only plan for a Discord activity: resolved name and socket candidates.
+  -- Reports needsClientId because no Discord application ID is configured.
+  registry.SlsPresenceDiscordPlan=function(raw)
+    local ok,obj=pcall(json.decode,raw or '')
+    if not ok or type(obj)~='table' then return response({success=false,error='Invalid payload'}) end
+    local root=millennium.steam_path()
+    local dirs=root~='' and {fs.join(root,'steamapps')} or {}
+    local name=resolve_game_name(obj.appid,titles,dirs,function(path)
+      local f=io.open(path,'rb'); if not f then return nil end
+      local s=f:read('*a'); f:close(); return s
+    end)
+    local cid=type(obj.clientId)=='string' and obj.clientId:match('^%d+$') or nil
+    return response({success=name~=nil,name=name,needsClientId=cid==nil,
+      status=state.discordAppId=='' and 'needs_app_id' or (live.session and live.session.status or 'idle'),
+      sockets=discord_socket_paths()})
+  end
+  -- Discord session: driven by M.tick (host plugin tick, ~5 s). Inert when the
+  -- host has no tick or socket.unix.
+  local session = new_discord_session({unix=default_unix, paths=function() return discord_socket_paths() end, pid=proc_pid})
+  local function read_text(path)
+    local f=io.open(path,'rb'); if not f then return nil end
+    local data=f:read('*a'); f:close(); return data
+  end
+  local function current_game()
+    local games,helpers=collect_running(fs.list,read_text)
+    local skip={}
+    for _,id in ipairs(helpers) do skip[id]=true end
+    local appid
+    for _,id in ipairs(games) do
+      if not skip[id] and (appid==nil or id==session.appid) then appid=id end
+    end
+    if not appid and runtime.reportedAt and os.time()-runtime.reportedAt<=20 then
+      appid=runtime.activeIds[1]
+    end
+    if not appid then return nil end
+    local root=millennium.steam_path()
+    local dirs=root~='' and {fs.join(root,'steamapps')} or {}
+    return {appid=appid,name=resolve_game_name(appid,titles,dirs,read_text)}
+  end
+  live.tick=function(now)
+    session.step({enabled=state.discordEnabled~=false,app_id=state.discordAppId},current_game(),now)
+  end
+  live.shutdown=function() session.shutdown() end
+  live.session=session
+  registry.SlsPresenceDiscordStatus=function()
+    local game=current_game()
+    return response({success=true,status=session.status,name=game and game.name or session.name,
+      appid=game and game.appid or nil,enabled=state.discordEnabled~=false,hasAppId=state.discordAppId~=''})
+  end
+  registry.SlsPresenceSetDiscord=function(raw)
+    if type(raw)~='string' or #raw>500 then return response({success=false,error='Invalid payload'}) end
+    local ok,obj=pcall(json.decode,raw)
+    if not ok or type(obj)~='table' then return response({success=false,error='Invalid payload'}) end
+    local updated=read_file()
+    if obj.enabled~=nil then
+      if type(obj.enabled)~='boolean' then return response({success=false,error='Expected boolean'}) end
+      updated.discordEnabled=obj.enabled
+    end
+    if obj.appId~=nil then
+      if type(obj.appId)~='string' or (obj.appId~='' and (not obj.appId:match('^%d+$') or #obj.appId<5 or #obj.appId>25)) then
+        return response({success=false,error='Application ID must be numeric'})
+      end
+      updated.discordAppId=obj.appId
+    end
+    local saved,err=save_file(updated)
+    if saved then state=updated end
+    return response({success=saved,error=err,discordEnabled=state.discordEnabled,discordAppId=state.discordAppId})
+  end
   registry.SlsPresencePut=function(raw)
     if type(raw)~='string' or #raw>1000000 then return response({success=false,error='Invalid payload'}) end
     local ok,obj=pcall(json.decode,raw)
@@ -262,6 +505,8 @@ function M.register(registry)
     next_state.enabled=state.enabled -- UI owns enabled setting, not agent
     next_state.cleanup=state.cleanup
     next_state.sessionTime=state.sessionTime -- UI owns the enrichment toggle too
+    next_state.discordEnabled=state.discordEnabled
+    next_state.discordAppId=state.discordAppId
     next_state.account=valid_account(obj.account) and obj.account or state.account
     next_state.accountSource=valid_source(obj.accountSource) and obj.accountSource or state.accountSource
     local count=0
@@ -361,8 +606,16 @@ function M.register(registry)
     return response({success=true})
   end
 end
+function M.tick(now) if live.tick then pcall(live.tick, now or os.time()) end end
+function M.on_unload() if live.shutdown then pcall(live.shutdown) end end
+M.new_discord_session = new_discord_session
 M.collect_running = collect_running
 M.login_users = login_users
 M.fnv1a = fnv1a
+M.acf_name = acf_name
+M.resolve_game_name = resolve_game_name
+M.discord_socket_paths = discord_socket_paths
+M.discord_handshake = discord_handshake
+M.discord_set_activity = discord_set_activity
 M.helper_policy = helper_policy
 return M

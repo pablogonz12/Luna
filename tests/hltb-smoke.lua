@@ -508,6 +508,24 @@ assert(out.success == false, 'an unknown launchers action must be refused')
 out = call('SlsLunaRepair')
 assert(out.success == false, 'repair with no updater copy must fail closed, not shell out')
 
+-- A repair job past its deadline is reported as timed out, the marker is
+-- removed, and the status read stays cheap. No installer is started here: the
+-- kill itself is the one group signal the job helper sends.
+local repair_dir = home .. '/.local/share/Lumen/sls-luna'
+os.execute('mkdir -p ' .. string.format('%q', repair_dir))
+local marker = assert(io.open(repair_dir .. '/repair-job.json', 'wb'))
+marker:write('{"id":"1","pid":0,"startedAt":' .. tostring(os.time() - 500)
+  .. ',"phase":"running","state":"running","limit":180}')
+marker:close()
+out = call('SlsLunaRepair', { raw = json.encode({ action = 'status' }) })
+assert(out.success == true and out.job.state == 'timeout', 'a stale job must report a timeout')
+assert(tostring(out.job.message):find('process group was stopped'),
+  'a timeout must say the process group was stopped')
+assert(io.open(repair_dir .. '/repair-job.json', 'rb') == nil, 'the stale marker is removed')
+out = call('SlsLunaRepair', { raw = json.encode({ action = 'status' }) })
+assert(out.success == true and out.job.state == 'timeout',
+  'and the last outcome stays a timeout, not a false success')
+
 -- Non-blocking fetch: with http.start/http.poll available, SlsHltbFetch never
 -- waits on the network. The fake answers each request after two empty polls,
 -- reusing the blocking fake's responses so both paths see the same site.
@@ -595,6 +613,18 @@ for _ = 1, 50 do
 end
 assert(finished and out.update.latest == '9.9.9', 'the detached check result must reach the status')
 out = call('SlsLunaUpdate', { raw = json.encode({ action = 'timer', value = 'on' }) })
-assert(out.success == true and out.timer == 'unattended updates: on', 'bounded updater runs keep their output')
+assert(out.success == true and type(out.job) == 'table', 'the timer job returns at once')
+local timer_state = out.job.state
+for _ = 1, 50 do
+  if timer_state ~= 'running' and timer_state ~= 'finishing' then break end
+  os.execute('sleep 0.1')
+  out = call('SlsLunaUpdate', { raw = json.encode({ action = 'status' }) })
+  timer_state = (type(out.job) == 'table' and out.job.state) or timer_state
+end
+assert(timer_state == 'ok', 'the detached timer job must finish cleanly, got ' .. tostring(timer_state))
+local timer_log = io.open(home .. '/.local/share/Lumen/sls-luna/timer-job.log', 'rb')
+assert(timer_log, 'a detached job keeps its output in a log file')
+local logged = timer_log:read('*a'); timer_log:close()
+assert(logged:find('unattended updates: on'), 'bounded updater runs keep their output')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs, health')

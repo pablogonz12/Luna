@@ -127,12 +127,6 @@
       "source_path": "bridge/bridge.lua",
       "source_repo": "https://github.com/pgm1207/slsteam-playtime"
     },
-    "scripts/lumen-hook.py": {
-      "sha256": "fed8ed22b9542e1cf52d05bd712922b09b617bcedf41f7bfa897114a48285c8a",
-      "source_commit": "12e0c2acd1d798af1690d30bcfd00698c1ab7874",
-      "source_path": "scripts/lumen-hook.py",
-      "source_repo": "https://github.com/pgm1207/Luna"
-    },
     "scripts/patch-lumen.py": {
       "sha256": "b9a7d060b818f1ed0ed9c81afd5b51c85ba2144cac89f96888771663794a5335",
       "source_commit": "5b3f0709d007977ae5028469ed2f7e291f9e6adc",

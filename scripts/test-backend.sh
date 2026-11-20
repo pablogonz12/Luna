@@ -13,6 +13,10 @@ mkdir -p "$tmp/presence"
 (cd "$root" && SLS_TEST_HOME="$tmp/presence" HOME="$tmp/presence" SLS_KIND=presence \
   "$lua" tests/presence/backend-smoke.lua)
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/bridge-smoke.lua"
+# Discovery must survive a HOME that a shell would mis-quote (item 14).
+awkward="$tmp/home with 'quote'"
+mkdir -p "$awkward"
+LUNA_TEST_HOME="$awkward" HOME="$awkward" LUNA_REPO="$root" "$lua" "$root/tests/bridge-discovery.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/compressor-smoke.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/hltb-smoke.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/sgdb-smoke.lua"

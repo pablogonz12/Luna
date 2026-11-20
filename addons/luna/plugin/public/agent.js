@@ -27,6 +27,41 @@
   const HLTB_SEARCH = 'https://howlongtobeat.com/?q=';
   const valid = id => Number.isSafeInteger(Number(id)) && Number(id) > 0 && Number(id) <= 4294967295;
 
+  /* One throw inside Steam's React render path blanks the whole library, so
+     every third-party hook and every patch Luna applies goes through
+     safeHook(): the failure is logged once with the stable prefix, kept in the
+     small ring the Health page reads, and rendering continues untouched. */
+  const DIAG_KEY = 'slsLunaDiag';
+  const DIAG_LIMIT = 20;
+  const diagSeen = new Set();
+
+  function agentDiag(w, text) {
+    try {
+      const store = w && w.localStorage;
+      if (!store || typeof store.getItem !== 'function') return;
+      let list = [];
+      try { list = JSON.parse(store.getItem(DIAG_KEY) || '[]'); } catch (_) { list = []; }
+      if (!Array.isArray(list)) list = [];
+      list.push({ at: Date.now(), text: String(text).slice(0, 200) });
+      store.setItem(DIAG_KEY, JSON.stringify(list.slice(-DIAG_LIMIT)));
+    } catch (_) { /* a diagnostic must never throw */ }
+  }
+
+  function reportAgentFailure(w, area, error) {
+    const key = String(area || 'agent');
+    const detail = error && error.message ? error.message : String(error);
+    if (!diagSeen.has(key)) {
+      diagSeen.add(key);
+      try { console.warn('[sls-luna] ' + key + ' failed: ' + detail); } catch (_) { /* no console */ }
+      agentDiag(w, '[sls-luna] ' + key + ' failed: ' + detail);
+    }
+    return undefined;
+  }
+
+  function safeHook(w, area, fn) {
+    try { return fn(); } catch (error) { return reportAgentFailure(w, area, error); }
+  }
+
   // A search query, never a scrape: HowLongToBeat has no supported public API,
   // so the browser does the lookup in the user's own session.
   function searchUrlFor(name) {
@@ -186,7 +221,7 @@
       if (!games.length) return Promise.resolve(false);
       payload = JSON.stringify({ games });
     } catch (error) {
-      console.warn('[SLS Luna] library inventory failed', error);
+      reportAgentFailure(w, 'library inventory', error);
       return Promise.resolve(false);
     }
     if (payload === lastLibraryPayload) return Promise.resolve(false);
@@ -199,7 +234,7 @@
         return false;
       })
       .catch(error => {
-        console.warn('[SLS Luna] library inventory push failed', error);
+        reportAgentFailure(w, 'library inventory push', error);
         return false;
       });
   }
@@ -227,7 +262,7 @@
         return Promise.resolve(true);
       }
     } catch (error) {
-      console.warn('[SLS Luna] Steam browser handler failed', error);
+      reportAgentFailure(w, 'Steam browser handler', error);
     }
     if (w && w.Millennium && typeof w.Millennium.callServerMethod === 'function') {
       return Promise.resolve(w.Millennium.callServerMethod('lumen', '__lumenOpenExternalUrl', { url: target }))
@@ -236,7 +271,7 @@
           return Boolean(out && out.ok === true);
         })
         .catch(error => {
-          console.warn('[SLS Luna] external URL relay failed', error);
+          reportAgentFailure(w, 'external URL relay', error);
           return false;
         });
     }
@@ -383,6 +418,183 @@
       if (typeof localStorage !== 'undefined') return localStorage;
     } catch (_) { /* blocked */ }
     return null;
+  }
+
+  /* ---- Steam main view control (this context only) ------------------------
+     Store, Community and the built-in browser are drawn by a separate CEF view
+     composited above Steam's shell document. Steam's own modals hide it with
+     MainWindowBrowserManager.m_browser.SetVisible(false); the manager lives in
+     this context, not in the shell document where the Luna panel runs. The
+     panel therefore asks through localStorage: one request key, one result
+     key. Nothing about the hidden state is written to disk, so a Steam restart
+     always starts with the view visible. */
+  const VIEW_REQUEST_KEY = 'slsLunaViewRequest';
+  const VIEW_RESULT_KEY = 'slsLunaViewResult';
+  const VIEW_REQUEST_TTL_MS = 5000;
+  let viewHiddenByLuna = false;
+  let viewChannelInstalled = false;
+  let lastViewRequest = '';
+
+  function viewManager(w) {
+    try { return w && w.MainWindowBrowserManager; } catch (_) { return null; }
+  }
+
+  function viewRoute(w) {
+    const manager = viewManager(w);
+    const history = manager && manager.m_history;
+    const location = history && history.location;
+    return location && typeof location.pathname === 'string' ? location.pathname : null;
+  }
+
+  function viewBrowser(w) {
+    const manager = viewManager(w);
+    const browser = manager && manager.m_browser;
+    return browser && typeof browser.SetVisible === 'function' ? browser : null;
+  }
+
+  // {ok, route, browserVisible} or {ok:false, error}. Never throws.
+  function viewStatus(w) {
+    const browser = viewBrowser(w);
+    const route = viewRoute(w);
+    if (!browser) return { ok: false, error: 'The Steam view API is unavailable.' };
+    return { ok: true, route, browserVisible: !viewHiddenByLuna };
+  }
+
+  // Hide/show is idempotent: repeated hides do not call SetVisible twice, and a
+  // show only ever restores a view this context hid.
+  function viewSetVisible(w, visible) {
+    const browser = viewBrowser(w);
+    if (!browser) return { ok: false, error: 'The Steam view API is unavailable.' };
+    const want = visible !== false;
+    try {
+      if (want && viewHiddenByLuna) {
+        viewHiddenByLuna = false;
+        browser.SetVisible(true);
+      } else if (!want && !viewHiddenByLuna) {
+        viewHiddenByLuna = true;
+        browser.SetVisible(false);
+      }
+    } catch (error) {
+      return { ok: false, error: String(error && error.message ? error.message : error) };
+    }
+    return { ok: true, route: viewRoute(w), browserVisible: !viewHiddenByLuna };
+  }
+
+  // Asking Steam's router for the Library. Hiding the browser view is not
+  // enough on its own: a hidden Store/Community view keeps taking input, so the
+  // menu is only reachable after Steam itself moved off that route. Bounded to
+  // ~1.5 s, and the route reported is the one Steam actually shows.
+  const VIEW_NAVIGATE_TIMEOUT_MS = 1500;
+
+  function viewNavigate(w, done) {
+    let navigate = null;
+    try {
+      const ui = w && w.SteamUIStore;
+      navigate = ui && typeof ui.Navigate === 'function' ? ui.Navigate : null;
+    } catch (_) { navigate = null; }
+    if (!navigate) { done({ ok: false, error: 'The Steam router is unavailable.' }); return; }
+    try {
+      navigate.call(w.SteamUIStore, '/library/home');
+    } catch (error) {
+      done({ ok: false, error: String(error && error.message ? error.message : error) });
+      return;
+    }
+    const timer = (w && w.setTimeout) || setTimeout;
+    const started = Date.now();
+    const check = () => {
+      const route = viewRoute(w);
+      if (!route || !/^\/(browser|store|community)(\/|$)/.test(route)) {
+        done({ ok: true, route: route, browserVisible: !viewHiddenByLuna });
+        return;
+      }
+      if (Date.now() - started >= VIEW_NAVIGATE_TIMEOUT_MS) {
+        done({ ok: false, route: route, error: 'Steam stayed on ' + route + ' after the Library switch.' });
+        return;
+      }
+      timer(check, 50);
+    };
+    timer(check, 50);
+  }
+
+  // Publishes one answer body on the result key.
+  function viewPublish(w, body) {
+    try {
+      const storage = storageOf(w);
+      if (!storage) return null;
+      storage.setItem(VIEW_RESULT_KEY, JSON.stringify(body));
+    } catch (_) { return null; }
+    return body;
+  }
+
+  function viewReply(w, id, action, result) {
+    return viewPublish(w, {
+      id, action, at: Date.now(), ok: result.ok === true,
+      route: typeof result.route === 'string' ? result.route : null,
+      browserVisible: result.browserVisible !== false,
+      error: result.error ? String(result.error) : '',
+    });
+  }
+
+  // Handles one panel request ({id, action, at}) and publishes the answer.
+  // Unknown actions and malformed ids are dropped, never guessed at.
+  function viewHandleRequest(w, raw) {
+    let request = null;
+    try { request = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (_) { return null; }
+    if (!request || typeof request !== 'object') return null;
+    const id = typeof request.id === 'string' ? request.id.slice(0, 64) : '';
+    const action = request.action;
+    if (!id || (action !== 'status' && action !== 'hide' && action !== 'show'
+        && action !== 'navigate')) return null;
+    const at = Number(request.at);
+    if (Number.isFinite(at) && at > 0 && Date.now() - at > VIEW_REQUEST_TTL_MS) return null;
+    if (action === 'navigate') {
+      // Asynchronous: the answer lands on the result key when the route moves.
+      viewNavigate(w, result => viewReply(w, id, action, result));
+      return null;
+    }
+    const result = action === 'status' ? viewStatus(w) : viewSetVisible(w, action !== 'hide');
+    return viewReply(w, id, action, result);
+  }
+
+  /* Installs the request listener in SharedJSContext. Also publishes the
+     current state once, so a panel that mounts later already knows the route
+     (its own document cannot read it) before the user clicks anything. */
+  function installViewControl(w) {
+    if (!w || viewChannelInstalled || w.__SlsLunaViewInstalled) return false;
+    if (typeof w.addEventListener !== 'function' || !storageOf(w)) return false;
+    viewChannelInstalled = true;
+    try { w.__SlsLunaViewInstalled = true; } catch (_) { /* read-only window */ }
+    const publish = () => {
+      const state = viewStatus(w);
+      try {
+        const storage = storageOf(w);
+        if (storage) {
+          storage.setItem(VIEW_RESULT_KEY, JSON.stringify({
+            id: '', action: 'status', at: Date.now(), ok: state.ok === true,
+            route: typeof state.route === 'string' ? state.route : null,
+            browserVisible: state.browserVisible !== false,
+            error: state.error ? String(state.error) : '',
+          }));
+        }
+      } catch (_) { /* a state push is best effort */ }
+    };
+    const consume = () => {
+      try {
+        const storage = storageOf(w);
+        const raw = storage && storage.getItem(VIEW_REQUEST_KEY);
+        if (!raw || raw === lastViewRequest) return;
+        lastViewRequest = raw;
+        viewHandleRequest(w, raw);
+      } catch (_) { /* never throw from a menu helper */ }
+    };
+    w.addEventListener('storage', event => {
+      const key = event && typeof event.key === 'string' ? event.key : '';
+      if (key !== VIEW_REQUEST_KEY) return;
+      consume();
+    });
+    consume();
+    publish();
+    return true;
   }
 
   function readHltbOrder(w) {
@@ -647,7 +859,7 @@
         try {
           return action.isEnabled(app, w) === true;
         } catch (error) {
-          console.warn('[SLS Luna] action eligibility failed: ' + action.id, error);
+          reportAgentFailure(w, 'action eligibility ' + action.id, error);
           return false;
         }
       });
@@ -665,7 +877,7 @@
         key: ITEM_PREFIX + action.id,
         onSelected: () => Promise.resolve()
           .then(() => action.run(app, w))
-          .catch(error => console.error('[SLS Luna] action failed: ' + action.id, error)),
+          .catch(error => reportAgentFailure(w, 'action ' + action.id, error)),
       }, action.label));
     }
 
@@ -730,24 +942,29 @@
         // the leaf so rendering still completes, without inserting twice.
         const next = inRender && base[key] ? base[key] : originals[key];
         if (!inRender) {
+          // Each hook is isolated: one throwing third-party patch must not take
+          // the others (or Steam's render) down with it. The outer catch is the
+          // net for everything this wrapper reads or builds; Steam's own call
+          // below is left alone so a real render error still reaches it.
+          try {
           const props = args[0];
-          hookHltbShelf(type, props, w);
+          safeHook(w, 'hltb shelf hook', () => hookHltbShelf(type, props, w));
           // Sort each view independently and subscribe mounted grids to data.
           if (props && Array.isArray(props.rgOptions)) {
-            const withSort = withSortOption(props, w);
+            const withSort = safeHook(w, 'sort option', () => withSortOption(props, w));
             if (withSort) args[0] = withSort;
           }
           if (props && Array.isArray(props.childSections)) {
-            const grid = hltbGridType(type, props, w, React);
-            if (grid !== type) type = grid;
+            const grid = safeHook(w, 'hltb grid', () => hltbGridType(type, props, w, React));
+            if (grid !== undefined && grid !== type) type = grid;
             else {
-              const sorted = withHltbSections(props, w);
+              const sorted = safeHook(w, 'hltb sections', () => withHltbSections(props, w));
               if (sorted) args[0] = sorted;
             }
           }
           // While that option is active, each capsule shows its cached hours.
           if (args[0] && args[0].sortByType === SORT_VALUE) {
-            const overlay = withHltbOverlay(args[0]);
+            const overlay = safeHook(w, 'hltb overlay', () => withHltbOverlay(args[0]));
             if (overlay) args[0] = overlay;
           }
           const proto = type && type.prototype;
@@ -756,11 +973,18 @@
             // its contents elements are created inside the same render pass.
             slot = { app: props.overview, instance: props.instance, ts: Date.now() };
           } else if (isInner(proto) && props && props.children != null) {
-            const target = targetFor(props);
-            if (target && target.app && valid(target.app.appid)) {
-              const items = actionItems(target.app);
-              if (items.length) args[0] = { ...props, children: insertActions(props.children, items) };
+            try {
+              const target = targetFor(props);
+              if (target && target.app && valid(target.app.appid)) {
+                const items = actionItems(target.app);
+                if (items.length) args[0] = { ...props, children: insertActions(props.children, items) };
+              }
+            } catch (error) {
+              reportAgentFailure(w, 'game menu actions', error);
             }
+          }
+          } catch (error) {
+            reportAgentFailure(w, 'menu render', error);
           }
         }
         inRender = true;
@@ -834,19 +1058,24 @@
   function bootLunaMenu(w) {
     if (w.__SlsLunaAgent) return;
     w.__SlsLunaAgent = true;
+    // The Luna panel cannot reach the main window's browser manager from the
+    // shell document; this context answers its requests.
+    safeHook(w, 'view control', () => installViewControl(w));
     const arm = () => {
       try {
         if (!w.__SlsLunaMenu) installLunaMenu(w);
         if (w.__SlsLunaMenu) w.__SlsLunaMenu.ensure();
       } catch (error) {
-        console.warn('[SLS Luna] menu install failed', error);
+        reportAgentFailure(w, 'menu install', error);
       }
     };
     arm();
     const beat = () => {
       arm();
       pushLibrary(w);
-      refreshHltbData(w).then(() => syncSortAs(w));
+      refreshHltbData(w)
+        .then(() => safeHook(w, 'sort sync', () => syncSortAs(w)))
+        .catch(error => reportAgentFailure(w, 'hltb refresh', error));
     };
     if (typeof w.setInterval === 'function') w.setInterval(beat, 30000);
     if (typeof w.setTimeout === 'function') w.setTimeout(() => pushLibrary(w), 60000);
@@ -859,12 +1088,16 @@
       });
     }
     pushLibrary(w);
-    refreshHltbData(w).then(() => syncSortAs(w));
+    refreshHltbData(w)
+      .then(() => safeHook(w, 'sort sync', () => syncSortAs(w)))
+      .catch(error => reportAgentFailure(w, 'hltb refresh', error));
     handleArtworkLive(w);
   }
 
   return { HLTB_SEARCH, SORT_VALUE, SORT_LABEL, ARTWORK_REQUEST_KEY, ARTWORK_LIVE_KEY,
-    ARTWORK_LIVE_RESULT_KEY, SORT_LIVE_KEY, discoverMenuTools, openExternalUrl,
+    ARTWORK_LIVE_RESULT_KEY, SORT_LIVE_KEY, VIEW_REQUEST_KEY, VIEW_RESULT_KEY,
+    viewStatus, viewSetVisible, viewNavigate, viewHandleRequest, installViewControl,
+    discoverMenuTools, openExternalUrl,
     searchUrlFor, nameOf, betaEnabled, defaultActions, publishArtworkRequest, handleArtworkLive,
     collectLibrary, pushLibrary, rpc, setHltbRecords, hltbSecondsFor, hltbMinutesFor, compareHltb,
     readHltbOrder, syncSortAs, isSortDropdown, withSortOption,

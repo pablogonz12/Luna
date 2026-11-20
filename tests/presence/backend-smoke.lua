@@ -125,6 +125,32 @@ if os.getenv('SLS_KIND')=='presence' then
   assert(ident.key=='5bda05e3', 'identity digest mismatch: '..tostring(ident.key))
   assert(ident.source=='loginusers', 'identity source must be reported')
   assert(ident.known==1 and ident.ambiguous==false, 'single account must not be ambiguous')
+  -- Discord Rich Presence: name resolution and IPC framing (no socket opened).
+  assert(plugin.acf_name('"AppState"\n{\n\t"appid"\t\t"3405340"\n\t"name"\t\t"Megabonk"\n}')=='Megabonk', 'acf name')
+  local function reader(path)
+    return path=='/lib/appmanifest_3405340.acf' and '"name"\t"Megabonk"' or nil
+  end
+  assert(plugin.resolve_game_name(3405340,{},{'/nope','/lib'},reader)=='Megabonk', 'manifest name')
+  assert(plugin.resolve_game_name(3405340,{['3405340']='Custom'},{'/lib'},reader)=='Custom', 'titles map wins')
+  assert(plugin.resolve_game_name(1,{},{'/lib'},reader)==nil and plugin.resolve_game_name('x',{},{},reader)==nil, 'unknown app')
+  local paths=plugin.discord_socket_paths(function(k) return k=='XDG_RUNTIME_DIR' and '/run/user/1000' or nil end)
+  assert(paths[1]=='/run/user/1000/discord-ipc-0' and paths[2]=='/run/user/1000/app/com.discordapp.Discord/discord-ipc-0', 'socket paths')
+  assert(#plugin.discord_socket_paths(function() return nil end)==0, 'no runtime dir')
+  local function unframe(frame)
+    local op,len=string.unpack('<I4I4',frame)
+    assert(#frame==8+len, 'frame length')
+    return op,json.decode(frame:sub(9))
+  end
+  local op,hs=unframe(plugin.discord_handshake(123456789012345678))
+  assert(op==0 and hs.v==1 and hs.client_id=='123456789012345678', 'handshake')
+  local op2,act=unframe(plugin.discord_set_activity(4242,'Megabonk',1700000000,'n1'))
+  assert(op2==1 and act.cmd=='SET_ACTIVITY' and act.args.pid==4242 and act.nonce=='n1', 'set activity')
+  assert(act.args.activity.name=='Megabonk' and act.args.activity.type==0
+    and act.args.activity.timestamps.start==1700000000, 'activity payload')
+  local _,cleared=unframe(plugin.discord_set_activity(4242,nil,nil,'n2'))
+  assert(cleared.args.activity==nil, 'clear activity')
+  local plan=call(reg,'SlsPresenceDiscordPlan',json.encode({appid=620}))
+  assert(plan.needsClientId==true and type(plan.sockets)=='table', 'plan must report the missing client id')
   -- Read-only contract probe: proves the {raw: string} argument shape.
   local probe=call(reg,'SlsPresenceContractProbe',json.encode({a=1}))
   assert(probe.success and probe.argType=='string' and probe.decoded==true, 'contract probe failed')
@@ -193,6 +219,80 @@ if os.getenv('SLS_KIND')=='presence' then
   -- A stop on a shortcut the ledger cannot confirm is refused by the backend too.
   assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000002}})).success==false,
     'running entry for an unowned shortcut accepted')
+  -- Discord session state machine against an injected fake transport.
+  do
+    local sent_ops, alive_conn = {}, nil
+    local function frame(op, tbl) local b=json.encode(tbl); return string.pack('<I4I4',op,#b)..b end
+    local function mkconn(up, readyframe)
+      local c={fd=-1,queue={},closed=false,timeout=0}
+      function c:settimeout(t) self.timeout=t end
+      function c:getfd() return self.fd end
+      function c:connect() if not up.on then return nil,'refused' end self.fd=7 return 1 end
+      function c:close() self.closed=true self.fd=-1 end
+      function c:send(data)
+        if self.closed then return nil,'closed' end
+        local op,len=string.unpack('<I4I4',data)
+        local body=json.decode(data:sub(9,8+len))
+        sent_ops[#sent_ops+1]={op=op,body=body}
+        if op==0 then self.queue[#self.queue+1]=readyframe end
+        return #data
+      end
+      function c:receive(n)
+        local q=self.queue
+        if self.dead then return nil,'closed' end
+        if #q==0 then return nil,'timeout' end
+        local cur=q[1]
+        if #cur<n then return nil,'timeout' end
+        q[1]=cur:sub(n+1); local out=cur:sub(1,n)
+        if #q[1]==0 then table.remove(q,1) end
+        return out
+      end
+      return c
+    end
+    local up={on=false}
+    local ready=frame(1,{cmd='DISPATCH',evt='READY'})
+    local deps={paths=function() return {'/fake/ipc-0'} end, pid=function() return 4242 end,
+      unix=function() alive_conn=mkconn(up,ready); return alive_conn end}
+    local S=plugin.new_discord_session(deps)
+    local game={appid=620,name='Portal 2'}
+    assert(S.step({enabled=true,app_id=''},game,100)=='needs_app_id', 'empty app id must report needs_app_id')
+    assert(#sent_ops==0, 'nothing may be sent without an app id')
+    assert(S.step({enabled=true,app_id='123456789012345678'},nil,100)=='idle', 'no game is idle')
+    assert(S.step({enabled=true,app_id='123456789012345678'},game,100)=='no_discord', 'unreachable Discord')
+    assert(S.step({enabled=true,app_id='123456789012345678'},game,105)=='no_discord' and #sent_ops==0, 'backoff must hold')
+    up.on=true
+    assert(S.step({enabled=true,app_id='123456789012345678'},game,120)=='connected', 'must connect after backoff')
+    assert(sent_ops[1].op==0 and sent_ops[1].body.client_id=='123456789012345678', 'handshake with app id')
+    assert(sent_ops[2].op==1 and sent_ops[2].body.cmd=='SET_ACTIVITY', 'activity sent')
+    local act=sent_ops[2].body.args
+    assert(act.pid==4242 and act.activity.name=='Portal 2' and act.activity.details=='Portal 2'
+      and act.activity.type==0 and act.activity.timestamps.start==100, 'activity payload')
+    local n=#sent_ops
+    assert(S.step({enabled=true,app_id='123456789012345678'},game,125)=='connected' and #sent_ops==n, 'steady state sends nothing')
+    alive_conn.queue[#alive_conn.queue+1]=frame(3,{nonce='x'})
+    S.step({enabled=true,app_id='123456789012345678'},game,130)
+    assert(sent_ops[#sent_ops].op==4, 'ping must be answered with pong')
+    alive_conn.dead=true -- Discord restarted
+    up.on=false
+    assert(S.step({enabled=true,app_id='123456789012345678'},game,135)=='no_discord', 'dead connection detected')
+    up.on=true
+    assert(S.step({enabled=true,app_id='123456789012345678'},game,160)=='connected', 'reconnects and resends')
+    assert(sent_ops[#sent_ops].body.cmd=='SET_ACTIVITY' and sent_ops[#sent_ops].body.args.activity, 'activity resent')
+    local conn=alive_conn
+    assert(S.step({enabled=true,app_id='123456789012345678'},nil,170)=='idle', 'game stop is idle')
+    assert(sent_ops[#sent_ops].body.args.activity==nil and conn.closed, 'clear activity then close')
+    assert(S.step({enabled=false,app_id='123456789012345678'},game,200)=='idle' and #sent_ops>0, 'disabled never connects')
+    -- RPCs and the host tick hook
+    local st=call(reg,'SlsPresenceDiscordStatus')
+    assert(st.success and st.hasAppId==false and st.status=='idle', 'status RPC before configuration')
+    assert(call(reg,'SlsPresenceSetDiscord',json.encode({appId='abc'})).success==false, 'non numeric app id rejected')
+    local set=call(reg,'SlsPresenceSetDiscord',json.encode({enabled=false,appId='123456789012345678'}))
+    assert(set.success and set.discordEnabled==false and set.discordAppId=='123456789012345678', 'settings saved')
+    assert(call(reg,'SlsPresenceGet').state.discordAppId=='123456789012345678', 'settings exposed in state')
+    assert(call(reg,'SlsPresencePut',json.encode({owned={},running={}})).success)
+    assert(call(reg,'SlsPresenceGet').state.discordEnabled==false, 'Put must keep discord settings')
+    assert(type(plugin.tick)=='function' and plugin.tick(1)==nil, 'tick hook never raises')
+  end
 else
   assert(call(reg,'SlsPlaytimeHeartbeat',json.encode({id=999,kind='start'})).success==false)
   assert(call(reg,'SlsPlaytimeHeartbeat',json.encode({id=620,kind='start',title='Portal 2'})).success)

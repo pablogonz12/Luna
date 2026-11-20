@@ -351,24 +351,56 @@ end
 
 -- ------------------------------------------------------------------ registry
 
+local function reply(data) return json.encode(data) end
+
+-- The report walks sysfs, the Vulkan layer dirs, the OptiScaler installs and
+-- ~/.var/app. The page asks for it on every refresh, so a successful report is
+-- reused for this many seconds and a throw becomes a structured error instead
+-- of an empty answer the panel would keep showing as blanks.
+local REPORT_TTL = tonumber(os.getenv('SLS_GRAPHICS_CACHE_TTL') or '') or 30
+local report_cache = nil
+
+local function build_report()
+  local os_release = M.parse_os_release(read_file(
+    os.getenv('SLS_GRAPHICS_OS_RELEASE') or '/etc/os-release'))
+  local kernel = trim(read_file('/proc/sys/kernel/osrelease') or '')
+  return {
+    success = true,
+    version = VERSION,
+    system = {
+      distro = os_release.PRETTY_NAME or os_release.NAME or '',
+      kernel = kernel,
+    },
+    gpus = M.gpu_report(),
+    lsfg = M.lsfg_report(home),
+    optiscaler = M.optiscaler_report(home),
+    optiscaler_client = M.optiscaler_client(home),
+    steam = M.steam_report(home),
+  }
+end
+
 function M.register(registry)
-  registry.SlsGraphicsGet = function()
-    local os_release = M.parse_os_release(read_file(
-      os.getenv('SLS_GRAPHICS_OS_RELEASE') or '/etc/os-release'))
-    local kernel = trim(read_file('/proc/sys/kernel/osrelease') or '')
-    return json.encode({
-      success = true,
-      version = VERSION,
-      system = {
-        distro = os_release.PRETTY_NAME or os_release.NAME or '',
-        kernel = kernel,
-      },
-      gpus = M.gpu_report(),
-      lsfg = M.lsfg_report(home),
-      optiscaler = M.optiscaler_report(home),
-      optiscaler_client = M.optiscaler_client(home),
-      steam = M.steam_report(home),
-    })
+  registry.SlsGraphicsGet = function(raw)
+    local force = false
+    if raw ~= nil then
+      local ok, entry = pcall(json.decode, tostring(raw))
+      if ok and type(entry) == 'table' and entry.force == true then force = true end
+    end
+    local now = os.time()
+    if not force and report_cache and now - report_cache.at < REPORT_TTL then
+      return report_cache.json
+    end
+    local done, report = pcall(build_report)
+    if not done then
+      return reply({ success = false,
+        error = 'Backend error: ' .. tostring(report):gsub('^.-:%d+: ', '') })
+    end
+    local ok_encode, encoded = pcall(json.encode, report)
+    if not ok_encode or type(encoded) ~= 'string' then
+      return reply({ success = false, error = 'The graphics report could not be encoded.' })
+    end
+    report_cache = { at = now, json = encoded }
+    return encoded
   end
 end
 

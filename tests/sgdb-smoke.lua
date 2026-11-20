@@ -152,8 +152,10 @@ do
 end
 
 -- Fake SteamGridDB.
-local wire = { calls = {} }
+local wire = { calls = {}, handles = {}, hang = false, down = false, throw = false }
 function wire.get(url, options)
+  if wire.throw then error('synthetic network failure') end
+  if wire.down then return nil, 'connection refused' end
   table.insert(wire.calls, { url = url, headers = options and options.headers })
   local authorization = options and options.headers and options.headers['Authorization'] or ''
   if url:find('/search/autocomplete/', 1, true) then
@@ -202,6 +204,21 @@ function wire.get(url, options)
   if url == 'https://cdn.example/logo1.png' then return { status = 200, body = 'LOGODATA' } end
   if url == 'https://cdn.example/icon1.png' then return { status = 200, body = 'ICONDATA' } end
   return { status = 404, body = '{"success":false}' }
+end
+-- The async half of the same wire: a handle, and a poll that never waits.
+-- `hang` models a dead network (poll never completes), `down` a refused one.
+function wire.start(url, options)
+  if wire.throw then error('synthetic network failure') end
+  table.insert(wire.calls, { url = url, headers = options and options.headers })
+  wire.handles[#wire.handles + 1] = { url = url, options = options }
+  return { index = #wire.handles }
+end
+function wire.poll(handle, wait)
+  if wire.hang then return false end
+  local job = wire.handles[handle.index]
+  if not job then return true, nil, 'unknown handle' end
+  if wire.down then return true, nil, 'connection refused' end
+  return true, wire.get(job.url, job.options)
 end
 package.preload['http'] = function() return wire end
 
@@ -360,8 +377,22 @@ assert(wide.success == true and #wide.assets == 1 and wide.assets[1].width == 92
 
 -- ---------------------------------------------------------------- auto picker
 
-local auto = call('SlsSgdbAuto', { raw = json.encode({ appid = 620, gameId = 1 }) })
-assert(auto.success == true and #auto.results == 5, 'the auto picker must cover five slots')
+-- The pass must return at once and do its work on the status polls.
+local before_auto = #wire.calls
+local started = call('SlsSgdbAuto', { raw = json.encode({ appid = 620, gameId = 1 }) })
+assert(started.success == true and started.pending == true and started.state == 'running',
+  'Auto must return a running job, not wait for the pass')
+assert(#wire.calls - before_auto <= 1, 'Auto must not fire every request before replying')
+assert(started.job and tonumber(started.job.id) and started.job.total == 5)
+assert(#started.results == 5, 'the page needs one row per slot from the first reply')
+
+local auto, polls = started, 0
+while auto.state == 'running' and polls < 40 do
+  auto = call('SlsSgdbAutoStatus', { raw = json.encode({ id = started.job.id }) })
+  polls = polls + 1
+end
+assert(auto.state == 'done', 'the auto pass must finish, got ' .. tostring(auto.state))
+assert(#auto.results == 5, 'the auto picker must cover five slots')
 local by_kind = {}
 for _, result in ipairs(auto.results) do by_kind[result.kind] = result end
 for _, kind in ipairs({ 'grid', 'wide', 'hero', 'logo', 'icon' }) do
@@ -389,4 +420,69 @@ assert(live_icon.success == false and live_icon.code == 'no_live')
 local live_none = call('SlsSgdbLive', { raw = json.encode({ appid = 1145360, kind = 'logo' }) })
 assert(live_none.success == false and live_none.code == 'none')
 
-print('Luna SteamGridDB backend OK: key gate, search, asset filtering, apply/backup/restore, wide, auto, live, refusals, accounts')
+-- ---------------------------------------------------------------- slow & failing network
+
+-- A dead network: Auto still answers at once and the status poll stays cheap
+-- (the request is in flight, so it reports pending rather than waiting).
+wire.hang = true
+local slow = call('SlsSgdbAuto', { raw = json.encode({ appid = 777, gameId = 1 }) })
+assert(slow.success == true and slow.state == 'running' and slow.pending == true,
+  'Auto must not wait for a request that never answers')
+local slow_poll = call('SlsSgdbAutoStatus', { raw = json.encode({ id = slow.job.id }) })
+assert(slow_poll.state == 'running' and slow_poll.pending == true and slow_poll.job.done == 0,
+  'a hung request must leave the pass pending, not block or fail it')
+wire.hang = false
+
+-- A refused connection: every slot reports its own error and the pass still ends.
+wire.down = true
+local refused = call('SlsSgdbAuto', { raw = json.encode({ appid = 778, gameId = 1 }) })
+local failed, tries = refused, 0
+while failed.state == 'running' and tries < 30 do
+  failed = call('SlsSgdbAutoStatus', { raw = json.encode({ id = refused.job.id }) })
+  tries = tries + 1
+end
+assert(failed.state == 'done', 'a failing pass must end, not hang')
+assert(#failed.results == 5)
+for _, result in ipairs(failed.results) do
+  assert(result.ok == false and type(result.error) == 'string' and result.error ~= '',
+    'every failed slot must say why (got ' .. tostring(result.kind) .. ')')
+end
+assert(failed.results[1].code == 'unavailable', 'the failure code must reach the page')
+wire.down = false
+
+-- A synchronous call that throws is reported, never ignored.
+wire.throw = true
+local threw = call('SlsSgdbApply', { raw = json.encode({ appid = 1, kind = 'grid',
+  url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
+assert(threw.success == false and threw.code == 'unavailable'
+  and threw.error:find('request failed', 1, true) ~= nil, 'a throwing http.get must become an error reply')
+wire.throw = false
+
+-- Any handler that throws at all answers with the shared error shape.
+local real_root = backend.steam_root
+backend.steam_root = function() error('synthetic failure') end
+local guarded = call('SlsSgdbGet')
+backend.steam_root = real_root
+assert(guarded.success == false and type(guarded.error) == 'string'
+  and guarded.error:find('Backend error', 1, true) ~= nil, 'handlers must be pcall-wrapped')
+
+-- Only https artwork URLs are fetched from the RPC path.
+local insecure = call('SlsSgdbApply', { raw = json.encode({ appid = 1, kind = 'grid',
+  url = 'http://127.0.0.1/secret.png', mime = 'image/png' }) })
+assert(insecure.success == false and insecure.code == 'invalid')
+
+-- Without http.start/http.poll the pass falls back to one bounded request per
+-- status poll; Auto still returns at once and no single poll runs the pass.
+local real_start, real_poll = wire.start, wire.poll
+wire.start, wire.poll = nil, nil
+local sync_started = call('SlsSgdbAuto', { raw = json.encode({ appid = 779, gameId = 1 }) })
+assert(sync_started.success == true and sync_started.state == 'running'
+  and sync_started.job.done == 0, 'the blocking fallback must still start as a job')
+local calls_before = #wire.calls
+local sync_poll = call('SlsSgdbAutoStatus', { raw = json.encode({ id = sync_started.job.id }) })
+assert(#wire.calls - calls_before <= 1, 'one poll must not chain requests: '
+  .. tostring(#wire.calls - calls_before))
+assert(sync_poll.state == 'running', 'one request per poll cannot finish five slots')
+wire.start, wire.poll = real_start, real_poll
+
+print('Luna SteamGridDB backend OK: key gate, search, asset filtering, apply/backup/restore, wide, auto job (async, slow, failing), live, refusals, accounts')

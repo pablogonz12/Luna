@@ -45,16 +45,25 @@
   // SLS Luna hosts this add-on's settings in its own menubar menu; the floating
   // panel is only for a standalone install.
   if(w.__SlsLunaUi)return;
-  w.__SlsPlaytimePanel=true;
+  // No host (Lumen stopped or restarting) must reject, not throw a TypeError
+  // from the refresh interval. Same guard the add-on agents use.
+  const offline=e=>/bridge unavailable/i.test(String((e&&e.message)||e));
+  const atend=(status,detail,e)=>{
+    if(offline(e)){status.textContent='Waiting for the host (Lumen bridge unavailable).';if(detail)detail.textContent='';return}
+    status.textContent=String(e);
+  };
   const parse=raw=>typeof raw==='string'?JSON.parse(raw):raw;
   const rpc=async(method,args={})=>{
-    if(!w.Millennium?.callServerMethod)throw Error('Lumen RPC not ready');
+    if(!w.Millennium?.callServerMethod)throw Error('bridge unavailable');
     const out=parse(await w.Millennium.callServerMethod('lumen',method,args));
     if(out?.success===false)throw Error(out.error||method+' failed');
     return out;
   };
+  // Returns true when the panel is (or already was) in the DOM; the published
+  // flag only exists after a successful mount, so a retry stays possible.
   function mount(){
-    if(!document.body||document.getElementById('sls-playtime-panel-button'))return;
+    if(!document.body)return false;
+    if(document.getElementById('sls-playtime-panel-button'))return true;
     const button=document.createElement('button');button.id='sls-playtime-panel-button';button.textContent='Playtime';
     button.style.cssText='position:fixed;right:110px;bottom:16px;z-index:99998;background:#224f6b;color:white;padding:8px;border:1px solid #62829a;border-radius:6px;cursor:pointer';
     const panel=document.createElement('section');panel.id='sls-playtime-panel';panel.hidden=true;
@@ -113,23 +122,33 @@
         const input=document.createElement('input');input.type='number';input.min='0';input.max='10000000';input.step='0.01';input.value=hours(g.total);
         input.style.cssText='width:100px;color:white;background:#263d50;border:1px solid #66849d;padding:5px';
         const save=document.createElement('button');save.textContent='Save';
-        save.onclick=async()=>{try{await rpc('SlsPlaytimeEdit',{raw:JSON.stringify({id:Number(g.id),hours:Number(input.value)})});await refresh();}catch(e){status.textContent=String(e)}};
+        save.onclick=async()=>{try{await rpc('SlsPlaytimeEdit',{raw:JSON.stringify({id:Number(g.id),hours:Number(input.value)})});await refresh();}catch(e){atend(status,null,e)}};
         line.append(label,input,save);list.appendChild(line);
       }
     }
-    async function refresh(){if(panel.hidden)return;try{snapshot=await rpc('SlsPlaytimeGet');paint();}catch(e){status.textContent=String(e)}}
+    async function refresh(){if(panel.hidden)return;try{snapshot=await rpc('SlsPlaytimeGet');paint();}catch(e){atend(status,null,e)}}
     button.onclick=()=>{panel.hidden=!panel.hidden;if(!panel.hidden)refresh()};
     query.oninput=()=>{visible=50;paint()};page.onclick=()=>{visible+=50;paint()};
     exportButton.onclick=async()=>{try{const out=await rpc('SlsPlaytimeExport');
       const textarea=document.createElement('textarea');textarea.rows=10;textarea.style.width='100%';
       textarea.value=JSON.stringify(out.data,null,2);panel.append(textarea);textarea.focus();textarea.select();
-    }catch(e){status.textContent=String(e)}};
+    }catch(e){atend(status,null,e)}};
     importButton.onclick=async()=>{const raw=w.prompt('Paste a trusted SLS Playtime backup (replaces local records).');
       if(!raw||!w.confirm('Replace ALL locally recorded playtime?'))return;
-      try{await rpc('SlsPlaytimeImport',{raw});await refresh()}catch(e){status.textContent=String(e)}};
+      try{await rpc('SlsPlaytimeImport',{raw});await refresh()}catch(e){atend(status,null,e)}};
     w.setInterval(refresh,10000);
+    w.__SlsPlaytimePanel=true;
+    return true;
   }
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>mount(w),{once:true});else mount(w);
+  // A fast Steam start can run this script before document.body exists. Retry a
+  // few times (bounded, then give up quietly) instead of losing the panel.
+  let attempts=0;
+  function attempt(){
+    if(w.__SlsPlaytimePanel||mount())return;
+    if(++attempts>20)return;
+    w.setTimeout(attempt,attempts<10?100:500);
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',attempt,{once:true});else attempt();
   }
   return {buildRows,hours,lifetimeSeconds,mount};
 });

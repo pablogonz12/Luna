@@ -12,11 +12,16 @@ local json = require('json')
 local M = {}
 local VERSION = '0.14.18'
 local home = os.getenv('HOME') or ''
-local base = home .. '/.local/share/Lumen/sls-addons/'
 local lumen_root = home .. '/.local/share/Lumen'
+-- luna-host (Luna's own plugin host) exports LUNA_HOME; the third-party Lumen
+-- host never does. That decides where add-ons and Luna's state live.
+local luna_home = os.getenv('LUNA_HOME') or ''
+local on_luna_host = luna_home ~= ''
+local base = (on_luna_host and (luna_home .. '/addons/') or (lumen_root .. '/sls-addons/'))
 -- The standalone updater copy the installer keeps here, plus the small files
 -- that describe an update in flight. This tree is not synced between machines.
-local update_dir = lumen_root .. '/sls-luna'
+local SESSION_STARTED_AT = os.time()
+local update_dir = on_luna_host and (luna_home .. '/state') or (lumen_root .. '/sls-luna')
 local data_dir = home .. '/.local/share/slssteam-integrations'
 local store_path = data_dir .. '/hltb.json'
 local library_path = data_dir .. '/hltb-library.json'
@@ -56,6 +61,9 @@ end
 -- obeys live here, where both the panel and the store script can ask over RPC.
 local PREF_KEYS = {
   store_hide_followed = 'boolean',
+  -- Steam window gradient that follows the Noctalia palette. On unless the
+  -- user turns it off (a missing key counts as on).
+  steam_gradient = 'boolean',
   -- Client settings used to live only in the shell's localStorage: a CEF cache
   -- reset lost them and the laptop could not follow the desktop. They live here
   -- now, and the panel mirrors them back into localStorage for the agent.
@@ -67,6 +75,12 @@ local PREF_KEYS = {
   -- Health page language. The technical paths and bug-report dumps stay in
   -- English in both languages; the attention list, headers and actions switch.
   lang = 'string',
+  -- Whether Lumen's own launcher stays in the menubar. Off by default: Luna's
+  -- menu carries a Lumen page, so there is one launcher and one menu.
+  lumen_button = 'boolean',
+  -- Whether the Lumen page renders Lumen's UI inside Luna's window (the
+  -- default) instead of closing Luna and opening Lumen's own overlay.
+  lumen_embed = 'boolean',
 }
 
 -- Allowed values for the string settings.
@@ -606,11 +620,17 @@ end
 
 local function write_json(path, value)
   fs.create_directories(fs.parent_path(path))
-  local handle = io.open(path, 'wb')
+  -- Python reads these files while this runs: write a temp name, then rename,
+  -- so a reader never sees a half-written file.
+  local temp = path .. '.tmp'
+  local handle = io.open(temp, 'wb')
   if not handle then return false end
   local written = handle:write(json.encode(value))
   local closed = handle:close()
-  return (written and closed) and true or false
+  if not (written and closed) then os.remove(temp); return false end
+  if os.rename(temp, path) then return true end
+  os.remove(temp)
+  return false
 end
 
 -- Lumen runs every RPC on its single injector thread, so a call that waits
@@ -641,6 +661,179 @@ local function run_updater(args, seconds)
     return nil, (message ~= '' and message or ('the updater exited with ' .. tostring(code or why)))
   end
   return output, nil
+end
+
+-- ------------------------------------------------------------ detached jobs
+-- Anything that runs the installer can take minutes. The host has one injector
+-- thread, so a handler that waits freezes Steam's UI for exactly that long.
+-- Each such action instead starts a job in its own session (`setsid`, so a
+-- timeout can stop the whole tree), records it in one small state file, and
+-- returns at once. Status reads are a file read plus a /proc check; the
+-- deadline is enforced on read, and a job past it is killed and reported.
+local JOB_LIMIT = 180
+local JOBS = {
+  repair = { label = 'Repair', seconds = 180, args = 'install --keep-steam-client' },
+  pin = { label = 'Steam pin', seconds = 60, args = 'steam pin' },
+  launchers = { label = 'Shortcuts', seconds = 60, args = 'launchers' },
+  timer = { label = 'Auto-update timer', seconds = 30, args = 'timer on' },
+}
+
+local function job_paths(name)
+  local base_path = update_dir .. '/' .. tostring(name) .. '-job'
+  return base_path .. '.json', base_path .. '.log', base_path .. '-result.json'
+end
+
+local function file_tail(path, bytes)
+  local handle = io.open(path, 'rb')
+  if not handle then return '' end
+  local size = handle:seek('end') or 0
+  local from = size - (bytes or 2048)
+  if from < 0 then from = 0 end
+  handle:seek('set', from)
+  local raw = handle:read('*a') or ''
+  handle:close()
+  return raw
+end
+
+local function last_line(text)
+  local line = ''
+  for candidate in tostring(text or ''):gmatch('[^\r\n]+') do
+    if candidate:match('%S') then line = candidate end
+  end
+  return (line:gsub('%s+$', ''))
+end
+
+local function process_alive(pid)
+  pid = math.floor(tonumber(pid) or 0)
+  if pid <= 0 then return false end
+  return path_exists('/proc/' .. tostring(pid))
+end
+
+-- The job runs in its own session, so its pid is the process-group id: a
+-- negative signal reaches the installer and everything it started.
+local function stop_group(pid)
+  pid = math.floor(tonumber(pid) or 0)
+  if pid <= 0 then return false end
+  os.execute('kill -TERM -' .. tostring(pid) .. ' 2>/dev/null; sleep 0.3; '
+    .. 'kill -KILL -' .. tostring(pid) .. ' 2>/dev/null')
+  return true
+end
+
+local function job_message(name, result)
+  local state = type(result) == 'table' and tostring(result.state or '') or ''
+  if state == 'ok' then return 'The ' .. name .. ' job finished.' end
+  if state == 'timeout' then
+    return 'The ' .. name .. ' job ' .. tostring(result.message
+      or 'did not finish in time') .. '.'
+  end
+  local message = type(result) == 'table' and tostring(result.message or '') or ''
+  local code = type(result) == 'table' and tonumber(result.code) or nil
+  if state == 'failed' then
+    return 'The ' .. name .. ' job failed'
+      .. (code and (' (exit ' .. tostring(code) .. ')') or '')
+      .. (message ~= '' and (': ' .. message) or '.')
+  end
+  return ''
+end
+
+-- Pure-ish state: one file read, one result read, one /proc check. A job past
+-- its deadline is stopped here, because the status poll is the only thing
+-- guaranteed to run while it is stuck.
+local function job_state(name)
+  local spec = JOBS[name] or { seconds = JOB_LIMIT }
+  local limit = tonumber(spec.seconds) or JOB_LIMIT
+  local state_path, log_path, result_path = job_paths(name)
+  local job = read_json(state_path)
+  local result = read_json(result_path)
+  local state, started, pid, age = 'idle', 0, 0, 0
+  if type(job) == 'table' then
+    started = tonumber(job.startedAt) or 0
+    pid = math.floor(tonumber(job.pid) or 0)
+    age = math.max(0, os.time() - started)
+    if age > limit then
+      if process_alive(pid) then stop_group(pid) end
+      state = 'timeout'
+      result = { state = 'timeout', at = os.time(),
+        message = 'did not finish in ' .. tostring(limit) .. ' s; its process group was stopped'
+          .. (last_line(file_tail(log_path)) ~= '' and (' - ' .. last_line(file_tail(log_path))) or '') }
+      write_json(result_path, result)
+      os.remove(state_path)
+    elseif pid == 0 and age > 15 then
+      state = 'failed'
+      result = { state = 'failed', at = os.time(), message = 'the installer never started' }
+      write_json(result_path, result)
+      os.remove(state_path)
+    elseif pid ~= 0 and not process_alive(pid) then
+      if type(result) == 'table' and (tonumber(result.at) or 0) >= started then
+        state = tostring(result.state or 'failed')
+      else
+        state = 'failed'
+        result = { state = 'failed', at = os.time(), message = 'the job ended without writing an outcome'
+          .. (last_line(file_tail(log_path)) ~= '' and (': ' .. last_line(file_tail(log_path))) or '') }
+        write_json(result_path, result)
+      end
+      os.remove(state_path)
+    else
+      state = age > (limit - 30) and 'finishing' or 'running'
+    end
+  elseif type(result) == 'table' then
+    -- No job in flight: the last outcome is the state (ok/failed/timeout),
+    -- so a timeout stays visible instead of turning into "done".
+    state = tostring(result.state or 'done')
+  end
+  return {
+    name = tostring(name),
+    id = type(job) == 'table' and tostring(job.id or started) or '',
+    pid = pid,
+    startedAt = started,
+    phase = type(job) == 'table' and tostring(job.phase or '') or '',
+    state = state,
+    age = age,
+    limit = limit,
+    log = log_path,
+    message = job_message(name, result),
+    result = type(result) == 'table' and result or nil,
+  }
+end
+
+local function start_job(name, args)
+  local spec = JOBS[name]
+  if not spec then return nil, 'unknown job' end
+  if not path_exists(updater_path()) then
+    return nil, 'the updater is not installed yet; run install --force once'
+  end
+  local current = job_state(name)
+  if current.state == 'running' or current.state == 'finishing' then
+    return current, nil, true -- already running: hand back its state
+  end
+  fs.create_directories(update_dir)
+  local state_path, log_path, result_path = job_paths(name)
+  os.remove(result_path)
+  os.remove(log_path)
+  local id = tostring(os.time()) .. '-' .. tostring(math.random(1000, 9999))
+  if not write_json(state_path, { id = id, startedAt = os.time(), phase = 'starting',
+      state = 'running', limit = spec.seconds }) then
+    return nil, 'could not record the job'
+  end
+  -- The child writes the state file again with its own pid (that is what a
+  -- timeout signals), runs the bounded command, records the outcome, and
+  -- removes the marker. Everything is constants plus shq(); no request text.
+  local command = tostring(args or spec.args)
+  local inner = "printf '{\"id\":\"%s\",\"pid\":%s,\"startedAt\":%s,\"phase\":\"running\","
+    .. "\"state\":\"running\",\"limit\":%s}\\n' " .. shq(id) .. " \"$$\" \"$(date +%s)\" "
+    .. "'" .. tostring(spec.seconds) .. "' > " .. shq(state_path .. '.tmp')
+    .. ' && mv -f ' .. shq(state_path .. '.tmp') .. ' ' .. shq(state_path)
+    .. '; ' .. bounded(spec.seconds) .. shq(python_bin()) .. ' ' .. shq(updater_path())
+    .. ' ' .. command .. ' >> ' .. shq(log_path) .. ' 2>&1; code=$?; '
+    .. "printf '{\"state\":\"%s\",\"code\":%s,\"at\":%s}\\n' "
+    .. '"$([ $code -eq 0 ] && echo ok || echo failed)" "$code" "$(date +%s)"'
+    .. ' > ' .. shq(result_path .. '.tmp')
+    .. '; mv -f ' .. shq(result_path .. '.tmp') .. ' ' .. shq(result_path)
+    .. '; rm -f ' .. shq(state_path)
+  os.execute('setsid sh -c ' .. shq(inner) .. ' < /dev/null > /dev/null 2>&1 &')
+  return { name = tostring(name), id = id, pid = 0, startedAt = os.time(),
+    phase = 'starting', state = 'running', age = 0,
+    limit = spec.seconds, log = log_path, message = '' }
 end
 
 -- The update check talks to GitHub, so it runs detached: the RPC returns at
@@ -685,6 +878,12 @@ local function update_state()
   local prefs = load_prefs()
   return {
     installed = tostring((snapshot.versions or {}).luna or ''),
+    -- What the installed snapshot pins per add-on, and the repo revision it
+    -- was installed from, so the Updates page can show installed vs pinned.
+    pinned = type(snapshot.versions) == 'table' and snapshot.versions or {},
+    source = tostring(snapshot.source or ''),
+    installedAt = tonumber(snapshot.installedAt) or 0,
+    toolsInstalled = path_exists(update_dir .. '/luna.py'),
     latest = tostring(cached.latest or ''),
     available = cached.available == true,
     checkedAt = tonumber(cached.checkedAt) or 0,
@@ -760,7 +959,7 @@ local function steam_client_state()
       end
     end
   end
-  local tools = home .. '/.local/share/Lumen/sls-luna'
+  local tools = update_dir
   local pin_raw = read_file(tools .. '/steam-pin.json')
   if pin_raw then
     local ok, pin = pcall(json.decode, pin_raw)
@@ -792,7 +991,7 @@ local function steam_client_state()
   -- Queued Health-menu work (update/cache while Steam is closed).
   state.pending = ''
   do
-    local pending_raw = read_file(home .. '/.local/share/Lumen/sls-luna/pending-steam.json')
+    local pending_raw = read_file(update_dir .. '/pending-steam.json')
     if pending_raw then
       local ok_pending, pending = pcall(json.decode, pending_raw)
       if ok_pending and type(pending) == 'table' then
@@ -828,6 +1027,27 @@ local function steam_client_state()
     end
   end
   return state
+end
+
+-- Which plugin host runs this backend. `running` is what is executing us now;
+-- `configured` is what `luna host` last selected (host.json), so a pending
+-- restart shows up as running ~= configured.
+local function luna_home_dir()
+  return on_luna_host and luna_home or (home .. '/.local/share/Luna')
+end
+
+local function host_info()
+  local state = read_json((on_luna_host and luna_home or (home .. '/.local/share/Luna'))
+    .. '/host.json') or {}
+  return {
+    running = on_luna_host and 'luna' or 'lumen',
+    configured = state.active == 'luna' and 'luna' or 'lumen',
+    addons = base,
+    state = update_dir,
+    -- luna-host has no version string of its own: report the binary Luna
+    -- installed (present + size) so the Updates page can show it.
+    binary = path_exists(luna_home_dir() .. '/bin/luna-host'),
+  }
 end
 
 local function build_health()
@@ -872,6 +1092,7 @@ local function build_health()
       versions = snapshot.versions,
       drift = json.array(drift),
     } or { drift = json.array({}) },
+    host = host_info(),
     lumen = {
       root = lumen_root,
       binary = path_exists(lumen_root .. '/lumen'),
@@ -891,6 +1112,9 @@ local function build_health()
       localconfigConflicts = count_steam_conflicts(),
       client = steam_client_state(),
     },
+    -- The last detached repair job (state, deadline, message): one file read,
+    -- so the Health page can show its outcome after a reopen without an RPC.
+    repair = job_state('repair'),
     data = {
       dir = data_dir,
       prefs = load_prefs(),
@@ -953,7 +1177,7 @@ function M.register(registry)
     local ok, entry = pcall(json.decode, tostring(raw or ''))
     local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
     if action == '' or action == 'status' then
-      return reply({ success = true, update = update_state() })
+      return reply({ success = true, update = update_state(), job = job_state('timer') })
     end
     if action == 'check' then
       if not checking(read_json(update_dir .. '/update-check.json') or {}) then
@@ -963,8 +1187,12 @@ function M.register(registry)
       return reply({ success = true, update = update_state() })
     end
     if action == 'install' then
+      local tag = tostring(entry.tag or '')
+      if tag ~= '' and (#tag > 64 or not tag:match('^[0-9A-Za-z][0-9A-Za-z._-]*$')) then
+        return reply({ success = false, error = 'That release tag is not valid.' })
+      end
       local queued = write_json(update_dir .. '/pending.json',
-        { tag = tostring(entry.tag or ''), requestedAt = os.time() })
+        { tag = tag, requestedAt = os.time() })
       if not queued then return reply({ success = false, error = 'could not queue the update' }) end
       return reply({ success = true, queued = true, update = update_state() })
     end
@@ -977,9 +1205,12 @@ function M.register(registry)
       if value ~= 'on' and value ~= 'off' and value ~= 'status' then
         return reply({ success = false, error = 'Send on, off or status.' })
       end
-      local out, err = run_updater('timer ' .. value, 30)
-      if not out then return reply({ success = false, error = err }) end
-      return reply({ success = true, timer = (out:gsub('%s+$', '')), update = update_state() })
+      local job, err, already = start_job('timer', 'timer ' .. value)
+      if not job then return reply({ success = false, error = err }) end
+      -- The units are written in well under a second; the status poll still
+      -- follows the same job contract rather than waiting here.
+      return reply({ success = true, job = job, alreadyRunning = already == true,
+        update = update_state() })
     end
     return reply({ success = false, error = 'Unknown update action.' })
   end
@@ -992,12 +1223,12 @@ function M.register(registry)
     local ok, entry = pcall(json.decode, tostring(raw or ''))
     local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
     if action == '' or action == 'status' then
-      return reply({ success = true, steam = steam_client_state() })
+      return reply({ success = true, steam = steam_client_state(), job = job_state('pin') })
     end
     if action == 'pin' then
-      local out, err = run_updater('steam pin', 60)
-      if not out then return reply({ success = false, error = err }) end
-      return reply({ success = true, message = (out:gsub('%s+$', '')),
+      local job, err, already = start_job('pin')
+      if not job then return reply({ success = false, error = err }) end
+      return reply({ success = true, job = job, alreadyRunning = already == true,
         steam = steam_client_state() })
     end
     if action == 'lock' or action == 'unlock' then
@@ -1005,7 +1236,7 @@ function M.register(registry)
       -- detached: setsid -f puts it in its own session, the CLI notifies and
       -- reopens Steam itself, and the job marker is removed when it ends. The
       -- command line is built from constants only; nothing from the request.
-      local tools = home .. '/.local/share/Lumen/sls-luna'
+      local tools = update_dir
       if not path_exists(updater_path()) then
         return reply({ success = false, error = 'the updater is not installed yet; run install --force once' })
       end
@@ -1023,7 +1254,7 @@ function M.register(registry)
       os.execute('setsid -f sh -c ' .. shq(inner) .. ' < /dev/null >> ' .. shq(log_path) .. ' 2>&1')
       return reply({ success = true, started = action, log = log_path, steam = steam_client_state() })
     end
-    local pending_path = home .. '/.local/share/Lumen/sls-luna/pending-steam.json'
+    local pending_path = update_dir .. '/pending-steam.json'
     if action == 'cancel' then
       os.remove(pending_path)
       return reply({ success = true, steam = steam_client_state() })
@@ -1040,22 +1271,456 @@ function M.register(registry)
     return reply({ success = false, error = 'Unknown Steam action.' })
   end
 
+  -- Which plugin host runs this backend, for the Health/Settings "Host" line.
+  -- Read-only: switching hosts is `luna host cutover|rollback` with Steam closed.
+  registry.SlsLunaHost = function()
+    return reply({ success = true, host = host_info() })
+  end
+
+  -- Third-party data, read-only: LuaTools (a Lumen plugin) keeps its signed-in
+  -- lua.tools account in <Lumen>/luatools/backend/data/lua_tools_auth.json. This
+  -- reads only the OAuth provider, the Discord display name, an https avatar
+  -- URL and the expiry/path -- and never returns, prints or logs a token value
+  -- or the rest of the file. Luna does not write, refresh or repair that file.
+  local LUA_TOOLS_AUTH_REL = '/luatools/backend/data/lua_tools_auth.json'
+
+  local function luatools_auth_candidates()
+    local out = { lumen_root .. LUA_TOOLS_AUTH_REL }
+    -- Luna's own host keeps its plugin trees under LUNA_HOME (add-ons under
+    -- /addons, host plugins under /plugins); try the same relative layout
+    -- there too, so the read is not Lumen-only.
+    if luna_home ~= '' then
+      out[#out + 1] = luna_home .. LUA_TOOLS_AUTH_REL
+      out[#out + 1] = luna_home .. '/plugins' .. LUA_TOOLS_AUTH_REL
+    end
+    return out
+  end
+
+  -- Only an https avatar on Discord's own CDN is used: anything else (http,
+  -- another host, quotes, whitespace, control bytes, an absurd length) becomes
+  -- an empty string, so the page can put the value straight on an <img>.
+  local AVATAR_HOSTS = { ['cdn.discordapp.com'] = true, ['media.discordapp.net'] = true }
+
+  local function luatools_avatar(value)
+    if type(value) ~= 'string' or #value == 0 or #value > 300 then return '' end
+    for index = 1, #value do
+      local byte = value:byte(index)
+      if byte <= 32 or byte == 127 or byte == 34 or byte == 39 then return '' end
+    end
+    local host = value:match('^https://([^/%?#]+)/')
+    if not host or not AVATAR_HOSTS[host:lower()] then return '' end
+    return value
+  end
+
+  -- ok = the question could be answered at all. signedIn = the file parses, the
+  -- provider is discord, a display name exists AND a refresh token is present
+  -- (its presence and type are tested, its value is never copied): LuaTools
+  -- renews the one-hour access token from it by itself. `expired` is kept for
+  -- callers but is not a state the UI may label with: a past expires_at only
+  -- means nothing has refreshed it yet. `at` is expires_at, 0 when absent.
+  local function luatools_state()
+    local path, raw = '', nil
+    for _, candidate in ipairs(luatools_auth_candidates()) do
+      raw = read_file(candidate)
+      if raw then path = candidate; break end
+    end
+    if not raw then
+      return { ok = false, signedIn = false, name = '', avatar = '', expired = false, at = 0, path = '',
+        error = 'LuaTools has not saved a Discord session on this machine' }
+    end
+    local ok, data = pcall(json.decode, raw)
+    if not ok or type(data) ~= 'table' then
+      return { ok = false, signedIn = false, name = '', avatar = '', expired = false, at = 0, path = path,
+        error = 'the LuaTools session file could not be read' }
+    end
+    local user = type(data.user) == 'table' and data.user or {}
+    local app = type(user.app_metadata) == 'table' and user.app_metadata or {}
+    local meta = type(user.user_metadata) == 'table' and user.user_metadata or {}
+    local claims = type(meta.custom_claims) == 'table' and meta.custom_claims or {}
+    local name = type(claims.global_name) == 'string' and claims.global_name or ''
+    if name:match('^%s*$') then
+      -- The same profile repeats the display name as full_name/name.
+      name = type(meta.full_name) == 'string' and meta.full_name
+        or (type(meta.name) == 'string' and meta.name or '')
+    end
+    name = tostring(name or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    local has_refresh = type(data.refresh_token) == 'string' and data.refresh_token ~= ''
+    local avatar = luatools_avatar(meta.avatar_url)
+    if avatar == '' then avatar = luatools_avatar(meta.picture) end
+    local expires_at = tonumber(data.expires_at) or 0
+    return {
+      ok = true,
+      signedIn = tostring(app.provider or '') == 'discord' and name ~= '' and has_refresh,
+      name = name,
+      avatar = avatar,
+      expired = expires_at > 0 and expires_at < os.time(),
+      at = expires_at,
+      path = path,
+    }
+  end
+
+  -- Parameterless: the footer asks when the menu opens and on Refresh (never
+  -- on a timer).
+  registry.SlsLunaLuaTools = function()
+    return reply({ success = true, luatools = luatools_state() })
+  end
+
+  -- Lumen base update for the Updates page (Lumen host only). Steam is running
+  -- while the menu is open, so `update` only QUEUES a job (pending-lumen.json);
+  -- the `luna autoupdate` timer applies it once Steam is closed. Nothing here
+  -- runs the installer or touches a process.
+  -- The network check (`lumen status --check --json`) runs detached and
+  -- writes lumen-check.json when done; one at a time, a stuck one is
+  -- abandoned after 90 s. The page asks for it on a click, never on a poll.
+  local lumen_check_path = update_dir .. '/lumen-check.json'
+  local lumen_check_started = update_dir .. '/lumen-check-started'
+  -- Last `luna lumen channels` read this session, so the page can show it
+  -- without running the CLI on every status poll. Filled on demand only.
+  local channels_cache = nil
+
+  local function checking_lumen()
+    local handle = io.open(lumen_check_started, 'rb')
+    if not handle then return false end
+    local started = tonumber((handle:read('*a') or ''):match('%d+')) or 0
+    handle:close()
+    return started > 0 and os.time() - started < CHECK_GRACE
+  end
+
+  local function spawn_lumen_check()
+    if not path_exists(updater_path()) then
+      return false, 'the updater is not installed yet; run install --force once'
+    end
+    fs.create_directories(update_dir)
+    local marker = io.open(lumen_check_started, 'wb')
+    if not marker then return false, 'could not record the check' end
+    marker:write(tostring(os.time()))
+    marker:close()
+    local temp = lumen_check_path .. '.tmp'
+    local inner = 'now=$(date +%s); if out=$(' .. bounded(CHECK_GRACE - 10) .. shq(python_bin()) .. ' '
+      .. shq(updater_path()) .. ' lumen status --check --json 2>/dev/null); then '
+      .. "printf '{\"checkedAt\":%s,\"status\":%s}' \"$now\" \"$out\" > " .. shq(temp) .. '; else '
+      .. "printf '{\"checkedAt\":%s,\"failed\":true}' \"$now\" > " .. shq(temp) .. '; fi; '
+      .. 'mv -f ' .. shq(temp) .. ' ' .. shq(lumen_check_path) .. '; rm -f ' .. shq(lumen_check_started)
+    os.execute('setsid sh -c ' .. shq(inner) .. ' < /dev/null > /dev/null 2>&1 &')
+    return true
+  end
+
+  local function lumen_state()
+    local versions = {}
+    local data = read_json(lumen_root .. '/versions.json')
+    if type(data) == 'table' then
+      for name, item in pairs(data) do
+        if type(item) == 'table' then versions[name] = tostring(item.tag or '') end
+      end
+    end
+    local blocked, bridge = false, false
+    local about = read_file(lumen_root .. '/lua/about.lua')
+    if about and about:find('LUNA-LUMEN-UPDATE-BLOCK: begin', 1, true) then blocked = true end
+    local boot = read_file(lumen_root .. '/lua/boot.lua')
+    if boot and boot:find('SLS-ADDONS-INTEGRATION', 1, true) then bridge = true end
+    -- The installed copy needs its support tree beside luna.py; without it an
+    -- applied update would lose Luna (it could not re-patch or reinstall).
+    local missing = {}
+    local needed = {
+      'scripts/patch-lumen.py', 'scripts/steam-machine.py', 'bridge/bridge.lua',
+      'vendor/MANIFEST.json', 'addons/luna/plugin/plugin.json',
+      'addons/sgdb/plugin/plugin.json', 'addons/graphics/plugin/plugin.json',
+      'addons/playtime/plugin/plugin.json', 'addons/presence/plugin/plugin.json',
+      'addons/compressor/plugin/plugin.json',
+    }
+    for _, rel in ipairs(needed) do
+      if not path_exists(update_dir .. '/runtime/' .. rel) then missing[#missing + 1] = rel end
+    end
+    local tooling_ok = #missing == 0
+    local host = host_info()
+    local result = read_json(update_dir .. '/lumen-update.json')
+    if type(result) ~= 'table' then result = {} end
+    local pending_job = read_json(update_dir .. '/pending-lumen.json')
+    local job = nil
+    if type(pending_job) == 'table' then
+      job = { action = tostring(pending_job.action or 'update'),
+        attempts = tonumber(pending_job.attempts) or 0,
+        lastError = tostring(pending_job.lastError or '') }
+    end
+    -- A running record whose process is gone was interrupted; the next
+    -- `luna lumen update` or the timer recovers it.
+    local interrupted = false
+    if result.state == 'running' then
+      local pid = tonumber(result.pid)
+      interrupted = (pid ~= nil and pid > 0) and not path_exists('/proc/' .. tostring(math.floor(pid))) or false
+    end
+    local backups = {}
+    local backup_root = update_dir .. '/lumen-backups'
+    local listed, names = pcall(fs.list, backup_root)
+    if listed and type(names) == 'table' then
+      for _, item in ipairs(names) do
+        local name = type(item) == 'table' and tostring(item.name or '') or tostring(item)
+        if name:match('^[0-9A-Za-z._-]+$') then
+          local meta = read_json(backup_root .. '/' .. name .. '/backup.json')
+          if type(meta) == 'table' then
+            backups[#backups + 1] = { name = name, at = tonumber(meta.at) or 0,
+              bytes = tonumber(meta.bytes) or 0, failed = meta.failed == true }
+          end
+        end
+      end
+      table.sort(backups, function(a, b) return a.name > b.name end)
+      while #backups > 8 do backups[#backups] = nil end
+    end
+    local options = read_json(update_dir .. '/lumen-options.json')
+    local choice = (type(options) == 'table' and (options.millennium == 'keep' or options.millennium == 'remove'))
+      and options.millennium or ''
+    -- The same places the CLI's plan lists as Millennium leftovers.
+    local present = {}
+    for _, path in ipairs({ home .. '/.config/millennium', home .. '/.local/share/millennium',
+        home .. '/.local/share/Steam/millennium', '/usr/lib/millennium', '/usr/share/millennium' }) do
+      if path_exists(path) then present[#present + 1] = path end
+    end
+    local check = read_json(lumen_check_path)
+    if type(check) ~= 'table' then check = {} end
+    check.checking = checking_lumen()
+    return {
+      host = host.configured,
+      running = host.running,
+      applicable = host.configured == 'lumen' and host.running == 'lumen',
+      versions = versions,
+      blockInPlace = blocked,
+      bridge = bridge,
+      tooling = { ok = tooling_ok, missing = missing },
+      toolingIncomplete = tooling_ok and '' or ('tooling incomplete: missing ' .. table.concat(missing, ', ')),
+      applyService = path_exists(home .. '/.config/systemd/user/luna-apply.service'),
+      pending = path_exists(update_dir .. '/pending-lumen.json'),
+      job = job,
+      result = result,
+      interrupted = interrupted,
+      backups = json.array(backups),
+      millennium = { choice = choice, present = json.array(present) },
+      check = check,
+      -- Which channel each component follows, as the CLI last reported it.
+      channels = channels_cache,
+      -- When this backend loaded: the plugin host starts with Steam, so it is
+      -- the start of this Steam session. Older final results are history.
+      sessionStartedAt = SESSION_STARTED_AT,
+    }
+  end
+
+  -- Every Lumen change goes through the CLI (it takes the writer lock and
+  -- refuses while a job runs). This file never writes the job files and never
+  -- starts or stops a unit. The two synchronous calls below (queue, cancel) are
+  -- short and bounded; the network check runs detached.
+  local MILLENNIUM_CHOICES = { keep = '--keep-millennium', remove = '--remove-millennium' }
+
+  local function clean(text)
+    return ((tostring(text or ''):gsub('%s+$', '')))
+  end
+
+  -- Which channel each Lumen component follows. The CLI owns
+  -- <LUMEN_DIR>/update-channels.json and writes it atomically; this backend
+  -- only reads it through `luna lumen channels` and changes it through
+  -- `luna lumen channels set`, so it can never race the CLI's rename and never
+  -- has to guess what "no file yet" means (stable, per the CLI).
+  local CHANNEL_NAMES = { lumen = true, plugin = true, slsteam_moon = true }
+  local CHANNEL_VALUES = { stable = true, beta = true }
+
+  local function parse_channels(output)
+    local values, file = {}, ''
+    for line in tostring(output or ''):gmatch('[^\r\n]+') do
+      local name, value = line:match('^([%w_]+)%s+([%a_]+)%s*$')
+      if name and CHANNEL_NAMES[name] and CHANNEL_VALUES[value] then values[name] = value end
+      local listed = line:match('^file%s*:%s*(.+)$')
+      if listed then file = (listed:gsub('%s+$', '')) end
+    end
+    return values, file
+  end
+
+  local function read_channels()
+    local out, err = run_updater('lumen channels', 20)
+    if not out then return nil, clean(err) end
+    local values, file = parse_channels(out)
+    if not next(values) then return nil, clean(out) end
+    channels_cache = { values = values, file = file, at = os.time(), output = clean(out) }
+    return channels_cache
+  end
+
+  -- The `--terminal` update runs as a detached job: it asks Steam itself to
+  -- quit (up to 60 s), then opens a window and tees to its own log. It outlives
+  -- this Lua VM, so its raw output and exit code go to two small files and the
+  -- page follows them instead of blocking the injector thread for a minute.
+  local TERMINAL_STARTED = update_dir .. '/terminal-update-started'
+  local TERMINAL_OUT = update_dir .. '/terminal-update.out'
+  local TERMINAL_CODE = update_dir .. '/terminal-update.code'
+  local TERMINAL_LIMIT = 240
+
+  local function terminal_state()
+    local started = tonumber((read_file(TERMINAL_STARTED) or ''):match('%d+')) or 0
+    local code = (read_file(TERMINAL_CODE) or ''):match('%d+')
+    local out = (file_tail(TERMINAL_OUT, 4000):gsub('%s+$', ''))
+    local log = (out:match('[Ll]og%s*:%s*([^\r\n]+)') or '')
+    local window = (out:match('terminal%s*:%s*([^\r\n]+)') or '')
+    local state = 'idle'
+    if code ~= nil then
+      state = (tonumber(code) == 0) and 'opened' or 'refused'
+    elseif started > 0 and os.time() - started < TERMINAL_LIMIT then
+      state = 'starting'
+    end
+    return { state = state, code = tonumber(code) or -1, at = started,
+      log = (log:gsub('%s+$', '')), window = (window:gsub('%s+$', '')), output = out }
+  end
+
+  local function lumen_view()
+    local state = lumen_state()
+    state.terminal = terminal_state()
+    return state
+  end
+
+  registry.SlsLunaLumen = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
+    if action == '' or action == 'status' then
+      return reply({ success = true, lumen = lumen_view() })
+    end
+    if action == 'check' then
+      if not checking_lumen() then
+        local started, err = spawn_lumen_check()
+        if not started then return reply({ success = false, error = err }) end
+      end
+      return reply({ success = true, lumen = lumen_view() })
+    end
+    if action == 'channels' then
+      local channels, err = read_channels()
+      if not channels then return reply({ success = false, error = err, lumen = lumen_view() }) end
+      return reply({ success = true, channels = channels, lumen = lumen_view() })
+    end
+    if action == 'channels-set' then
+      -- The whitelists make this a fixed command line: no request text ever
+      -- reaches the shell. Refusals (exit 2) carry the CLI's own REFUSING
+      -- text, which the page shows unchanged.
+      local component = tostring(entry.component or '')
+      local channel = tostring(entry.channel or '')
+      if not CHANNEL_NAMES[component] then
+        return reply({ success = false, error = 'Unknown channel component.' })
+      end
+      if not CHANNEL_VALUES[channel] then
+        return reply({ success = false, error = 'Choose stable or beta.' })
+      end
+      if entry.confirmed ~= true then
+        return reply({ success = false, error = 'The channel change needs a confirmation first.' })
+      end
+      local out, err = run_updater('lumen channels set ' .. channel .. ' --only ' .. component, 20)
+      if not out then return reply({ success = false, error = clean(err), lumen = lumen_view() }) end
+      local channels = read_channels()
+      return reply({ success = true, message = clean(out), channels = channels, lumen = lumen_view() })
+    end
+    if action == 'terminal' then
+      -- `update-all --terminal` asks Steam itself to quit, waits for it, then
+      -- opens a terminal that runs the same update live and tees it to a log.
+      -- This backend never runs steam -shutdown, pkill or any lock command.
+      if entry.confirmed ~= true then
+        return reply({ success = false, error = 'The terminal update needs a confirmation first.' })
+      end
+      if not path_exists(updater_path()) then
+        return reply({ success = false, error = 'the updater is not installed yet; run install --force once' })
+      end
+      if terminal_state().state == 'starting' then
+        return reply({ success = false, error = 'A terminal update is already starting.' })
+      end
+      fs.create_directories(update_dir)
+      os.remove(TERMINAL_OUT)
+      os.remove(TERMINAL_CODE)
+      local marker = io.open(TERMINAL_STARTED, 'wb')
+      if not marker then return reply({ success = false, error = 'could not record the terminal update' }) end
+      marker:write(tostring(os.time()))
+      marker:close()
+      local inner = shq(python_bin()) .. ' ' .. shq(updater_path()) .. ' update-all --terminal --yes > '
+        .. shq(TERMINAL_OUT) .. ' 2>&1; echo $? > ' .. shq(TERMINAL_CODE)
+      os.execute('setsid sh -c ' .. shq(inner) .. ' < /dev/null > /dev/null 2>&1 &')
+      return reply({ success = true, started = true, lumen = lumen_view() })
+    end
+    if action == 'update' then
+      local state = lumen_state()
+      if not state.applicable then
+        return reply({ success = false, error = 'Lumen is not the active host; nothing to update.' })
+      end
+      if not state.tooling.ok then
+        return reply({ success = false, error = state.toolingIncomplete
+          .. '. Re-run: luna install --force' })
+      end
+      -- The page asks for a confirmation first; a call without it is refused
+      -- here too, so nothing can be queued by a stray request.
+      if entry.confirmed ~= true then
+        return reply({ success = false, error = 'The update needs a confirmation first.' })
+      end
+      local flag = ''
+      if entry.millennium ~= nil and entry.millennium ~= '' then
+        flag = MILLENNIUM_CHOICES[tostring(entry.millennium)]
+        if not flag then return reply({ success = false, error = 'Choose keep or remove for Millennium.' }) end
+        flag = ' ' .. flag
+      end
+      local out, err = run_updater('lumen update --queue' .. flag, 20)
+      if not out then return reply({ success = false, error = clean(err) }) end
+      return reply({ success = true, queued = true, message = clean(out), lumen = lumen_state() })
+    end
+    if action == 'cancel' then
+      local out, err = run_updater('lumen cancel', 20)
+      if not out then return reply({ success = false, error = clean(err), lumen = lumen_state() }) end
+      return reply({ success = true, message = clean(out), lumen = lumen_state() })
+    end
+    if action == 'restore' or action == 'reinstall' then
+      -- Both need Steam closed and cannot be queued, and this menu only exists
+      -- while Steam is open: the page shows the terminal command instead.
+      return reply({ success = false, error = 'Close Steam and run this from a terminal.' })
+    end
+    return reply({ success = false, error = 'Unknown Lumen action.' })
+  end
+
+  -- The Steam window gradient follows the desktop. Noctalia regenerates its
+  -- Steam colour file whenever the wallpaper or palette changes; this only
+  -- reads the few colours the gradient needs, so the panel can repaint live.
+  registry.SlsLunaGradient = function()
+    local prefs = load_prefs()
+    local path = home .. '/.steam/steam/steamui/skins/Material-Theme/css/main/colors/matugen.css'
+    local css = read_file(path)
+    local wanted = { primary = true, secondary = true, tertiary = true, surface = true,
+      ['surface-container'] = true, ['primary-container'] = true }
+    local colors = {}
+    if css then
+      for name, r, g, b in css:gmatch('%-%-md%-sys%-color%-([%w%-]+)%s*:%s*rgba?%(%s*(%d+)%s*,%s*(%d+)%s*,%s*(%d+)') do
+        if wanted[name] then
+          colors[name] = { tonumber(r), tonumber(g), tonumber(b) }
+        end
+      end
+    end
+    return reply({ success = true, enabled = prefs.steam_gradient ~= false,
+      available = colors.primary ~= nil, colors = colors, source = path })
+  end
+
   -- One-click bridge repair for the Health page. A base (Lumen/Moon) update
   -- replaces boot.lua and wipes the bridge while the payloads stay current;
   -- this reruns the installer keeping the Steam client untouched. It refuses
   -- while Steam runs (same guard as the shell), so the panel surfaces the
   -- refusal instead of changing anything.
-  registry.SlsLunaRepair = function()
-    local out, err = run_updater('install --keep-steam-client', 180)
-    if not out then return reply({ success = false, error = err }) end
-    return reply({ success = true, message = (out:gsub('%s+$', '')),
-      health = build_health() })
+  -- The installer touches hundreds of files, so it runs as a detached job:
+  -- this call only starts it (or reports the one already running) and the
+  -- panel follows repair-job.json through action='status'. Steam's UI is
+  -- never held for the length of an install.
+  registry.SlsLunaRepair = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
+    if action == 'status' then
+      return reply({ success = true, job = job_state('repair') })
+    end
+    if action == '' or action == 'start' then
+      local job, err, already = start_job('repair')
+      if not job then return reply({ success = false, error = err }) end
+      return reply({ success = true, job = job, alreadyRunning = already == true,
+        message = job.state == 'running' and 'Repair started.' or 'A repair is already running.' })
+    end
+    return reply({ success = false, error = 'Unknown repair action.' })
   end
 
   registry.SlsLunaRefresh = function(raw)
     local ok, entry = pcall(json.decode, tostring(raw or ''))
     local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
-    local pending_path = home .. '/.local/share/Lumen/sls-luna/pending-refresh.json'
+    local pending_path = update_dir .. '/pending-refresh.json'
     if action == '' or action == 'status' then
       return reply({ success = true, refreshPending = path_exists(pending_path) })
     end
@@ -1081,16 +1746,33 @@ function M.register(registry)
   registry.SlsLunaLaunchers = function(raw)
     local ok, entry = pcall(json.decode, tostring(raw or ''))
     local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
-    local tools = home .. '/.local/share/Lumen/sls-luna'
+    local tools = update_dir
     if action == '' or action == 'status' then
-      return reply({ success = true, helper = path_exists(tools .. '/steam-machine.py') })
+      return reply({ success = true, helper = path_exists(tools .. '/steam-machine.py'),
+        job = job_state('launchers') })
     end
     if action == 'create' then
-      local out, err = run_updater('launchers', 60)
-      if not out then return reply({ success = false, error = err }) end
-      return reply({ success = true, message = (out:gsub('%s+$', '')) })
+      local job, err, already = start_job('launchers')
+      if not job then return reply({ success = false, error = err }) end
+      return reply({ success = true, job = job, alreadyRunning = already == true })
     end
     return reply({ success = false, error = 'Unknown launchers action.' })
+  end
+
+  -- An error inside any of the Luna handlers becomes a structured reply, so
+  -- the page shows a reason instead of getting nothing back.
+  for _, name in ipairs({ 'SlsLunaInfo', 'SlsLunaPrefsSet', 'SlsLunaHealth', 'SlsLunaUpdate',
+      'SlsLunaSteam', 'SlsLunaHost', 'SlsLunaLumen', 'SlsLunaGradient', 'SlsLunaRepair',
+      'SlsLunaRefresh', 'SlsLunaLaunchers' }) do
+    local handler = registry[name]
+    if type(handler) == 'function' then
+      registry[name] = function(...)
+        local done, out = pcall(handler, ...)
+        if done and out ~= nil then return out end
+        return reply({ success = false, error = done and 'The backend returned nothing.'
+          or ('Backend error: ' .. tostring(out):gsub('^.-:%d+: ', '')) })
+      end
+    end
   end
 
   -- Whole local cache: appid -> record, plus the game list the agent reported.

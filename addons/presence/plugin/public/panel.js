@@ -4,8 +4,19 @@
   // SLS Luna hosts this add-on's settings in its own menubar menu; the floating
   // panel is only for a standalone install.
   if (w.__SlsLunaUi) return;
-  w.__SlsPresencePanel = true;
+  // No host (Lumen stopped or restarting) must reject, never throw a TypeError
+  // from the refresh interval. Same guard the add-on agents use.
+  const offline = e => /bridge unavailable/i.test(String((e && e.message) || e));
+  const atend = (status, detail, e) => {
+    if (offline(e)) {
+      status.textContent = 'Waiting for the host (Lumen bridge unavailable).';
+      if (detail) detail.textContent = '';
+      return;
+    }
+    status.textContent = String(e);
+  };
   const rpc = async (method, args = {}) => {
+    if (!w.Millennium || typeof w.Millennium.callServerMethod !== 'function') throw Error('bridge unavailable');
     const raw = await w.Millennium.callServerMethod('lumen', method, args);
     const out = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (out?.success === false) throw Error(out.error || 'RPC failed');
@@ -13,8 +24,12 @@
   };
   const BTN = 'position:fixed;right:15px;bottom:16px;z-index:99999;background:#224f6b;color:white;padding:8px;border:1px solid #62829a;border-radius:6px;cursor:pointer';
   const PANE = 'position:fixed;right:14px;bottom:56px;z-index:99999;width:340px;padding:14px;border-radius:8px;background:#192734;color:white;box-shadow:0 7px 20px #000b';
+  // Returns true when the panel is (or already was) in the DOM. The published
+  // flag only exists after a successful mount, so a fast Steam start that runs
+  // this before document.body is ready can still retry.
   function mount() {
-    if (!document.body || document.getElementById('sls-presence-panel-button')) return;
+    if (!document.body) return false;
+    if (document.getElementById('sls-presence-panel-button')) return true;
     const btn = document.createElement('button');
     btn.id = 'sls-presence-panel-button';
     btn.textContent = 'Presence';
@@ -84,7 +99,7 @@
           accountSource: health.accountSource, identityAmbiguous: health.identityAmbiguous,
           helperPauseReason: result.session?.helpersAllowed === false ? result.session.reason : '',
         });
-      } catch (e) { status.textContent = String(e); }
+      } catch (e) { atend(status, detail, e); }
     }
     btn.onclick = () => { pane.hidden = !pane.hidden; if (!pane.hidden) refresh(); };
     enable.onclick = async () => {
@@ -92,7 +107,7 @@
         const s = (await rpc('SlsPresenceGet')).state;
         await rpc('SlsPresenceSetEnabled', {value: !s.enabled});
         await refresh();
-      } catch (e) { status.textContent = String(e); }
+      } catch (e) { atend(status, detail, e); }
     };
     clear.onclick = async () => {
       // Only ever removes shortcuts this addon created and still owns.
@@ -105,10 +120,21 @@
       try {
         await rpc('SlsPresenceRequestCleanup');
         status.textContent = 'Cleanup requested; SharedJSContext will process it.';
-      } catch (e) { status.textContent = String(e); }
+      } catch (e) { atend(status, detail, e); }
     };
     w.setInterval(refresh, 6000);
+    w.__SlsPresencePanel = true;
+    return true;
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, {once: true});
-  else mount();
+  // A fast Steam start can run this script before document.body exists. Retry a
+  // few times (bounded, then give up quietly) instead of losing the panel for
+  // the whole session.
+  let attempts = 0;
+  function attempt() {
+    if (w.__SlsPresencePanel || mount()) return;
+    if (++attempts > 20) return;
+    w.setTimeout(attempt, attempts < 10 ? 100 : 500);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', attempt, {once: true});
+  else attempt();
 })(window);

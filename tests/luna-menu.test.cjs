@@ -12,7 +12,8 @@ const {discoverMenuTools,installLunaMenu,bootLunaMenu,openExternalUrl,searchUrlF
   collectLibrary,pushLibrary,SORT_VALUE,SORT_LABEL,ARTWORK_REQUEST_KEY,ARTWORK_LIVE_KEY,
   ARTWORK_LIVE_RESULT_KEY,setHltbRecords,compareHltb,syncSortAs,
   isSortDropdown,withSortOption,withHltbSections,hltbGridType,hookHltbShelf,withHltbOverlay,hltbMinutesFor,
-  handleArtworkLive,refreshHltbData}=require('../addons/luna/plugin/public/agent.js');
+  handleArtworkLive,refreshHltbData,VIEW_REQUEST_KEY,VIEW_RESULT_KEY,
+  viewStatus,viewSetVisible,viewHandleRequest,installViewControl}=require('../addons/luna/plugin/public/agent.js');
 test('home HLTB shelves redraw after asynchronous times load, without remounting',()=>{
   setHltbRecords({});
   const tasks=[];
@@ -254,8 +255,8 @@ test('selecting an action opens the browser through the Steam client',async()=>{
 test('a failing action is contained and never breaks the menu',async()=>{
   const tools=fixture();
   const errors=[];
-  const originalError=console.error;
-  console.error=(...args)=>errors.push(args.join(' '));
+  const originalError=console.warn;
+  console.warn=(...args)=>errors.push(args.join(' '));
   try{
     const w={appStore:{GetAppOverviewByAppID:id=>({appid:id,display_name:'Hades'})}};
     const menu=installLunaMenu(w,tools);
@@ -266,9 +267,10 @@ test('a failing action is contained and never breaks the menu',async()=>{
     const item=(el.props.children||[]).find(child=>child&&child.props&&child.props.children
       &&child.props.children[0]==='Broken');
     await item.props.onSelected();
-    assert.equal(errors.some(line=>line.includes('broken')&&line.includes('boom')),true);
+    assert.equal(errors.some(line=>line.includes('[sls-luna]')&&line.includes('broken')
+      &&line.includes('boom')),true,'one guarded, prefixed warning');
     menu.dispose();
-  }finally{console.error=originalError;}
+  }finally{console.warn=originalError;}
 });
 
 test('other add-ons can register and remove their own game actions through the registry',()=>{
@@ -817,4 +819,95 @@ test('the rendered library dropdown carries the HowLongToBeat option',()=>{
     {type:'play',props:{}},{type:'rg',props:{rgApps:[{appid:1145360}]}}]});
   assert.deepEqual(labelsAfterPrimary(game),['HowLongToBeat'],'game menus keep their items');
   menu.dispose();
+});
+
+test('a throwing third-party patch never escapes the jsx wrapper',()=>{
+  const tools=fixture();
+  const warnings=[];
+  const originalWarn=console.warn;
+  console.warn=(...args)=>warnings.push(args.join(' '));
+  try{
+    const w={};
+    const menu=installLunaMenu(w,tools);
+    const props={overview:{appid:1145360,display_name:'Hades'},instance:{}};
+    Object.defineProperty(props,'rgOptions',{get(){throw Error('patch boom');}});
+    let out;
+    assert.doesNotThrow(()=>{out=tools.jsx.jsx(tools.Outer,props);},
+      'a broken patch must not blank the library render');
+    assert.ok(out,'the render still returns an element');
+    assert.ok(warnings.some(line=>line.includes('[sls-luna]')&&line.includes('patch boom')),
+      'the failure is logged once with the stable prefix');
+    menu.dispose();
+  }finally{console.warn=originalWarn;}
+});
+
+/* The panel runs in Steam's shell document, where the main window's browser
+   manager does not exist; this context owns it. Its answers cross over
+   localStorage, so what matters here is the state machine: hide, show, and a
+   clear error shape when the Steam API is not there. */
+function viewWindow(route){
+  const seen=[];
+  const listeners={};
+  const storage=new Map();
+  const w={
+    localStorage:{getItem:key=>storage.has(key)?storage.get(key):null,
+      setItem:(key,value)=>storage.set(key,String(value)),removeItem:key=>storage.delete(key)},
+    addEventListener:(type,fn)=>{(listeners[type]=listeners[type]||[]).push(fn);},
+    MainWindowBrowserManager:{m_history:{location:{pathname:route}},
+      m_browser:{SetVisible:visible=>seen.push(visible)}},
+  };
+  return {w,seen,storage,listeners};
+}
+const viewRequest=(action,extra)=>JSON.stringify({id:'r1',action,at:Date.now(),...extra});
+
+test('the view agent reports the route and keeps hide/show idempotent',()=>{
+  const {w,seen}=viewWindow('/store/');
+  assert.deepEqual(viewStatus(w),{ok:true,route:'/store/',browserVisible:true});
+  assert.deepEqual(viewSetVisible(w,false),{ok:true,route:'/store/',browserVisible:false});
+  assert.deepEqual(viewSetVisible(w,false),{ok:true,route:'/store/',browserVisible:false});
+  assert.deepEqual(seen,[false],'a second hide must not call SetVisible again');
+  assert.deepEqual(viewSetVisible(w,true),{ok:true,route:'/store/',browserVisible:true});
+  assert.deepEqual(viewSetVisible(w,true),{ok:true,route:'/store/',browserVisible:true});
+  assert.deepEqual(seen,[false,true],'and a second show must not either');
+});
+
+test('a missing Steam view API answers ok:false instead of throwing',()=>{
+  const {w}=viewWindow('/store/');
+  w.MainWindowBrowserManager={m_history:{location:{pathname:'/store/'}}};
+  assert.deepEqual(viewStatus(w),{ok:false,error:'The Steam view API is unavailable.'});
+  assert.deepEqual(viewSetVisible(w,false),{ok:false,error:'The Steam view API is unavailable.'});
+  assert.equal(viewHandleRequest(w,viewRequest('hide')).ok,false);
+  delete w.MainWindowBrowserManager;
+  assert.equal(viewStatus(w).ok,false,'no manager at all is the same answer');
+});
+
+test('view requests are validated: bad actions, ids and stale asks are dropped',()=>{
+  const {w}=viewWindow('/library/home');
+  assert.equal(viewHandleRequest(w,viewRequest('resize')),null,'unknown action');
+  assert.equal(viewHandleRequest(w,JSON.stringify({action:'hide',at:Date.now()})),null,'no id');
+  assert.equal(viewHandleRequest(w,'{not json'),null);
+  assert.equal(viewHandleRequest(w,null),null);
+  assert.equal(viewHandleRequest(w,viewRequest('status',{at:Date.now()-60000})),null,
+    'a request older than the TTL is ignored');
+  const body=viewHandleRequest(w,viewRequest('status'));
+  assert.equal(body.ok,true);
+  assert.equal(body.route,'/library/home');
+  assert.deepEqual(JSON.parse(w.localStorage.getItem(VIEW_RESULT_KEY)).id,'r1');
+});
+
+test('the installed channel answers only its own key and publishes the route at boot',()=>{
+  const {w,storage,listeners,seen}=viewWindow('/community/home');
+  let installed=0;
+  w.addEventListener=(type,fn)=>{installed+=1;(listeners[type]=listeners[type]||[]).push(fn);};
+  assert.equal(installViewControl(w),true);
+  assert.equal(installViewControl(w),false,'installing twice is a no-op');
+  assert.equal(installed,1);
+  const published=JSON.parse(storage.get(VIEW_RESULT_KEY));
+  assert.equal(published.route,'/community/home','the panel learns the route before any click');
+  storage.set(VIEW_REQUEST_KEY,viewRequest('hide'));
+  listeners.storage[0]({key:'slsLunaArtworkRequest'});
+  assert.deepEqual(seen,[],'an unrelated storage key is not a view request');
+  listeners.storage[0]({key:VIEW_REQUEST_KEY});
+  assert.deepEqual(seen,[false],'the panel asks, this context hides');
+  assert.equal(JSON.parse(storage.get(VIEW_RESULT_KEY)).browserVisible,false);
 });
