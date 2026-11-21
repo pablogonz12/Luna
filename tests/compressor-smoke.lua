@@ -369,8 +369,15 @@ assert(call(reg, 'SlsCompressorPutSettings', json.encode({
   compress = true, dedupe = true, assets = false, maxSizeGb = 0, excluded = {},
 })).success, 'queue settings refused for cancel')
 assert(call(reg, 'SlsCompressorRun', json.encode({action = 'run'})).success, 'the queue run was refused')
-local qlive = wait_for(reg, function(state) return state.queue and state.queue.active end, 10)
-assert(qlive.queue.active, 'the queue was not observed as active')
+-- Cancel while a game is genuinely in progress: waiting only for `active` also
+-- matches the moment after the last game finished but before the driver writes
+-- its finish line, which makes the cancel a no-op and the check below racy.
+local qlive = wait_for(reg, function(state)
+  local queue = state.queue
+  return queue and queue.active and queue.current ~= nil and queue.done == 0
+    and not queue.finished
+end, 10)
+assert(qlive.queue.current ~= nil, 'the queue run must be live when it is cancelled')
 assert(call(reg, 'SlsCompressorCancel').success, 'cancel refused the queue')
 local qstopped = wait_for(reg, function(state) return state.queue and not state.queue.active end, 15)
 assert(qstopped.queue.finished == false, 'a cancelled queue must not read as finished')
