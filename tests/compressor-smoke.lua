@@ -359,6 +359,14 @@ local qlive = wait_for(reg, function(state) return state.queue and state.queue.a
 assert(qlive.queue.active, 'the queue was not observed as active')
 assert(call(reg, 'SlsCompressorCancel').success, 'cancel refused the queue')
 local qstopped = wait_for(reg, function(state) return state.queue and not state.queue.active end, 15)
+if qstopped.queue.finished then
+  local dir = home .. '/.local/share/slssteam-integrations/compressor'
+  print('DEBUG finished=true job.running=' .. tostring(qstopped.job and qstopped.job.running)
+    .. ' pid=' .. tostring(qstopped.job and qstopped.job.pid))
+  print('DEBUG state:\n' .. tostring(read(dir .. '/queue.state')))
+  print('DEBUG log:\n' .. tostring(read(dir .. '/run.log')))
+  os.execute('ps -eo pid,pgid,stat,comm,args | grep -E "run-queue|sleep" | grep -v grep')
+end
 assert(qstopped.queue.finished == false, 'a cancelled queue must not read as finished')
 
 -- The preview is read-only and reports its own argv.

@@ -1,0 +1,14 @@
+name: Debug compressor cancel
+on: [push, workflow_dispatch]
+jobs:
+  debug:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y lua5.4
+      - run: |
+          bash --version | head -1
+          tmp=$(mktemp -d); mkdir -p "$tmp/home"
+          LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$PWD" lua5.4 tests/compressor-smoke.lua || true
+          echo "=== leftover state ==="
+          cat "$tmp/home/.local/share/slssteam-integrations/compressor/queue.state" 2>/dev/null || echo none
