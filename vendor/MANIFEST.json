@@ -53,7 +53,7 @@
           "source_path": "plugin/public/panel.js"
         }
       },
-      "plugin_version": "0.14.18",
+      "plugin_version": "0.14.19",
       "source_commit": "e59fdc42ab9b31af8b49dbc0ad73f4f6a67c5e9a",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
