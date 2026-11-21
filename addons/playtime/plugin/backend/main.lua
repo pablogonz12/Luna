@@ -54,6 +54,13 @@ local DAY=86400
 local CONTRIB=3
 local MAX_SESSIONS=MAX_EVENTS
 local STATE_DIR=(os.getenv('XDG_STATE_HOME') or (HOME..'/.local/state'))..'/slssteam-integrations'
+-- File stamps for the poll cache and rev. Optional: without lfs the size is
+-- still used, so a same-size rewrite is the only blind spot.
+local LFS=nil
+do
+  local ok,mod=pcall(require,'lfs')
+  if ok and type(mod)=='table' then LFS=mod end
+end
 local function valid_id(v)
   local n=tonumber(v)
   return n and n>=1 and n<=MAX and n==math.floor(n)
@@ -157,8 +164,9 @@ end
 -- ---------------------------------------------------------------------------
 -- Schema 3: per-machine contributions and their merge.
 -- ---------------------------------------------------------------------------
-local function blank_own(account,host)
-  return {version=CONTRIB,host=host,account=account or '',games={},daily={},
+local function blank_own(account,host,nonce,installation)
+  return {version=CONTRIB,host=host,nonce=nonce,installation=installation,
+    account=account or '',games={},daily={},
     sessions={},edits={},titles={},import=nil,acked={},ackOrder={},resetAt=0,active={}}
 end
 local function own_record(store,k)
@@ -175,7 +183,20 @@ local function sanitize_own(obj,account)
   if tonumber(obj.version)~=CONTRIB then return nil,'unsupported contribution schema '..tostring(obj.version) end
   local declared=type(obj.host)=='string' and obj.host or ''
   if not declared:match('^[%w%-_]+$') or #declared<1 or #declared>32 then return nil,'missing host id' end
-  local own=blank_own(account,declared)
+  -- Installation identity. Two machines can be handed the same host id (a
+  -- copied state dir, a restored backup); the nonce is what tells their
+  -- contributions apart, so they are summed instead of max-merged.
+  local nonce=type(obj.nonce)=='string' and obj.nonce or nil
+  if nonce and (not nonce:match('^[%w%-_]+$') or #nonce>64) then return nil,'invalid installation id' end
+  local declared_account=type(obj.account)=='string' and obj.account or ''
+  if declared_account~='' and account and account~='' and declared_account~=account then
+    return nil,'contribution belongs to account '..declared_account
+  end
+  local installation=type(obj.installation)=='string' and obj.installation or nil
+  if installation and (not installation:match('^[%w%-_]+$') or #installation>64) then
+    return nil,'invalid installation fingerprint'
+  end
+  local own=blank_own(account,declared,nonce,installation)
   own.resetAt=finite(obj.resetAt,0,1e12) or 0
   for k,v in pairs(type(obj.games)=='table' and obj.games or {}) do
     if valid_id(k) and type(v)=='table' then
@@ -222,7 +243,7 @@ local function sanitize_own(obj,account)
   if type(obj.import)=='table' then
     local at=finite(obj.import.at,0,1e12)
     if at then
-      local record={at=at,host=declared,games={},daily={}}
+      local record={at=at,host=declared,legacy=imp.legacy==true,games={},daily={}}
       for k,v in pairs(type(obj.import.games)=='table' and obj.import.games or {}) do
         if valid_id(k) and type(v)=='table' then
           record.games[tostring(tonumber(k))]={
@@ -249,6 +270,64 @@ local function sanitize_own(obj,account)
     if seq then own.acked[order[i]]=seq;own.ackOrder[#own.ackOrder+1]=order[i] end
   end
   return own
+end
+-- Canonical content fingerprint of a contribution. Used to tell an identical
+-- copy (counted once) from a divergent writer that happens to share a host id
+-- and nonce (summed): a cloned state directory copies both, the histories do
+-- not match, and neither side may be dropped.
+local function own_digest(c)
+  local h1,h2=11,23
+  local function mixn(n)
+    n=math.floor(tonumber(n) or 0)%16777216
+    h1=(h1*131+n+1)%16777216
+    h2=(h2*65599+n+3)%16777216
+  end
+  local function mixt(text)
+    text=tostring(text or '')
+    for i=1,#text do mixn(text:byte(i)) end
+  end
+  local keys={}
+  for k in pairs(c.games) do keys[#keys+1]=k end
+  table.sort(keys)
+  for _,k in ipairs(keys) do
+    local g=c.games[k]
+    mixt(k);mixn(g.trackedSeconds);mixn(g.adjustmentSeconds);mixt(g.title)
+  end
+  keys={}
+  for k in pairs(c.daily) do keys[#keys+1]=k end
+  table.sort(keys)
+  for _,k in ipairs(keys) do mixt(k);mixn(c.daily[k]) end
+  for _,e in ipairs(c.sessions) do mixn(e.id);mixn(e.seconds);mixn(e.endedAt) end
+  keys={}
+  for k in pairs(c.edits) do keys[#keys+1]=k end
+  table.sort(keys)
+  for _,k in ipairs(keys) do
+    local e=c.edits[k]
+    mixt(k);mixn(e.at);mixn(e.adjustmentSeconds)
+  end
+  return ('%06x%06x'):format(h1,h2)
+end
+-- Same totals for every game and day: what two conflict copies of one writer
+-- look like (they may differ only in the pulse tail). Anything else is either
+-- a genuinely newer snapshot of the same writer or a clone; since a no-field
+-- fingerprint cannot prove which, divergent totals are summed (never lost) and
+-- reported, while equal totals are merged by max.
+local function equal_totals(a,b)
+  for k,rec in pairs(b.games) do
+    local other=a.games[k]
+    if not other or other.trackedSeconds~=rec.trackedSeconds then return false end
+  end
+  for k,rec in pairs(a.games) do
+    if not b.games[k] then return false end
+    if rec.trackedSeconds~=b.games[k].trackedSeconds then return false end
+  end
+  for k,v in pairs(b.daily) do
+    if (a.daily[k] or 0)~=v then return false end
+  end
+  for k,v in pairs(a.daily) do
+    if (b.daily[k] or 0)~=v then return false end
+  end
+  return true
 end
 -- (at, host) is the only logical clock there is. Comparing the stored pair,
 -- never the local wall clock, is what makes the merge deterministic on both
@@ -300,6 +379,7 @@ local function fold_own(group,own)
 end
 -- The one reader every surface goes through: baseline + their contributions.
 local function merge_view(baseline,own,peers,recovered,account)
+  local cloneFiles={}
   local view=blank(account)
   view.officialBase=baseline.officialBase
   for k,rec in pairs(baseline.games) do
@@ -308,24 +388,69 @@ local function merge_view(baseline,own,peers,recovered,account)
   end
   for k,v in pairs(baseline.daily) do view.daily[k]=v end
   local groups,order={},{}
+  local own_key=nil
+  if own then
+    own_key=own.installation and (own.host..'|fp|'..own.installation..'|'..(own.nonce or ''))
+      or (own.host..'|nofp|'..own_digest(own))
+  end
   local function add(c)
-    local group=groups[c.host]
-    if not group then
-      group={host=c.host,games={},daily={},sessions={},sessionKeys={},edits={},
-        titles={},import=nil,acked={}}
-      groups[c.host]=group
-      order[#order+1]=c.host
+    -- One group per writer installation. New files carry an installation
+    -- fingerprint: their own conflict copies share it and are max-merged. A
+    -- file whose fingerprint matches but whose content neither is identical
+    -- nor a monotone extension is a CLONE (VM image, copied state dir): its
+    -- play is summed and reported, never maxed away.
+    -- Always recompute: `mine` is the same table across pulses, so a cached
+    -- digest would go stale and make an identical copy look like a clone.
+    c.digest=own_digest(c)
+    local key
+    if c.installation then
+      key=c.host..'|fp|'..c.installation..'|'..(c.nonce or '')
+      local existing=groups[key]
+      if existing then
+        local same=false
+        for _,member in ipairs(existing.members) do
+          if member.digest==c.digest or equal_totals(c,member.own) then
+            same=true
+            break
+          end
+        end
+        if not same then
+          key=key..'|clone|'..c.digest
+          for _,member in ipairs(existing.members) do
+            cloneFiles[#cloneFiles+1]=member.file
+          end
+          cloneFiles[#cloneFiles+1]=c.file or ''
+        end
+      end
+    elseif c.nonce then
+      -- No fingerprint but an installation nonce: content is the identity.
+      key=c.host..'|nofp|'..c.digest
+    else
+      -- Pre-nonce file: one group per host, max-merged, so two monotone
+      -- snapshots of the same old writer do not add up.
+      key=c.host..'|legacy'
     end
+    local group=groups[key]
+    if not group then
+      group={key=key,host=c.host,nonce=c.nonce,installation=c.installation,
+        games={},daily={},sessions={},sessionKeys={},edits={},titles={},
+        import=nil,acked={},members={}}
+      groups[key]=group
+      order[#order+1]=key
+    end
+    group.members[#group.members+1]={own=c,digest=c.digest,file=c.file}
     fold_own(group,c)
   end
   if own then add(own) end
   for _,p in ipairs(peers) do add(p) end
   table.sort(order)
-  -- Time recorded on different machines is additive; the baseline is the
+  -- Time recorded on different installations is additive; the baseline is the
   -- pre-migration shared total and must not be added twice, so it is only
   -- ever the starting point, never a host.
-  for _,host in ipairs(order) do
-    local group=groups[host]
+  local contributed,contributed_daily={},{}
+  local contributed_peer,contributed_peer_daily={},{}
+  for _,key in ipairs(order) do
+    local group=groups[key]
     for k,rec in pairs(group.games) do
       local g=view.games[k]
       if not g then
@@ -335,14 +460,20 @@ local function merge_view(baseline,own,peers,recovered,account)
       g.trackedSeconds=math.min(MAX_SECONDS,g.trackedSeconds+rec.trackedSeconds)
       g.lastPlayed=math.max(g.lastPlayed,rec.lastPlayed)
       if rec.title~='' and rec.title~=('App '..k) then g.title=rec.title end
+      contributed[k]=(contributed[k] or 0)+rec.trackedSeconds
+      if key~=own_key then contributed_peer[k]=(contributed_peer[k] or 0)+rec.trackedSeconds end
     end
-    for k,v in pairs(group.daily) do view.daily[k]=(view.daily[k] or 0)+v end
+    for k,v in pairs(group.daily) do
+      view.daily[k]=(view.daily[k] or 0)+v
+      contributed_daily[k]=(contributed_daily[k] or 0)+v
+      if key~=own_key then contributed_peer_daily[k]=(contributed_peer_daily[k] or 0)+v end
+    end
   end
   -- One winner per game for the whole shared directory: the last edit (or the
   -- last backup import) by (at, host). Both machines therefore agree.
   local chosen_edits,chosen_titles,chosen_import={},{},nil
-  for _,host in ipairs(order) do
-    local group=groups[host]
+  for _,key in ipairs(order) do
+    local group=groups[key]
     for k,rec in pairs(group.edits) do
       local cur=chosen_edits[k]
       if not cur or wins(rec.at,rec.host,cur.at,cur.host) then chosen_edits[k]=rec end
@@ -357,30 +488,55 @@ local function merge_view(baseline,own,peers,recovered,account)
     end
   end
   if chosen_import then
-    -- A backup import is a deliberate replace-all (the existing guard already
-    -- refuses it during a live session): it overrides baseline and hosts for
-    -- the games and days it covers, and pulses newer than it are added back.
     for k,rec in pairs(chosen_import.games) do
       local g=view.games[k]
       if not g then
         g={title='App '..k,trackedSeconds=0,adjustmentSeconds=0,lastPlayed=0}
         view.games[k]=g
       end
-      g.trackedSeconds=rec.trackedSeconds
+      if chosen_import.legacy then
+        -- Gate per game: a backup whose total is not above what the shared
+        -- baseline already holds cannot contain post-migration play, so its
+        -- time is already covered and nothing is added. When it is above the
+        -- baseline, only the excess is added, once, together with what was
+        -- recorded since (so a pre-migration backup never hides our own play).
+        local base_rec=baseline.games[k]
+        local base_total=(base_rec and (base_rec.trackedSeconds+base_rec.adjustmentSeconds)) or 0
+        local imported=rec.trackedSeconds+rec.adjustmentSeconds
+        if imported>base_total then
+          local extra=imported-base_total
+          local current=(base_rec and base_rec.trackedSeconds or 0)+(contributed[k] or 0)
+          g.trackedSeconds=math.min(MAX_SECONDS,current+extra)
+        else
+          g.trackedSeconds=math.min(MAX_SECONDS,
+            (base_rec and base_rec.trackedSeconds or 0)+(contributed[k] or 0))
+          g.adjustmentSeconds=(base_rec and base_rec.adjustmentSeconds) or 0
+        end
+      else
+        g.trackedSeconds=rec.trackedSeconds
+      end
       g.adjustmentSeconds=rec.adjustmentSeconds
     end
-    for k,v in pairs(chosen_import.daily) do view.daily[k]=v end
+    for k,v in pairs(chosen_import.daily) do
+      if chosen_import.legacy then
+        view.daily[k]=math.max(v,(baseline.daily[k] or 0))+(contributed_daily[k] or 0)
+      else
+        view.daily[k]=v
+      end
+    end
     local added={}
-    for _,host in ipairs(order) do
-      for _,e in ipairs(groups[host].sessions) do
-        local key=host..'|'..e.id..'|'..e.endedAt..'|'..e.seconds
-        local k=tostring(e.id)
-        if e.endedAt>chosen_import.at and chosen_import.games[k] and not added[key] then
-          added[key]=true
-          local g=view.games[k]
-          g.trackedSeconds=math.min(MAX_SECONDS,g.trackedSeconds+e.seconds)
-          local day=os.date('%Y-%m-%d',e.endedAt)
-          view.daily[day]=(view.daily[day] or 0)+e.seconds
+    if not chosen_import.legacy then
+      for _,key in ipairs(order) do
+        for _,e in ipairs(groups[key].sessions) do
+          local gk=key..'|'..e.id..'|'..e.endedAt..'|'..e.seconds
+          local k=tostring(e.id)
+          if e.endedAt>chosen_import.at and chosen_import.games[k] and not added[gk] then
+            added[gk]=true
+            local g=view.games[k]
+            g.trackedSeconds=math.min(MAX_SECONDS,g.trackedSeconds+e.seconds)
+            local day=os.date('%Y-%m-%d',e.endedAt)
+            view.daily[day]=(view.daily[day] or 0)+e.seconds
+          end
         end
       end
     end
@@ -400,8 +556,15 @@ local function merge_view(baseline,own,peers,recovered,account)
     if not view.titles[k] then view.titles[k]=v end
   end
   -- Pulses recovered once from schema-2 sync-conflict copies (see migrate).
+  -- Once the shared ledger starts carrying a pulse (an old-version machine
+  -- saved it), it must not be added a second time.
+  local in_baseline={}
+  for _,e in ipairs(baseline.events) do
+    in_baseline[e.id..'|'..e.endedAt..'|'..e.seconds]=true
+  end
   for _,e in ipairs(recovered or {}) do
-    if e.id and e.seconds and e.endedAt then
+    if e.id and e.seconds and e.endedAt
+      and not in_baseline[e.id..'|'..e.endedAt..'|'..e.seconds] then
       local k=tostring(e.id)
       local g=view.games[k]
       if not g then
@@ -435,11 +598,11 @@ local function merge_view(baseline,own,peers,recovered,account)
   end
   view.events=events
   view.account=account or baseline.account
-  return view
+  return view,cloneFiles
 end
 -- Cheap change detector for the 1 s poll. Order independent (each entry is
 -- hashed on its own, then mixed in), so pairs() order cannot change it.
-local function revision(view)
+local function revision(view,extra)
   local h1,h2=7,13
   local function mix(v)
     local n=math.floor(tonumber(v) or 0)%16777216
@@ -456,12 +619,15 @@ local function revision(view)
     mix(h)
   end
   for k,g in pairs(view.games) do
-    entry(3,k,{g.trackedSeconds,g.adjustmentSeconds,g.lastPlayed,#g.title,g.title:byte(1)})
+    entry(3,k,{g.trackedSeconds,g.adjustmentSeconds,g.lastPlayed})
+    entry(4,g.title,{})
   end
   for k,v in pairs(view.daily) do entry(5,k,{v}) end
-  for k,v in pairs(view.titles) do entry(7,k,{#v}) end
+  -- The whole name, not just its length: a same-length rename is a change.
+  for k,v in pairs(view.titles) do entry(7,k,{});entry(8,v,{}) end
   for k,v in pairs(view.active) do entry(11,k,{v.seq}) end
   for _,e in ipairs(view.events) do entry(13,'',{e.id,e.seconds,e.endedAt}) end
+  entry(17,extra or '',{})
   return string.format('%06x%06x',h1,h2)
 end
 local function read_file(path)
@@ -853,63 +1019,259 @@ end
 -- directory would be copied to the other machine and the race would be back.
 -- XDG state lives outside the Syncthing folder, like the compressor's state
 -- dir. SLS_PLAYTIME_HOST exists for tests and for recovering a lost file.
-local function host_id()
-  local override=os.getenv('SLS_PLAYTIME_HOST')
-  if override and #override>=1 and #override<=32 and override:match('^[%w%-_]+$') then
-    return override,'SLS_PLAYTIME_HOST'
-  end
-  local path=STATE_DIR..'/host-id'
-  local f=io.open(path,'rb')
-  if f then
-    local raw=f:read(64);f:close()
-    local id=raw and raw:match('^%s*([%w%-_]+)')
-    if id and #id>=4 and #id<=32 then return id,'machine-local state' end
-  end
-  local id=nil
+local function random_hex(bytes)
   local urandom=io.open('/dev/urandom','rb')
   if urandom then
-    local raw=urandom:read(6);urandom:close()
-    if raw and #raw==6 then
+    local raw=urandom:read(bytes);urandom:close()
+    if raw and #raw==bytes then
       local out={}
-      for i=1,6 do out[#out+1]=('%02x'):format(raw:byte(i)) end
-      id=table.concat(out)
+      for i=1,#raw do out[#out+1]=('%02x'):format(raw:byte(i)) end
+      return table.concat(out)
     end
   end
-  if not id then id=('h%x'):format(os.time()%0xffffff)..('x%x'):format(os.time()%0xffff) end
+  return ('%08x%08x'):format(os.time()%0xffffffff,math.floor(os.clock()*1000000)%0xffffffff)
+end
+local function short_digest(text)
+  local h1,h2=7,13
+  text=tostring(text or '')
+  for i=1,#text do
+    local b=text:byte(i)
+    h1=(h1*131+b+1)%16777216
+    h2=(h2*65599+b+3)%16777216
+  end
+  return ('%06x%06x'):format(h1,h2)
+end
+-- A machine-only fingerprint. /etc/machine-id is read and immediately hashed:
+-- the raw id is never stored, in the state dir or in a synced file. It is what
+-- tells two boxes apart when a state directory (and its nonce) was copied.
+local function machine_hash()
+  local f=io.open('/etc/machine-id','rb')
+  if f then
+    local raw=f:read(128);f:close()
+    local id=raw and raw:match('%x+')
+    if id and #id>=8 then return short_digest('machine:'..id) end
+  end
+  local host=os.getenv('HOSTNAME') or os.getenv('COMPUTERNAME')
+  if type(host)=='string' and host~='' then return short_digest('host:'..host) end
+  return short_digest('unknown')
+end
+local function read_identity(path)
+  local raw=read_file(path)
+  if not raw then return nil end
+  local ok,obj=pcall(json.decode,raw)
+  if not ok or type(obj)~='table' then return nil end
+  local host=type(obj.host)=='string' and obj.host or nil
+  local nonce=type(obj.nonce)=='string' and obj.nonce or nil
+  if not host or not host:match('^[%w%-_]+$') or #host>32 then return nil end
+  if not nonce or not nonce:match('^[%w%-_]+$') or #nonce>64 then return nil end
+  return {host=host,nonce=nonce,machine=tostring(obj.machine or ''),
+    install=tostring(obj.install or '')}
+end
+local function save_identity(path,identity)
   local ok=pcall(function() fs.create_directories(STATE_DIR) end)
-  if ok then
-    local tmp=path..'.tmp'
-    local handle=io.open(tmp,'wb')
-    if handle then
-      handle:write(id..'\n')
-      handle:close()
-      if not os.rename(tmp,path) then os.remove(tmp) end
+  if not ok then return false end
+  local tmp=path..'.tmp'
+  local f=io.open(tmp,'wb')
+  if not f then return false end
+  local written=f:write(json.encode(identity))
+  if written then f:flush() end
+  local closed=f:close()
+  if not written or not closed then os.remove(tmp);return false end
+  sync_card(tmp)
+  if not os.rename(tmp,path) then os.remove(tmp);return false end
+  return true
+end
+-- Installation identity = machine hash (never stored raw) + a random id minted
+-- once. Both are needed: the nonce alone is copied with the state dir, and the
+-- machine hash alone would not separate two accounts on one box.
+local function installation_of(ident)
+  return short_digest('install:'..tostring(ident.machine or '')
+    ..':'..tostring(ident.install or ''))
+end
+-- Machine identity. It has to be machine-local: an id inside the synced data
+-- directory would be copied to the other machine. SLS_PLAYTIME_HOST exists for
+-- tests and for recovering a lost file; SLS_PLAYTIME_NONCE is test-only.
+local function host_id()
+  local override=os.getenv('SLS_PLAYTIME_HOST')
+  local machine=machine_hash()
+  if override and #override>=1 and #override<=32 and override:match('^[%w%-_]+$') then
+    local forced=os.getenv('SLS_PLAYTIME_NONCE')
+    if forced and #forced>=1 and #forced<=64 and forced:match('^[%w%-_]+$') then
+      return override,'SLS_PLAYTIME_HOST',forced,machine,
+        short_digest('forced:'..override..':'..forced),false
     end
+    local path=STATE_DIR..'/identity-'..override..'.json'
+    local ident=read_identity(path)
+    local moved=false
+    if ident and ident.machine~='' and ident.machine~=machine then
+      -- The state directory came from another machine: keep its host label,
+      -- mint a new nonce so the two installs are two writers, not one counter.
+      ident.nonce=random_hex(8)
+      ident.machine=machine
+      ident.install=random_hex(6)
+      moved=true
+      save_identity(path,ident)
+    elseif not ident then
+      ident={host=override,nonce=random_hex(8),machine=machine,install=random_hex(6)}
+      save_identity(path,ident)
+    end
+    return ident.host,'SLS_PLAYTIME_HOST',ident.nonce,ident.machine or '',
+      installation_of(ident),moved
   end
-  return id,'generated'
+  local path=STATE_DIR..'/identity.json'
+  local ident=read_identity(path)
+  local moved=false
+  if ident and ident.machine~='' and ident.machine~=machine then
+    ident.nonce=random_hex(8)
+    ident.machine=machine
+    ident.install=random_hex(6)
+    moved=true
+    save_identity(path,ident)
+  elseif not ident then
+    local legacy=nil
+    local f=io.open(STATE_DIR..'/host-id','rb')
+    if f then
+      local raw=f:read(64);f:close()
+      legacy=raw and raw:match('^%s*([%w%-_]+)')
+    end
+    local host=(legacy and #legacy>=4 and #legacy<=32) and legacy or random_hex(6)
+    ident={host=host,nonce=random_hex(8),machine=machine,install=random_hex(6)}
+    save_identity(path,ident)
+  end
+  return ident.host,'machine-local state',ident.nonce,ident.machine or '',
+    installation_of(ident),moved
 end
 local function merge_marker_path(account)
   return DIR..'/playtime/'..account..'.merge.json'
 end
--- Read this machine's own contribution. A torn file is restored from its
--- .bak with a note; it is never silently replaced by an empty contribution.
-local function read_own(path,account)
+local function highwater_path(account,host,nonce)
+  return DIR..'/playtime/'..account..'.highwater.'..host..'-'..nonce..'.json'
+end
+local function highwater_files(account)
+  local dir=DIR..'/playtime'
+  local out={}
+  local ok,items=pcall(fs.list,dir)
+  if not ok or type(items)~='table' then return out end
+  local prefix=account..'.highwater'
+  for _,item in ipairs(items) do
+    local name=type(item)=='table' and tostring(item.name) or ''
+    if item.is_directory~=true and name:sub(1,#prefix)==prefix and name:sub(-5)=='.json' then
+      out[#out+1]=dir..'/'..name
+    end
+  end
+  table.sort(out)
+  return out
+end
+-- High-water floors are per writer, and every conflict copy of every part is
+-- read, taking the max: a stale Syncthing copy, or a part written by a machine
+-- that has not seen the latest baseline, can never lower a floor. The whole
+-- set is monotone, whichever writer saved last, and this writer only ever
+-- raises its own part.
+local function apply_highwater(baseline,account,host,nonce)
+  if not account or account=='' then return false end
+  local games,days={},{}
+  for _,path in ipairs(highwater_files(account)) do
+    local raw=read_file(path)
+    if raw then
+      local ok,obj=pcall(json.decode,raw)
+      if ok and type(obj)=='table' and tonumber(obj.version)==CONTRIB then
+        for k,v in pairs(type(obj.games)=='table' and obj.games or {}) do
+          local n=finite(v,0,MAX_SECONDS)
+          if valid_id(k) and n and n>(games[k] or 0) then games[k]=n end
+        end
+        for k,v in pairs(type(obj.daily)=='table' and obj.daily or {}) do
+          local n=finite(v,0,MAX_SECONDS)
+          if type(k)=='string' and valid_day_key(k) and n and n>(days[k] or 0) then days[k]=n end
+        end
+      end
+    end
+  end
+  -- The live baseline is itself a floor: whatever it holds must be kept even
+  -- if no part has recorded it yet (first run, or a part was pruned).
+  for k,rec in pairs(baseline.games) do
+    if rec.trackedSeconds>(games[k] or 0) then games[k]=rec.trackedSeconds end
+  end
+  for k,v in pairs(baseline.daily) do
+    if v>(days[k] or 0) then days[k]=v end
+  end
+  local dropped=0
+  for k,rec in pairs(baseline.games) do
+    local high=games[k]
+    if high and high>rec.trackedSeconds then
+      dropped=dropped+1
+      rec.trackedSeconds=high
+    end
+  end
+  for k,v in pairs(baseline.daily) do
+    local high=days[k]
+    if high and high>v then
+      dropped=dropped+1
+      baseline.daily[k]=high
+    end
+  end
+  local path=highwater_path(account,host or 'anon',nonce or 'nonce')
+  local own=nil
+  local own_raw=read_file(path)
+  if own_raw then
+    local ok,obj=pcall(json.decode,own_raw)
+    if ok and type(obj)=='table' then own=obj end
+  end
+  local need=not own
+  if not need then
+    for k,v in pairs(games) do
+      if (tonumber(own.games and own.games[k]) or 0)<v then need=true;break end
+    end
+  end
+  if not need then
+    for k,v in pairs(days) do
+      if (tonumber(own.daily and own.daily[k]) or 0)<v then need=true;break end
+    end
+  end
+  if need then
+    persist({version=CONTRIB,account=account,games=games,daily=days},path)
+  end
+  return dropped>0
+end
+-- Read this machine's own contribution (its installation nonce is in the
+-- file). A torn file is restored from its .bak with a note; it is never
+-- silently replaced by an empty contribution.
+local function read_own(path,account,host,nonce,installation)
   local raw=read_file(path)
   if raw then
     local ok,obj=pcall(json.decode,raw)
     if ok then
-      local own=sanitize_own(obj,account)
-      if own then return own,'' end
+      local parsed,why=sanitize_own(obj,account)
+      if parsed then
+        if parsed.host==host and (parsed.nonce==nil or parsed.nonce==nonce)
+          and (parsed.installation==nil or parsed.installation==installation) then
+          parsed.nonce=nonce
+          return parsed,''
+        end
+        -- Another writer ended up at our exact path (a copied identity, a
+        -- restored backup). Move it to a name of its own so it is merged as a
+        -- peer instead of being overwritten by the next save.
+        local target=DIR..'/playtime/'..account..'.'..parsed.host..'-'
+          ..(parsed.nonce or random_hex(6))..'-'..random_hex(3)..'.json'
+        if os.rename(path,target) then
+          return nil,('the file at this machine\'s own path belonged to another writer (%s); kept it as %s'
+            ):format(tostring(parsed.host),target:match('[^/]+$') or target)
+        end
+        return nil,('the file at this machine\'s own path belongs to another writer (%s)'
+          ..(why and (': '..why) or '')):format(tostring(parsed.host)),path
+      end
     end
     local backup=read_file(path..'.bak')
     if backup then
       local ok2,obj2=pcall(json.decode,backup)
       if ok2 then
         local restored=sanitize_own(obj2,account)
-        if restored then
+        if restored and restored.host==host
+          and (restored.nonce==nil or restored.nonce==nonce)
+          and (restored.installation==nil or restored.installation==installation) then
           -- Move the unreadable bytes aside first: otherwise the next save
           -- would rotate them into .bak and overwrite the good copy.
           local moved=quarantine(path)
+          restored.nonce=nonce
           return restored,('recovered this machine\'s previous contribution from .bak'
             ..(moved and ('; unreadable bytes kept as '..moved) or ''))
         end
@@ -924,7 +1286,12 @@ local function read_own(path,account)
     local ok,obj=pcall(json.decode,backup)
     if ok then
       local restored=sanitize_own(obj,account)
-      if restored then return restored,'recovered this machine\'s contribution from .bak' end
+      if restored and restored.host==host
+        and (restored.nonce==nil or restored.nonce==nonce)
+        and (restored.installation==nil or restored.installation==installation) then
+        restored.nonce=nonce
+        return restored,'recovered this machine\'s contribution from .bak'
+      end
     end
   end
   return nil,''
@@ -933,19 +1300,36 @@ end
 -- them. The baseline itself, its .bak, .pre-official and .pre-decky-import
 -- copies are deliberately not matched: they are schema-2 aggregated totals,
 -- not per-host counters, and folding them in would double count.
+-- Every contribution file for an account, including `sync-conflict` copies of
+-- them. The match is an explicit allow-list: `<acct>.<token>.json` and
+-- `<acct>.<token>.sync-conflict-*.json`, with the migration marker, the
+-- high-water file, .bak/.tmp and anything else excluded by name. The baseline
+-- itself is never matched: it is a schema-2 aggregate, not a host counter.
 local function contribution_files(account)
   local dir=DIR..'/playtime'
   local out={}
   local ok,items=pcall(fs.list,dir)
   if not ok or type(items)~='table' then return out end
-  local prefix=account..'.'
+  local base=account..'.'
+  local reserved={}
+  reserved[base..'merge.json']=true
+  local function is_reserved(name)
+    if reserved[name] then return true end
+    local tail=name:sub(#base+1)
+    return tail:sub(1,7)=='merge-' or tail:sub(1,9)=='highwater'
+  end
   for _,item in ipairs(items) do
     local name=type(item)=='table' and tostring(item.name) or ''
-    if name~='' and item.is_directory~=true and name:sub(1,#prefix)==prefix and name:sub(-5)=='.json' then
-      local rest=name:sub(#prefix+1)
-      local host=rest:match('^([%w%-_]+)%.json$')
-        or rest:match('^([%w%-_]+)%.sync%-conflict%-[^/]-%.json$')
-      if host then out[#out+1]={name=name,path=dir..'/'..name,host=host} end
+    local candidate=name~='' and item.is_directory~=true and name:sub(1,#base)==base
+      and name:sub(-5)=='.json' and not is_reserved(name)
+    if candidate then
+      local rest=name:sub(#base+1)
+      local token=rest:match('^([%w%-_]+)%.json$')
+        or rest:match('^([%w%-_]+)%.sync%-conflict%-[^.]+%.json$')
+      if token then
+        out[#out+1]={name=name,path=dir..'/'..name,token=token,
+          conflict=rest:find('%.sync%-conflict%-')~=nil}
+      end
     end
   end
   table.sort(out,function(a,b) return a.name<b.name end)
@@ -1018,15 +1402,19 @@ local function migrate_merge(account,baseline,note)
         end
       end
     end
+    local floor_games,floor_daily={},{}
+    for k,rec in pairs(baseline.games) do floor_games[k]=rec.trackedSeconds end
+    for k,v in pairs(baseline.daily) do floor_daily[k]=v end
     marker={version=CONTRIB,account=account,migratedAt=os.time(),
-      recovered=json.array(recovered),conflicts=json.array(names)}
+      recovered=json.array(recovered),conflicts=json.array(names),
+      floorGames=floor_games,floorDaily=floor_daily}
     local saved,why=persist(marker,marker_path)
     if not saved then
       -- Recovering without the marker would add the same pulses on every
       -- start, so nothing is recovered until the marker is durable.
-      return note..'. Could not record the one-time merge: '..tostring(why),{},names
+      return note..'. Could not record the one-time merge: '..tostring(why),{},names,nil
     end
-    return note,recovered,names
+    return note,recovered,names,{games=floor_games,daily=floor_daily}
   end
   local recovered={}
   for _,e in ipairs(type(marker.recovered)=='table' and marker.recovered or {}) do
@@ -1042,7 +1430,12 @@ local function migrate_merge(account,baseline,note)
   for _,v in ipairs(type(marker.conflicts)=='table' and marker.conflicts or {}) do
     if type(v)=='string' then names[#names+1]=v end
   end
-  return note,recovered,names
+  local floor=nil
+  if type(marker.floorGames)=='table' or type(marker.floorDaily)=='table' then
+    floor={games=type(marker.floorGames)=='table' and marker.floorGames or {},
+      daily=type(marker.floorDaily)=='table' and marker.floorDaily or {}}
+  end
+  return note,recovered,names,floor
 end
 -- loginusers.vdf is Valve's own account list; "MostRecent" marks the account
 -- Steam will sign in next. It is the only account identity a local add-on can
@@ -1137,9 +1530,24 @@ function M.register(registry)
   local account,source=resolve_account(root)
   local ledger=LEGACY
   local note='Ledger account resolved from '..tostring(source)
-  local host,mine,own_path=nil,nil,nil
+  local host,mine,own_path,nonce,installation=nil,nil,nil,'',''
   local peers,recovered,conflictFiles={},{},{}
+  local recovered_floor=nil
+  local unmoved=nil
   local baseline=nil
+  -- Notes are deduplicated and capped: a 30 s reload must not grow the reply
+  -- (or its rev) by appending the same warning forever.
+  local base_note=note
+  local notes={}
+  local function add_note(text)
+    if text==nil or text=='' then return end
+    for _,existing in ipairs(notes) do
+      if existing==text then return end
+    end
+    notes[#notes+1]=text
+    while #notes>8 do table.remove(notes,1) end
+    note=base_note..(#notes>0 and ('. '..table.concat(notes,'. ')) or '')
+  end
   local scoped=account~=nil
   if scoped then
     ledger=DIR..'/playtime/'..account..'.json'
@@ -1148,22 +1556,47 @@ function M.register(registry)
     note=tostring(source)..'; using the shared legacy ledger'
   end
   local data,loadnote=read_state(ledger,account or '',scoped)
-  if loadnote~='' then note=note..'. '..loadnote end
+  if loadnote~='' then add_note(loadnote) end
   baseline=data
   if scoped then
-    local hsource
-    host,hsource=host_id()
-    own_path=DIR..'/playtime/'..account..'.'..host..'.json'
-    local own,ownnote=read_own(own_path,account)
-    mine=own or blank_own(account,host)
+    local hsource,machine,moved
+    host,hsource,nonce,machine,installation,moved=host_id()
+    if moved then
+      add_note('this machine\'s saved identity came from another computer; minted a new installation id')
+    end
+    own_path=DIR..'/playtime/'..account..'.'..host..'-'..nonce..'.json'
+    local own,ownnote,refused=read_own(own_path,account,host,nonce,installation)
+    if refused then
+      -- A foreign contribution could not be moved aside; never rotate it into
+      -- .bak. Give this writer a different file and report the leftover.
+      own_path=DIR..'/playtime/'..account..'.'..host..'-'..nonce..'-own.json'
+      unmoved=refused:match('[^/]+$') or refused
+      own,ownnote=read_own(own_path,account,host,nonce,installation)
+    end
+    mine=own or blank_own(account,host,nonce,installation)
     mine.host=host
-    if ownnote~='' then note=note..'. '..ownnote end
-    note,recovered,conflictFiles=migrate_merge(account,baseline,note)
+    mine.nonce=nonce
+    mine.file=own_path:match('[^/]+$') or own_path
+    -- A file that predates fingerprints keeps content identity for this
+    -- session, so an identical copy elsewhere is counted once, not twice.
+    if own then
+      mine.installation=own.installation
+    else
+      mine.installation=installation
+    end
+    if ownnote~='' then add_note(ownnote) end
+    local dropped
+    dropped=apply_highwater(baseline,account,host,nonce)
+    if dropped then
+      add_note('the shared ledger went backwards on some counters; kept the recorded high-water mark')
+    end
+    recovered_floor=nil
+    note,recovered,conflictFiles,recovered_floor=migrate_merge(account,baseline,note)
     if #recovered>0 then
-      note=note..('. Recovered '..#recovered..' pulse(s) from a sync-conflict copy of the shared ledger')
+      add_note('recovered '..#recovered..' pulse(s) from a sync-conflict copy of the shared ledger')
     end
     if #conflictFiles>0 then
-      note=note..('; kept '..#conflictFiles..' sync-conflict cop'..
+      add_note('kept '..#conflictFiles..' sync-conflict cop'..
         (#conflictFiles==1 and 'y' or 'ies')..
         ' of the shared ledger (its aggregated totals cannot be split without guessing)')
     end
@@ -1205,10 +1638,38 @@ function M.register(registry)
       if not saved then note=note..'. Could not persist the official-base migration: '..tostring(migerr) end
     end
   end
-  -- Every read of the merged view goes through here. Peers are re-read so a
-  -- session another machine wrote while this one was idle shows up on the
-  -- next poll without a restart.
-  local peerNotes={}
+  -- Every read of the merged view goes through here. Peer files are parsed
+  -- once and then cached by (name, size, mtime), so the 1 s poll does not
+  -- re-decode megabytes; renames and rewrites still change the signature.
+  local peer_cache={}
+  local peerNotes,nameMismatch={},{}
+  local duplicateHost=false
+  local peerSignature=''
+  local function file_state(path)
+    local f=io.open(path,'rb')
+    if not f then return 'missing' end
+    local size=f:seek('end') or -1
+    local mtime=0
+    if LFS and type(LFS.attributes)=='function' then
+      local ok,attr=pcall(LFS.attributes,path)
+      if ok and type(attr)=='table' then mtime=tonumber(attr.modification) or 0 end
+    end
+    local digest=''
+    if mtime==0 and size>0 then
+      -- No stat module: a size alone would miss a same-length rewrite (an
+      -- edit or a counter that changed digits), so fingerprint the bytes.
+      f:seek('set',0)
+      local raw=f:read(size) or ''
+      local h1,h2=7,13
+      for i=1,#raw,3 do
+        h1=(h1*131+(raw:byte(i) or 0)+1)%16777216
+        h2=(h2*65599+(raw:byte(i+1) or 0)+1)%16777216
+      end
+      digest=('%06x%06x'):format(h1,h2)
+    end
+    f:close()
+    return tostring(size)..':'..tostring(mtime)..':'..digest
+  end
   -- A newer backup import supersedes every machine's earlier contribution (it
   -- is a replace-all by design; the RPC already refuses to run during a live
   -- session). Each machine zeroes its own counters the first time it sees one,
@@ -1217,7 +1678,8 @@ function M.register(registry)
     if not scoped then return end
     local best=nil
     local function consider(c)
-      if c.import and (not best or wins(c.import.at,c.import.host,best.at,best.host)) then
+      if c.import and not c.import.legacy
+        and (not best or wins(c.import.at,c.import.host,best.at,best.host)) then
         best=c.import
       end
     end
@@ -1229,29 +1691,109 @@ function M.register(registry)
     end
   end
   local function reload_peers()
-    local list={}
-    peerNotes={}
+    local list,index={},{}
+    peerNotes,nameMismatch={},{}
+    duplicateHost=false
     if scoped then
       for _,file in ipairs(contribution_files(account)) do
+        local state=file_state(file.path)
+        index[#index+1]=file.name..'='..state
         if file.path~=own_path then
-          local raw=read_file(file.path)
+          local cached=peer_cache[file.path]
           local peer=nil
-          if raw then
-            local ok,obj=pcall(json.decode,raw)
-            if ok then peer=sanitize_own(obj,account) end
+          if cached and cached.state==state then
+            peer=cached.peer
+            if cached.problem then peerNotes[#peerNotes+1]=cached.problem end
+            if cached.mismatch then nameMismatch[#nameMismatch+1]=cached.mismatch end
+          else
+            local problem=nil
+            local raw=read_file(file.path)
+            if raw then
+              local ok,obj=pcall(json.decode,raw)
+              if ok then peer=sanitize_own(obj,account) end
+              if not peer then problem=file.name..' (unreadable contribution)' end
+            else
+              problem=file.name..' (unreadable contribution)'
+            end
+            if peer then
+              -- Identity is what the file says, not what it is called. A
+              -- copied file is reported when the two disagree and counted
+              -- once, under its declared identity.
+              local mismatch=nil
+              local accept=file.token==peer.host
+                or (peer.nonce and file.token==peer.host..'-'..peer.nonce)
+              if not accept then
+                mismatch=('file %s declares %s'):format(file.name,peer.host)
+                nameMismatch[#nameMismatch+1]=mismatch
+                peerNotes[#peerNotes+1]=mismatch
+              end
+              peer.file=file.name
+              peer_cache[file.path]={state=state,peer=peer,mismatch=mismatch}
+            else
+              peer_cache[file.path]={state=state,problem=problem}
+              peerNotes[#peerNotes+1]=problem
+            end
           end
-          if peer then list[#list+1]=peer else peerNotes[#peerNotes+1]=file.name end
+          if peer then
+            peer.file=file.name
+            if peer.host==host and peer.nonce and peer.nonce~=nonce then duplicateHost=true end
+            list[#list+1]=peer
+          end
         end
       end
     end
+    table.sort(index)
+    peerSignature=table.concat(index,';')
     peers=list
     absorb_import()
   end
   reload_peers()
-  local rev=''
+  -- A recovered pulse is only added while the live baseline does not already
+  -- account for it. The 200-event ring is not enough (an old writer rolls it
+  -- over), so the marker also stores the per-game/per-day floor seen at
+  -- migration: when the baseline's aggregate has grown past floor+recovered,
+  -- the pulse has been folded in and must not be added again.
+  local function active_recovered()
+    local out={}
+    if #recovered==0 then return out end
+    local floor_games=recovered_floor and recovered_floor.games or {}
+    local floor_days=recovered_floor and recovered_floor.daily or {}
+    local per_game,per_day={},{}
+    for _,e in ipairs(recovered) do
+      local k=tostring(e.id)
+      per_game[k]=(per_game[k] or 0)+e.seconds
+      if e.day then per_day[e.day]=(per_day[e.day] or 0)+e.seconds end
+    end
+    local ring={}
+    for _,e in ipairs(baseline.events) do
+      ring[e.id..'|'..e.endedAt..'|'..e.seconds]=true
+    end
+    for _,e in ipairs(recovered) do
+      local k=tostring(e.id)
+      local contained=ring[e.id..'|'..e.endedAt..'|'..e.seconds] and true or false
+      local floor=tonumber(floor_games[k])
+      if not contained and floor then
+        local tracked=(baseline.games[k] and baseline.games[k].trackedSeconds) or 0
+        if tracked>=floor+per_game[k] then contained=true end
+      end
+      if not contained and e.day and floor_days[e.day] then
+        if (baseline.daily[e.day] or 0)>=floor_days[e.day]+per_day[e.day] then
+          contained=true
+        end
+      end
+      if not contained then out[#out+1]=e end
+    end
+    return out
+  end
+  local last_signature=nil
+  local cloneSuspect=false
+  local cloneFileList={}
   local function rebuild()
     if scoped then
-      data=merge_view(baseline,mine,peers,recovered,account or baseline.account)
+      local files
+      data,files=merge_view(baseline,mine,peers,active_recovered(),account or baseline.account)
+      cloneFileList=files or {}
+      cloneSuspect=#cloneFileList>0
       -- Session bookkeeping is this machine's own: an "active" session from
       -- the other machine cannot be verified here, and its pulses arrive as
       -- ordinary contributions.
@@ -1260,7 +1802,7 @@ function M.register(registry)
       data.ackOrder=mine.ackOrder
       data.officialBase=baseline.officialBase
     end
-    rev=revision(data)
+    last_signature=peerSignature
   end
   rebuild()
   -- The baseline is the one file an old add-on version can still rewrite. It
@@ -1272,7 +1814,10 @@ function M.register(registry)
     baseline_at=os.time()
     local fresh,why=read_state(ledger,account,true)
     baseline=fresh
-    if why~='' then note=note..'. '..why end
+    if why~='' then add_note(why) end
+    if apply_highwater(baseline,account,host,nonce) then
+      add_note('the shared ledger went backwards on some counters; kept the recorded high-water mark')
+    end
     rebuild()
   end
   local function merge_info()
@@ -1283,8 +1828,12 @@ function M.register(registry)
         if not seen[peer.host] then seen[peer.host]=true;count=count+1 end
       end
     end
-    return {host=host or '',hosts=count,conflictFiles=json.array(conflictFiles),
-      recovered=#recovered,unreadable=json.array(peerNotes)}
+    return {host=host or '',hosts=count,nonce=mine and mine.nonce or '',
+      installation=mine and mine.installation or '',unmoved=unmoved or '',
+      duplicateHostId=(duplicateHost or cloneSuspect) and true or false,
+      duplicateFiles=json.array(cloneFileList),
+      conflictFiles=json.array(conflictFiles),recovered=#recovered,
+      unreadable=json.array(peerNotes),nameMismatch=json.array(nameMismatch)}
   end
   local runtime={healthy=false,error='',reportedAt=0,note=note,
     file=(ledger:match('[^/]+$') or ledger)}
@@ -1362,6 +1911,16 @@ function M.register(registry)
   -- Editing and naming are offered for every trackable or manifest game.
   local function editable(id)
     return refresh_inventory().editSet[id]==true
+  end
+  -- Everything that can change what the page must redraw, cheap to compute:
+  -- peer file stamps (rename/new/rewrite), the inventory, merge warnings and
+  -- the note. Paired with the content hash in revision().
+  local function rev_key()
+    local snap=refresh_inventory()
+    return table.concat({peerSignature,tostring(#snap.ids),tostring(#snap.trackIds),
+      tostring(#snap.shortcutNames),tostring(duplicateHost),tostring(#nameMismatch),
+      tostring(#peerNotes),tostring(#conflictFiles),tostring(unmoved and 1 or 0),
+      tostring(#cloneFileList)},'|')
   end
   -- Recorded time always lands in this machine's own contribution; the merged
   -- view (data) is rebuilt from it, never written back to the shared file.
@@ -1545,8 +2104,9 @@ function M.register(registry)
     -- previous rev must see a session they wrote since the last call.
     reload_peers()
     reload_baseline()
-    rebuild()
+    if peerSignature~=last_signature then rebuild() end
     runtime.note=note
+    local rev=revision(data,rev_key())
     local want=nil
     if type(raw)=='string' and #raw<=200 then
       want=raw:match('"rev"%s*:%s*"([%w%-_]+)"')
@@ -1608,7 +2168,8 @@ function M.register(registry)
   end
   registry.SlsPlaytimeExport=function()
     return reply({success=true,data={version=SCHEMA,account=data.account,games=data.games,
-      events=json.array(data.events),daily=data.daily,titles=data.titles,stats=stats(data)}})
+      events=json.array(data.events),daily=data.daily,titles=data.titles,stats=stats(data),
+      exportedAt=os.time()}})
   end
   registry.SlsPlaytimeImport=function(raw)
     -- Never replace the ledger while an agent is accumulating sessions; the
@@ -1639,20 +2200,30 @@ function M.register(registry)
       -- Expressed as this machine's one import record rather than as a
       -- rewritten shared total: the whole directory picks the same import by
       -- (at, host), so both machines converge on the same numbers.
-      local record={at=os.time(),host=host,games={},daily={}}
+      local exported_at=finite(obj.exportedAt,0,1e12)
+      local record={at=exported_at or 0,host=host,legacy=exported_at==nil,games={},daily={}}
       for k,v in pairs(replacement.games) do
         record.games[k]={trackedSeconds=v.trackedSeconds,adjustmentSeconds=v.adjustmentSeconds}
       end
       for k,v in pairs(replacement.daily) do record.daily[k]=v end
       mine.import=record
-      mine.resetAt=record.at
-      mine.games,mine.daily,mine.sessions,mine.edits={},{},{},{}
+      local import_note=nil
+      if record.legacy then
+        -- Older exports carry no export time, so nothing can prove what they
+        -- already contain. Keep this machine's counters: merge_view adds them
+        -- on top of the imported floor, which may double count a pre-export
+        -- session but never loses one.
+        import_note='Backup has no export time; only the excess over the current ledger is added, and recorded play is never hidden'
+      else
+        mine.resetAt=record.at
+        mine.games,mine.daily,mine.sessions,mine.edits={},{},{},{}
+      end
       local saved,err=persist(mine,own_path)
       if saved then
         reload_peers()
         rebuild()
         runtime.error=''
-        return reply({success=true})
+        return reply({success=true,note=import_note})
       end
       return reply({success=false,error=err})
     end
