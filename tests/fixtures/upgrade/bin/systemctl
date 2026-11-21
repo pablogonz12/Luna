@@ -1,0 +1,5 @@
+#!/bin/sh
+# Never talk to the user's real systemd: just record the call.
+echo "systemctl $*" >> "$HOME/systemctl.log"
+case "$2" in is-enabled) echo enabled;; is-active) echo active;; esac
+exit 0

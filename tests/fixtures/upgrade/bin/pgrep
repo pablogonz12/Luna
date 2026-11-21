@@ -1,0 +1,5 @@
+#!/bin/sh
+# pgrep stand-in: exit 0 only for names listed in $LUNA_FAKE_RUNNING.
+name="$4"
+case ",${LUNA_FAKE_RUNNING:-}," in *",$name,"*) echo 4242; exit 0;; esac
+exit 1

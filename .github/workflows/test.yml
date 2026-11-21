@@ -14,7 +14,11 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
+      # Full history and tags: tests/test_upgrade.py installs old release
+      # tags and upgrades them, and skips without them.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
