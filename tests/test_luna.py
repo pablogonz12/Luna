@@ -212,6 +212,16 @@ class LunaTestCase(unittest.TestCase):
         self.assertFalse((self.home / '.local/share/applications').exists())
         self.assertEqual(self.boot.read_text(), UPSTREAM)
 
+    def test_install_dry_run_with_steam_running_plans_and_writes_nothing(self):
+        result = self.luna('install', '--dry-run', running='steam,steamwebhelper')
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn('note: Steam is running; a real run would stop here until Steam is closed', output)
+        self.assertIn('DRY RUN', result.stdout)
+        self.assertNotIn('REFUSING', output)
+        self.assertFalse(self.addons.exists(), 'a dry run installed add-ons')
+        self.assertEqual(self.boot.read_text(), UPSTREAM, 'a dry run patched boot.lua')
+
     def test_install_generates_steam_machine_shortcuts_automatically(self):
         result = self.luna('install')
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -1539,6 +1549,19 @@ class LumenUpdateTestCase(unittest.TestCase):
         self.assertEqual(self.installs, [])
         self.assertEqual(self.m.lumen_backups(), [])
 
+    def test_dry_run_with_steam_running_says_it_would_refuse_and_writes_nothing(self):
+        import io, contextlib
+        self.steam_running = True
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(self.run_lumen('update', dry_run=True), 0)
+        text = out.getvalue() + err.getvalue()
+        self.assertIn('would refuse now: Steam is running', text)
+        self.assertIn('note: Steam is running; a real run would stop here until Steam is closed', text)
+        self.assertIn('DRY RUN: nothing was written.', text)
+        self.assertEqual(self.installs, [])
+        self.assertEqual(self.m.lumen_backups(), [])
+
     def test_update_refuses_while_steam_runs_and_can_queue(self):
         import io, contextlib
         self.steam_running = True
@@ -2121,6 +2144,97 @@ class VendorTestCase(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('commit it before pinning', result.stderr)
         self.assertEqual(manifest_path.read_bytes(), before)
+
+
+BRIDGE_STATUS_SCRIPT = '''
+import importlib.util, json
+spec = importlib.util.spec_from_file_location('luna_beat', %r)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+level, lines = module.bridge_status()
+print(json.dumps({'level': level, 'lines': lines}))
+'''
+
+
+class BridgeHeartbeatTestCase(unittest.TestCase):
+    """The heartbeat's three honest states, and the older format still being read.
+
+    The bridge stamps `time` when the host loads it (at boot, possibly minutes
+    before Steam) and `attachedAt` on the first RPC Steam serves. The CLI must
+    never call the first one "attached", and must not break on an old file.
+    """
+
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp(prefix='luna-beat-'))
+        self.home = self.temp / 'home'
+        self.luna_home = self.home / '.local/share/Luna'
+        self.state = self.luna_home / 'state'
+        self.state.mkdir(parents=True)
+        (self.luna_home / 'host.json').write_text('{"active": "luna"}\n')
+        self.beat = self.state / 'bridge-heartbeat.json'
+        self.bin = stub_bin(self.home)
+        self.env = dict(os.environ, HOME=str(self.home), LUNA_HOME=str(self.luna_home),
+                        XDG_DATA_HOME=str(self.home / '.local/share'),
+                        XDG_CONFIG_HOME=str(self.home / '.config'),
+                        XDG_RUNTIME_DIR=str(self.home / 'run'),
+                        PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', ''))
+
+    def tearDown(self):
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def report(self, running='', **fields):
+        stub_bin(self.home, running)
+        self.beat.write_text(json.dumps(fields) + '\n')
+        result = subprocess.run([sys.executable, '-c', BRIDGE_STATUS_SCRIPT % str(LUNA)],
+                                capture_output=True, text=True, env=self.env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def lines(self, report):
+        return '\n'.join(report['lines'])
+
+    def test_boot_only_with_steam_closed_is_not_a_problem(self):
+        report = self.report('', format=2, time=int(time.time()) - 120, pid=os.getpid(),
+                             addons=['luna'], failed=[])
+        text = self.lines(report)
+        self.assertIn('not attached yet', text)
+        self.assertIn('Steam is closed', text)
+        self.assertIn('not a problem', text)
+        self.assertEqual(report['level'], 'ok')
+
+    def test_steam_starting_within_the_grace_is_not_a_problem(self):
+        report = self.report('steam', format=2, time=int(time.time()) - 20, pid=os.getpid(),
+                             addons=['luna'], failed=[])
+        text = self.lines(report)
+        self.assertIn('Steam is starting', text)
+        self.assertEqual(report['level'], 'ok')
+
+    def test_attached_reports_the_age(self):
+        now = int(time.time())
+        report = self.report('steam,steamwebhelper', format=2, time=now - 900, pid=os.getpid(),
+                             attachedAt=now - 600, lastSeen=now - 30,
+                             addons=['luna', 'playtime'], failed=[])
+        text = self.lines(report)
+        self.assertIn('attached: 2 add-ons', text)
+        self.assertIn('10m ago', text)
+        self.assertIn('last RPC', text)
+        self.assertEqual(report['level'], 'ok')
+
+    def test_stale_steam_and_host_without_attach_is_a_problem_with_the_fix(self):
+        report = self.report('steam,steamwebhelper', format=2, time=int(time.time()) - 900,
+                             pid=os.getpid(), addons=['luna'], failed=[])
+        text = self.lines(report)
+        self.assertIn('has not attached', text)
+        self.assertIn('Steam is not serving Luna', text)
+        self.assertIn('repair: luna hook repair, then restart Steam', text)
+        self.assertEqual(report['level'], 'warn')
+
+    def test_old_format_heartbeat_is_read_as_before(self):
+        report = self.report('', time=int(time.time()) - 3600, pid=os.getpid(),
+                             addons=['luna'], failed=[])
+        text = self.lines(report)
+        self.assertIn('attached: 1 add-ons', text)
+        self.assertEqual(report['level'], 'ok')
 
 
 if __name__ == '__main__':

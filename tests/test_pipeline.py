@@ -367,6 +367,69 @@ for name in ("steam.cfg", "Steam.cfg"):
             self.assertFalse((self.home / 'lumen-installer-args.log').exists())
             self.assertEqual(before, self.tree())
 
+    def test_dry_run_with_steam_running_prints_the_plan_and_writes_nothing(self):
+        self.fake('pgrep', '#!/bin/sh\nexit 0\n')  # Steam and steamwebhelper are "up"
+        note = 'note: Steam is running; a real run would stop here until Steam is closed'
+        for host in ('lumen', 'luna'):
+            (self.home / '.local/share/Luna/host.json').parent.mkdir(parents=True, exist_ok=True)
+            (self.home / '.local/share/Luna/host.json').write_text('{"active": "%s"}\n' % host)
+            before = self.tree()
+            result = self.bootstrap('--dry-run', lumen=(host == 'lumen'))
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 0, output)
+            self.assertIn(note, output)
+            self.assertNotIn('STOPPED', output)
+            self.assertIn('DRY RUN: nothing was written.', result.stdout)
+            self.assertEqual(before, self.tree(), 'a dry run wrote something')
+        # A dry install writes nothing either, and still plans.
+        before = self.tree()
+        result = self.luna('install', '--dry-run')
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn(note, output)
+        self.assertIn('DRY RUN:', result.stdout)
+        self.assertEqual(before, self.tree())
+
+    def test_real_run_still_refuses_before_any_write_with_steam_running(self):
+        self.fake('pgrep', '#!/bin/sh\nexit 0\n')
+        before = self.tree()
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('REFUSING to install:', result.stdout)
+        self.assertIn('Quit Steam (Steam → Exit)', result.stdout)
+        self.assertEqual(before, self.tree())
+
+    def test_resume_hint_is_the_one_liner_when_install_sh_runs_it(self):
+        self.fake('pgrep', '#!/bin/sh\nexit 0\n')
+        env = dict(self.env, LUNA_INSTALL_ONELINER='1',
+                   LUNA_INSTALL_FLAGS='--no-system-packages --lumen --no-gamemode')
+        result = self.luna('bootstrap', '--no-system-packages', '--lumen', env=env)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 2, output)
+        self.assertIn('resume with: curl -fsSL '
+                      'https://raw.githubusercontent.com/pgm1207/Luna/main/install.sh '
+                      '| bash -s -- --no-system-packages --lumen --no-gamemode', output)
+        # The temp tree install.sh deletes is never offered, and no `luna` command
+        # exists yet on a fresh machine.
+        self.assertNotIn('sls-luna-install', output)
+        self.assertNotIn('resume with: luna bootstrap', output)
+
+    def test_resume_hint_names_the_launcher_only_when_it_exists(self):
+        self.fake('pgrep', '#!/bin/sh\nexit 0\n')
+        result = self.luna('bootstrap', '--no-system-packages', '--lumen')
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 2, output)
+        self.assertIn('resume with: python3 %s bootstrap --no-system-packages --lumen' % LUNA, output)
+        self.assertNotIn('resume with: luna bootstrap', output)
+        launcher = self.home / '.local/bin/luna'
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text('#!/bin/sh\nexit 0\n')
+        launcher.chmod(0o755)
+        result = self.luna('bootstrap', '--no-system-packages', '--lumen')
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 2, output)
+        self.assertIn('resume with: luna bootstrap --no-system-packages --lumen', output)
+
     def test_broken_runtime_tree_is_repaired_not_delegated_to(self):
         lumen = self.old_install_layout()
         first = self.bootstrap()

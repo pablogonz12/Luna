@@ -217,4 +217,16 @@ if [[ "$ref" != "checkout" ]]; then
 fi
 
 printf '\nSetting up SLS Luna (standalone host, or the Lumen base with --lumen).\n'
+# This tree came from a tarball in a temporary directory that the EXIT trap
+# deletes, and a fresh machine has no `luna` command yet: tell the pipeline to
+# quote the one-liner itself, with these exact flags, when it has to tell the
+# user how to resume.
+if [[ "$ref" != "checkout" ]]; then
+  export LUNA_INSTALL_ONELINER=1
+  install_quoted=()
+  for arg in "${luna_args[@]}" "${base_args[@]}"; do
+    install_quoted+=("$(printf '%q' "$arg")")
+  done
+  export LUNA_INSTALL_FLAGS="${install_quoted[*]}"
+fi
 python3 "$script_dir/scripts/luna.py" bootstrap "${luna_args[@]}" "${base_args[@]}"

@@ -1150,25 +1150,69 @@ def bridge_heartbeat_path():
     return luna_state_dir() / 'bridge-heartbeat.json'
 
 
-def bridge_status():
-    """(level, lines): what the bridge's heartbeat says, against whether Lumen runs now.
+BRIDGE_ATTACH_GRACE = 180  # seconds Steam gets to load the bridge after the host started
 
-    The bridge writes the file when it loads (time, host pid, add-ons that loaded, add-ons
-    that failed with the error). Level is 'ok', 'warn' or 'info'.
+
+def _bridge_stamp(when):
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(when)) if when else 'unknown time'
+
+
+def _bridge_age(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return '%ds' % seconds
+    if seconds < 3600:
+        return '%dm' % (seconds // 60)
+    return '%dh' % (seconds // 3600)
+
+
+def bridge_status():
+    """(level, lines): what the bridge's heartbeat says, against whether the host runs now.
+
+    The bridge stamps `time`/`pid` when the host loads it (at boot, before Steam
+    necessarily exists) and `attachedAt` - plus a refreshed `lastSeen` - the first
+    time Steam calls one of its add-ons, which is the only moment the bridge can
+    observe that it is really serving a live session. So three states:
+      - host started, not attached yet (Steam closed or just starting): not a problem
+      - attached, with the age of that attach
+      - stale: Steam and the host both run and nothing attached after the grace
+        period, which is a problem and comes with the repair command
+    A heartbeat written by an older bridge has no `attachedAt`; it is read exactly
+    as before (an alive pid means attached), so the two versions never break each
+    other. Level is 'ok', 'warn' or 'info'.
     """
     data = read_json_file(bridge_heartbeat_path())
     data = data if isinstance(data, dict) else {}
+    now = int(time.time())
     when = int(data.get('time') or 0)
     stamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(when)) if when else 'unknown time'
     pid = int(data.get('pid') or 0)
     host_alive = bool(pid) and pid_alive(pid)
+    attached = int(data.get('attachedAt') or 0)
+    new_format = int(data.get('format') or 0) >= 2
+    if data and host_alive and not new_format:
+        attached = when  # an older bridge only knows when it loaded
+    last_seen = int(data.get('lastSeen') or 0)
     host = active_host()
     running = luna_host_running() if host == 'luna' else lumen_running()
+    steam = steam_running()
     host_name = 'Luna host' if host == 'luna' else 'Lumen'
     failed = [item for item in data.get('failed') or [] if isinstance(item, dict)]
     lines, level = [], 'ok'
-    if data and host_alive:
-        lines.append('attached: %d add-ons, loaded at %s' % (len(data.get('addons') or []), stamp))
+    if attached and host_alive:
+        lines.append('attached: %d add-ons, loaded at %s (%s ago)'
+                     % (len(data.get('addons') or []), _bridge_stamp(attached), _bridge_age(now - attached)))
+        if last_seen > attached:
+            lines.append('          last RPC %s ago' % _bridge_age(now - last_seen))
+    elif data and host_alive and steam and when and (now - when) > BRIDGE_ATTACH_GRACE:
+        level = 'warn'
+        lines.append('WARN: %s started at %s and Steam is running, but the bridge has not attached '
+                     'after %s: Steam is not serving Luna'
+                     % (host_name, stamp, _bridge_age(now - when)))
+        lines.append('      repair: luna hook repair, then restart Steam')
+    elif data and host_alive:
+        lines.append('host started at %s, not attached yet (%s): that is not a problem'
+                     % (stamp, 'Steam is starting' if steam else 'Steam is closed'))
     elif running:
         level = 'warn'
         lines.append('WARN: %s is running but the bridge has not loaded since Steam started%s'
@@ -5094,9 +5138,14 @@ def _base_extra(options):
     return extra
 
 
-def resume_command(options):
-    """The exact command that continues this pipeline after a failure."""
-    parts = ['luna', 'bootstrap']
+ONELINER_ENV = 'LUNA_INSTALL_ONELINER'
+ONELINER_FLAGS_ENV = 'LUNA_INSTALL_FLAGS'
+ONELINER_URL = 'https://raw.githubusercontent.com/pgm1207/Luna/main/install.sh'
+
+
+def bootstrap_flags(options):
+    """The bootstrap flags this run was given, in the order `luna bootstrap` takes them."""
+    parts = []
     if getattr(options, 'lock_steam_client', False):
         parts.append('--lock-steam-client')
     if getattr(options, 'no_system_packages', False):
@@ -5117,11 +5166,38 @@ def resume_command(options):
         parts.append('--no-steam-machine')
     if getattr(options, 'lumen', False):
         parts.append('--lumen')
-    command = ' '.join(parts)
-    if ROOT != _INSTALLED_ROOT:
-        # A stale launcher or installed copy would run other code: name this one too.
-        command += '  (this code: python3 %s %s)' % (Path(__file__).resolve(), ' '.join(parts[1:]))
-    return command
+    return parts
+
+
+def installed_launcher():
+    """The `luna` command a finished install leaves behind, when it really exists."""
+    launcher = home() / '.local/bin/luna'
+    return launcher if launcher.is_file() and os.access(launcher, os.X_OK) else None
+
+
+def resume_command(options):
+    """The exact command that continues this pipeline after a failure.
+
+    Run from install.sh's temporary tree, that is the one-liner itself: the temp
+    directory is deleted when install.sh exits, and a fresh machine has no `luna`
+    command yet. install.sh passes the flags the user gave in LUNA_INSTALL_FLAGS,
+    so the pasted command is the one that ran. From a checkout or an installed
+    copy the command names the code that is running, and `luna bootstrap` is only
+    offered when that launcher is actually installed.
+    """
+    flags = bootstrap_flags(options)
+    suffixes = (' ' + ' '.join(flags)) if flags else ''
+    if os.environ.get(ONELINER_ENV) == '1':
+        given = (os.environ.get(ONELINER_FLAGS_ENV) or '').strip() or suffixes.strip()
+        return 'curl -fsSL %s | bash -s -- %s' % (ONELINER_URL, given)
+    this_code = 'python3 %s bootstrap%s' % (Path(__file__).resolve(), suffixes)
+    if installed_launcher() is not None:
+        command = 'luna bootstrap' + suffixes
+        if ROOT != _INSTALLED_ROOT:
+            # A stale launcher or installed copy would run other code: name this one too.
+            command += '  (this code: %s)' % this_code
+        return command
+    return this_code
 
 
 def bootstrap_stop(options, step, reason, code=1):
@@ -5174,6 +5250,11 @@ def bootstrap_preflight(options, say, dry):
     """
     host = serving_host()
     if not steam_running():
+        return EXIT_OK
+    if dry:
+        # A dry run writes nothing, so a running Steam is not a reason to stop:
+        # it only means a real run would refuse at this point.
+        say('note: Steam is running; a real run would stop here until Steam is closed')
         return EXIT_OK
     return bootstrap_stop(options, 'Steam', (
         'Steam is running. Quit Steam (Steam → Exit) and run the command again. '
@@ -7049,6 +7130,8 @@ def cmd_lumen(options):
               '(result: failed, rolledBack); the Steam lock is re-applied either way')
         for reason in blockers:
             print('lumen: would refuse now: %s' % reason)
+        if any('Steam is running' in reason for reason in blockers):
+            print('note: Steam is running; a real run would stop here until Steam is closed')
         print('\nDRY RUN: nothing was written.')
         return EXIT_OK
     if getattr(options, 'queue', False) and (not blockers or steam_only):
@@ -7421,12 +7504,16 @@ def cmd_install(options):
 
 def _cmd_install(options, target):
     dry = getattr(options, 'dry_run', False)
-    if target == 'lumen' and getattr(options, 'lumen', False):
+    lumen_base = target == 'lumen' and getattr(options, 'lumen', False)
+    if lumen_base:
         # The base installer must not run while Steam is open. Check that one
         # guard before touching anything; the rest are re-checked below.
         blocked = [reason for reason in refuse_reasons(for_install=True)
                    if 'Steam is running' in reason]
-        if blocked:
+        if dry and blocked:
+            # A dry run writes nothing: report the plan instead of stopping.
+            print('note: Steam is running; a real run would stop here until Steam is closed')
+        elif blocked:
             print('REFUSING to install:')
             for reason in blocked:
                 print('  - %s' % reason)
@@ -7444,15 +7531,21 @@ def _cmd_install(options, target):
             systemctl_user('disable', '--now', HOST_UNIT)
             systemctl_user('daemon-reload')
             systemctl_user('enable', '--now', LUMEN_UNIT)
-    elif target == 'luna' and not dry and not prefer_luna():
-        _write_host_state('luna', active_host())
     targets = selected_addons(options)
     reasons = refuse_reasons(for_install=True)
+    if dry and any('Steam is running' in reason for reason in reasons):
+        # Steam being up only stops a run that would write; a dry run shows the plan.
+        print('note: Steam is running; a real run would stop here until Steam is closed')
+    if dry:
+        reasons = [reason for reason in reasons if 'Steam is running' not in reason]
     if reasons:
         print('REFUSING to install:')
         for reason in reasons:
             print('  - %s' % reason)
         return EXIT_REFUSED
+    # Only once the run is known to be allowed: this is a write.
+    if target == 'luna' and not lumen_base and not dry and not prefer_luna():
+        _write_host_state('luna', active_host())
     print('host      : %s' % host_label(target))
     if target == 'lumen':
         check = patcher('check')

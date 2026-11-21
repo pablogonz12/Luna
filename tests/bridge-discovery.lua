@@ -53,6 +53,20 @@ local text = beat:read('*a'); beat:close()
 assert(text:find('"addons":["luna","alpha","zeta"]', 1, true), 'heartbeat add-ons: ' .. text)
 assert(text:find('"failed":[]', 1, true), 'heartbeat failed: ' .. text)
 assert(text:match('"time":%d+') and text:match('"pid":%d+'), 'heartbeat time/pid: ' .. text)
+assert(text:find('"format":2', 1, true), 'the additive format marker is missing: ' .. text)
+assert(not text:find('"attachedAt"', 1, true), 'a boot stamp must not claim an attach: ' .. text)
+
+-- Attach: the first add-on call is the only proof Steam is driving the bridge. It
+-- must add attachedAt/lastSeen and leave the boot stamp and the add-on list alone.
+local boot_time = tonumber(text:match('"time":(%d+)'))
+assert(type(registry.Alpha) == 'function', 'the registered entry point is missing')
+assert(registry.Alpha() == '{}', 'the wrapped entry point must return the add-on value')
+local attach_beat = assert(io.open(bridge.heartbeat_path, 'rb'))
+local attached = attach_beat:read('*a'); attach_beat:close()
+assert(attached:match('"attachedAt":%d+'), 'no attachedAt after the first RPC: ' .. attached)
+assert(attached:match('"lastSeen":%d+'), 'no lastSeen after the first RPC: ' .. attached)
+assert(tonumber(attached:match('"time":(%d+)')) == boot_time, 'the boot stamp moved: ' .. attached)
+assert(attached:find('"addons":["luna","alpha","zeta"]', 1, true), 'add-ons lost: ' .. attached)
 
 -- A broken add-on is reported with its error, the others still load.
 write('broken/backend/main.lua', 'this is not lua (\n')

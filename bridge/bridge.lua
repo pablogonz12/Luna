@@ -87,6 +87,14 @@ end
 -- Exposed so the test harness and `luna status` can show what would load.
 M.discover = addon_names
 
+-- Two moments matter: this file is loaded when the host boots (`time`/`pid`), which
+-- can be minutes before Steam exists, and Steam calls the first add-on RPC
+-- (`attachedAt`), the only evidence available here that it serves a live session.
+-- `lastSeen` follows the attach at most once a minute. All of it is additive: an
+-- older CLI reads `time`, and an older bridge that writes no `attachedAt` is read
+-- as attached when its pid is alive, so neither version breaks the other.
+local beat = { at = 0, pid = 0, attached = 0, seen = 0, written = 0, loaded = {}, failed = {} }
+
 local function json_string(value)
   return '"' .. tostring(value):gsub('[%c"\\]', function(ch)
     return string.format('\\u%04x', ch:byte())
@@ -95,23 +103,46 @@ end
 
 -- Best effort and never fatal: no shell-out, and a missing state dir or a read-only disk
 -- must not stop add-ons from loading (the whole call is under pcall).
-local function write_heartbeat(loaded, failed)
-  local pid = 0
-  local stat = read('/proc/self/stat')
-  if stat then pid = tonumber(stat:match('^(%d+)')) or 0 end
+local function write_heartbeat()
+  local fields = {}
+  -- Additive marker: without it a file is from a bridge that only knew its load
+  -- time, and a new CLI must keep reading that the way it always did.
+  fields[#fields + 1] = '"format":2'
+  fields[#fields + 1] = string.format('"time":%d', beat.at)
+  fields[#fields + 1] = string.format('"pid":%d', beat.pid)
+  if beat.attached > 0 then
+    fields[#fields + 1] = string.format('"attachedAt":%d', beat.attached)
+  end
+  if beat.seen > 0 then
+    fields[#fields + 1] = string.format('"lastSeen":%d', beat.seen)
+  end
   local parts = {}
-  for _, name in ipairs(loaded) do parts[#parts + 1] = json_string(name) end
+  for _, name in ipairs(beat.loaded) do parts[#parts + 1] = json_string(name) end
   local errors = {}
-  for _, item in ipairs(failed) do
+  for _, item in ipairs(beat.failed) do
     errors[#errors + 1] = '{"name":' .. json_string(item.name) .. ',"error":' .. json_string(item.error) .. '}'
   end
-  local body = string.format('{"time":%d,"pid":%d,"addons":[%s],"failed":[%s]}\n',
-    os.time(), pid, table.concat(parts, ','), table.concat(errors, ','))
+  fields[#fields + 1] = '"addons":[' .. table.concat(parts, ',') .. ']'
+  fields[#fields + 1] = '"failed":[' .. table.concat(errors, ',') .. ']'
+  local now = os.time()
+  if beat.at <= 0 then beat.at = now end
   local handle = io.open(M.heartbeat_path .. '.tmp', 'wb')
   if not handle then return end
-  handle:write(body)
+  handle:write('{' .. table.concat(fields, ',') .. '}\n')
   handle:close()
   os.rename(M.heartbeat_path .. '.tmp', M.heartbeat_path)
+  beat.written = now
+end
+
+-- First RPC served: Steam is driving the add-ons, so stamp the attach and then
+-- refresh the file at most once a minute (cheap, and never on every call).
+function M.attach()
+  local now = os.time()
+  local fresh = beat.attached <= 0
+  if fresh then beat.attached = now end
+  beat.seen = now
+  if fresh or now - beat.written >= 60 then pcall(write_heartbeat) end
+  return M
 end
 
 function M.register(registry)
@@ -136,6 +167,19 @@ function M.register(registry)
       io.stderr:write('[sls-addons] ' .. name .. ' failed to load: ' .. tostring(plugin) .. '\n')
     end
   end
-  pcall(write_heartbeat, loaded, failed)
+  local pid = 0
+  local stat = read('/proc/self/stat')
+  if stat then pid = tonumber(stat:match('^(%d+)')) or 0 end
+  beat.at, beat.pid, beat.loaded, beat.failed = os.time(), pid, loaded, failed
+  pcall(write_heartbeat)
+  -- Any add-on call proves Steam is attached, so the first one stamps it.
+  for key, value in pairs(registry) do
+    if type(value) == 'function' then
+      registry[key] = function(...)
+        M.attach()
+        return value(...)
+      end
+    end
+  end
 end
 return M
