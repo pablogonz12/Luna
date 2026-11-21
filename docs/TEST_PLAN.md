@@ -1,5 +1,10 @@
 # Test plan and release gates
 
+## Rules for the suite
+
+- Tests never write inside the checkout. Anything that must modify add-on files, `vendor/` or `scripts/` (tamper, dirty-tree and vendor tests) runs against a temporary copy. `scripts/test-all.sh` snapshots `git status` and the hashes of tracked files under `addons/`, `vendor/` and `scripts/` before and after the run and fails, listing the paths, if they changed.
+- One suite run per checkout at a time. `scripts/test-all.sh` takes a `flock` lock (under `$XDG_RUNTIME_DIR` or `/tmp`, keyed by the checkout path) and a second concurrent run exits 75 immediately. The lock is released when the script exits or is killed.
+
 ## Automated
 
 | Suite | Command | Covers |

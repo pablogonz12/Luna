@@ -10,6 +10,36 @@ export LUNA_LIVE_CHECKS=0
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# One suite run per checkout: a second concurrent run refuses at once. The lock
+# lives outside the tree, is keyed by the checkout path, and the kernel drops it
+# when this script exits or is killed.
+lock_dir="${XDG_RUNTIME_DIR:-/tmp}"
+lock_file="$lock_dir/luna-test-all-$(printf '%s' "$root" | sha256sum | cut -c1-16).lock"
+exec 9>"$lock_file"
+if ! flock -n 9; then
+  echo "test-all.sh: another suite run is already using $root (lock $lock_file); refusing to start a second one." >&2
+  exit 75
+fi
+
+# Tests must never write inside the checkout: snapshot `git status` and the
+# content hashes of addons/, vendor/ and scripts/, and compare after the run.
+tree_snapshot() {
+  git status --porcelain
+  git ls-files -z -- addons vendor scripts | xargs -0 -r sha256sum 2>&1
+}
+guard_dir="$(mktemp -d)"
+trap 'rm -rf "$guard_dir"' EXIT
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  tree_snapshot >"$guard_dir/before" || true
+  guard=1
+else
+  echo 'note: not a git checkout; skipping the tree-unchanged guard.'
+  guard=0
+fi
+
+echo '== personal-data leak check =='
+bash scripts/check-personal-data.sh
+
 echo '== node: check + tests =='
 for file in addons/*/plugin/public/*.js; do node --check "$file"; done
 node --test tests/*.test.cjs tests/presence/*.test.cjs
@@ -32,6 +62,15 @@ python3 scripts/luna.py verify
 
 echo '== shell syntax =='
 bash -n scripts/*.sh
+
+if [ "$guard" = 1 ]; then
+  tree_snapshot >"$guard_dir/after" || true
+  if ! diff -u "$guard_dir/before" "$guard_dir/after" >"$guard_dir/diff"; then
+    echo 'FAIL: the test run changed files inside the checkout:' >&2
+    grep -E '^[+-][^+-]' "$guard_dir/diff" >&2 || true
+    exit 1
+  fi
+fi
 
 echo
 echo 'all suites passed.'

@@ -342,7 +342,7 @@ def cmd_vendor(options):
                 raise SystemExit('FAIL: %s differs from HEAD; commit it before pinning' % rel)
             files[dest_rel] = {'source_path': source_rel, 'sha256': sha256(path)}
         manifest['addons'][name] = {
-            'source_repo': 'https://github.com/pgm1207/Luna',
+            'source_repo': GITHUB_URL + '/Luna',
             'source_commit': repo_commit,
             'plugin_version': addon_version(name),
             'files': files,
@@ -359,7 +359,7 @@ def cmd_vendor(options):
                 raise SystemExit('FAIL: %s did not produce %s' % (name, source_rel))
             files[dest_rel] = {'source_path': source_rel, 'sha256': sha256(path)}
         manifest['addons'][name] = {
-            'source_repo': 'https://github.com/pgm1207/slsteam-' + name,
+            'source_repo': GITHUB_URL + '/slsteam-' + name,
             'source_commit': commit,
             'plugin_version': addon_version(name),
             'files': files,
@@ -378,20 +378,20 @@ def vendor_shared(manifest, shared_source, head, show, repo_commit):
     for rel, source_path in (('bridge/bridge.lua', 'bridge/bridge.lua'),
                              ('scripts/patch-lumen.py', 'scripts/patch-lumen.py')):
         (ROOT / rel).write_bytes(show(shared_source, shared_commit, source_path))
-        manifest['shared'][rel] = {'source_repo': 'https://github.com/pgm1207/slsteam-playtime',
+        manifest['shared'][rel] = {'source_repo': GITHUB_URL + '/slsteam-playtime',
                                    'source_commit': shared_commit, 'source_path': source_path,
                                    'sha256': sha256(ROOT / rel)}
         print('pinned %s from %s@%s' % (rel, shared_source.name, shared_commit[:12]))
     # First-party scripts come from this repository, pinned to its HEAD.
     manifest['shared']['scripts/steam-machine.py'] = {
-        'source_repo': 'https://github.com/pgm1207/Luna', 'source_commit': repo_commit,
+        'source_repo': GITHUB_URL + '/Luna', 'source_commit': repo_commit,
         'source_path': 'scripts/steam-machine.py', 'sha256': sha256(ROOT / 'scripts/steam-machine.py')}
     hook_rel = 'scripts/lumen-hook.py'
     committed_hook = subprocess.run(['git', '-C', str(ROOT), 'show', repo_commit + ':' + hook_rel],
                                     capture_output=True)
     hook_clean = committed_hook.returncode == 0 and committed_hook.stdout == (ROOT / hook_rel).read_bytes()
     manifest['shared'][hook_rel] = {
-        'source_repo': 'https://github.com/pgm1207/Luna',
+        'source_repo': GITHUB_URL + '/Luna',
         'source_commit': repo_commit if hook_clean else 'uncommitted-worktree',
         'source_path': hook_rel, 'sha256': sha256(ROOT / hook_rel)}
 

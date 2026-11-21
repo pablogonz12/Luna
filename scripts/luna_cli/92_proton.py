@@ -163,6 +163,7 @@ def _proton_json(url):
             if error.code not in STEAM_RETRY_STATUS:
                 raise OSError('HTTP %s from %s' % (error.code, url)) from error
             delay = _retry_after_seconds(error)
+            error.close()
         except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError) as error:
             last, delay = error, None
         if attempt == STEAM_DOWNLOAD_ATTEMPTS:
@@ -822,6 +823,7 @@ def _proton_download(url, destination, total=0, label=None):
             if error.code not in STEAM_RETRY_STATUS or attempt == STEAM_DOWNLOAD_ATTEMPTS:
                 raise OSError('HTTP %s from %s' % (error.code, url)) from error
             delay, reason = _retry_after_seconds(error), 'HTTP %s' % error.code
+            error.close()
         except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
             if attempt == STEAM_DOWNLOAD_ATTEMPTS:
                 raise OSError('%s: %s' % (url, error)) from error

@@ -592,6 +592,7 @@ def _download_steam_file(url, destination, expected, limit=512 * 1024 * 1024,
                 raise OSError('HTTP %s from %s' % (error.code, url)) from error
             delay = _retry_after_seconds(error)
             reason = 'HTTP %s' % error.code
+            error.close()
         except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
             if attempt == attempts:
                 raise OSError('%s: %s' % (url, error)) from error

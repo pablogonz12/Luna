@@ -1,3 +1,9 @@
+# The single place that names the GitHub account the add-on payloads come from.
+# Override with LUNA_GITHUB_OWNER to point a fork at its own repositories.
+GITHUB_OWNER = os.environ.get('LUNA_GITHUB_OWNER') or 'pgm1207'
+GITHUB_URL = 'https://github.com/' + GITHUB_OWNER
+
+
 def home():
     return Path(os.environ.get('HOME') or Path.home())
 

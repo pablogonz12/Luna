@@ -1253,15 +1253,23 @@ class Restart(GuiFixture):
         self.install_tool('steam', '#!/bin/sh\necho "$ACCESSIBILITY_ENABLED|$@" >> "%s"\n' % log)
         self.install_tool('setsid', '#!/bin/sh\nexec "$@"\n')
         os.environ['ACCESSIBILITY_ENABLED'] = '1'  # a stale value must not leak into the normal launch
-        with mock.patch.object(luna, 'gui_steam_state', return_value=(False, False)):
+        children, real_popen = [], subprocess.Popen
+
+        def tracked(*args, **kwargs):
+            children.append(real_popen(*args, **kwargs))
+            return children[-1]
+        with mock.patch.object(luna, 'gui_steam_state', return_value=(False, False)), \
+                mock.patch.object(luna.subprocess, 'Popen', tracked):
             ok, _ = luna.gui_launch_accessible()
-        self.assertTrue(ok)
-        luna._launch_steam_detached()
+            self.assertTrue(ok)
+            luna._launch_steam_detached()
+        for child in children:  # the launches are detached by design; reap them so none outlives the test
+            child.wait(timeout=10)
         for _ in range(40):
             if log.exists() and len(log.read_text().splitlines()) >= 2:
                 break
             time.sleep(0.1)
-        accessible, normal = sorted(log.read_text().splitlines(), key=lambda l: l.startswith('|'))
+        accessible, normal = sorted(log.read_text().splitlines(), key=lambda l: luna.GUI_ACCESS_ARGS[0] not in l)  # the two launches race to the log
         self.assertTrue(accessible.startswith('1|') and luna.GUI_ACCESS_ARGS[0] in accessible, accessible)
         self.assertNotIn(luna.GUI_ACCESS_ARGS[0], normal)
 

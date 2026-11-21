@@ -115,7 +115,7 @@ class LunaTestCase(unittest.TestCase):
         self.data.mkdir(parents=True)
         (self.data / 'presence.json').write_text('{"version":1,"owned":{}}')
         (self.data / 'playtime').mkdir()
-        (self.data / 'playtime/76561199026823325.json').write_text('{"version":2,"games":{}}')
+        (self.data / 'playtime/76561198000000042.json').write_text('{"version":2,"games":{}}')
         self.bin = stub_bin(self.home)
         self.env = dict(os.environ, HOME=str(self.home),
                         XDG_DATA_HOME=str(self.home / '.local/share'),
@@ -127,6 +127,21 @@ class LunaTestCase(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.temp, ignore_errors=True)
+
+    def tree_copy(self):
+        """A throwaway copy of what verify/release read; tests never write inside the checkout."""
+        tree = self.temp / 'tree'
+        if not tree.exists():
+            (tree / 'scripts').mkdir(parents=True)
+            shutil.copy2(LUNA, tree / 'scripts' / 'luna.py')
+            for rel in ('addons', 'vendor', 'bridge'):
+                shutil.copytree(HERE / rel, tree / rel, ignore=shutil.ignore_patterns('__pycache__'))
+        return tree
+
+    def luna_in(self, tree, *args):
+        stub_bin(self.home, '')
+        return subprocess.run([sys.executable, str(tree / 'scripts' / 'luna.py')] + list(args),
+                              env=self.env, capture_output=True, text=True)
 
     def luna(self, *args, running='', env=None, keep_steam_client=True):
         stub_bin(self.home, running)
@@ -421,15 +436,11 @@ class LunaTestCase(unittest.TestCase):
         self.assertIn('differs', result.stdout)
 
     def test_verify_detects_a_tampered_payload(self):
-        target = HERE / 'addons/presence/plugin/public/panel.js'
-        original = target.read_bytes()
-        try:
-            target.write_bytes(b'// tampered\n')
-            result = self.luna('verify')
-            self.assertEqual(result.returncode, 1)
-            self.assertIn('does not match the manifest', result.stdout)
-        finally:
-            target.write_bytes(original)
+        tree = self.tree_copy()
+        (tree / 'addons/presence/plugin/public/panel.js').write_bytes(b'// tampered\n')
+        result = self.luna_in(tree, 'verify')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('does not match the manifest', result.stdout)
 
     def test_verify_accepts_the_pinned_payloads(self):
         result = self.luna('verify')
@@ -439,7 +450,7 @@ class LunaTestCase(unittest.TestCase):
         sources = self.home / 'Documents/Scripts'
         sources.mkdir(parents=True)
         for name in ('playtime', 'presence'):
-            origin = Path(os.environ.get('HOME', '/home/pgm1207')) / 'Documents/Scripts' / ('slsteam-' + name)
+            origin = Path(os.environ.get('HOME', '/home/user')) / 'Documents/Scripts' / ('slsteam-' + name)
             if not (origin / '.git').is_dir():
                 self.skipTest('no local %s checkout to compare against' % name)
             shutil.copytree(origin, sources / ('slsteam-' + name),
@@ -601,16 +612,13 @@ class LunaTestCase(unittest.TestCase):
         self.assertFalse(timer.exists() and service.exists(), 'the units were not removed')
 
     def test_release_refuses_a_dirty_tree(self):
-        target = HERE / 'addons/luna/plugin/public/panel.js'
-        original = target.read_bytes()
-        try:
-            target.write_bytes(original + b'\n// dirty\n')
-            out = self.temp / 'dist-dirty'
-            result = self.luna('release', '--out', str(out))
-            self.assertNotEqual(result.returncode, 0, 'a dirty tree must not release')
-            self.assertIn('does not match the manifest', result.stdout + result.stderr)
-        finally:
-            target.write_bytes(original)
+        tree = self.tree_copy()
+        target = tree / 'addons/luna/plugin/public/panel.js'
+        target.write_bytes(target.read_bytes() + b'\n// dirty\n')
+        out = self.temp / 'dist-dirty'
+        result = self.luna_in(tree, 'release', '--out', str(out))
+        self.assertNotEqual(result.returncode, 0, 'a dirty tree must not release')
+        self.assertIn('does not match the manifest', result.stdout + result.stderr)
 
     def test_update_refuses_a_bundle_with_a_bad_inner_manifest(self):
         out = self.temp / 'dist-inner'
