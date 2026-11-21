@@ -57,6 +57,56 @@ local function read_file(path)
   return raw
 end
 
+-- ------------------------------------------------------------------- caching
+--
+-- Two read-only RPCs build a whole payload from local files on every call
+-- (SlsHltbGet re-encodes the entire cache, ~1 MB; SlsLunaHealth walks every
+-- add-on and data directory). Both are polled, so the answer is remembered
+-- until one of its sources changes. `rev` is a compact string of each source's
+-- size and modification time: a polling client can send it back and get
+-- {unchanged = true} instead of a payload it already has. Without lfs (a
+-- host without stat) only the size is known, so a same-size rewrite is noticed
+-- at the next TTL, which is why the TTL stays short.
+local CACHE_TTL = 30
+
+local lfs = select(2, pcall(require, 'lfs'))
+if type(lfs) ~= 'table' or type(lfs.attributes) ~= 'function' then lfs = nil end
+-- Without any stat source a cache cannot tell "changed" from "unchanged", so
+-- it stays off and the RPC behaves exactly as before.
+local has_stat = lfs ~= nil or type(fs.size) == 'function'
+-- Only a modification time makes a same-size rewrite visible, so only then may
+-- a client be told `unchanged`.
+local mtime_known = lfs ~= nil
+
+local function file_stamp(path)
+  if lfs then
+    local ok, attr = pcall(lfs.attributes, path)
+    if ok and type(attr) == 'table' then
+      return tostring(attr.size or 0) .. ':' .. tostring(attr.modification or 0)
+    end
+    return 'missing'
+  end
+  local ok, size = pcall(fs.size, path)
+  if ok and size ~= nil then return tostring(size) end
+  return 'missing'
+end
+
+local function stamps_rev(paths)
+  if not has_stat then return nil end
+  local parts = {}
+  for index, path in ipairs(paths) do parts[index] = file_stamp(path) end
+  return table.concat(parts, '|')
+end
+
+-- `text` is the exact wire string, so a hit costs one table lookup and no
+-- decode or encode at all.
+local hltb_cache = { rev = '', text = nil, expires = 0 }
+local health_cache = { rev = '', text = nil, expires = 0 }
+
+local function cache_drop(cache)
+  cache.rev, cache.text, cache.expires = '', nil, 0
+end
+
 local function valid_appid(v)
   local n = tonumber(v)
   return n and n > 0 and n <= 4294967295 and n == math.floor(n)
@@ -165,6 +215,7 @@ local function persist_store(data)
   end
   local ok, rerr = os.rename(tmp, store_path)
   if not ok then os.remove(tmp); return false, rerr or 'rename failed' end
+  cache_drop(hltb_cache)
   return true
 end
 
@@ -195,6 +246,7 @@ local function persist_library(data)
   end
   local ok, rerr = os.rename(tmp, library_path)
   if not ok then os.remove(tmp); return false, rerr or 'rename failed' end
+  cache_drop(hltb_cache)
   return true
 end
 
@@ -1178,9 +1230,44 @@ function M.register(registry)
   end
 
   -- Read-only diagnostics for the Health page: paths, versions, marker counts
-  -- and file sizes, so a problem can be described without a shell.
-  registry.SlsLunaHealth = function()
-    return reply({ success = true, health = build_health() })
+  -- and file sizes, so a problem can be described without a shell. The build
+  -- walks every add-on and data directory and probes a dozen paths, so it is
+  -- memoised on the stamps of everything it reads; {refresh: true} bypasses it
+  -- for a caller that just changed something and cannot wait out the TTL.
+  local health_inputs = function()
+    local steam = home .. '/.local/share/Steam'
+    local paths = {
+      lumen_root .. '/lua/boot.lua', lumen_root .. '/lumen', base,
+      base .. 'luna-manifest.json', base .. 'bridge.lua',
+      data_dir, store_path, library_path, data_dir .. '/sgdb.json',
+      steam, steam .. '/steam.sh', steam .. '/steam.cfg', steam .. '/userdata',
+      steam .. '/logs', steam .. '/logs/console_log.txt',
+      steam .. '/package', steam .. '/package/steam_client_ubuntu12.manifest',
+      update_dir, update_dir .. '/update-check.json', update_dir .. '/autoupdate.json',
+      update_dir .. '/steam-pin.json', update_dir .. '/steam-job.json',
+      update_dir .. '/steam-client-cache', update_dir .. '/steam-client-cache/build.txt',
+      home .. '/.config/systemd/user/luna-autoupdate.timer',
+    }
+    for _, name in ipairs(installed()) do
+      paths[#paths + 1] = base .. name .. '/plugin.json'
+    end
+    return paths
+  end
+  registry.SlsLunaHealth = function(raw)
+    local refresh = type(raw) == 'table' and raw.refresh == true
+    local rev = stamps_rev(health_inputs())
+    local now = os.time()
+    if not refresh and rev and health_cache.text and health_cache.rev == rev
+      and now < health_cache.expires then
+      return health_cache.text
+    end
+    local text = reply({ success = true, health = build_health() })
+    if rev and not refresh then
+      health_cache.text = text
+      health_cache.rev = rev
+      health_cache.expires = now + CACHE_TTL
+    end
+    return text
   end
 
   -- Update plumbing for the Health page. `status` reads local files only;
@@ -1794,15 +1881,38 @@ function M.register(registry)
   end
 
   -- Whole local cache: appid -> record, plus the game list the agent reported.
-  -- Small by design (a library at most).
-  registry.SlsHltbGet = function()
-    local store = load_store()
-    local library = load_library()
-    local count = 0
-    for _ in pairs(store.games) do count = count + 1 end
-    return reply({ success = true, games = store.games, count = count,
-      library = library.games, libraryAt = library.updatedAt,
-      minFetchInterval = M.min_fetch_interval })
+  -- Small by design (a library at most). The encoded reply is memoised on the
+  -- stamps of both files: a poll with the `rev` it got last time answers
+  -- `{unchanged = true}` in a few bytes instead of the whole megabyte, and a
+  -- poll without one (the current panel, a fresh window) gets the full shape.
+  registry.SlsHltbGet = function(raw)
+    local asked = nil
+    if type(raw) == 'string' then asked = raw
+    elseif type(raw) == 'table' and type(raw.rev) == 'string' then asked = raw.rev end
+    local rev = stamps_rev({ store_path, library_path })
+    local now = os.time()
+    local cached = rev ~= nil and hltb_cache.text and hltb_cache.rev == rev
+      and now < hltb_cache.expires
+    if not cached then
+      local store = load_store()
+      local library = load_library()
+      local count = 0
+      for _ in pairs(store.games) do count = count + 1 end
+      local payload = { success = true, rev = rev, games = store.games, count = count,
+        library = library.games, libraryAt = library.updatedAt,
+        minFetchInterval = M.min_fetch_interval }
+      if rev then
+        hltb_cache.text = reply(payload)
+        hltb_cache.rev = rev
+        hltb_cache.expires = now + CACHE_TTL
+      else
+        return reply(payload)
+      end
+    end
+    if asked and asked ~= '' and mtime_known and asked == rev then
+      return reply({ success = true, unchanged = true, rev = rev })
+    end
+    return hltb_cache.text
   end
 
   -- The Steam agent's inventory of owned games and non-Steam shortcuts, so the

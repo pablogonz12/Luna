@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "pkill $*" >> "$HOME/systemctl.log"
+exit 0

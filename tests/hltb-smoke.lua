@@ -193,6 +193,20 @@ local home = os.getenv('HOME')
 local repo = os.getenv('LUNA_REPO') or '.'
 local store_path = home .. '/.local/share/slssteam-integrations/hltb.json'
 
+-- The backend keys its payload cache on file stamps. No stat module is
+-- installed here, so a tiny lfs stand-in supplies size + a modification time
+-- the test can bump, which makes cache invalidation deterministic.
+local stamps = {}
+package.preload['lfs'] = function()
+  return { attributes = function(path)
+    local f = io.open(path, 'rb')
+    if not f then return nil end
+    local size = f:seek('end'); f:close()
+    return { size = size, modification = stamps[path] or 0 }
+  end }
+end
+local function touch(path) stamps[path] = (stamps[path] or 0) + 1 end
+
 local backend = dofile(repo .. '/addons/luna/plugin/backend/main.lua')
 local registry = {}
 backend.register(registry)
@@ -626,5 +640,48 @@ local timer_log = io.open(home .. '/.local/share/Lumen/sls-luna/timer-job.log', 
 assert(timer_log, 'a detached job keeps its output in a log file')
 local logged = timer_log:read('*a'); timer_log:close()
 assert(logged:find('unattended updates: on'), 'bounded updater runs keep their output')
+
+-- ----------------------------------------------------------- payload cache
+--
+-- SlsHltbGet is the biggest polled reply; it is memoised on the stamps of the
+-- two files it reads, and a client that already has a payload can ask with the
+-- `rev` it got back for a tiny "nothing changed" answer.
+local library_path = home .. '/.local/share/slssteam-integrations/hltb-library.json'
+local first_text = registry.SlsHltbGet()
+local first_count = json.decode(first_text).count
+local first_rev = json.decode(first_text).rev
+assert(type(first_rev) == 'string' and #first_rev > 0, 'the payload must carry a revision')
+assert(registry.SlsHltbGet() == first_text, 'a cache hit must return the identical wire payload')
+local unchanged = json.decode(registry.SlsHltbGet(first_rev))
+assert(unchanged.success == true and unchanged.unchanged == true, 'the rev must be recognised')
+assert(unchanged.games == nil and unchanged.library == nil, 'an unchanged reply must carry no data')
+assert(#registry.SlsHltbGet(first_rev) < 200, 'the unchanged reply must be tiny')
+-- A change written by something else (not this backend) is seen at once.
+do
+  local f = io.open(store_path, 'rb')
+  local store = json.decode(f:read('*a')); f:close()
+  store.games['999'] = {id = 0, name = 'External', match = 'manual', main = 3600}
+  local out = io.open(store_path, 'wb')
+  out:write(json.encode(store)); out:close()
+end
+touch(store_path)
+local grown = json.decode(registry.SlsHltbGet())
+assert(grown.count == first_count + 1 and grown.games['999'], 'a changed source must invalidate the cache')
+assert(registry.SlsHltbGet(first_rev).unchanged == nil, 'a stale rev must never answer unchanged')
+local new_rev = grown.rev
+assert(new_rev ~= first_rev, 'the revision must move with the file')
+assert(json.decode(registry.SlsHltbGet(new_rev)).unchanged == true, 'the new rev must be recognised')
+-- The backend's own writes drop the memo without waiting for a stat.
+assert(call('SlsHltbPut', {raw = json.encode({appid = 4242, name = 'Own', main = 2})}).success)
+assert(call('SlsHltbGet').games['4242'] ~= nil, 'a local write must be visible immediately')
+-- Health is memoised the same way and the escape hatch bypasses it.
+local health_text = registry.SlsLunaHealth()
+assert(registry.SlsLunaHealth() == health_text, 'health must be memoised')
+local refreshed = json.decode(registry.SlsLunaHealth(json.encode({refresh = true})))
+assert(refreshed.success == true and refreshed.health.version ~= nil, 'refresh must rebuild the payload')
+local cfg = io.open(home .. '/.local/share/Steam/steam.cfg', 'wb')
+cfg:write('BootStrapperInhibitAll\n'); cfg:close()
+assert(json.decode(registry.SlsLunaHealth()).health.steam.client.updatesBlocked == true,
+  'a changed input must invalidate the health memo')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs, health')

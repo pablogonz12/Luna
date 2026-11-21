@@ -1258,3 +1258,61 @@ test('with session time disabled the placeholder keeps its plain title', async (
   await w.deliver({unAppID: GAME, bRunning: false});
   await w.tick();
 });
+
+// ------------------------------------------------- 18. poll cadence (perf)
+test('the poll backs off while idle, speeds up on a running-app event, and reports it at once', async () => {
+  const w = fakeWorld();
+  w.state = {...w.state, enabled: true};
+  agent.bootAgent(w.win);
+  await w.tick();
+  // The 60 s name refresh is a separate timer; this is the sync one.
+  const syncTimer = () => w.timers.filter(t => t.ms === 40000 || t.ms === 5000).at(-1);
+  assert.equal(syncTimer().ms, 40000, 'idle polling must be slow');
+  const before = w.reports.length;
+  await w.deliver({unAppID: GAME, bRunning: true});
+  assert.equal(syncTimer().ms, 5000, 'a running game is polled every five seconds');
+  assert.ok(w.reports.length > before, 'the start is reported without waiting for a poll');
+  assert.equal(w.reports.at(-1).active, 1);
+  await w.deliver({unAppID: GAME, bRunning: false});
+  assert.equal(syncTimer().ms, 40000, 'a stop returns the poll to the idle cadence');
+  // Only the newest timer is live: a host that cannot clear an interval must
+  // not end up syncing once per obsolete cadence.
+  const stale = w.timers.length - 1;
+  const inner = w.win.Millennium.callServerMethod;
+  let gets = 0;
+  w.win.Millennium.callServerMethod = async (...args) => {
+    if (args[1] === 'SlsPresenceGet') gets++;
+    return inner(...args);
+  };
+  for (const timer of w.timers.slice(0, stale)) await timer.fn();
+  assert.equal(gets, 0, 'superseded timers are inert');
+  await syncTimer().fn();
+  assert.equal(gets, 1, 'the live timer still syncs');
+});
+
+test('the poll pauses while the document is hidden and resumes on visibility', async () => {
+  const w = fakeWorld();
+  let onVisibility = null;
+  w.win.document = {hidden: true, addEventListener: (type, fn) => { if (type === 'visibilitychange') onVisibility = fn; }};
+  w.state = {...w.state, enabled: true};
+  agent.bootAgent(w.win);
+  await w.tick();
+  const inner = w.win.Millennium.callServerMethod;
+  let gets = 0;
+  w.win.Millennium.callServerMethod = async (...args) => {
+    if (args[1] === 'SlsPresenceGet') gets++;
+    return inner(...args);
+  };
+  await w.timers.find(t => t.ms === 40000).fn();
+  assert.equal(gets, 0, 'a hidden document does no polling');
+  w.win.document.hidden = false;
+  assert.equal(typeof onVisibility, 'function', 'visibility must be observed');
+  await onVisibility();
+  assert.equal(gets, 1, 'becoming visible syncs immediately');
+  // Two overlapping fires share one RPC: never two syncs in flight.
+  const timer = w.timers.filter(t => t.ms === 40000).at(-1);
+  const first = timer.fn();
+  const second = timer.fn();
+  await Promise.all([first, second]);
+  assert.equal(gets, 2, 'concurrent fires share a single sync');
+});

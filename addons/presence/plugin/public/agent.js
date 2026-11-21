@@ -942,6 +942,62 @@
       if (!syncing) syncing = syncOnce().finally(() => { syncing = null; });
       return syncing;
     }
+    // Steam notifies every running-app change, so that event is the primary
+    // trigger and this timer is only the safety net that catches a missed
+    // notification (a lost window, a helper that died on its own). It is fast
+    // only while there is something to track: 5 s with a game running, 40 s
+    // idle, and nothing at all while the document is hidden.
+    const SYNC_RUNNING_MS = 5000;
+    const SYNC_IDLE_MS = 40000;
+    let syncTimer = 0, syncPeriod = 0, syncGeneration = 0;
+    const timerHidden = () => w.document?.hidden === true;
+    const syncPeriodFor = () => (controller && controller.active.size > 0)
+      ? SYNC_RUNNING_MS : SYNC_IDLE_MS;
+    const stopTimer = () => {
+      if (syncTimer && typeof w.clearInterval === 'function') w.clearInterval(syncTimer);
+      syncTimer = 0;
+      syncPeriod = 0;
+    };
+    function armSync() {
+      const period = syncPeriodFor();
+      if (syncTimer && period === syncPeriod) return;
+      stopTimer();
+      syncPeriod = period;
+      // A host whose setInterval cannot be cleared (a test double, an unusual
+      // sandbox) leaves the old timer alive; the generation makes it a no-op so
+      // a cadence change still means exactly one running timer.
+      const generation = ++syncGeneration;
+      syncTimer = w.setInterval(() => {
+        if (generation !== syncGeneration || timerHidden()) return undefined;
+        // Returned so a caller (and tests) can await one full cycle instead of
+        // polling.
+        return sync();
+      }, period);
+    }
+    const onVisible = () => {
+      if (timerHidden()) return undefined;
+      armSync();
+      // Returned so a caller can await the catch-up sync.
+      return sync();
+    };
+    if (typeof w.document?.addEventListener === 'function') {
+      w.document.addEventListener('visibilitychange', onVisible);
+    }
+    // The running-app event already changed the tracked state, so the report
+    // goes out now instead of up to 40 s later at the idle poll. No status read
+    // and no /proc probe here: the controller has just applied the event, and
+    // the periodic sync still reconciles against the process table.
+    const reportNow = () => {
+      if (!controller) return Promise.resolve();
+      const report = controller.report();
+      const signature = JSON.stringify(report);
+      if (signature === lastSignature) return Promise.resolve();
+      lastSignature = signature;
+      lastReport = Date.now();
+      return rpc('SlsPresenceReport', {raw: JSON.stringify({
+        ...report, contracts, hideStrategy: hiding.strategy, hideVerified: hiding.verified,
+      })}).catch(e => console.warn('[SLS Presence] report failed:', e));
+    };
     async function syncOnce() {
       try {
         const status = await rpc('SlsPresenceGet');
@@ -1048,11 +1104,16 @@
     // start/stop cycle instead of polling.
     const sub = steam.GameSessions.RegisterForAppLifetimeNotifications(n => {
       if (!controller) return Promise.resolve();
-      return Promise.resolve(controller.onLifetime(n)).catch(e => console.error('[SLS Presence]', e));
+      // The event is the state change itself: apply it, retime the poll to the
+      // new cadence and report at once, so a start or stop is visible within
+      // the same second instead of waiting for the next idle poll.
+      return Promise.resolve(controller.onLifetime(n))
+        .then(() => { armSync(); return reportNow(); })
+        .catch(e => console.error('[SLS Presence]', e));
     });
     if (!sub) console.warn('[SLS Presence] App lifetime subscription unavailable');
     sync();
-    w.setInterval(sync, 5000);
+    armSync();
     // Session-time enrichment runs on its own slower cadence so a rename never
     // waits on (or blocks) the status sync.
     w.setInterval(() => {

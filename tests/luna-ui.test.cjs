@@ -1613,14 +1613,199 @@ test('library shelves re-render only when their HLTB times or direction change',
   await new Promise(resolve=>setTimeout(resolve,60));
   assert.deepEqual(hltbShelf.order,[2,1],'shortest first');
   const settled=hltbShelf.updates;
-  for(let i=0;i<5;i++)intervals.forEach(fn=>fn());
+  // The walk runs in idle slices now, so let the queued slice finish after
+  // each interval pump before counting re-renders.
+  const pumpAll=async()=>{intervals.forEach(fn=>fn());await settle(20);};
+  for(let i=0;i<5;i++)await pumpAll();
   assert.equal(hltbShelf.updates,settled,'unchanged times and direction must not force re-renders');
   w.localStorage.setItem('slsLunaHltbOrder','long');
-  intervals.forEach(fn=>fn());
+  await pumpAll();
   assert.equal(hltbShelf.updates,settled+1,'a direction change re-renders exactly once');
   assert.deepEqual(hltbShelf.order,[1,2],'longest first');
-  intervals.forEach(fn=>fn());
+  await pumpAll();
   assert.equal(hltbShelf.updates,settled+1);
+});
+
+/* --- Shelf walk cost control ------------------------------------------------
+   A fake MutationObserver records the observers the panel installs, so these
+   tests drive the filters directly. A library container with a stable id is
+   what the panel binds to instead of document.body. */
+function shelfWindow(options){
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const library=document.createElement('div');
+  library.id='GamepadUI_Library';
+  document.body.appendChild(library);
+  const {w}=fakeWindow(document,Object.assign({hltb:{success:true,
+    games:{'1':{main:3600},'2':{main:120}}}},options||{}));
+  const observers=[];
+  w.MutationObserver=function(cb){
+    this.cb=cb;this.connected=false;this.target=null;
+    this.observe=target=>{this.connected=true;this.target=target;};
+    this.disconnect=()=>{this.connected=false;};
+    observers.push(this);
+  };
+  const intervals=[];
+  w.setInterval=(fn,ms)=>{intervals.push({fn,ms});return intervals.length;};
+  return {document,library,w,observers,intervals,
+    live:()=>observers.filter(observer=>observer.connected)};
+}
+function shortShelf(){
+  const instance={props:{showcase:{eSortBy:1},collectionId:'g'},updates:0,
+    m_fnSort:collection=>collection.visibleApps.slice(),
+    forceUpdate(){this.updates++;}};
+  const fiber={memoizedProps:{showcase:{eSortBy:1}},child:null,sibling:null,return:null};
+  let reads=0;
+  Object.defineProperty(fiber,'stateNode',{get(){reads++;return instance;}});
+  return {fiber,instance,reads:()=>reads};
+}
+function hltbShelfFiber(){
+  const instance={props:{showcase:{eSortBy:12},collectionId:'g'},updates:0,
+    m_fnSort:collection=>collection.visibleApps.slice(),
+    forceUpdate(){this.updates++;}};
+  return {fiber:{stateNode:instance,memoizedProps:{showcase:{eSortBy:12}},
+    child:null,sibling:null,return:null},instance};
+}
+function addNode(document,library,fiber,index){
+  const node=document.createElement('div');
+  if(fiber)node['__reactFiber$t'+(index||0)]=fiber;
+  library.appendChild(node);
+  return node;
+}
+
+test('a mutation storm coalesces into one shelf pass and unrelated nodes cost none',async()=>{
+  const {document,library,w,live}=shelfWindow();
+  mount(w);
+  await settle(30);
+  assert.ok(live().length>=1,'an observer must exist');
+  assert.equal(live().filter(entry=>entry.target===document.body).length,0,'nothing observes document.body');
+  const observer=live().find(entry=>entry.target&&entry.target.id==='GamepadUI_Library');
+  assert.ok(observer,'the shelf observer must sit on the library container');
+  const before=w.__SlsLunaSelftest.state();
+  for(let i=0;i<1000;i++){
+    const {fiber}=shortShelf();
+    const node=addNode(document,library,fiber,i);
+    observer.cb([{type:'childList',target:library,addedNodes:[node],removedNodes:[]}]);
+  }
+  await settle(40);
+  const after=w.__SlsLunaSelftest.state();
+  assert.equal(after.observerCallbacks-before.observerCallbacks,1000,'every callback is counted');
+  assert.equal(after.walks-before.walks,1,'1000 mutations must schedule at most one fiber walk');
+  const plain=document.createElement('div');
+  for(let i=0;i<1000;i++){
+    observer.cb([{type:'childList',target:library,addedNodes:[plain],removedNodes:[]}]);
+  }
+  await settle(40);
+  assert.equal(w.__SlsLunaSelftest.state().walks,after.walks,'nodes without a fiber never schedule work');
+  assert.equal(typeof after.walks,'number');
+  assert.equal(typeof after.walkMsTotal,'number');
+  assert.equal(after.shelfObserver,true,'the selftest says the library observer is bound');
+  w.__SlsLunaTeardown();
+});
+
+test('mutations inside Luna\'s own UI never schedule a shelf walk',async()=>{
+  const {document,library,w,live}=shelfWindow();
+  mount(w);
+  await settle(30);
+  const observer=live().find(entry=>entry.target&&entry.target.id==='GamepadUI_Library');
+  assert.ok(observer,'the shelf observer must be bound to the library container');
+  const before=w.__SlsLunaSelftest.state().walks;
+  const own=document.createElement('div');
+  own.id='sls-luna-overlay';
+  library.appendChild(own);
+  const insideOwn=addNode(document,own,hltbShelfFiber().fiber,1);
+  observer.cb([{type:'childList',target:own,addedNodes:[insideOwn]}]);
+  const lumen=document.createElement('div');
+  lumen.id='lumen-embed-root';
+  library.appendChild(lumen);
+  observer.cb([{type:'childList',target:lumen,addedNodes:[addNode(document,lumen,shortShelf().fiber,2)]}]);
+  await settle(40);
+  assert.equal(w.__SlsLunaSelftest.state().walks,before,'Luna\'s own nodes are filtered out');
+  w.__SlsLunaTeardown();
+});
+
+test('an added library node is walked once, not once per mutation (WeakSet)',async()=>{
+  const {document,library,w,live}=shelfWindow();
+  mount(w);
+  await settle(30);
+  const observer=live().find(entry=>entry.target&&entry.target.id==='GamepadUI_Library');
+  assert.ok(observer,'the shelf observer must be bound to the library container');
+  const {fiber,reads}=shortShelf();
+  const node=addNode(document,library,fiber,1);
+  observer.cb([{type:'childList',target:library,addedNodes:[node]}]);
+  await settle(40);
+  assert.equal(reads(),1,'the first pass visits the added fiber');
+  observer.cb([{type:'childList',target:library,addedNodes:[node]}]);
+  await settle(40);
+  assert.equal(reads(),1,'the same fiber is never visited twice: the WeakSet skips it');
+  w.__SlsLunaTeardown();
+});
+
+test('no shelf work happens while the document is hidden',async()=>{
+  const {document,library,w,live}=shelfWindow();
+  mount(w);
+  await settle(30);
+  const observer=live().find(entry=>entry.target&&entry.target.id==='GamepadUI_Library');
+  assert.ok(observer,'the shelf observer must be bound to the library container');
+  const before=w.__SlsLunaSelftest.state().walks;
+  document.hidden=true;
+  const {fiber,instance}=hltbShelfFiber();
+  const node=addNode(document,library,fiber,1);
+  observer.cb([{type:'childList',target:library,addedNodes:[node]}]);
+  await settle(40);
+  assert.equal(instance.updates,0,'a hidden window patches and re-renders nothing');
+  assert.equal(w.__SlsLunaSelftest.state().walks,before);
+  document.hidden=false;
+  observer.cb([{type:'childList',target:library,addedNodes:[node]}]);
+  await settle(40);
+  assert.equal(instance.updates,1,'visible again: the shelf is patched and drawn once');
+  w.__SlsLunaTeardown();
+});
+
+test('the fallback shelf pass is rare and exits early when nothing changed',async()=>{
+  const {document,library,w,intervals}=shelfWindow();
+  const {fiber}=shortShelf();
+  const root={child:fiber,sibling:null};
+  fiber.return=root;
+  const anchor=document.createElement('div');
+  anchor['__reactFiber$anchor']=root;
+  library.appendChild(anchor);
+  mount(w);
+  await settle(40);
+  const safety=intervals.filter(entry=>entry.ms===120000);
+  assert.equal(safety.length,1,'one fallback pass, not a 15 s one');
+  assert.equal(intervals.filter(entry=>entry.ms===15000).length,0,'the 15 s walk is gone');
+  const settled=w.__SlsLunaSelftest.state().walks;
+  safety[0].fn();
+  await settle(40);
+  assert.equal(w.__SlsLunaSelftest.state().walks,settled,'unchanged signature: no walk');
+  library.appendChild(document.createElement('div'));
+  safety[0].fn();
+  await settle(40);
+  assert.equal(w.__SlsLunaSelftest.state().walks,settled+1,'a real change earns one pass');
+  document.hidden=true;
+  library.appendChild(document.createElement('div'));
+  safety[0].fn();
+  await settle(40);
+  assert.equal(w.__SlsLunaSelftest.state().walks,settled+1,'hidden: even a change waits');
+  w.__SlsLunaTeardown();
+});
+
+test('teardown disconnects the library observer and drops queued shelf work',async()=>{
+  const {document,library,w,live}=shelfWindow();
+  mount(w);
+  await settle(30);
+  const observer=live().find(entry=>entry.target&&entry.target.id==='GamepadUI_Library');
+  assert.ok(observer,'the shelf observer must be bound to the library container');
+  const {fiber,instance}=hltbShelfFiber();
+  const node=addNode(document,library,fiber,1);
+  observer.cb([{type:'childList',target:library,addedNodes:[node]}]);
+  const before=w.__SlsLunaSelftest.state().walks;
+  w.__SlsLunaTeardown();
+  await settle(40);
+  assert.equal(observer.connected,false,'the observer is disconnected with the page');
+  assert.equal(instance.updates,0,'the debounced pass dies with the page');
+  assert.equal(w.__SlsLunaSelftest.state().walks,before);
 });
 
 test('Forget removes a cached record and the game becomes fetchable again',async()=>{

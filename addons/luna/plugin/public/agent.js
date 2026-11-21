@@ -229,6 +229,8 @@
       .then(out => {
         if (out && out.success === true) {
           lastLibraryPayload = payload;
+          // Writing the library moves the cache revision on: read full next.
+          hltbGetRev = null;
           return true;
         }
         return false;
@@ -342,6 +344,8 @@
   let sortSeen = 0;
   let liveSortValue;
   let hltbRevision = 0;
+  // Revision of the last SlsHltbGet payload; see refreshHltbData.
+  let hltbGetRev = null;
   const hltbViews = new Set();
   let refreshPending = false;
 
@@ -781,11 +785,23 @@
     return { ok: true, props: { ...props, sortByType: 4, app: clone } }; // 4 = Steam's hours-played sort
   }
 
+  /* Sends the revision of the payload we already hold, so an unchanged cache
+     answers {unchanged:true, rev} (59 B) instead of ~1 MB; the records stay.
+     An error forgets the rev, because the next call must be a full read. */
   function refreshHltbData(w) {
-    return rpc(w, 'SlsHltbGet').then(out => {
+    const payload = hltbGetRev === null ? {} : { rev: hltbGetRev };
+    return rpc(w, 'SlsHltbGet', payload).then(out => {
+      if (out && out.unchanged === true) {
+        if (out.rev !== undefined) hltbGetRev = out.rev;
+        return true;
+      }
       if (out && out.success !== false) setHltbRecords(out.games || {}, w);
+      hltbGetRev = out && out.rev !== undefined ? out.rev : null;
       return true;
-    }).catch(() => false);
+    }).catch(() => {
+      hltbGetRev = null;
+      return false;
+    });
   }
 
   /* Install the Luna game-menu hook. Returns the registry (or null while the
@@ -1070,13 +1086,22 @@
       }
     };
     arm();
+    let beats = 0;
     const beat = () => {
+      // Cheap every beat: a Steam UI reload can drop the menu and re-arming is
+      // a no-op otherwise.
       arm();
+      // The library/HLTB reconcile costs a SlsHltbGet (1.1 MB over the bridge)
+      // and the panel refreshes it whenever it opens, so only every tenth beat
+      // (5 min) pays for it while the menu stays closed.
+      beats += 1;
+      if (beats % 10 !== 0) return;
       pushLibrary(w);
       refreshHltbData(w)
         .then(() => safeHook(w, 'sort sync', () => syncSortAs(w)))
         .catch(error => reportAgentFailure(w, 'hltb refresh', error));
     };
+    // 30 s liveness beat; the expensive work inside it is throttled above.
     if (typeof w.setInterval === 'function') w.setInterval(beat, 30000);
     if (typeof w.setTimeout === 'function') w.setTimeout(() => pushLibrary(w), 60000);
     // The panel writes the sort order and artwork requests in localStorage;

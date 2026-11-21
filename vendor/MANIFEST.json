@@ -49,7 +49,7 @@
           "source_path": "plugin/public/agent.js"
         },
         "public/panel.js": {
-          "sha256": "abc76fcb05545ce731ac50a4bd892427b7c875138cfd91f4584adbcc9aa4b092",
+          "sha256": "7ebac7dfddf25d50a91dc05adaf4d2845f843e130fbc92396ac7f08fcc195548",
           "source_path": "plugin/public/panel.js"
         }
       },

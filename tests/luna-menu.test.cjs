@@ -911,3 +911,38 @@ test('the installed channel answers only its own key and publishes the route at 
   assert.deepEqual(seen,[false],'the panel asks, this context hides');
   assert.equal(JSON.parse(storage.get(VIEW_RESULT_KEY)).browserVisible,false);
 });
+
+test('the HLTB read sends its revision and keeps the payload when unchanged',async()=>{
+  setHltbRecords({});
+  const payloads=[];
+  let reply={success:true,rev:'r1',games:{'1':{main:3600}}};
+  const w={Millennium:{callServerMethod:(addon,fn,payload)=>{payloads.push(payload||{});
+    return Promise.resolve(reply);}}};
+  assert.equal(await refreshHltbData(w),true);
+  assert.equal(hltbMinutesFor(1),60,'the full reply becomes the records');
+  reply={unchanged:true,rev:'r1'};
+  assert.equal(await refreshHltbData(w),true);
+  assert.deepEqual(payloads[1],{rev:'r1'},'the second call asks with the last revision');
+  assert.equal(hltbMinutesFor(1),60,'an unchanged reply keeps the previous payload');
+});
+
+test('a write or an error drops the cached HLTB revision',async()=>{
+  setHltbRecords({});
+  const calls=[];
+  let reply={success:true,rev:'r1',games:{'1':{main:3600}}};
+  let fail=false;
+  const w={appStore:{allApps:[{appid:1,display_name:'Alpha',app_type:1}]},
+    Millennium:{callServerMethod:(addon,fn,payload)=>{calls.push({fn,payload:payload||{}});
+      if(fail)return Promise.reject(new Error('boom'));
+      return Promise.resolve(reply);}}};
+  await refreshHltbData(w);
+  await pushLibrary(w); // SlsHltbLibrary writes the library (and its cache rev).
+  reply={success:true,rev:'r2',games:{'1':{main:3600}}};
+  await refreshHltbData(w);
+  assert.deepEqual(calls[calls.length-1].payload,{},'a library write clears the revision');
+  fail=true;
+  assert.equal(await refreshHltbData(w),false);
+  fail=false;
+  await refreshHltbData(w);
+  assert.deepEqual(calls[calls.length-1].payload,{},'an error clears the revision too');
+});

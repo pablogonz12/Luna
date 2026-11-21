@@ -1,0 +1,3 @@
+#!/bin/sh
+# Offline: no release is ever known.
+exit 1

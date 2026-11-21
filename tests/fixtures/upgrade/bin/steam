@@ -1,0 +1,5 @@
+#!/bin/sh
+# Never launch the real client; only satisfy "Steam is installed" checks.
+mkdir -p "$HOME/.local/share/Steam"
+[ -f "$HOME/.local/share/Steam/steam.sh" ] || printf '#!/bin/sh\nexit 0\n' > "$HOME/.local/share/Steam/steam.sh"
+exit 0

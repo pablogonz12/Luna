@@ -473,6 +473,7 @@
         finish(error instanceof Error ? error : Error('Steam view control is unavailable.'));
         return;
       }
+      // 40 ms only until the answer or VIEW_TIMEOUT_MS; finish() clears it.
       poll = (w.setInterval || setInterval)(read, 40);
       timer = (w.setTimeout || setTimeout)(() => finish(Error('Steam view control did not answer.')),
         Number(timeoutMs) > 0 ? Number(timeoutMs) : VIEW_TIMEOUT_MS);
@@ -594,6 +595,7 @@
     };
     if (place()) return;
     let tries = 0;
+    // Retries at most 120 times (one minute after boot) and stops on success.
     const timer = life.interval(() => {
       tries += 1;
       if (place() || tries > 120) { try { (w.clearInterval || clearInterval)(timer); } catch (_) { /* gone */ } }
@@ -760,6 +762,8 @@
 
     function schedule() {
       if (scheduled || state.show) return;
+      // Hidden store page: nothing to hide on screen, the 4 s pass catches up.
+      if (document.hidden === true) return;
       scheduled = true;
       const later = () => { scheduled = false; sweep(); };
       if (typeof w.setTimeout === 'function') life.timeout(later, 350);
@@ -788,6 +792,8 @@
         state.observer.observe(root, { childList: true, subtree: true });
         life.watch(state.observer);
       }
+      // Runs only while store_hide_followed is on and only on store pages; the
+      // pass is a querySelectorAll over the tiles, skipped while hidden.
       if (typeof w.setInterval === 'function') state.interval = life.interval(schedule, 4000);
     }
 
@@ -846,7 +852,12 @@
       }
     }
     refresh();
-    if (typeof w.setInterval === 'function') life.interval(refresh, 30000);
+    // Cheap (one RPC per 30 s) and it only paints; skipped while the window is
+    // hidden, and the focus listener refreshes right away when it returns.
+    if (typeof w.setInterval === 'function') life.interval(() => {
+      if (document.hidden === true) return;
+      refresh();
+    }, 30000);
     life.listen(w, 'focus', refresh);
     return { refresh };
   }
@@ -896,6 +907,9 @@
     let presence = null;
     let compressor = null;
     let hltb = null;
+    // Revision of the last cache payload. SlsHltbGet with the same rev answers
+    // {unchanged:true, rev} (59 B) instead of ~1 MB; the payload stays as is.
+    let hltbRev = null;
     let hltbQuery = '';
     let hltbQueue = null;
     let hltbEdit = null;
@@ -2513,9 +2527,29 @@
       if (document.getElementById(OVERLAY_ID)) paint();
     };
 
+    /* One reader for every SlsHltbGet: remembers the revision, keeps the
+       previous payload when the backend says unchanged, and forgets the rev
+       after any error (the next call asks for the full reply). */
+    async function readHltb() {
+      try {
+        const out = await rpc(w, 'SlsHltbGet', hltbRev === null ? {} : { rev: hltbRev });
+        if (out && out.unchanged === true) {
+          if (out.rev !== undefined) hltbRev = out.rev;
+          return hltb;
+        }
+        hltbRev = out && out.rev !== undefined ? out.rev : null;
+        return out;
+      } catch (error) {
+        hltbRev = null;
+        throw error;
+      }
+    }
+    // A write moves the backend's revision on, so the next read must be full.
+    const forgetHltbRev = () => { hltbRev = null; };
+
     async function refreshHltb() {
       try {
-        hltb = await rpc(w, 'SlsHltbGet');
+        hltb = await readHltb();
       } catch (error) {
         hltb = hltb || {};
       }
@@ -2594,58 +2628,273 @@
       };
       return true;
     }
-    // A patched shelf re-sorts on Steam's own renders, so it is only forced to
-    // re-render when it was just patched or the times/direction it last drew
-    // with changed. Forcing it on every pass fed the DOM observer below: each
-    // re-render mutated the DOM, which scheduled the next pass, indefinitely.
-    function refreshLibraryShelves() {
-      let root = null;
-      try { root = libraryRootFiber(); } catch (_) { root = null; }
-      if (!root) return 0;
+
+    /* --- Library shelf refresh -------------------------------------------
+       What the walk is for: Steam's home/library shelves are React class
+       instances with their own m_fnSort. A shelf whose sort is 12
+       ("HowLongToBeat") is patched to sort by the cached times, and it is
+       forced to re-render only when it was just patched or the times/direction
+       it last drew with changed. Every other shelf keeps Steam's own sorter.
+
+       Cost control, because the menu is normally closed while the user browses:
+       - the observer is bound to the library view container, not document.body,
+         and is re-bound only when that container appears or is replaced;
+       - a mutation only schedules work when Steam added element nodes outside
+         Luna's own UI, and only the fibers under those nodes are visited (a
+         WeakSet skips repeats), so a storm of unrelated mutations costs one
+         cheap filter pass;
+       - one pass runs in idle slices of <= 8 ms;
+       - the fallback rescan runs every 2 min, only while visible and focused,
+         and bails out when a cheap signature says nothing changed. */
+    const SHELF_SLICE_MS = 8;
+    const SHELF_DEBOUNCE_MS = 800;
+    const SHELF_SAFETY_MS = 120000;
+    const SHELF_QUIET_MS = 1500;
+    const SHELF_ROOT_CAP = 64;
+    const SHELF_QUEUE_CAP = 4096;
+    // Steam has no stable id for the library; the desktop shell's container
+    // class carries the stable "LibraryDisplaySize" suffix, the Deck/BPM shell
+    // uses this id. Either is the smallest element the shelves live under.
+    const LIBRARY_ROOT_IDS = ['GamepadUI_Library', 'GamepadUI_LibraryHome'];
+    const LIBRARY_ROOT_HINT = '[class*="LibraryDisplaySize"]';
+    let shelfObserverRoot = null;
+    let shelfObserver = null;
+    let shelfTimer = null;
+    let shelfWalkTimer = null;
+    let shelfIdleHandle = null;
+    let shelfQueue = [];
+    let shelfScheduled = false;
+    let shelfPendingRoots = [];
+    let shelfPassRunning = false;
+    let shelfPassStart = 0;
+    let shelfSeen = new WeakSet();
+    let shelfEpoch = { data: null, order: '' };
+    let shelfQuietUntil = 0;
+    let shelfSig = null;
+    const shelfStats = { walks: 0, walkMsTotal: 0, observerCallbacks: 0 };
+
+    function shelfNow() {
+      const perf = w.performance;
+      return perf && typeof perf.now === 'function' ? perf.now() : Date.now();
+    }
+    function libraryObserverRoot() {
+      for (const id of LIBRARY_ROOT_IDS) {
+        const node = document.getElementById ? document.getElementById(id) : null;
+        if (node) return node;
+      }
+      try {
+        return document.querySelector ? document.querySelector(LIBRARY_ROOT_HINT) : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    // Luna's own UI (the menu, its button, the Lumen overlay) never contains a
+    // Steam shelf, so mutations inside it are never worth a walk.
+    function lunaOwned(node) {
+      let current = node;
+      for (let depth = 0; current && depth < 64; depth += 1) {
+        const id = typeof current.id === 'string' ? current.id : '';
+        if (id.indexOf('sls-luna') === 0 || id.indexOf('lumen') === 0) return true;
+        current = current.parentNode || null;
+      }
+      return false;
+    }
+    function fiberOfNode(node) {
+      if (!node || typeof node !== 'object' || node.nodeType === 3) return null;
+      const key = fiberKey(node);
+      if (!key) return null;
+      const fiber = node[key];
+      return fiber && typeof fiber === 'object' ? fiber : null;
+    }
+    function shelfEpochCurrent() {
+      return shelfEpoch.data === hltb && shelfEpoch.order === hltbOrder();
+    }
+    function resetShelfWalk() {
+      shelfSeen = new WeakSet();
+      shelfEpoch = { data: hltb, order: hltbOrder() };
+    }
+    // Cheap "did anything change" check for the fallback pass: direction, route
+    // and a bounded node count of the container. No fiber access.
+    function shelfSignature() {
+      const root = shelfObserverRoot && shelfObserverRoot.isConnected !== false
+        ? shelfObserverRoot : libraryObserverRoot();
+      let count = 0;
+      if (root) {
+        const stack = [root];
+        while (stack.length && count < 4000) {
+          const node = stack.pop();
+          count += 1;
+          try {
+            const kids = node.children;
+            if (kids) for (let index = 0; index < kids.length; index += 1) {
+              if (kids[index]) stack.push(kids[index]);
+            }
+          } catch (_) { /* a live collection that changed under us */ }
+        }
+      }
+      return String(currentRoute(w) || '') + '|' + hltbOrder() + '|' + count;
+    }
+    function visitShelfFiber(node, data, order) {
+      const instance = node.stateNode;
+      const props = node.memoizedProps;
+      if (!instance || !props || !props.showcase) return;
+      if (props.showcase.eSortBy !== 12) {
+        if (instance.__slsHltbShelf && instance.__slsOrigSort) {
+          try { instance.m_fnSort = instance.__slsOrigSort; } catch (_) {}
+          instance.__slsHltbShelf = false;
+          instance.__slsHltbDrawn = null;
+        }
+        return;
+      }
+      const patched = patchShelfInstance(instance);
+      if (!patched && !instance.__slsHltbShelf) return;
+      const drawn = instance.__slsHltbDrawn;
+      if (!patched && drawn && drawn.data === data && drawn.order === order) return;
+      if (typeof instance.forceUpdate !== 'function') return;
+      try {
+        instance.forceUpdate();
+        instance.__slsHltbDrawn = { data, order };
+        // Those re-renders come back as mutations; they need no second pass.
+        shelfQuietUntil = shelfNow() + SHELF_QUIET_MS;
+      } catch (_) {}
+    }
+    function scheduleShelfPump() {
+      if (shelfScheduled || !shelfQueue.length) return;
+      shelfScheduled = true;
+      if (typeof w.requestIdleCallback === 'function') {
+        try {
+          shelfIdleHandle = w.requestIdleCallback(pumpShelfWalk, { timeout: 400 });
+          return;
+        } catch (_) { /* fall through to a plain timeout */ }
+      }
+      shelfWalkTimer = (w.setTimeout || setTimeout)(pumpShelfWalk, 16);
+    }
+    // One idle slice: <= 8 ms of fiber visiting, then re-arm. The pass counter
+    // and its wall time are what `luna selftest` reads.
+    function pumpShelfWalk() {
+      shelfScheduled = false;
+      shelfWalkTimer = null;
+      shelfIdleHandle = null;
+      if (tornDown === true) { shelfQueue = []; return; }
+      if (!shelfQueue.length) return;
+      if (!shelfPassRunning) {
+        shelfPassRunning = true;
+        shelfPassStart = shelfNow();
+        shelfStats.walks += 1;
+      }
+      const started = shelfNow();
       const data = hltb;
       const order = hltbOrder();
-      let refreshed = 0;
-      eachFiber(root, node => {
-        const instance = node.stateNode;
-        const props = node.memoizedProps;
-        if (!instance || !props || !props.showcase) return;
-        if (props.showcase.eSortBy !== 12) {
-          if (instance.__slsHltbShelf && instance.__slsOrigSort) {
-            try { instance.m_fnSort = instance.__slsOrigSort; } catch (_) {}
-            instance.__slsHltbShelf = false;
-            instance.__slsHltbDrawn = null;
-          }
-          return;
+      let visited = 0;
+      while (shelfQueue.length) {
+        const node = shelfQueue.pop();
+        if (!node) continue;
+        // A fiber already visited still has unseen descendants (a shelf can be
+        // added under an old container), so its children are queued anyway.
+        if (shelfSeen.has(node)) {
+          try { if (node.sibling) shelfQueue.push(node.sibling); } catch (_) {}
+          try { if (node.child) shelfQueue.push(node.child); } catch (_) {}
+          continue;
         }
-        const patched = patchShelfInstance(instance);
-        if (!patched && !instance.__slsHltbShelf) return;
-        const drawn = instance.__slsHltbDrawn;
-        if (!patched && drawn && drawn.data === data && drawn.order === order) return;
-        if (typeof instance.forceUpdate !== 'function') return;
-        try {
-          instance.forceUpdate();
-          instance.__slsHltbDrawn = { data, order };
-          refreshed += 1;
-        } catch (_) {}
-      });
-      return refreshed;
+        shelfSeen.add(node);
+        try { if (node.sibling) shelfQueue.push(node.sibling); } catch (_) {}
+        try { if (node.child) shelfQueue.push(node.child); } catch (_) {}
+        visitShelfFiber(node, data, order);
+        visited += 1;
+        if (visited >= 32 && shelfNow() - started >= SHELF_SLICE_MS) break;
+      }
+      if (shelfQueue.length) { scheduleShelfPump(); return; }
+      shelfPassRunning = false;
+      shelfStats.walkMsTotal += shelfNow() - shelfPassStart;
+      shelfSig = shelfSignature();
     }
-    let shelfTimer = null;
+    // Roots are fibers from nodes Steam just added; without them the whole tree
+    // from the library root is visited (a new cache object or direction always
+    // takes this path, since earlier passes drew with the old one).
+    function requestShelfWalk(roots) {
+      if (tornDown === true) return;
+      if (!shelfEpochCurrent()) { resetShelfWalk(); roots = null; }
+      const list = roots && roots.length ? roots : [libraryRootFiber()];
+      for (const fiber of list) if (fiber) shelfQueue.push(fiber);
+      if (shelfQueue.length > SHELF_QUEUE_CAP) {
+        shelfQueue = shelfQueue.slice(-SHELF_QUEUE_CAP);
+        shelfSeen = new WeakSet();
+      }
+      scheduleShelfPump();
+    }
+    function refreshLibraryShelves() {
+      requestShelfWalk(null);
+    }
     function scheduleShelfRefresh(delay) {
       if (shelfTimer) return;
-      const schedule = w.setTimeout || setTimeout;
-      shelfTimer = schedule(() => {
+      shelfTimer = (w.setTimeout || setTimeout)(() => {
         shelfTimer = null;
-        // A hidden window has nothing to show; the periodic pass catches up.
-        if (document.hidden === true) return;
-        refreshLibraryShelves();
+        if (tornDown === true) { shelfPendingRoots.length = 0; return; }
+        // A hidden window has nothing to show; the fallback pass catches up.
+        if (document.hidden === true) { shelfPendingRoots.length = 0; return; }
+        requestShelfWalk(shelfPendingRoots.splice(0));
       }, delay == null ? 0 : delay);
+    }
+    /* Mutation filter: only element nodes Steam added outside Luna's UI can
+       bring new shelves, and only their fibers are queued. A thousand unrelated
+       records therefore cost one loop and no walk. */
+    function onLibraryMutations(records) {
+      shelfStats.observerCallbacks += 1;
+      if (tornDown === true || document.hidden === true) return;
+      if (shelfNow() < shelfQuietUntil) return;
+      let relevant = false;
+      for (let index = 0; index < records.length; index += 1) {
+        const record = records[index];
+        if (!record || record.type !== 'childList') continue;
+        const added = record.addedNodes;
+        if (!added || !added.length) continue;
+        if (lunaOwned(record.target)) continue;
+        for (let child = 0; child < added.length; child += 1) {
+          const node = added[child];
+          if (!node || node.nodeType === 3) continue;
+          if (lunaOwned(node)) continue;
+          const fiber = fiberOfNode(node);
+          if (!fiber) continue;
+          if (shelfPendingRoots.length < SHELF_ROOT_CAP) shelfPendingRoots.push(fiber);
+          relevant = true;
+        }
+        if (shelfPendingRoots.length >= SHELF_ROOT_CAP) break;
+      }
+      if (!relevant) return;
+      scheduleShelfRefresh(SHELF_DEBOUNCE_MS);
+    }
+    /* Binds the observer to the library container that is mounted now. Steam
+       fires no route event in this document, so the probe below calls this on
+       arrival and departure of the library view: nothing observes the shell
+       while another page is up. */
+    function syncShelfObserver() {
+      if (tornDown === true) return;
+      const root = libraryObserverRoot();
+      if (root === shelfObserverRoot) return;
+      if (shelfObserver) {
+        try { shelfObserver.disconnect(); } catch (_) { /* already dropped */ }
+        shelfObserver = null;
+      }
+      shelfObserverRoot = root;
+      resetShelfWalk();
+      if (!root || typeof w.MutationObserver !== 'function') return;
+      try {
+        shelfObserver = new w.MutationObserver(onLibraryMutations);
+        shelfObserver.observe(root, { childList: true, subtree: true });
+        life.watch(shelfObserver);
+      } catch (_) {
+        shelfObserver = null;
+        return;
+      }
+      // The library just mounted, so its shelves are new: visit them once.
+      scheduleShelfRefresh(0);
     }
 
     async function forgetHltb(row) {
       hltbNotice = null;
       try {
         await rpc(w, 'SlsHltbForget', { appid: Number(row.id) });
+        forgetHltbRev();
         hltbEdit = null;
         await refreshHltb();
       } catch (error) {
@@ -2660,7 +2909,9 @@
     async function fetchHltbRpc(row) {
       for (let attempt = 0; ; attempt += 1) {
         try {
-          return await rpc(w, 'SlsHltbFetch', { appid: Number(row.id), name: row.name });
+          const out = await rpc(w, 'SlsHltbFetch', { appid: Number(row.id), name: row.name });
+          forgetHltbRev();
+          return out;
         } catch (error) {
           if (!error || error.code !== 'pending' || attempt >= 300) throw error;
           await sleep(250);
@@ -2743,7 +2994,7 @@
           const result = await fetchHltbWithPolicy(row, hltbQueue);
           if (result.skipped) hltbQueue.skipped += 1;
           else hltbQueue.done += 1;
-          const fresh = await rpc(w, 'SlsHltbGet').catch(() => null);
+          const fresh = await readHltb().catch(() => null);
           if (fresh && fresh.success !== false) hltb = fresh;
           hltbNotice = null;
           repaintIfOpen();
@@ -2857,6 +3108,7 @@
               extra: Number(inputs.extra.value) || 0,
               completionist: Number(inputs.completionist.value) || 0,
             }) });
+            forgetHltbRev();
             hltbEdit = null;
             await refreshHltb();
           } catch (error) {
@@ -5424,6 +5676,8 @@
       if (typeof w.MutationObserver !== 'function') return;
       const bar = findMenubar(document);
       if (!bar) return;
+      // Menubar only (never body): Lumen's own button is inserted there, and the
+      // callback is a no-op unless Luna is meant to hide it.
       try {
         const observer = new w.MutationObserver(() => { hideLumenLauncher(); });
         observer.observe(bar, { childList: true, subtree: true });
@@ -6361,7 +6615,7 @@
         compressor = compressor || {};
       }
       try {
-        hltb = await rpc(w, 'SlsHltbGet');
+        hltb = await readHltb();
       } catch (error) {
         hltb = hltb || {};
       }
@@ -6623,6 +6877,29 @@
       restoreMainView(w);
     }
 
+    // Read-only probe for `luna selftest` and `luna doctor --report`: the
+    // categories that exist and what is on screen right now. It cannot click,
+    // switch, write or navigate anything - the selftest does its own clicking
+    // through the DOM (`element.click()`), so this only has to answer.
+    w.__SlsLunaSelftest = {
+      tabs: () => visibleNav().map(entry => ({ id: entry.id, label: entry.label })),
+      state: () => ({
+        tab,
+        open: Boolean(document.getElementById(OVERLAY_ID)),
+        build: PANEL_BUILD,
+        embedding: Boolean(lumenEmbedState && lumenEmbedState.overlay),
+        hiddenView: Boolean(viewHiddenByLuna),
+        route: currentRoute(w) || '',
+        problems: PROBLEMS.slice(0),
+        // Shelf-walk cost, so `luna selftest` (and a human) can measure it live:
+        // passes started, their summed wall time, and mutation callbacks seen.
+        walks: shelfStats.walks,
+        walkMsTotal: Math.round(shelfStats.walkMsTotal * 10) / 10,
+        observerCallbacks: shelfStats.observerCallbacks,
+        shelfObserver: Boolean(shelfObserverRoot),
+      }),
+    };
+
     // Retiring this generation: every handle below is registered with `life`,
     // so the next mount (or a page reload) starts from a clean page.
     w.__SlsLunaTeardown = () => {
@@ -6644,11 +6921,30 @@
       // Give Lumen's launcher back before the observer that watches it goes.
       restoreLumenLauncher();
       life.teardown();
-      // The shelf refresh keeps one timeout of its own; drop it with the page.
+      // The shelf refresh keeps a timeout and an observer of its own; drop both
+      // with the page, so a retired panel never watches or walks again.
       if (shelfTimer) {
         try { (w.clearTimeout || clearTimeout)(shelfTimer); } catch (_) { /* already fired */ }
         shelfTimer = null;
       }
+      if (shelfWalkTimer) {
+        try { (w.clearTimeout || clearTimeout)(shelfWalkTimer); } catch (_) { /* already fired */ }
+        shelfWalkTimer = null;
+      }
+      if (shelfIdleHandle !== null) {
+        try { if (typeof w.cancelIdleCallback === 'function') w.cancelIdleCallback(shelfIdleHandle); } catch (_) {}
+        shelfIdleHandle = null;
+      }
+      if (shelfObserver) {
+        try { shelfObserver.disconnect(); } catch (_) { /* already dropped */ }
+        shelfObserver = null;
+      }
+      shelfObserverRoot = null;
+      shelfQueue = [];
+      shelfPendingRoots = [];
+      shelfSeen = new WeakSet();
+      shelfScheduled = false;
+      shelfPassRunning = false;
       try { stopJobPolling(); } catch (_) { /* never started */ }
       const node = document.getElementById(OVERLAY_ID);
       if (node && typeof node.remove === 'function') node.remove();
@@ -6703,12 +6999,19 @@
     });
     // Safety net: an add-on that mounted its floating panel before the flag was
     // set is removed on the next pass.
-    life.interval(() => { removeFloating(document); }, 4000);
+    // Skipped while hidden: no floating panel can appear on a window nobody is
+    // looking at, the next visible pass gets it.
+    life.interval(() => {
+      if (tornDown === true || document.hidden === true) return;
+      removeFloating(document);
+    }, 4000);
 
     /* The Lumen job follows itself only while the Updates page is open and
        visible. Fast while a job runs or a check is out, then slower and slower
        when nothing changes; never the network check, only the status files. */
     life.interval(() => {
+      // Returns on the first line while the menu is closed (no Updates tab, no
+      // overlay), so the 2 s tick costs one property read.
       if (tornDown || lumenBusy || document.hidden === true) return;
       if (tab !== 'updates' || !document.getElementById(OVERLAY_ID)) return;
       const terminalStarting = Boolean(lunaLumen && lunaLumen.terminal
@@ -6738,24 +7041,38 @@
     life.timeout(() => { consumeArtworkRequest(); }, 2500);
     // Home-shelf HLTB order lives in this window: re-scan after navigation and
     // re-apply after the cache or direction changes. No shared objects change.
+    // Two early passes cover Steam's late shelf render; the observer and the
+    // fallback pass below cover everything after that.
     life.timeout(() => { refreshLibraryShelves(); }, 3000);
     life.timeout(() => { refreshLibraryShelves(); }, 9000);
-    life.interval(() => { if (document.hidden !== true) refreshLibraryShelves(); }, 15000);
+    /* Presence probe: Steam fires no route event in this document, so the
+       observer's target is checked here. One getElementById (or one
+       querySelector over the stable library class) per 2 s, nothing while the
+       window is hidden; it re-binds only when the container actually changed. */
+    life.interval(() => {
+      if (tornDown === true || document.hidden === true) return;
+      syncShelfObserver();
+    }, 2000);
+    /* Fallback pass for a shelf that arrived without a mutation record (a
+       restored page, a Steam re-render): every 2 min, visible and focused only,
+       and skipped outright unless the cheap signature changed. */
+    life.interval(() => {
+      if (tornDown === true || document.hidden === true) return;
+      if (typeof document.hasFocus === 'function' && document.hasFocus() === false) return;
+      if (shelfSignature() === shelfSig) return;
+      if (!shelfEpochCurrent()) resetShelfWalk();
+      requestShelfWalk([libraryRootFiber()]);
+    }, SHELF_SAFETY_MS);
     life.listen(document, 'visibilitychange', () => {
-      if (document.hidden !== true) scheduleShelfRefresh(0);
+      if (document.hidden !== true) { syncShelfObserver(); scheduleShelfRefresh(0); }
     });
-    if (typeof w.MutationObserver === 'function') {
-      try {
-        const seen = new w.MutationObserver(() => { scheduleShelfRefresh(800); });
-        seen.observe(document.body || document, { childList: true, subtree: true });
-        life.watch(seen);
-      } catch (_) { /* a static view simply keeps its current order */ }
-    }
+    life.listen(w, 'focus', () => { syncShelfObserver(); });
+    syncShelfObserver();
     // Resume a background fetch pass after a Steam restart without making the
     // user open the menu: load the local times and continue where it left off.
     life.timeout(async () => {
       try {
-        hltb = await rpc(w, 'SlsHltbGet');
+        hltb = await readHltb();
       } catch (_) { /* the backend may still be starting */ }
       refreshLibraryShelves();
       maybeAutoFetch();

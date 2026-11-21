@@ -136,6 +136,20 @@ local home = os.getenv('HOME')
 local json = require('json')
 local repo = os.getenv('LUNA_REPO') or '.'
 
+-- The backend memoises SlsCompressorGet on file stamps. No stat module is
+-- installed here, so a tiny lfs stand-in supplies size + a bumpable
+-- modification time, which is what makes the cache observable.
+local stamps = {}
+package.preload['lfs'] = function()
+  return { attributes = function(path)
+    local f = io.open(path, 'rb')
+    if not f then return nil end
+    local size = f:seek('end'); f:close()
+    return { size = size, modification = stamps[path] or 0 }
+  end }
+end
+local function touch(path) stamps[path] = (stamps[path] or 0) + 1 end
+
 -- The standard install location is the discovery path under test.
 local tool = home .. '/.local/bin/btrfs-game-compressor'
 do
@@ -360,6 +374,19 @@ assert(qlive.queue.active, 'the queue was not observed as active')
 assert(call(reg, 'SlsCompressorCancel').success, 'cancel refused the queue')
 local qstopped = wait_for(reg, function(state) return state.queue and not state.queue.active end, 15)
 assert(qstopped.queue.finished == false, 'a cancelled queue must not read as finished')
+assert(qstopped.queue.cancelled == true, 'the cancel marker must be reported')
+-- The TERM does not always win: bash defers it while a game runs, so the driver
+-- can still append its own final lines. The marker written before the signal
+-- must keep that pass from reading as finished.
+local queue_state = home .. '/.local/share/slssteam-integrations/compressor/queue.state'
+do
+  local late = io.open(queue_state, 'ab')
+  late:write('done\t1\t1\t0\t0\nfinish\t1\t1\n')
+  late:close()
+end
+local late = call(reg, 'SlsCompressorGet')
+assert(late.queue.cancelled == true, 'a late finish must not clear the cancel marker')
+assert(late.queue.finished == false, 'a driver that finished after the signal must not read as finished')
 
 -- The preview is read-only and reports its own argv.
 assert(call(reg, 'SlsCompressorRun', json.encode({action = 'preview'})).success, 'the preview was refused')
@@ -432,5 +459,25 @@ assert(call(reg, 'SlsCompressorGet', json.encode({light = true})).stats == nil,
 assert(call(reg, 'SlsCompressorRun', json.encode({action = 'recheck'})).success, 'the recheck was refused')
 local rechecked = wait_for(reg, function(state) return state.job and not state.job.running end)
 assert(rechecked.job.log:find('ARGS: --recheck', 1, true), 'the recheck used the wrong command')
+
+
+-- --------------------------------------------------------------- read cache
+local settings_file = home .. '/.local/share/slssteam-integrations/compressor/settings.json'
+local cached = reg.SlsCompressorGet()
+assert(reg.SlsCompressorGet() == cached, 'a settled backend must answer from the memo')
+-- An explicit refresh always rebuilds, even with nothing changed.
+local refreshed = call(reg, 'SlsCompressorGet', json.encode({refresh = true}))
+assert(refreshed.success == true and refreshed.plan.total == 2, 'refresh must rebuild the shape')
+-- A write from outside (another surface, a hand edit) invalidates at once.
+do
+  local f = io.open(settings_file, 'rb')
+  local data = json.decode(f:read('*a')); f:close()
+  data.runOrder = 'library'
+  local out = io.open(settings_file, 'wb')
+  out:write(json.encode(data)); out:close()
+end
+touch(settings_file)
+assert(call(reg, 'SlsCompressorGet').settings.runOrder == 'library',
+  'a changed settings file must invalidate the memo')
 
 print('Luna compressor backend OK: discovery, jobs, settings, mirroring, composition, guards, cancel, stats')

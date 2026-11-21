@@ -84,6 +84,41 @@ local function read_text(path)
   return data
 end
 
+-- ---------------------------------------------------------------- read cache
+--
+-- SlsCompressorGet decodes the tool's report, tails up to 512 KB of the queue
+-- log and reads the ledger on every call, and the panel polls it. A settled
+-- answer is therefore memoised on the stamps (size, and modification time when
+-- lfs is there) of every file below it was built from; a change on disk
+-- invalidates it at once and a short TTL bounds a same-size rewrite. The wire
+-- string is cached, so a hit does no decode, no log read and no encode.
+local GET_CACHE_TTL = 15
+
+local lfs = select(2, pcall(require, 'lfs'))
+if type(lfs) ~= 'table' or type(lfs.attributes) ~= 'function' then lfs = nil end
+-- With no stat source a cache cannot notice a change, so it stays off.
+local has_stat = lfs ~= nil or type(fs.size) == 'function'
+
+local function file_stamp(path)
+  if lfs then
+    local ok, attr = pcall(lfs.attributes, path)
+    if ok and type(attr) == 'table' then
+      return tostring(attr.size or 0) .. ':' .. tostring(attr.modification or 0)
+    end
+    return 'missing'
+  end
+  local ok, size = pcall(fs.size, path)
+  if ok and size ~= nil then return tostring(size) end
+  return 'missing'
+end
+
+local function stamps_rev(paths)
+  if not has_stat then return nil end
+  local parts = {}
+  for index, path in ipairs(paths) do parts[index] = file_stamp(path) end
+  return table.concat(parts, '|')
+end
+
 local function dirname(path)
   return tostring(path):match('^(.*)/[^/]+$') or '.'
 end
@@ -542,8 +577,13 @@ local function read_queue(limit)
     end
   end
   local queue = { total = index, index = 0, current = nil, done = 0, failed = 0,
-    skipped = 0, saved = 0, finished = false, phase = '', doneBytes = 0,
-    totalBytes = 0, scannedBytes = 0, games = games }
+    skipped = 0, saved = 0, finished = false, cancelled = false, phase = '',
+    doneBytes = 0, totalBytes = 0, scannedBytes = 0, games = games }
+  -- A cancelled pass must never read as finished: bash defers SIGTERM while it
+  -- waits for a running game, so the driver can still append its final line
+  -- after the signal. The cancel marker the backend writes before signalling
+  -- therefore wins over any later `finish`.
+  local cancelled = false
   local state = read_text(QUEUE_STATE)
   if state then
     for line in state:gmatch('[^\n]+') do
@@ -571,12 +611,16 @@ local function read_queue(limit)
         elseif rc == 3 then queue.skipped = queue.skipped + 1
         else queue.failed = queue.failed + 1 end
         queue.saved = queue.saved + saved
+      elseif kind == 'cancel' then
+        cancelled = true
+        queue.finished = false
       elseif kind == 'finish' then
-        queue.finished = true
+        queue.finished = not cancelled
         queue.current = nil
       end
     end
   end
+  queue.cancelled = cancelled
   local log = read_tail_bytes(QUEUE_LOG, limit or 262144)
   for line in log:gmatch('[^\n]+') do
     local done_bytes, total_bytes = line:match('^PROGRESS|compress|(%d+)|(%d+)$')
@@ -712,6 +756,9 @@ end
 
 local function response(o) return json.encode(o) end
 
+-- One memo per backend instance; see GET_CACHE_TTL above.
+local get_cache = { rev = '', text = nil, expires = 0 }
+
 function M.register(registry)
   local settings = read_settings()
 
@@ -733,9 +780,31 @@ function M.register(registry)
     -- Polling clients can ask for the light shape: the plan and the job, with
     -- the per-game list left out so a one-second poll stays tiny.
     local light = false
+    local refresh = false
     if type(raw) == 'string' and #raw <= 200 then
       local ok, obj = pcall(json.decode, raw)
-      if ok and type(obj) == 'table' and obj.light == true then light = true end
+      if ok and type(obj) == 'table' then
+        light = obj.light == true
+        refresh = obj.refresh == true
+      end
+    end
+    -- Every file the reply is built from, so the memo below cannot outlive a
+    -- scan that landed or a queue that moved.
+    local inputs = { SETTINGS, STATUS, STATUS_AT, ATTEMPT_AT, JOB_FILE, JOB_DONE,
+      JOB_LOG, QUEUE_LIST, QUEUE_STATE, QUEUE_LOG, TOOL_STATE_FILE,
+      TOOL_DEDUPE_HISTORY, DIR, TOOL_DIR, tool or '' }
+    local key = function()
+      local rev = stamps_rev(inputs)
+      if not rev then return nil end
+      return rev .. '|' .. (light and '1' or '0')
+    end
+    local now = os.time()
+    local cacheKey = key()
+    -- `refresh` is the explicit escape hatch: a caller that just changed a
+    -- setting or finished a pass can skip the memo instead of waiting the TTL.
+    if not refresh and cacheKey and get_cache.text and get_cache.rev == cacheKey
+      and now < get_cache.expires then
+      return get_cache.text
     end
     -- job_state() first: observing a finished scan adopts its report, which is
     -- what this same response must already include.
@@ -774,7 +843,7 @@ function M.register(registry)
     -- for it.
     local stats = nil
     if not light then stats = build_stats(status, queue) end
-    return response({
+    local out = response({
       success = true,
       tool = {
         found = tool ~= nil,
@@ -790,6 +859,15 @@ function M.register(registry)
       job = job,
       autoStarted = autoStarted,
     })
+    -- A running pass (or a scan this call just started) rewrites its log and
+    -- state while the client polls, and the next call should see that at once,
+    -- so only a settled backend is memoised.
+    if not refresh and cacheKey and not autoStarted and not (job and job.running) then
+      get_cache.text = out
+      get_cache.rev = key()
+      get_cache.expires = os.time() + GET_CACHE_TTL
+    end
+    return out
   end
 
   registry.SlsCompressorPutSettings = function(raw)
@@ -887,6 +965,11 @@ function M.register(registry)
     if not write_text(QUEUE_LIST, table.concat(lines, '\n') .. '\n') then
       return response({success = false, error = 'Could not write the queue'})
     end
+    -- Per-pass state: a stale `finish` (or a cancel marker) from the previous
+    -- pass must not colour this one.
+    if not write_text(QUEUE_STATE, '') then
+      return response({success = false, error = 'Could not reset the queue state'})
+    end
     if not write_driver(tool) then
       return response({success = false, error = 'Could not write the queue driver'})
     end
@@ -912,6 +995,15 @@ function M.register(registry)
       return response({success = false, error = 'No job is running'})
     end
     local pid = math.floor(job.pid)
+    if job.action == 'run' and fs.exists(QUEUE_STATE) then
+      -- Before the signal, so a driver that outlives it cannot make the pass
+      -- read as finished; the marker also survives the driver's own finish.
+      local marker = io.open(QUEUE_STATE, 'ab')
+      if marker then
+        marker:write('cancel\t' .. tostring(os.time()) .. '\n')
+        marker:close()
+      end
+    end
     local group = process_group(pid)
     local command
     if group and group == pid then

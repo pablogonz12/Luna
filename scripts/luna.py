@@ -38,6 +38,13 @@ Commands:
                                         ~/.local/share/Luna/state/update-<timestamp>.log
     luna uninstall [--only NAME]
     luna verify [--sources]             manifest, payload and drift checks
+    luna selftest [--json] [--keep-open]
+                                        drive the real menu in the running Steam over CDP:
+                                        every sidebar page, the read-only status RPCs, the
+                                        Store route (report only); never writes, never navigates
+    luna doctor [--report [--out FILE]]
+                                        print a health check, or write one redacted report file
+                                        for sharing (versions, units, journals, last selftest)
     luna vendor [--source-dir DIR]      re-pin payloads from the add-on projects
     luna release [--out DIR] [--publish]  build a bundle tarball (+ sha256) for other machines
     luna update --bundle FILE | --url URL | --latest [--only NAME] [--dry-run]
@@ -1345,6 +1352,7 @@ def cmd_release(options):
         ('addons', ROOT / 'addons'),
         ('vendor/MANIFEST.json', MANIFEST_PATH),
          ('scripts/luna.py', ROOT / 'scripts' / 'luna.py'),
+        ('scripts/luna_selftest.py', ROOT / 'scripts' / 'luna_selftest.py'),
         ('scripts/steam-machine.py', ROOT / 'scripts' / 'steam-machine.py'),
         ('scripts/patch-lumen.py', PATCHER),
         ('bridge/bridge.lua', BRIDGE_SOURCE),
@@ -1856,6 +1864,7 @@ def ours_cli_launcher(launcher):
 def runtime_sources():
     """(relative path, source) for the support tree an installed copy needs."""
     rels = ['scripts/patch-lumen.py', 'scripts/steam-machine.py',
+            'scripts/luna_selftest.py',
             'bridge/bridge.lua', 'vendor/MANIFEST.json']
     for name in ADDONS:
         for source_rel, _dest in ADDON_FILES[name]:
@@ -7302,8 +7311,58 @@ cmd_clean_guard = lambda options: (run_locked(cmd_clean, options) if getattr(opt
                                    and not getattr(options, 'dry_run', False) else cmd_clean(options))
 
 
+def _selftest_module():
+    """Load luna_selftest.py beside luna.py, or from the deployed runtime tree."""
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    candidates = (here / 'luna_selftest.py',
+                  ROOT / 'scripts' / 'luna_selftest.py',
+                  here / 'runtime' / 'scripts' / 'luna_selftest.py')
+    path = next((item for item in candidates if item.is_file()), None)
+    if path is None:
+        print('FAIL: luna_selftest.py is missing beside luna.py; reinstall Luna '
+              '(luna install --force).', file=sys.stderr)
+        return None
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location('luna_selftest', str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def cmd_selftest(options):
+    """Live menu checks against the running Steam over CDP (never writes)."""
+    module = _selftest_module()
+    if module is None:
+        return EXIT_CORRUPT
+    code, _report = module.run_selftest(
+        json_output=getattr(options, 'json', False),
+        keep_open=getattr(options, 'keep_open', False),
+        host=active_host(),
+        backend_names=module.backend_rpc_names(ROOT / 'addons'),
+    )
+    return code
+
+
 def cmd_doctor(options):
-    """Print-only health check: preflight, update-block heal check, launch options, pacman."""
+    """Print-only health check: preflight, update-block heal check, launch options, pacman.
+
+    `--report` writes one redacted, shareable text file instead (and prints its path).
+    """
+    if getattr(options, 'report', False):
+        module = _selftest_module()
+        if module is None:
+            return EXIT_CORRUPT
+        out = Path(options.out).expanduser() if getattr(options, 'out', None) else None
+        try:
+            path = module.build_report(out=out, luna=sys.modules[__name__],
+                                       luna_py=Path(__file__).resolve())
+        except OSError as error:
+            print('FAIL: could not write the report: %s' % error, file=sys.stderr)
+            return EXIT_CORRUPT
+        print('wrote %s' % path)
+        return EXIT_OK
     print('host       : %s' % host_label())
     code = cmd_preflight(argparse.Namespace(only=[], no_heal=True))
     print('\n== update block (heal check, nothing is changed) ==')
@@ -7901,6 +7960,7 @@ def build_parser():
                           ('bootstrap', cmd_bootstrap),
                           ('update-all', cmd_update_all),
                           ('doctor', cmd_doctor),
+                          ('selftest', cmd_selftest),
                           ('launchers', cmd_launchers_locked),
                            ('timer', cmd_timer), ('hook', cmd_hook_locked), ('host', cmd_host_locked),
                           ('lumen', cmd_lumen_guard), ('clean', cmd_clean_guard)):
@@ -7911,6 +7971,18 @@ def build_parser():
         if name == 'status':
             child.add_argument('--strict', action='store_true',
                                help='exit 1 instead of 6 when a payload differs (CI gate)')
+        if name == 'selftest':
+            child.add_argument('--json', action='store_true',
+                               help='print one JSON object instead of PASS/FAIL lines')
+            child.add_argument('--keep-open', action='store_true',
+                               help='leave the menu open and skip the close/no-hidden-view checks')
+        if name == 'doctor':
+            child.add_argument('--report', action='store_true',
+                               help='write one redacted report file for sharing instead of '
+                                    'printing the health check (the last line is its path)')
+            child.add_argument('--out', metavar='FILE',
+                               help='where --report writes (default '
+                                    '~/luna-report-<timestamp>.txt)')
         if name == 'install':
             child.add_argument('--lumen', action='store_true',
                                help='opt in to the Lumen stack: pin Steam, install Lumen/LuaTools/'
