@@ -3,7 +3,40 @@
 Notable changes to the Luna bundle. Versions follow the `luna` add-on payload
 (the bundle version); the other add-ons keep their own versions.
 
-## Unreleased
+## 0.14.19 — 2026-11-21
+
+- **Playtime across two machines**: each installation writes only its own
+  contribution file and the reply is the merge of all of them, so a desktop and
+  a laptop sharing the data directory through Syncthing cannot overwrite each
+  other. A per-writer high-water floor keeps a stale ledger from lowering
+  recorded totals, recovered pulses are revalidated against the baseline,
+  conflict copies are merged once, imports carry their export time, and every
+  store has a `.bak` with atomic writes. 30 smoke tests, from three independent
+  reviews.
+- **Page fixes**: Presence says when Discord cannot publish and why; Playtime
+  has one time format, a busy Save and a two-step import confirm; Artwork shows
+  change times, refuses Undo at zero depth and asks for a restart only when the
+  kind needs one; Graphics marks the GPU in use and "checked N s ago"; a run of
+  rate-limit and error states are rendered inline.
+- **Faster tabs**: a tab switch issues only that page's reads, and issues them
+  together — 13 sequential round trips became 5 plus parallel page calls.
+  HowLongToBeat data is read with its `rev` and only when something needs it.
+- **Backends**: HowLongToBeat no longer matches a sequel to the base game and
+  re-checks stored matches instead of trusting them; every store is written
+  atomically with a `.bak` and reports recovery; Presence running entries
+  expire and the reply states whether Discord can publish; SteamGridDB keeps
+  the key server-side, reports change times and rate limits; Graphics reports
+  the GPU in use; page-load handlers are cached (Health 199 → 8 ms, HLTB first
+  reply 223 → 3 ms) behind a latency budget test.
+- **Menu**: artwork undo and history per slot, a 30-day Playtime chart with a
+  week-over-week line, and arrow-key navigation for the sidebar.
+- **Installer and health**: `--dry-run` prints the plan and never stops for a
+  running Steam; a stopped one-liner tells you to re-run the one-liner rather
+  than a deleted temporary path; the bridge records when it attached, so
+  `luna doctor` distinguishes "host started, Steam closed" from "stale".
+- **`luna selftest`** now settles the backend before timing calls, checks the
+  embedded Lumen page by its position rather than DOM containment, and works
+  when Steam's window is hidden.
 
 - **Luna menu on Store and Community**: the menu opens clickable there now. On
   those routes Steam composites a separate browser view above the shell
