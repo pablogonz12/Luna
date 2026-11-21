@@ -57,6 +57,169 @@ local function read_file(path)
   return raw
 end
 
+-- --------------------------------------------------------------- durability
+--
+-- Every store this backend owns is written to a temporary name and renamed over
+-- the target, so a reader never sees a half-written file. The previous good
+-- copy is kept as <file>.bak first: a truncated store is then recovered on the
+-- next read instead of starting from nothing. These files live in a
+-- Syncthing-shared directory (~/.local/share/slssteam-integrations), so each
+-- one also has a hard size cap; the numbers below are the answer to "how big
+-- may this file get":
+--   hltb.json          4 MB  (and at most 8000 records)
+--   hltb-library.json  2 MB  (the agent already sends at most 5000 entries)
+--   luna.json          64 KB (a dozen booleans and short strings)
+--   hltb-wire.txt      6 MB  (a cache of the encoded store, ~1.35x its size; dropped and rebuilt)
+--   sidecars           8 KB  each (count, scorer marker, hygiene summary)
+--   *.bak              same cap as the file it mirrors, one copy
+--   *.corrupt-<ts>     the broken original, at most 3 kept per file
+local FILE_CAPS = {
+  store = 4 * 1024 * 1024,
+  library = 2 * 1024 * 1024,
+  prefs = 64 * 1024,
+  wire = 6 * 1024 * 1024,
+  sidecar = 8 * 1024,
+}
+local MAX_STORE_RECORDS = 8000
+local MAX_CORRUPT_COPIES = 3
+local BAK_SUFFIX = '.bak'
+-- Only the last few recoveries are worth carrying into a reply; they are
+-- transient on purpose (the files themselves are the durable record).
+local recovery_log = {}
+
+local function note_recovery(entry)
+  recovery_log[#recovery_log + 1] = entry
+  while #recovery_log > 5 do table.remove(recovery_log, 1) end
+end
+
+local function last_recovery()
+  return recovery_log[#recovery_log]
+end
+
+local function file_exists(path)
+  local handle = io.open(path, 'rb')
+  if handle then handle:close(); return true end
+  return false
+end
+
+local function read_json_small(path)
+  local raw = read_file(path)
+  if not raw then return nil end
+  local ok, parsed = pcall(json.decode, raw)
+  if ok and type(parsed) == 'table' then return parsed end
+  return nil
+end
+
+-- tmp + rename only, no backup: the primitive the .bak copy itself uses.
+local function write_bytes(path, text)
+  if type(text) ~= 'string' then return false, 'nothing to write' end
+  local dir = fs.parent_path(path)
+  if dir and dir ~= '' then fs.create_directories(dir) end
+  local tmp = path .. '.tmp'
+  local handle, why = io.open(tmp, 'wb')
+  if not handle then return false, tostring(why or ('cannot write ' .. path)) end
+  local written = handle:write(text)
+  local closed = handle:close()
+  if not written or not closed then
+    os.remove(tmp)
+    return false, 'write failed for ' .. path
+  end
+  if not os.rename(tmp, path) then
+    os.remove(tmp)
+    return false, 'rename failed for ' .. path
+  end
+  return true
+end
+
+-- The durable write: keep the current good copy as .bak, then replace atomically.
+local function atomic_write(path, text, cap)
+  if type(text) ~= 'string' then return false, 'nothing to write' end
+  if cap and #text > cap then
+    return false, (path:match('[^/]+$') or path) .. ' would exceed its '
+      .. tostring(cap) .. '-byte cap (' .. tostring(#text) .. ' bytes)'
+  end
+  local previous = read_file(path)
+  if previous and previous ~= '' and (not cap or #previous <= cap) then
+    -- Best effort: a missing .bak must not lose the new write.
+    write_bytes(path .. BAK_SUFFIX, previous)
+  end
+  return write_bytes(path, text)
+end
+
+-- A corrupt original is kept for inspection, never deleted silently. At most
+-- MAX_CORRUPT_COPIES are retained per file; the oldest goes when a fourth
+-- arrives and the recovery message says so.
+local function prune_corrupt(path)
+  local dir = fs.parent_path(path)
+  local prefix = (path:match('[^/]+$') or path) .. '.corrupt-'
+  local ok, items = pcall(fs.list, dir)
+  if not ok or type(items) ~= 'table' then return end
+  local found = {}
+  for _, item in ipairs(items) do
+    local name = tostring((type(item) == 'table' and item.name) or item or '')
+    if name:sub(1, #prefix) == prefix then found[#found + 1] = name end
+  end
+  table.sort(found)
+  local removed = {}
+  while #found > MAX_CORRUPT_COPIES do
+    local oldest = table.remove(found, 1)
+    if os.remove(dir .. '/' .. oldest) then removed[#removed + 1] = oldest end
+  end
+  return removed
+end
+
+local function keep_corrupt(path)
+  local base = path .. '.corrupt-' .. tostring(os.time())
+  local candidate, index = base, 1
+  while file_exists(candidate) do
+    index = index + 1
+    candidate = base .. '-' .. tostring(index)
+  end
+  if not os.rename(path, candidate) then return nil end
+  local removed = prune_corrupt(path)
+  return candidate, removed
+end
+
+-- Reads a JSON store, recovering the previous good copy when the live file is
+-- torn. Returns the decoded table, or nil when nothing usable is left (the file
+-- is then kept as .corrupt-<ts> and the caller starts from a blank store).
+local function read_store_file(path, label)
+  local raw = read_file(path)
+  if not raw then return nil end
+  local ok, parsed = pcall(json.decode, raw)
+  if ok and type(parsed) == 'table' then return parsed end
+  local backup = read_file(path .. BAK_SUFFIX)
+  local restored = nil
+  if backup then
+    local ok_backup, decoded = pcall(json.decode, backup)
+    if ok_backup and type(decoded) == 'table' then restored = decoded end
+  end
+  local kept, pruned = keep_corrupt(path)
+  local kept_name = kept and kept:match('[^/]+$') or nil
+  if restored then
+    write_bytes(path, backup)
+    note_recovery({
+      file = label,
+      recovered = true,
+      from = 'bak',
+      kept = kept_name,
+      message = label .. ' was unreadable; the previous good copy (' .. label .. BAK_SUFFIX
+        .. ') was restored' .. (kept_name and (' and the broken file is kept as ' .. kept_name) or '') .. '.',
+    })
+    return restored
+  end
+  note_recovery({
+    file = label,
+    recovered = false,
+    kept = kept_name,
+    pruned = pruned,
+    error = label .. ' was unreadable and no usable backup exists; '
+      .. (kept_name and ('the broken file is kept as ' .. kept_name .. ' and ') or '')
+      .. 'it started empty. Nothing was discarded.',
+  })
+  return nil
+end
+
 -- ------------------------------------------------------------------- caching
 --
 -- Two read-only RPCs build a whole payload from local files on every call
@@ -153,10 +316,8 @@ local function default_prefs()
 end
 
 local function load_prefs()
-  local raw = read_file(prefs_path)
-  if not raw then return default_prefs() end
-  local ok, decoded = pcall(json.decode, raw)
-  if not ok or type(decoded) ~= 'table' then return default_prefs() end
+  local decoded = read_store_file(prefs_path, 'luna.json')
+  if not decoded then return default_prefs() end
   local prefs = default_prefs()
   for key, kind in pairs(PREF_KEYS) do
     local value = decoded[key]
@@ -171,15 +332,8 @@ local function load_prefs()
 end
 
 local function persist_prefs(prefs)
-  fs.create_directories(fs.parent_path(prefs_path))
-  local tmp = prefs_path .. '.tmp'
-  local f = io.open(tmp, 'wb')
-  if not f then return false, 'cannot write prefs' end
-  f:write(json.encode(prefs))
-  local closed = f:close()
-  if not closed then os.remove(tmp); return false, 'cannot write prefs' end
-  local ok, err = os.rename(tmp, prefs_path)
-  if not ok then os.remove(tmp); return false, tostring(err) end
+  local ok, err = atomic_write(prefs_path, json.encode(prefs), FILE_CAPS.prefs)
+  if not ok then return false, tostring(err) end
   return true
 end
 
@@ -189,33 +343,162 @@ local function blank_store()
   return { version = 1, games = {} }
 end
 
+-- Decoding the store (~700 KB) is the most expensive thing a page-load handler
+-- can do, and two of them read it: SlsHltbGet (to encode the reply) and
+-- SlsLunaHealth (only to count its records). So the decoded table is kept
+-- until the file's stamp moves, and the count lives in a tiny sidecar written
+-- whenever the store is decoded or saved: Health then never decodes the store
+-- at all, and a page load pays one decode at most.
+local store_memo = { rev = '', data = nil }
+local count_path = data_dir .. '/hltb-count.json'
+
+local function store_stamp()
+  if not has_stat then return nil end
+  return file_stamp(store_path)
+end
+
+local function read_sidecar_count(rev)
+  if not rev then return nil end
+  local handle = io.open(count_path, 'rb')
+  if not handle then return nil end
+  local raw = handle:read('*a')
+  handle:close()
+  local ok, parsed = pcall(json.decode, raw or '')
+  if ok and type(parsed) == 'table' and parsed.rev == rev and type(parsed.count) == 'number' then
+    return parsed.count
+  end
+  return nil
+end
+
+local function write_sidecar_count(rev, count)
+  if not rev or type(count) ~= 'number' then return end
+  atomic_write(count_path, json.encode({ rev = rev, count = count }), FILE_CAPS.sidecar)
+end
+
+-- Which scorer produced the stored matches. Bumped whenever the matching rules
+-- change: the next read then re-validates every stored record once (no network)
+-- against the Steam name in the library, marks the ones that no longer score as
+-- a confident match `needsReview`/`stale` and leaves them in place, so a fetch
+-- replaces them with a fresh answer. The marker keeps that pass off the cached
+-- page-load path: a matching rev means the store was already reviewed.
+local SCORER_VERSION = 2
+local scorer_path = data_dir .. '/hltb-scorer.json'
+
+local function review_count(store)
+  local count = 0
+  for _, record in pairs(type(store) == 'table' and type(store.games) == 'table' and store.games or {}) do
+    if type(record) == 'table' and record.needsReview then count = count + 1 end
+  end
+  return count
+end
+
+local function write_scorer_marker(rev, scorer, review)
+  if not rev then return end
+  atomic_write(scorer_path, json.encode({ rev = rev, scorer = scorer or 0,
+    needsReview = review or 0 }), FILE_CAPS.sidecar)
+end
+
+local function read_scorer_marker()
+  local marker = read_json_small(scorer_path)
+  if type(marker) ~= 'table' then marker = read_json_small(scorer_path .. BAK_SUFFIX) end
+  if type(marker) ~= 'table' then return nil end
+  return marker
+end
+
+local function validation_pending()
+  local rev = store_stamp()
+  if not rev then
+    -- Without stat the marker cannot be trusted across calls; only the memo can.
+    return not (store_memo.data and store_memo.data.scorer == SCORER_VERSION)
+  end
+  local marker = read_scorer_marker()
+  if not marker then return true end
+  return marker.rev ~= rev or tonumber(marker.scorer) ~= SCORER_VERSION
+end
+
+-- The exact SlsHltbGet wire text is kept on disk as well, keyed by `rev`: a
+-- fresh Lua VM (a Steam restart) then serves its first HLTB page with one file
+-- read instead of decoding the store and re-encoding ~1 MB. Two files, not one
+-- wrapping JSON, so the text is never escaped again.
+local wire_cache = { rev = '', text = nil, expires = 0 }
+local wire_text_path = data_dir .. '/hltb-wire.txt'
+local wire_rev_path = data_dir .. '/hltb-wire.rev'
+
+local function read_wire_text(rev)
+  if not rev then return nil end
+  local handle = io.open(wire_rev_path, 'rb')
+  if not handle then return nil end
+  local stored = (handle:read('*a') or ''):gsub('%s+$', '')
+  handle:close()
+  if stored ~= rev then return nil end
+  local body = io.open(wire_text_path, 'rb')
+  if not body then return nil end
+  local text = body:read('*a')
+  body:close()
+  if not text or #text < 2 then return nil end
+  return text
+end
+
+local function write_wire_text(rev, text)
+  if not rev or type(text) ~= 'string' then return end
+  if #text > FILE_CAPS.wire then return end
+  if not write_bytes(wire_text_path, text) then return end
+  write_bytes(wire_rev_path, rev)
+end
+
+-- What the reply actually needs: the times, the name and the match quality.
+-- No reader in the repo (panel.js, agent.js, the store page) reads a record's
+-- `source` or `fetchedAt`, and those two fields are ~22% of the wire text
+-- (~210 KB of 950 KB here), so the read path leaves them out. Fetch and Put
+-- still return the whole record they just stored. Review flags are kept: the
+-- panel needs them to badge a record the re-validation no longer trusts.
+local function wire_games(games)
+  local out = {}
+  for key, record in pairs(games) do
+    if type(record) == 'table' then
+      out[key] = { name = record.name, match = record.match, id = record.id,
+        main = record.main, extra = record.extra, all = record.all,
+        completionist = record.completionist,
+        needsReview = record.needsReview == true or nil }
+    end
+  end
+  return out
+end
+
 local function load_store()
-  local raw = read_file(store_path)
-  if not raw then return blank_store() end
-  local ok, parsed = pcall(json.decode, raw)
-  if not ok or type(parsed) ~= 'table' or type(parsed.games) ~= 'table' then
+  local rev = store_stamp()
+  if rev and store_memo.rev == rev and store_memo.data then return store_memo.data end
+  local parsed = read_store_file(store_path, 'hltb.json')
+  if not parsed or type(parsed.games) ~= 'table' then
+    if parsed then
+      note_recovery({ file = 'hltb.json', recovered = false,
+        error = 'hltb.json has no game table; it started empty and the file was left in place.' })
+    end
     return blank_store()
   end
   parsed.version = 1
+  if rev then store_memo.rev, store_memo.data = rev, parsed end
   return parsed
 end
 
--- Atomic like the Playtime ledger: tmp file + rename, so a crash never leaves
--- a half-written store behind.
+-- Durable like the Playtime ledger: .bak of the previous good copy, then tmp
+-- file + rename, so a crash never leaves a half-written store behind.
 local function persist_store(data)
-  fs.create_directories(fs.parent_path(store_path))
-  local tmp = store_path .. '.tmp'
-  local f, why = io.open(tmp, 'wb')
-  if not f then return false, why or 'cannot write store' end
-  local written, werr = f:write(json.encode(data))
-  local closed, cerr = f:close()
-  if not written or not closed then
-    os.remove(tmp)
-    return false, werr or cerr or 'write failed'
+  local games = type(data.games) == 'table' and data.games or {}
+  local count = 0
+  for _ in pairs(games) do count = count + 1 end
+  if count > MAX_STORE_RECORDS then
+    return false, 'the HowLongToBeat store is full (' .. tostring(count) .. ' of '
+      .. tostring(MAX_STORE_RECORDS) .. ' records)'
   end
-  local ok, rerr = os.rename(tmp, store_path)
-  if not ok then os.remove(tmp); return false, rerr or 'rename failed' end
+  local ok, err = atomic_write(store_path, json.encode(data), FILE_CAPS.store)
+  if not ok then return false, tostring(err) end
   cache_drop(hltb_cache)
+  cache_drop(wire_cache)
+  local rev = store_stamp()
+  if rev then store_memo.rev, store_memo.data = rev, data end
+  write_sidecar_count(rev, count)
+  write_scorer_marker(rev, data.scorer or 0, review_count(data))
   return true
 end
 
@@ -223,10 +506,8 @@ end
 -- the times themselves: it is inventory, not measurements, and the panel uses
 -- it to show what is still missing. Written atomically like the store.
 local function load_library()
-  local raw = read_file(library_path)
-  if not raw then return { version = 1, updatedAt = 0, games = {} } end
-  local ok, parsed = pcall(json.decode, raw)
-  if not ok or type(parsed) ~= 'table' or type(parsed.games) ~= 'table' then
+  local parsed = read_store_file(library_path, 'hltb-library.json')
+  if not parsed or type(parsed.games) ~= 'table' then
     return { version = 1, updatedAt = 0, games = {} }
   end
   parsed.version = 1
@@ -234,18 +515,8 @@ local function load_library()
 end
 
 local function persist_library(data)
-  fs.create_directories(fs.parent_path(library_path))
-  local tmp = library_path .. '.tmp'
-  local f, why = io.open(tmp, 'wb')
-  if not f then return false, why or 'cannot write library' end
-  local written, werr = f:write(json.encode(data))
-  local closed, cerr = f:close()
-  if not written or not closed then
-    os.remove(tmp)
-    return false, werr or cerr or 'write failed'
-  end
-  local ok, rerr = os.rename(tmp, library_path)
-  if not ok then os.remove(tmp); return false, rerr or 'rename failed' end
+  local ok, err = atomic_write(library_path, json.encode(data), FILE_CAPS.library)
+  if not ok then return false, tostring(err) end
   cache_drop(hltb_cache)
   return true
 end
@@ -268,63 +539,262 @@ local ACCENTS = {
 function M.normalize(text)
   local out = tostring(text or ''):lower()
   out = out:gsub('\226\132\162', ''):gsub('\194\174', ''):gsub('\194\169', '') -- ™ ® ©
+  out = out:gsub("['\226\128\153]", '') -- apostrophes: Assassin's == Assassins
+  out = out:gsub('%s*&%s*', ' and ')
   for bytes, plain in pairs(ACCENTS) do out = out:gsub(bytes, plain) end
   out = out:gsub('[^%w]+', ' ')
   out = out:gsub('^%s+', ''):gsub('%s+$', '')
+  -- A leading article is not part of the title ("The Witcher 3" == "Witcher 3").
+  out = out:gsub('^the%s+', '')
   return out
 end
 
-local function tokens(normalized)
+local ROMAN = {
+  i = 1, ii = 2, iii = 3, iv = 4, v = 5, vi = 6, vii = 7, viii = 8, ix = 9, x = 10,
+  xi = 11, xii = 12, xiii = 13, xiv = 14, xv = 15, xvi = 16, xvii = 17, xviii = 18,
+  xix = 19, xx = 20,
+}
+local NUMBER_WORDS = {
+  one = 1, two = 2, three = 3, four = 4, five = 5, six = 6, seven = 7, eight = 8,
+  nine = 9, ten = 10, eleven = 11, twelve = 12, thirteen = 13, fourteen = 14,
+  fifteen = 15, sixteen = 16, seventeen = 17, eighteen = 18, nineteen = 19, twenty = 20,
+}
+-- Edition words describe another release of the SAME game, so they are noise at
+-- the end of a title. "Part"/"Chapter" are NOT here: they mark a sequel.
+local EDITION_TOKENS = {
+  remastered = true, remaster = true, remake = true, redux = true, hd = true, goty = true,
+  definitive = true, deluxe = true, ultimate = true, complete = true, enhanced = true,
+  special = true, collectors = true, edition = true, anniversary = true, gold = true,
+  game = true, of = true, the = true, year = true, directors = true, director = true,
+  cut = true, final = true, extended = true, legacy = true, premium = true, digital = true,
+}
+-- A candidate that is really a soundtrack, demo or playtest of the game is not
+-- the game: the query would get its times from the wrong page.
+local NON_GAME_TOKENS = {
+  soundtrack = true, ost = true, demo = true, playtest = true, beta = true, dlc = true,
+  expansion = true, expansions = true, artbook = true, sdk = true, dedicated = true,
+  server = true, benchmark = true, editor = true,
+}
+local MATCH_FLOOR = 0.6
+
+-- A trailing parenthesised/bracketed year ("Resident Evil 4 (2023)") is a
+-- release marker, not part of the title; a bare trailing year is a sequel year
+-- and stays in the tokens (see classify_suffix).
+local function strip_bracket_year(text)
+  local out = tostring(text or '')
+  for _, pattern in ipairs({ '(%s*%b()%s*)$', '(%s*%b[]%s*)$' }) do
+    out = out:gsub(pattern, function(group)
+      local inner = group:gsub('[%(%)%[%]%s]', '')
+      if inner:match('^%d%d%d%d$') then return '' end
+      return group
+    end)
+  end
+  return out
+end
+
+-- The comparison form of a title: normalised words, no leading article, roman
+-- numerals as arabic (so "II" == "2" and "V" == "5"), no edition suffix.
+local function core_tokens(text)
+  local normalized = M.normalize(strip_bracket_year(text))
+  if normalized == '' then return {} end
   local list = {}
   for token in normalized:gmatch('%S+') do list[#list + 1] = token end
+  for index, token in ipairs(list) do
+    local value = ROMAN[token]
+    if value then list[index] = tostring(value) end
+  end
+  while #list > 1 and EDITION_TOKENS[list[#list]] do table.remove(list) end
   return list
 end
 
-local function token_overlap(query, name)
-  local q = tokens(query)
-  local n = {}
-  for _, token in ipairs(tokens(name)) do n[token] = true end
-  if #q == 0 then return 0 end
+local function is_year(token)
+  return token and token:match('^%d%d%d%d$') ~= nil
+    and tonumber(token) >= 1950 and tonumber(token) <= 2035
+end
+
+local function is_number_token(token)
+  if not token then return false end
+  if token:match('^%d+$') then return true end
+  return NUMBER_WORDS[token] ~= nil
+end
+
+-- What a longer title adds after the shared prefix: a subtitle ("Wild Hunt",
+-- same game), a sequel marker ("II", "2", "Part 2", "2024") or the name of a
+-- non-game page (a soundtrack, a demo, a playtest).
+local function classify_suffix(suffix)
+  if #suffix == 0 then return 'subtitle' end
+  for _, token in ipairs(suffix) do
+    if NON_GAME_TOKENS[token] then return 'nongame' end
+  end
+  local head = suffix[1]
+  if is_number_token(head) then return 'sequel' end
+  if (head == 'part' or head == 'chapter' or head == 'episode' or head == 'vol'
+      or head == 'volume' or head == 'season' or head == 'act') and is_number_token(suffix[2]) then
+    return 'sequel'
+  end
+  return 'subtitle'
+end
+
+local function coverage(list, other)
+  local set = {}
+  for _, token in ipairs(other) do set[token] = true end
   local hits = 0
-  for _, token in ipairs(q) do if n[token] then hits = hits + 1 end end
-  return hits / #q
+  for _, token in ipairs(list) do if set[token] then hits = hits + 1 end end
+  return hits / #list
 end
 
 -- How well one candidate title answers the query: (score, quality) or nil.
--- Precision matters more than recall here: a common word shared with an
--- unrelated title must not clear the floor, so token overlap is measured in
--- both directions and only good coverage of both sides counts as strong.
+-- Precision matters more than recall: a sequel, a soundtrack or a playtest page
+-- must never supply the times of the game itself, so those score 'weak' and
+-- pick_match refuses them. Editions of the same game (Remastered, Definitive,
+-- GOTY, Director's Cut) are stripped and still match.
 function M.name_score(query, name)
-  local q = M.normalize(query)
-  local candidate = M.normalize(name)
-  if q == '' or candidate == '' then return nil end
-  if candidate == q then return 1, 'exact' end
-  -- Word-boundary prefixes: "Hades" -> "Hades II" or "The Witcher 3" ->
-  -- "The Witcher 3: Wild Hunt", the usual sequel/subtitle shape.
-  if candidate:sub(1, #q + 1) == q .. ' ' then return 0.9, 'strong' end
-  if q:sub(1, #candidate + 1) == candidate .. ' ' then return 0.85, 'strong' end
-  local q_cov = token_overlap(q, candidate)
-  local c_cov = token_overlap(candidate, q)
-  if q_cov >= 0.75 and c_cov >= 0.5 then
-    return math.min(0.8 * q_cov + 0.2 * c_cov, 0.8), 'strong'
+  local q = core_tokens(query)
+  local c = core_tokens(name)
+  if #q == 0 or #c == 0 then return nil end
+  local qs, cs = table.concat(q, ' '), table.concat(c, ' ')
+  if qs == cs then return 1, 'exact' end
+  local short, long
+  if #c ~= #q then
+    if #c > #q then short, long = q, c else short, long = c, q end
   end
-  return (0.8 * q_cov + 0.2 * c_cov) * 0.6, 'weak'
+  if short then
+    local shared = true
+    for index = 1, #short do
+      if short[index] ~= long[index] then shared = false; break end
+    end
+    if shared then
+      local suffix = {}
+      for index = #short + 1, #long do suffix[#suffix + 1] = long[index] end
+      local kind = classify_suffix(suffix)
+      if kind == 'sequel' or kind == 'nongame' then return 0.35, 'weak' end
+      -- One bare word plus one extra word is too generic to trust: "Doom" must
+      -- not take "DOOM Eternal", "Hades" must not take "Hades' Star". A longer
+      -- subtitle ("LISA: The Painful") is the usual same-game shape and stays.
+      if #short == 1 and #suffix == 1 then return 0.45, 'weak' end
+      return 0.9, 'strong'
+    end
+  end
+  local q_cov = coverage(q, c)
+  local c_cov = coverage(c, q)
+  local q_set, c_set = {}, {}
+  for _, token in ipairs(q) do q_set[token] = true end
+  for _, token in ipairs(c) do c_set[token] = true end
+  -- A number on one side only is a sequel boundary, never a coincidence.
+  for _, token in ipairs(q) do
+    if not c_set[token] and (token:match('^%d+$') or is_year(token)) then return 0.3, 'weak' end
+  end
+  for _, token in ipairs(c) do
+    if not q_set[token] and (token:match('^%d+$') or is_year(token)) then return 0.3, 'weak' end
+  end
+  if q_cov >= 0.8 and c_cov >= 0.7 then
+    return math.min(0.8 * q_cov + 0.2 * c_cov, 0.82), 'strong'
+  end
+  return math.min((0.8 * q_cov + 0.2 * c_cov) * 0.6, 0.5), 'weak'
 end
 
--- Best candidate for `query` among the site's rows, refusing weak guesses:
--- pick_match returns nil when even the best score is too low to trust.
+-- Release year, when the site's row carries one. The search endpoint does not
+-- today, but a row with a year lets a tie be broken instead of guessed.
+local function row_year(row)
+  for _, field in ipairs({ 'release_world', 'release_date', 'release', 'year' }) do
+    local value = tonumber(row[field])
+    if value and value >= 1950 and value <= 2035 then return math.floor(value) end
+  end
+  for _, field in ipairs({ 'release_world', 'release_date', 'release' }) do
+    local found = tostring(row[field] or ''):match('(%d%d%d%d)')
+    if found then
+      local value = tonumber(found)
+      if value >= 1950 and value <= 2035 then return value end
+    end
+  end
+  return nil
+end
+
+local function query_year(query)
+  for found in tostring(query or ''):gmatch('%d%d%d%d') do
+    local value = tonumber(found)
+    if value >= 1950 and value <= 2035 then return value end
+  end
+  return nil
+end
+
+-- Best candidate for `query` among the site's rows. Ties prefer exact
+-- normalised equality, then a release year that matches a year in the query.
+-- Returns nil when nothing is a confident match, so the caller stores
+-- "no confident match" instead of the best weak guess.
 function M.pick_match(rows, query)
-  local best, best_score, best_quality
+  local best, best_score, best_quality, best_exact, best_year
+  local wanted = query_year(query)
   for _, row in ipairs(rows or {}) do
     if type(row) == 'table' then
       local score, quality = M.name_score(query, row.game_name or row.name)
-      if score and (best_score == nil or score > best_score) then
-        best, best_score, best_quality = row, score, quality
+      if score and quality ~= 'weak' and score >= MATCH_FLOOR then
+        local exact = quality == 'exact'
+        local year = row_year(row)
+        local better = false
+        if best == nil then
+          better = true
+        elseif exact ~= best_exact then
+          better = exact
+        elseif score > best_score + 0.0001 then
+          better = true
+        elseif math.abs(score - best_score) <= 0.0001 and wanted and year then
+          better = (best_year ~= wanted) and (year == wanted)
+        end
+        if better then
+          best, best_score, best_quality, best_exact, best_year = row, score, quality, exact, year
+        end
       end
     end
   end
-  if best == nil or best_score < 0.6 then return nil end
+  if best == nil then return nil end
   return best, best_quality, best_score
+end
+
+-- One-time, idempotent re-validation of the stored times against the current
+-- scorer, using the Steam names from the library (no network). A record whose
+-- title no longer scores as a confident match is marked `needsReview`/`stale`,
+-- never deleted: the times stay visible (flagged) and the next fetch of that
+-- game replaces the record with a fresh answer.
+function M.revalidate_store(store, library, now)
+  if type(store) ~= 'table' or type(store.games) ~= 'table' then return 0, 0, false end
+  local titles = {}
+  if type(library) == 'table' and type(library.games) == 'table' then
+    for _, item in ipairs(library.games) do
+      if type(item) == 'table' and item.appid ~= nil and type(item.name) == 'string' then
+        local key = tostring(math.floor(tonumber(item.appid) or 0))
+        if key ~= '0' then titles[key] = item.name end
+      end
+    end
+  end
+  local checked, flagged, changed = 0, 0, false
+  for key, record in pairs(store.games) do
+    if type(record) == 'table' then
+      local skip = record.match == 'manual' or record.match == 'none' or record.source == 'manual'
+        or type(record.name) ~= 'string' or record.name == ''
+      local title = titles[tostring(key)]
+      if not skip and title and title ~= '' then
+        checked = checked + 1
+        local score, quality = M.name_score(title, record.name)
+        local strong = score ~= nil and quality ~= 'weak' and score >= MATCH_FLOOR
+        if strong then
+          if record.needsReview or record.stale then
+            record.needsReview, record.stale, record.staleReason = nil, nil, nil
+            changed = true
+          end
+          if record.match ~= quality then record.match = quality; changed = true end
+        else
+          if not record.needsReview or not record.stale then changed = true end
+          record.needsReview = true
+          record.stale = true
+          record.staleReason = 'the stored title no longer matches "' .. title .. '"'
+        end
+      end
+      if record.needsReview then flagged = flagged + 1 end
+    end
+  end
+  if store.scorer ~= SCORER_VERSION then store.scorer = SCORER_VERSION; changed = true end
+  return checked, flagged, changed
 end
 
 -- ------------------------------------------------------------------ fetching
@@ -604,6 +1074,28 @@ local function count_keys(value)
   return count
 end
 
+-- The Health page only shows the number of cached games. Read the sidecar the
+-- store writes on save/decode; decode once (and remember) only when it is
+-- missing or the store moved, never on the plain status read.
+local function store_game_count()
+  local rev = store_stamp()
+  local cached = read_sidecar_count(rev)
+  if cached then return cached end
+  local count = count_keys(load_store().games)
+  write_sidecar_count(rev, count)
+  return count
+end
+
+local FILE_CAP_BY_NAME = {
+  ['hltb.json'] = FILE_CAPS.store,
+  ['hltb-library.json'] = FILE_CAPS.library,
+  ['luna.json'] = FILE_CAPS.prefs,
+  ['hltb-wire.txt'] = FILE_CAPS.wire,
+  ['hltb-count.json'] = FILE_CAPS.sidecar,
+  ['hltb-scorer.json'] = FILE_CAPS.sidecar,
+  ['hltb-hygiene.json'] = FILE_CAPS.sidecar,
+}
+
 local function dir_report(path, depth)
   local report = {}
   local ok, items = pcall(fs.list, path)
@@ -625,6 +1117,11 @@ local function dir_report(path, depth)
           entry.size = handle:seek('end') or 0
           handle:close()
         end
+        local cap = FILE_CAP_BY_NAME[name]
+        if not cap and name:match('sync%-conflict%-') then cap = FILE_CAPS.store end
+        if not cap and name:match('%.corrupt%-%d') then cap = FILE_CAPS.store end
+        if not cap and name:match('%.bak$') then cap = FILE_CAP_BY_NAME[name:gsub('%.bak$', '')] end
+        if cap then entry.cap = cap end
       end
       report[#report + 1] = entry
     end
@@ -992,8 +1489,152 @@ local function count_steam_conflicts()
   return count
 end
 
-local function steam_client_state()
-  -- What `luna steam status` reports on the shell, read-only for the menu:
+-- ------------------------------------------------------------ data hygiene
+--
+-- The data directory is shared with Syncthing. When two machines write at once
+-- Syncthing leaves `*.sync-conflict-<date>-<time>-<host>.json` copies behind;
+-- they are snapshots, never live data, so nothing here reads them (every loader
+-- opens one exact path). They are reported in Health and moved - never deleted -
+-- into conflicts/<date>/ by the SlsLunaHygiene RPC.
+local CONFLICTS_DIR = data_dir .. '/conflicts'
+local hygiene_path = data_dir .. '/hltb-hygiene.json'
+local CORRUPT_PATTERN = '%.corrupt%-%d'
+
+local function size_and_time(path)
+  if lfs then
+    local ok, attr = pcall(lfs.attributes, path)
+    if ok and type(attr) == 'table' then
+      return tonumber(attr.size) or 0, tonumber(attr.modification) or 0
+    end
+  end
+  local ok, size = pcall(fs.size, path)
+  if ok and size then return tonumber(size) or 0, 0 end
+  return 0, 0
+end
+
+local function data_dirs()
+  local dirs = { data_dir }
+  local ok, items = pcall(fs.list, data_dir)
+  if ok and type(items) == 'table' then
+    for _, item in ipairs(items) do
+      local name = tostring((type(item) == 'table' and item.name) or '')
+      if type(item) == 'table' and item.is_directory == true and name ~= ''
+        and name:sub(1, 1) ~= '.' and name ~= 'conflicts' then
+        dirs[#dirs + 1] = data_dir .. '/' .. name
+      end
+    end
+  end
+  return dirs
+end
+
+-- The data directory and its immediate subdirectories; a conflict copy can sit
+-- next to the playtime ledger too, not only next to hltb-library.json.
+local function hygiene_rev()
+  if not has_stat then return nil end
+  local parts = {}
+  for index, dir in ipairs(data_dirs()) do parts[index] = file_stamp(dir) end
+  return table.concat(parts, '|')
+end
+
+local function data_files(pattern)
+  local files = {}
+  for _, dir in ipairs(data_dirs()) do
+    local ok, items = pcall(fs.list, dir)
+    if ok and type(items) == 'table' then
+      local relative = (dir == data_dir) and '' or (dir:match('[^/]+$') or '')
+      for _, item in ipairs(items) do
+        local name = tostring((type(item) == 'table' and item.name) or item or '')
+        local directory = type(item) == 'table' and item.is_directory == true
+        if name ~= '' and not directory and name:match(pattern) then
+          local size, modified = size_and_time(dir .. '/' .. name)
+          files[#files + 1] = { name = name, dir = relative, path = dir .. '/' .. name,
+            size = size, modified = modified }
+        end
+      end
+    end
+  end
+  table.sort(files, function(a, b)
+    if a.dir == b.dir then return a.name < b.name end
+    return a.dir < b.dir
+  end)
+  return files
+end
+
+local function summarize(files)
+  local bytes, oldest = 0, nil
+  for _, file in ipairs(files) do
+    bytes = bytes + (file.size or 0)
+    if (file.modified or 0) > 0 and (oldest == nil or file.modified < oldest) then
+      oldest = file.modified
+    end
+  end
+  return { count = #files, totalBytes = bytes, oldest = oldest }
+end
+
+-- The expensive part is one directory listing plus a stat per conflict file, so
+-- the result is kept in a sidecar keyed on the directory stamp; Health and a
+-- repeated status call then pay one small read. The sidecar is only rewritten
+-- when the summary really changed, so the write cannot churn the directory
+-- timestamp Health is memoised on.
+local function hygiene_state(force, persist)
+  if not force then
+    local rev = hygiene_rev()
+    local cached = read_json_small(hygiene_path)
+    if rev and type(cached) == 'table' and cached.rev == rev
+      and type(cached.count) == 'number' then
+      return { count = cached.count, totalBytes = cached.totalBytes or 0,
+        oldest = cached.oldest, cached = true }
+    end
+  end
+  local files = data_files('sync%-conflict%-')
+  local summary = summarize(files)
+  summary.files = files
+  -- Only an explicit status/clean writes the sidecar. Health must not: its
+  -- cache is keyed on the directory stamp this write would move.
+  if persist then
+    local rev = hygiene_rev()
+    local previous = read_json_small(hygiene_path)
+    local same = type(previous) == 'table' and previous.rev == rev
+      and previous.count == summary.count and previous.totalBytes == summary.totalBytes
+      and (previous.oldest or nil) == (summary.oldest or nil)
+    if not same then
+      write_bytes(hygiene_path, json.encode({ rev = rev, count = summary.count,
+        totalBytes = summary.totalBytes, oldest = summary.oldest }))
+    end
+  end
+  return summary
+end
+
+local function corrupt_state()
+  local files = data_files(CORRUPT_PATTERN)
+  local summary = summarize(files)
+  summary.files = files
+  return summary
+end
+
+local function hygiene_clean()
+  local files = data_files('sync%-conflict%-')
+  if #files == 0 then return { success = true, moved = 0 } end
+  local folder = CONFLICTS_DIR .. '/' .. os.date('%Y-%m-%d')
+  fs.create_directories(folder)
+  local moved, failed = 0, {}
+  for _, file in ipairs(files) do
+    local target_dir = folder
+    if file.dir and file.dir ~= '' then
+      target_dir = folder .. '/' .. file.dir
+      fs.create_directories(target_dir)
+    end
+    if os.rename(file.path, target_dir .. '/' .. file.name) then
+      moved = moved + 1
+    else
+      failed[#failed + 1] = (file.dir ~= '' and (file.dir .. '/') or '') .. file.name
+    end
+  end
+  cache_drop(health_cache)
+  return { success = #failed == 0, moved = moved, folder = folder, failed = failed }
+end
+
+local function steam_client_state()  -- What `luna steam status` reports on the shell, read-only for the menu:
   -- running build, pin, match, update block and local package cache.
   local state = { build = '', pinned = '', hardLock = false, match = false, updatesBlocked = false,
     cachedBuild = '', cacheReady = false }
@@ -1139,8 +1780,8 @@ local function build_health()
       if not seen[name] then drift[#drift + 1] = name .. ': pinned ' .. tostring(pinned) .. ', not installed' end
     end
   end
-  local store = load_store()
   local sgdb = read_json(data_dir .. '/sgdb.json') or {}
+  local scorer_marker = read_scorer_marker()
   local steam_root = home .. '/.local/share/Steam'
   return {
     version = VERSION,
@@ -1184,8 +1825,18 @@ local function build_health()
     data = {
       dir = data_dir,
       prefs = load_prefs(),
-      hltb = { cached = count_keys(store.games) },
+      hltb = {
+        cached = store_game_count(),
+        scorer = SCORER_VERSION,
+        -- From the scorer marker: no store decode on the page-load path.
+        needsReview = tonumber(scorer_marker and scorer_marker.needsReview) or 0,
+        recovery = last_recovery(),
+      },
       sgdb = { hasKey = type(sgdb.apiKey) == 'string' and sgdb.apiKey ~= '' },
+      -- Every file this backend writes, with the cap it is held to.
+      caps = { hltb = FILE_CAPS.store, library = FILE_CAPS.library, prefs = FILE_CAPS.prefs,
+        wire = FILE_CAPS.wire, sidecar = FILE_CAPS.sidecar, records = MAX_STORE_RECORDS },
+      hygiene = { conflicts = hygiene_state(false, false), corrupt = corrupt_state() },
       files = json.array(dir_report(data_dir, 1)),
     },
   }
@@ -1268,6 +1919,36 @@ function M.register(registry)
       health_cache.expires = now + CACHE_TTL
     end
     return text
+  end
+
+  -- Syncthing conflict copies in the shared data directory: `status` reports
+  -- them (count, total size, oldest) and `clean` is the only action that
+  -- writes - it moves them into conflicts/<date>/, it never deletes.
+  registry.SlsLunaHygiene = function(raw)
+    local ok, entry = pcall(json.decode, tostring(raw or ''))
+    local action = (ok and type(entry) == 'table') and tostring(entry.action or '') or ''
+    if action == '' or action == 'status' then
+      local state = hygiene_state(true, true)
+      return reply({ success = true, hygiene = {
+        dir = data_dir,
+        count = state.count, totalBytes = state.totalBytes, oldest = state.oldest,
+        files = json.array(state.files or {}),
+        corrupt = (function()
+          local corrupt = corrupt_state()
+          return { count = corrupt.count, totalBytes = corrupt.totalBytes }
+        end)(),
+        caps = { store = FILE_CAPS.store, library = FILE_CAPS.library, prefs = FILE_CAPS.prefs,
+          wire = FILE_CAPS.wire, sidecar = FILE_CAPS.sidecar, records = MAX_STORE_RECORDS },
+      } })
+    end
+    if action == 'clean' then
+      local result = hygiene_clean()
+      local state = hygiene_state(true, true)
+      return reply({ success = result.success, moved = result.moved, folder = result.folder,
+        failed = json.array(result.failed or {}),
+        hygiene = { count = state.count, totalBytes = state.totalBytes, oldest = state.oldest } })
+    end
+    return reply({ success = false, error = 'Unknown action; use status or clean.' })
   end
 
   -- Update plumbing for the Health page. `status` reads local files only;
@@ -1637,7 +2318,17 @@ function M.register(registry)
     return values, file
   end
 
-  local function read_channels()
+  -- The CLI read spawns Python, which is the slowest thing the Lumen page can
+  -- trigger. The file it prints only changes through this backend or a manual
+  -- `luna lumen channels set`, so a page load inside this window reuses the
+  -- last answer; `channels-set` passes force to read it back fresh.
+  local CHANNELS_TTL = 300
+  local function read_channels(force)
+    local now = os.time()
+    if not force and channels_cache and channels_cache.at
+      and now - channels_cache.at < CHANNELS_TTL then
+      return channels_cache
+    end
     local out, err = run_updater('lumen channels', 20)
     if not out then return nil, clean(err) end
     local values, file = parse_channels(out)
@@ -1712,7 +2403,7 @@ function M.register(registry)
       end
       local out, err = run_updater('lumen channels set ' .. channel .. ' --only ' .. component, 20)
       if not out then return reply({ success = false, error = clean(err), lumen = lumen_view() }) end
-      local channels = read_channels()
+      local channels = read_channels(true)
       return reply({ success = true, message = clean(out), channels = channels, lumen = lumen_view() })
     end
     if action == 'terminal' then
@@ -1866,7 +2557,7 @@ function M.register(registry)
 
   -- An error inside any of the Luna handlers becomes a structured reply, so
   -- the page shows a reason instead of getting nothing back.
-  for _, name in ipairs({ 'SlsLunaInfo', 'SlsLunaPrefsSet', 'SlsLunaHealth', 'SlsLunaUpdate',
+  for _, name in ipairs({ 'SlsLunaInfo', 'SlsLunaPrefsSet', 'SlsLunaHealth', 'SlsLunaHygiene', 'SlsLunaUpdate',
       'SlsLunaSteam', 'SlsLunaHost', 'SlsLunaLumen', 'SlsLunaGradient', 'SlsLunaRepair',
       'SlsLunaRefresh', 'SlsLunaLaunchers' }) do
     local handler = registry[name]
@@ -1889,24 +2580,44 @@ function M.register(registry)
     local asked = nil
     if type(raw) == 'string' then asked = raw
     elseif type(raw) == 'table' and type(raw.rev) == 'string' then asked = raw.rev end
+    -- After a scorer change (or a store written by another tool) every stored
+    -- record is checked once against the library's Steam names: it costs one
+    -- decode and is then recorded in the scorer marker, so the cached path
+    -- below never pays for it again.
+    if validation_pending() then
+      local store = load_store()
+      local library = load_library()
+      local checked, flagged, changed = M.revalidate_store(store, library)
+      if changed then persist_store(store) end
+      write_scorer_marker(store_stamp(), SCORER_VERSION, flagged)
+    end
     local rev = stamps_rev({ store_path, library_path })
     local now = os.time()
     local cached = rev ~= nil and hltb_cache.text and hltb_cache.rev == rev
       and now < hltb_cache.expires
     if not cached then
-      local store = load_store()
-      local library = load_library()
-      local count = 0
-      for _ in pairs(store.games) do count = count + 1 end
-      local payload = { success = true, rev = rev, games = store.games, count = count,
-        library = library.games, libraryAt = library.updatedAt,
-        minFetchInterval = M.min_fetch_interval }
+      -- A previous VM (or a previous page load) may already have encoded this
+      -- exact revision: reuse its wire text instead of decode + encode.
+      local text = read_wire_text(rev)
+      if not text then
+        local store = load_store()
+        local library = load_library()
+        local count = count_keys(store.games)
+        write_sidecar_count(rev, count)
+        text = reply({ success = true, rev = rev, games = wire_games(store.games), count = count,
+          needsReview = review_count(store), scorer = SCORER_VERSION,
+          recovered = last_recovery() ~= nil and last_recovery().recovered == true or nil,
+          recovery = last_recovery(),
+          library = library.games, libraryAt = library.updatedAt,
+          minFetchInterval = M.min_fetch_interval })
+        if rev then write_wire_text(rev, text) end
+      end
       if rev then
-        hltb_cache.text = reply(payload)
+        hltb_cache.text = text
         hltb_cache.rev = rev
         hltb_cache.expires = now + CACHE_TTL
       else
-        return reply(payload)
+        return text
       end
     end
     if asked and asked ~= '' and mtime_known and asked == rev then
@@ -1915,21 +2626,64 @@ function M.register(registry)
     return hltb_cache.text
   end
 
+  -- Re-run the title check over the whole store on demand. Idempotent: a store
+  -- already reviewed by this scorer is answered with applied = false and the
+  -- same flagged count, and nothing is written.
+  registry.SlsHltbRevalidate = function()
+    local store = load_store()
+    local library = load_library()
+    local checked, flagged, changed = M.revalidate_store(store, library)
+    local saved = true
+    local err = nil
+    if changed then
+      saved, err = persist_store(store)
+    else
+      write_scorer_marker(store_stamp(), SCORER_VERSION, flagged)
+    end
+    if not saved then
+      return reply({ success = false, error = tostring(err) })
+    end
+    return reply({ success = true, checked = checked, flagged = flagged, applied = changed,
+      scorer = SCORER_VERSION })
+  end
+
   -- The Steam agent's inventory of owned games and non-Steam shortcuts, so the
   -- panel can show what has no times yet. Purely local; never sent anywhere.
+  -- Soundtracks, demos, playtests, dedicated servers and SDKs ship as their own
+  -- appids; they are dropped from the inventory (and reported as `skipped`)
+  -- because they have no times of their own to find.
+  local SKIPPABLE_TAIL = {
+    soundtrack = true, ost = true, demo = true, playtest = true, artbook = true, sdk = true,
+    server = true, benchmark = true, tool = true, tools = true, pass = true,
+    expansion = true, expansions = true, dlc = true,
+  }
+  local function library_skippable(name)
+    local normalized = M.normalize(name)
+    if normalized == '' then return true end
+    local last = normalized:match('(%S+)$')
+    if last and SKIPPABLE_TAIL[last] then return true end
+    if normalized:sub(-# 'art book') == 'art book' then return true end
+    return false
+  end
+
   registry.SlsHltbLibrary = function(raw)
     local ok, entry = pcall(json.decode, tostring(raw or ''))
     if not ok or type(entry) ~= 'table' or type(entry.games) ~= 'table' then
       return reply({ success = false, error = 'Send {games: [{appid, name, shortcut?}]}.' })
     end
     local games, seen = {}, {}
+    local skipped = 0
     for _, game in ipairs(entry.games) do
       if type(game) == 'table' and valid_appid(game.appid) then
         local key = tostring(math.floor(tonumber(game.appid)))
         local name = tostring(game.name or ''):sub(1, 200)
         if name ~= '' and not seen[key] then
           seen[key] = true
-          games[#games + 1] = { appid = tonumber(key), name = name, shortcut = game.shortcut == true }
+          if library_skippable(name) then
+            skipped = skipped + 1
+          else
+            games[#games + 1] = { appid = tonumber(key), name = name, shortcut = game.shortcut == true }
+          end
         end
       end
       if #games >= 5000 then break end
@@ -1939,7 +2693,7 @@ function M.register(registry)
     end
     local saved, serr = persist_library({ version = 1, updatedAt = os.time(), games = games })
     if not saved then return reply({ success = false, error = tostring(serr) }) end
-    return reply({ success = true, count = #games })
+    return reply({ success = true, count = #games, skipped = skipped })
   end
 
   -- User-triggered fetch for one game. Never runs by itself and never batches.

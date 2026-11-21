@@ -11,6 +11,9 @@ local M = {}
 local VERSION = '0.2.0'
 local home = os.getenv('HOME') or ''
 local sysfs_root = os.getenv('SLS_GRAPHICS_SYSFS') or '/sys'
+-- The handlers take their sysfs root from here, so the smoke test can point a
+-- two-GPU fixture tree at it (SLS_GRAPHICS_SYSFS, or M.use_sysfs at runtime).
+M.sysfs_root = sysfs_root
 
 local function read_file(path)
   local f = io.open(path, 'rb')
@@ -65,10 +68,42 @@ local function clean_hex(value)
   return cleaned
 end
 
--- scan(root, home) -> array of { card, vendor, vendor_name, device, driver, product }
+-- Render nodes are mapped by PCI address: /sys/class/drm/renderD*/device/uevent
+-- names the same PCI_ID as the card, and the card's own device/drm listing names
+-- its render node outright. Both are plain reads, so the cached status path
+-- never spawns a process.
+local function render_nodes(root)
+  local by_pci = {}
+  local ok, items = pcall(fs.list, root .. '/class/drm')
+  if ok and type(items) == 'table' then
+    for _, item in ipairs(items) do
+      local name = tostring(item.name or item)
+      if name:match('^renderD%d+$') then
+        local uevent = read_file(root .. '/class/drm/' .. name .. '/device/uevent') or ''
+        local pci = uevent:match('PCI_ID=([0-9A-Fa-f:]+)')
+        if pci then by_pci[pci:upper()] = name end
+      end
+    end
+  end
+  return by_pci
+end
+
+local function card_render_node(root, card)
+  local ok, items = pcall(fs.list, root .. '/class/drm/' .. card .. '/device/drm')
+  if ok and type(items) == 'table' then
+    for _, item in ipairs(items) do
+      local name = tostring(item.name or item)
+      if name:match('^renderD%d+$') then return name end
+    end
+  end
+  return nil
+end
+
+-- scan(root) -> array of { card, vendor, vendor_name, device, driver, product,
+-- boot_vga, render_node, powered, in_use }
 -- `root` is a sysfs root (overridable for tests).
 function M.gpu_report(root)
-  root = root or sysfs_root
+  root = root or M.sysfs_root
   local drm = root .. '/class/drm'
   local cards = {}
   if fs.exists(drm) then
@@ -81,6 +116,7 @@ function M.gpu_report(root)
     end
   end
   table.sort(cards)
+  local by_pci = render_nodes(root)
   local out = {}
   for _, card in ipairs(cards) do
     local device_dir = drm .. '/' .. card .. '/device'
@@ -88,6 +124,7 @@ function M.gpu_report(root)
     if vendor then
       local uevent = read_file(device_dir .. '/uevent') or ''
       local driver = uevent:match('DRIVER=([^\n]+)')
+      local pci = uevent:match('PCI_ID=([0-9A-Fa-f:]+)')
       out[#out + 1] = {
         card = card,
         vendor = vendor,
@@ -95,10 +132,66 @@ function M.gpu_report(root)
         device = clean_hex(read_file(device_dir .. '/device')) or '',
         driver = trim(driver or ''),
         product = trim(read_file(device_dir .. '/product_name') or ''),
+        boot_vga = trim(read_file(device_dir .. '/boot_vga') or '') == '1',
+        render_node = card_render_node(root, card) or (pci and by_pci[pci:upper()]) or '',
+        -- 'active' means the GPU is powered and driving a display right now; a
+        -- hybrid laptop's discrete GPU sits at 'suspended' while idle.
+        powered = trim(read_file(device_dir .. '/power/runtime_status') or ''),
       }
     end
   end
+  -- Which GPU is in use: the one that is powered, else the boot/primary card.
+  local in_use = nil
+  for _, gpu in ipairs(out) do
+    if gpu.powered == 'active' and not in_use then in_use = gpu.card end
+  end
+  for _, gpu in ipairs(out) do
+    if gpu.boot_vga and not in_use then in_use = gpu.card end
+  end
+  for _, gpu in ipairs(out) do gpu.in_use = gpu.card == in_use end
   return as_array(out)
+end
+
+-- The short summary shown above the GPU list on a hybrid machine.
+function M.gpu_selection(gpus)
+  local in_use, primary = '', ''
+  local list = type(gpus) == 'table' and gpus or {}
+  for _, gpu in ipairs(list) do
+    if gpu.in_use == true and in_use == '' then in_use = tostring(gpu.card or '') end
+    if gpu.boot_vga == true and primary == '' then primary = tostring(gpu.card or '') end
+  end
+  return { in_use = in_use, primary = primary, hybrid = #list > 1 }
+end
+
+-- A minimal TOML reader for lsfg-vk's conf.toml: sections, comments and
+-- string/boolean/number scalars. Anything else is kept as its raw text so a
+-- newer config still shows its values instead of failing unsupported.
+function M.parse_toml(text)
+  local out, section, count = {}, nil, 0
+  for raw in tostring(text or ''):gmatch('[^\r\n]+') do
+    local line = raw:gsub('#.*$', ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if line ~= '' then
+      local name = line:match('^%[%[?(.+)%]%]?$')
+      if name then
+        section = trim(name)
+      else
+        local key, value = line:match('^([%w%._%-]+)%s*=%s*(.+)$')
+        if key then
+          value = trim(value)
+          local scalar
+          if value:match('^".*"$') or value:match("^'.*'$") then scalar = value:sub(2, -2)
+          elseif value == 'true' then scalar = true
+          elseif value == 'false' then scalar = false
+          else scalar = tonumber(value) or value end
+          count = count + 1
+          if count <= 64 then
+            out[section and (section .. '.' .. key) or key] = scalar
+          end
+        end
+      end
+    end
+  end
+  return out
 end
 
 -- ------------------------------------------------------------------ lsfg-vk
@@ -156,7 +249,15 @@ function M.lsfg_report(home_dir, system_dirs)
   }
   for _, path in ipairs(configCandidates) do
     local info = file_info(path)
-    if info then report.config = info; break end
+    if info then
+      local text = read_file(path)
+      info.values = M.parse_toml(text or '')
+      info.keys = 0
+      for _ in pairs(info.values) do info.keys = info.keys + 1 end
+      info.parseError = (text ~= nil and info.keys == 0) and 'conf.toml has no readable keys' or ''
+      report.config = info
+      break
+    end
   end
   local pluginCandidates = {
     home_dir .. '/homebrew/plugins/decky-lsfg-vk',
@@ -364,14 +465,17 @@ local function build_report()
   local os_release = M.parse_os_release(read_file(
     os.getenv('SLS_GRAPHICS_OS_RELEASE') or '/etc/os-release'))
   local kernel = trim(read_file('/proc/sys/kernel/osrelease') or '')
+  local gpus = M.gpu_report()
   return {
     success = true,
     version = VERSION,
+    checkedAt = os.time(),
     system = {
       distro = os_release.PRETTY_NAME or os_release.NAME or '',
       kernel = kernel,
     },
-    gpus = M.gpu_report(),
+    gpus = gpus,
+    gpu = M.gpu_selection(gpus),
     lsfg = M.lsfg_report(home),
     optiscaler = M.optiscaler_report(home),
     optiscaler_client = M.optiscaler_client(home),
@@ -380,6 +484,12 @@ local function build_report()
 end
 
 function M.register(registry)
+  local root_override = os.getenv('SLS_GRAPHICS_SYSFS') or '/sys'
+  -- Tests point the whole handler at a fixture tree here; the default is /sys.
+  M.use_sysfs = function(root)
+    if type(root) == 'string' and root ~= '' then root_override = root; M.sysfs_root = root end
+    return root_override
+  end
   registry.SlsGraphicsGet = function(raw)
     local force = false
     if raw ~= nil then

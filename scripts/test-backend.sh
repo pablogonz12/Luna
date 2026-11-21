@@ -19,6 +19,14 @@ mkdir -p "$awkward"
 LUNA_TEST_HOME="$awkward" HOME="$awkward" LUNA_REPO="$root" "$lua" "$root/tests/bridge-discovery.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/compressor-smoke.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/hltb-smoke.lua"
+# Playtime: two machines on one Syncthing-style directory (schema-3 merge).
+mkdir -p "$tmp/playtime"
+LUNA_TEST_HOME="$tmp/playtime" HOME="$tmp/playtime" LUNA_REPO="$root" "$lua" "$root/tests/playtime-smoke.lua"
+# Page-load budgets: no handler may block the single RPC thread for hundreds of
+# milliseconds, and a warm status pass must spawn no process. Runs in its own
+# HOME because it builds a full-size library and store.
+mkdir -p "$tmp/perf"
+LUNA_TEST_HOME="$tmp/perf" HOME="$tmp/perf" LUNA_REPO="$root" "$lua" "$root/tests/latency-smoke.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/sgdb-smoke.lua"
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" \
   SLS_GRAPHICS_SYSFS="$tmp/home/sys" SLS_GRAPHICS_OS_RELEASE="$tmp/home/os-release" \

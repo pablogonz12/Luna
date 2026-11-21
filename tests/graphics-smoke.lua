@@ -172,6 +172,15 @@ write(sysfs .. '/class/drm/card0/device/product_name', 'AMD Radeon RX 7900 XTX (
 write(sysfs .. '/class/drm/card1/device/vendor', '0x10de\n')
 write(sysfs .. '/class/drm/card1/device/device', '0x2684\n')
 write(sysfs .. '/class/drm/card1/device/uevent', 'DRIVER=nvidia\nPCI_ID=10DE:2684\n')
+-- Hybrid selection: the NVIDIA card is the boot/primary one and is suspended,
+-- the AMD card is powered and is the one actually in use. Render nodes are
+-- mapped by PCI address, the way /sys/class/drm exposes them.
+write(sysfs .. '/class/drm/card0/device/boot_vga', '0\n')
+write(sysfs .. '/class/drm/card1/device/boot_vga', '1\n')
+write(sysfs .. '/class/drm/card0/device/power/runtime_status', 'active\n')
+write(sysfs .. '/class/drm/card1/device/power/runtime_status', 'suspended\n')
+write(sysfs .. '/class/drm/renderD128/device/uevent', 'DRIVER=amdgpu\nPCI_ID=1002:744C\n')
+write(sysfs .. '/class/drm/renderD129/device/uevent', 'DRIVER=nvidia\nPCI_ID=10DE:2684\n')
 
 -- A lsfg-vk layer plus an unrelated Mesa layer that must not be reported.
 write(home .. '/.local/share/vulkan/implicit_layer.d/VkLayer_LSFG_vk.json',
@@ -179,7 +188,8 @@ write(home .. '/.local/share/vulkan/implicit_layer.d/VkLayer_LSFG_vk.json',
   '"implementation_version":2}}')
 write(home .. '/.local/share/vulkan/implicit_layer.d/VkLayer_MESA_device_select.json',
   '{"file_format_version":"1.0.0","layer":{"name":"VK_LAYER_MESA_device_select"}}')
-write(home .. '/.config/lsfg-vk/conf.toml', '[global]\nenabled = true\n')
+write(home .. '/.config/lsfg-vk/conf.toml',
+  '[global]\nenabled = true\nmultiplier = 2\nallow_fp16 = false\n[backend]\nname = "vulkan"\n')
 write(home .. '/homebrew/plugins/decky-lsfg-vk/plugin.json', '{"name":"decky-lsfg-vk"}')
 
 write(home .. '/.local/share/OptiScalerClient/AppRun', '#!/bin/sh\n')
@@ -206,6 +216,9 @@ os.execute('mkdir -p ' .. string.format('%q', home .. '/.local/share/Steam/steam
 local backend = dofile(repo .. '/addons/graphics/plugin/backend/main.lua')
 local registry = {}
 backend.register(registry)
+-- The handler's sysfs root is overridable, so the RPC path can be tested
+-- against the fixture tree instead of the host's /sys.
+assert(backend.use_sysfs(sysfs) == sysfs, 'the sysfs root must be overridable')
 
 local function call(name, arg)
   assert(type(registry[name]) == 'function', 'missing RPC: ' .. name)
@@ -222,12 +235,34 @@ assert(#gpus == 2, 'both cards must be reported, got ' .. #gpus)
 assert(gpus[1].card == 'card0' and gpus[1].vendor == '0x1002' and gpus[1].vendor_name == 'AMD')
 assert(gpus[1].driver == 'amdgpu' and gpus[1].product:find('7900 XTX') ~= nil)
 assert(gpus[2].vendor_name == 'NVIDIA' and gpus[2].driver == 'nvidia')
+-- Hybrid-GPU selection: boot/primary, render node and which card is in use.
+assert(gpus[1].boot_vga == false and gpus[2].boot_vga == true, 'boot_vga must come from sysfs')
+assert(gpus[1].render_node == 'renderD128' and gpus[2].render_node == 'renderD129',
+  'each card must map to its render node')
+assert(gpus[1].powered == 'active' and gpus[2].powered == 'suspended',
+  'the power state must be reported per card')
+assert(gpus[1].in_use == true and gpus[2].in_use == false,
+  'the powered card is the one in use, not the boot card')
+local selection = backend.gpu_selection(gpus)
+assert(selection.in_use == 'card0' and selection.primary == 'card1' and selection.hybrid == true,
+  'the selection summary must name in-use and primary')
+-- A tree with only the vendor file must not raise on the missing extras.
+local bare = backend.gpu_report(home .. '/bare-sysfs')
 
 local lsfg = backend.lsfg_report(home, {})
 assert(#lsfg.layers == 1, 'only the lsfg layer may be reported, got ' .. #lsfg.layers)
 assert(lsfg.layers[1].path:find('VkLayer_LSFG_vk.json', 1, true) ~= nil)
 assert(lsfg.layers[1].version == 2, 'the layer version must come from the manifest')
 assert(lsfg.config and lsfg.config.path:find('conf.toml', 1, true) ~= nil)
+-- The config is parsed, not merely detected.
+assert(lsfg.config.values['global.enabled'] == true, 'conf.toml booleans must be parsed')
+assert(lsfg.config.values['global.multiplier'] == 2, 'conf.toml numbers must be parsed')
+assert(lsfg.config.values['global.allow_fp16'] == false)
+assert(lsfg.config.values['backend.name'] == 'vulkan', 'conf.toml strings must be parsed')
+assert(lsfg.config.keys == 4 and lsfg.config.parseError == '', 'every key must parse cleanly')
+local toml = backend.parse_toml('# comment\n[dll]\npath = "/x/lsfg.so" # trailing\nkey=1.5\nunknown = a b c\n')
+assert(toml['dll.path'] == '/x/lsfg.so' and toml['dll.key'] == 1.5 and toml['dll.unknown'] == 'a b c',
+  'the TOML reader must strip comments and keep unknown values')
 assert(#lsfg.decky_plugins == 1)
 
 local opti = backend.optiscaler_report(home)
@@ -273,7 +308,13 @@ assert(report.success == true and report.version == '0.2.0')
 assert(report.system.distro == 'Arch Linux (fixture)', 'the fake os-release must be used')
 assert(type(report.system.kernel) == 'string', 'the kernel must be reported')
 assert(#report.gpus == 2)
+assert(report.gpu and report.gpu.in_use == 'card0' and report.gpu.primary == 'card1'
+  and report.gpu.hybrid == true, 'the report must name the in-use and primary GPU')
+assert(type(report.checkedAt) == 'number' and report.checkedAt > 0,
+  'the report must carry when it was checked')
 assert(#report.lsfg.layers == 1 and report.lsfg.config ~= nil)
+assert(report.lsfg.config.values['global.multiplier'] == 2,
+  'the parsed lsfg-vk config must ride along')
 assert(#report.optiscaler >= 3, 'every install candidate must be reported')
 assert(report.optiscaler_client and report.optiscaler_client.managed == 2,
   'the client report must ride along')
@@ -282,8 +323,10 @@ assert(#report.steam.runtimes == 1)
 -- A refresh is served from the session cache; force rebuilds it.
 local again = call('SlsGraphicsGet')
 assert(again.success == true and #again.gpus == 2 and again.system.distro == report.system.distro)
+assert(again.checkedAt == report.checkedAt, 'a cached reply keeps its own check time')
 local forced = call('SlsGraphicsGet', '{"force":true}')
 assert(forced.success == true and #forced.gpus == 2)
+assert(forced.checkedAt >= report.checkedAt, 'force must rebuild and re-stamp the report')
 
 -- A throw inside the report becomes a structured error, and the next call
 -- recovers instead of leaving the panel on blanks.

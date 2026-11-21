@@ -79,8 +79,7 @@ local function read_file(path)
   return raw
 end
 
-local function write_file_atomic(path, body)
-  fs.create_directories(fs.parent_path(path))
+local function write_bytes(path, body)
   local tmp = path .. '.tmp'
   local f, why = io.open(tmp, 'wb')
   if not f then return false, why or 'cannot write file' end
@@ -95,16 +94,46 @@ local function write_file_atomic(path, body)
   return true
 end
 
+local function write_file_atomic(path, body)
+  fs.create_directories(fs.parent_path(path))
+  -- Keep the last good bytes beside the file: a torn write, or a hand-edited
+  -- JSON file, is then recoverable instead of losing the slot, key or history.
+  local previous = read_file(path)
+  if previous and previous ~= '' then
+    local good = true
+    if path:match('%.json$') then
+      local ok, parsed = pcall(json.decode, previous)
+      good = ok and type(parsed) == 'table'
+    end
+    if good then write_bytes(path .. '.bak', previous) end
+  end
+  return write_bytes(path, body)
+end
+
+-- Read a JSON file, falling back to its .bak when the live copy is torn.
+-- Returns the table and whether it came from the backup.
+local function read_json(path)
+  local raw = read_file(path)
+  if raw then
+    local ok, parsed = pcall(json.decode, raw)
+    if ok and type(parsed) == 'table' then return parsed, false end
+  end
+  local backup = read_file(path .. '.bak')
+  if backup then
+    local ok, restored = pcall(json.decode, backup)
+    if ok and type(restored) == 'table' then return restored, true end
+  end
+  return nil, false
+end
+
 -- ------------------------------------------------------------------ config
 
 local function load_config()
-  local raw = read_file(config_path)
-  if not raw then return { version = 1, apiKey = '' } end
-  local ok, parsed = pcall(json.decode, raw)
-  if not ok or type(parsed) ~= 'table' then return { version = 1, apiKey = '' } end
+  local parsed, recovered = read_json(config_path)
+  if not parsed then return { version = 1, apiKey = '' }, false end
   parsed.version = 1
   parsed.apiKey = type(parsed.apiKey) == 'string' and parsed.apiKey or ''
-  return parsed
+  return parsed, recovered
 end
 
 local function save_config(data)
@@ -290,16 +319,28 @@ end
 
 local function log_op(directory, entry)
   local path = op_log_path(directory)
-  local log = {}
-  local raw = read_bytes(path)
-  if raw then
-    local ok, parsed = pcall(json.decode, raw)
-    if ok and type(parsed) == 'table' then log = parsed end
-  end
+  local log = read_json(path) or {}
   log[#log + 1] = entry
   while #log > OP_LOG_MAX do table.remove(log, 1) end
   fs.create_directories(history_root(directory))
   write_file_atomic(path, json.encode(log))
+end
+
+-- When each slot was last changed, recovered from the op-log the backend
+-- already writes. Additive: the page can show "when" next to the undo count.
+local function last_times(directory, appid)
+  local times, recovered = {}, false
+  local log
+  log, recovered = read_json(op_log_path(directory))
+  for _, entry in ipairs(type(log) == 'table' and log or {}) do
+    if type(entry) == 'table' and tonumber(entry.appid) == appid
+        and KINDS[tostring(entry.kind)] and tonumber(entry.at) then
+      local kind = tostring(entry.kind)
+      local at = math.floor(tonumber(entry.at))
+      if at > 0 and (not times[kind] or at > times[kind]) then times[kind] = at end
+    end
+  end
+  return times, recovered
 end
 
 -- Stash the slot's current file(s) into history before they are replaced.
@@ -409,6 +450,53 @@ local function url_encode(text)
   end)
 end
 
+-- Every non-200 answer is classified in one place, so a rate limit or an
+-- invalid key reads the same whichever handler asked.
+local function header_value(response, name)
+  local headers = type(response) == 'table' and response.headers or nil
+  if type(headers) ~= 'table' then return nil end
+  local want = tostring(name):lower()
+  for key, value in pairs(headers) do
+    if tostring(key):lower() == want then return value end
+  end
+  return nil
+end
+
+local function retry_after(response)
+  local seconds = tonumber(tostring(header_value(response, 'retry-after') or ''):match('^%s*(%d+)'))
+  return seconds and math.floor(seconds) or nil
+end
+
+-- Returns {code, error, retryAfter?} for a failed response.
+local function http_failure(response, what)
+  local status = tonumber(type(response) == 'table' and response.status) or 0
+  if status == 401 then
+    return { code = 'bad_key', error = 'SteamGridDB rejected that API key.' }
+  end
+  if status == 429 then
+    local wait = retry_after(response)
+    local hint = wait and (' SteamGridDB asked to wait ' .. tostring(wait) .. ' s.')
+      or ' SteamGridDB asked to wait before retrying.'
+    return { code = 'rate_limit', retryAfter = wait,
+      error = 'Rate limited by SteamGridDB.' .. hint }
+  end
+  return { code = 'http',
+    error = 'SteamGridDB ' .. tostring(what) .. ' failed (HTTP ' .. tostring(status) .. ').' }
+end
+
+-- Steam shows a non-Steam shortcut under its 32-bit AppID (the form in
+-- SteamClient.Apps and in presence.json), but the 64-bit encoding
+-- (id << 32) | 0x02000000 also circulates. Artwork files are always named by
+-- the 32-bit form, so both are accepted and normalised here.
+function M.normalize_appid(value)
+  local n = tonumber(value)
+  if not n or n ~= math.floor(n) or n <= 0 then return nil end
+  if n <= 4294967295 then return n end
+  local high = math.floor(n / 4294967296)
+  if high >= 1 and high <= 4294967295 then return high end
+  return nil
+end
+
 function M.base64(data)
   local alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
   local out = {}
@@ -440,11 +528,9 @@ end
 local function fetch_assets(config, gameId, kind)
   local response, why = http_get(assets_url(gameId, kind), api_headers(config.apiKey))
   if not response then return nil, nil, 'unavailable', why end
-  if response.status == 401 then
-    return nil, nil, 'bad_key', 'SteamGridDB rejected that API key.'
-  end
   if response.status ~= 200 then
-    return nil, nil, 'http', 'SteamGridDB assets failed (HTTP ' .. tostring(response.status) .. ').'
+    local failure = http_failure(response, 'assets')
+    return nil, nil, failure.code, failure.error, failure.retryAfter
   end
   local parsed = decode_body(response.body)
   if not parsed or type(parsed.data) ~= 'table' then
@@ -516,8 +602,8 @@ local function place_asset(appid, kind, url, mime, author)
   local response, down_why = http_get(url, { ['User-Agent'] = USER_AGENT })
   if not response then return false, { code = 'unavailable', error = down_why } end
   if response.status ~= 200 then
-    return false, { code = 'http',
-      error = 'The image download failed (HTTP ' .. tostring(response.status) .. ').' }
+    local failure = http_failure(response, 'image download')
+    return false, { code = failure.code, error = failure.error, retryAfter = failure.retryAfter }
   end
   return store_asset(appid, kind, response.body, mime, author)
 end
@@ -644,12 +730,10 @@ local function job_finish(job)
     return
   end
   if job.stage == 'assets' then
-    if response.status == 401 then
-      job_finish_item(job, { ok = false, code = 'bad_key',
-        error = 'SteamGridDB rejected that API key.' })
-    elseif response.status ~= 200 then
-      job_finish_item(job, { ok = false, code = 'http',
-        error = 'SteamGridDB assets failed (HTTP ' .. tostring(response.status) .. ').' })
+    if response.status ~= 200 then
+      local failure = http_failure(response, 'assets')
+      job_finish_item(job, { ok = false, code = failure.code, error = failure.error,
+        retryAfter = failure.retryAfter })
     else
       local parsed = decode_body(response.body)
       if not parsed or type(parsed.data) ~= 'table' then
@@ -669,8 +753,9 @@ local function job_finish(job)
   end
   local asset = job.asset
   if response.status ~= 200 then
-    job_finish_item(job, { ok = false, code = 'http',
-      error = 'The image download failed (HTTP ' .. tostring(response.status) .. ').' })
+    local failure = http_failure(response, 'image download')
+    job_finish_item(job, { ok = false, code = failure.code, error = failure.error,
+      retryAfter = failure.retryAfter })
     return
   end
   local placed, detail = store_asset(job.appid, kind, response.body, asset.mime, asset.author)
@@ -733,7 +818,7 @@ end
 
 function M.register(registry)
   registry.SlsSgdbGet = function()
-    local config = load_config()
+    local config, recovered = load_config()
     local directory, why = grid_dir()
     local masked = ''
     if config.apiKey ~= '' then
@@ -747,6 +832,8 @@ function M.register(registry)
       keyMasked = masked,
       gridDir = directory or '',
       gridError = directory and '' or tostring(why),
+      recovered = recovered == true,
+      recoveredNote = recovered == true and 'The key file was torn; restored from sgdb.json.bak.' or '',
     })
   end
 
@@ -770,12 +857,10 @@ function M.register(registry)
     end
     local response, why = http_get(API .. '/search/autocomplete/portal', api_headers(config.apiKey))
     if not response then return reply({ success = false, code = 'unavailable', error = why }) end
-    if response.status == 401 then
-      return reply({ success = false, code = 'bad_key', error = 'SteamGridDB rejected that API key.' })
-    end
     if response.status ~= 200 then
-      return reply({ success = false, code = 'http',
-        error = 'SteamGridDB answered HTTP ' .. tostring(response.status) .. '.' })
+      local failure = http_failure(response, 'call')
+      return reply({ success = false, code = failure.code, error = failure.error,
+        retryAfter = failure.retryAfter })
     end
     return reply({ success = true })
   end
@@ -794,12 +879,10 @@ function M.register(registry)
     local response, why = http_get(API .. '/search/autocomplete/' .. url_encode(term),
       api_headers(config.apiKey))
     if not response then return reply({ success = false, code = 'unavailable', error = why }) end
-    if response.status == 401 then
-      return reply({ success = false, code = 'bad_key', error = 'SteamGridDB rejected that API key.' })
-    end
     if response.status ~= 200 then
-      return reply({ success = false, code = 'http',
-        error = 'SteamGridDB search failed (HTTP ' .. tostring(response.status) .. ').' })
+      local failure = http_failure(response, 'search')
+      return reply({ success = false, code = failure.code, error = failure.error,
+        retryAfter = failure.retryAfter })
     end
     local parsed = decode_body(response.body)
     local rows = parsed and parsed.data
@@ -825,8 +908,10 @@ function M.register(registry)
     if config.apiKey == '' then
       return reply({ success = false, code = 'no_key', error = 'Add your SteamGridDB API key first.' })
     end
-    local assets, total, code, why = fetch_assets(config, math.floor(entry.gameId), tostring(entry.kind))
-    if not assets then return reply({ success = false, code = code, error = why }) end
+    local assets, total, code, why, wait = fetch_assets(config, math.floor(entry.gameId), tostring(entry.kind))
+    if not assets then
+      return reply({ success = false, code = code, error = why, retryAfter = wait })
+    end
     return reply({ success = true, assets = assets, total = total })
   end
 
@@ -837,9 +922,9 @@ function M.register(registry)
     if not ok or type(entry) ~= 'table' then
       return reply({ success = false, error = 'Send {"appid", "kind", "url", "mime"}.' })
     end
-    local appid = tonumber(entry.appid)
+    local appid = M.normalize_appid(entry.appid)
     local kind = tostring(entry.kind)
-    if not (appid and appid > 0 and appid <= 4294967295 and appid == math.floor(appid)) then
+    if not appid then
       return reply({ success = false, code = 'invalid', error = 'Invalid app id.' })
     end
     if not KINDS[kind] then
@@ -850,7 +935,7 @@ function M.register(registry)
       return reply({ success = false, code = detail.code, error = detail.error })
     end
     return reply({ success = true, path = detail.path, kind = kind, backedUp = detail.backedUp,
-      live = LIVE_TYPES[kind] ~= nil })
+      appid = appid, live = LIVE_TYPES[kind] ~= nil })
   end
 
   -- Start the auto pass and return at once. The page polls SlsSgdbAutoStatus
@@ -860,9 +945,9 @@ function M.register(registry)
     if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) or not tonumber(entry.gameId) then
       return reply({ success = false, error = 'Send {"appid": <id>, "gameId": <id>}.' })
     end
-    local appid = tonumber(entry.appid)
+    local appid = M.normalize_appid(entry.appid)
     local gameId = math.floor(tonumber(entry.gameId))
-    if not (appid > 0 and appid <= 4294967295) then
+    if not appid then
       return reply({ success = false, code = 'invalid', error = 'Invalid app id.' })
     end
     local config = load_config()
@@ -919,7 +1004,11 @@ function M.register(registry)
     end
     local directory, why = grid_dir()
     if not directory then return reply({ success = false, code = 'no_steam', error = tostring(why) }) end
-    local files = slot_files(directory, math.floor(tonumber(entry.appid)), kind)
+    local appid = M.normalize_appid(entry.appid)
+    if not appid then
+      return reply({ success = false, code = 'invalid', error = 'Invalid app id.' })
+    end
+    local files = slot_files(directory, appid, kind)
     if #files == 0 then
       return reply({ success = false, code = 'none', error = 'Nothing has been applied to this slot yet.' })
     end
@@ -949,8 +1038,11 @@ function M.register(registry)
     if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) or not KINDS[tostring(entry.kind)] then
       return reply({ success = false, error = 'Send {"appid": <id>, "kind": "..."}.' })
     end
-    local appid = math.floor(tonumber(entry.appid))
+    local appid = M.normalize_appid(entry.appid)
     local kind = tostring(entry.kind)
+    if not appid then
+      return reply({ success = false, code = 'invalid', error = 'Invalid app id.' })
+    end
     local directory, why = grid_dir()
     if not directory then return reply({ success = false, code = 'no_steam', error = tostring(why) }) end
     local current = slot_files(directory, appid, kind)
@@ -978,8 +1070,11 @@ function M.register(registry)
     if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) or not KINDS[tostring(entry.kind)] then
       return reply({ success = false, error = 'Send {"appid": <id>, "kind": "..."}.' })
     end
-    local appid = math.floor(tonumber(entry.appid))
+    local appid = M.normalize_appid(entry.appid)
     local kind = tostring(entry.kind)
+    if not appid then
+      return reply({ success = false, code = 'invalid', error = 'Invalid app id.' })
+    end
     local directory, why = grid_dir()
     if not directory then return reply({ success = false, code = 'no_steam', error = tostring(why) }) end
     local current = slot_files(directory, appid, kind)
@@ -995,12 +1090,17 @@ function M.register(registry)
     if not ok or type(entry) ~= 'table' or not tonumber(entry.appid) then
       return reply({ success = false, error = 'Send {"appid": <id>}.' })
     end
-    local appid = math.floor(tonumber(entry.appid))
+    local appid = M.normalize_appid(entry.appid)
+    if not appid then
+      return reply({ success = false, code = 'invalid', error = 'Invalid app id.' })
+    end
     local directory, why = grid_dir()
     if not directory then return reply({ success = false, code = 'no_steam', error = tostring(why) }) end
     local depths = {}
     for kind in pairs(KINDS) do depths[kind] = history_depth(directory, appid, kind) end
-    return reply({ success = true, history = depths })
+    local times, recovered = last_times(directory, appid)
+    return reply({ success = true, appid = appid, history = depths, times = times,
+      recovered = recovered == true })
   end
 
   -- An exception inside any handler must still produce a reply: otherwise the

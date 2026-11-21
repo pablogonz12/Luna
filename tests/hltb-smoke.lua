@@ -132,7 +132,20 @@ package.preload['fs'] = function()
       return false
     end,
     join = function(...) return table.concat({ ... }, '/') end,
-    list = function() return {} end,
+    list = function(path)
+      -- The hygiene/Health code needs a real listing of the data directory.
+      local out = {}
+      local pipe = io.popen('ls -1Ap ' .. string.format('%q', path) .. ' 2>/dev/null')
+      if not pipe then return out end
+      for line in pipe:lines() do
+        if line ~= '' then
+          local directory = line:sub(-1) == '/'
+          out[#out + 1] = { name = directory and line:sub(1, -2) or line, is_directory = directory }
+        end
+      end
+      pipe:close()
+      return out
+    end,
   }
 end
 
@@ -241,13 +254,16 @@ end
 assert(backend.normalize('Hades™') == 'hades', 'trademark noise must be stripped')
 assert(backend.normalize('  Pokémon   Legends: Arceus ') == 'pokemon legends arceus',
   'accents must fold and spacing must collapse')
-assert(backend.normalize('Ori & the Blind Forest') == 'ori the blind forest')
+assert(backend.normalize('Ori & the Blind Forest') == 'ori and the blind forest',
+  'an ampersand is the word "and"')
+assert(backend.normalize('The Witcher 3') == 'witcher 3', 'a leading article is not part of a title')
+assert(backend.normalize("Assassin's Creed") == 'assassins creed', 'apostrophes fold away')
 assert(backend.normalize('') == '')
 
 local score, quality = backend.name_score('Hades', 'Hades')
 assert(score == 1 and quality == 'exact')
 score, quality = backend.name_score('Hades', 'Hades II')
-assert(quality == 'strong' and score > 0.5, 'a prefix match must be strong, not exact')
+assert(quality == 'weak' and score < 0.6, 'a sequel must never score as a strong match')
 score, quality = backend.name_score('The Witcher 3', 'The Witcher 3: Wild Hunt')
 assert(quality == 'strong')
 local weak, weak_quality = backend.name_score('Hades', 'Saint Seiya: The Hades')
@@ -260,6 +276,99 @@ assert(backend.pick_match({ { game_name = 'Orion Drift' } }, 'Hades') == nil,
   'no confident match must return nil')
 assert(backend.pick_match({ { game_name = 'Pokémon Legends: Arceus' } }, 'Pokemon Legends Arceus').game_name
   == 'Pokémon Legends: Arceus', 'accent-folded titles must still match')
+-- A tie is broken by a release year only when both rows carry one.
+assert(backend.pick_match({
+  { game_name = 'Doom', release_world = 2016 },
+  { game_name = 'Doom', release_world = 1993 },
+}, 'Doom (2016)').release_world == 2016, 'a matching release year must break a tie')
+
+-- Table-driven: every pair the store has been fooled by. `want` is true when
+-- the candidate is the same game (an edition or a subtitle), false when it is a
+-- sequel, another game or a non-game page.
+local MATCH_CASES = {
+  -- same game: exact, editions, subtitles, numeral spellings
+  { 'Hades', 'Hades', true },
+  { 'Portal', 'Portal', true },
+  { 'DOOM', 'Doom', true },
+  { 'The Witcher 3', 'Witcher 3: Wild Hunt', true },
+  { 'Witcher 3', 'The Witcher 3: Wild Hunt', true },
+  { 'Ori and the Blind Forest', 'Ori & the Blind Forest: Definitive Edition', true },
+  { 'Dark Souls', 'Dark Souls: Remastered', true },
+  { 'The Last of Us', 'The Last of Us Remastered', true },
+  { 'Batman: Arkham City', 'Batman: Arkham City - Game of the Year Edition', true },
+  { 'Sekiro: Shadows Die Twice', 'Sekiro: Shadows Die Twice - GOTY Edition', true },
+  { 'Disco Elysium', 'Disco Elysium: The Final Cut', true },
+  { 'Death Stranding', "Death Stranding Director's Cut", true },
+  { 'The Elder Scrolls V: Skyrim', 'The Elder Scrolls V: Skyrim Special Edition', true },
+  { 'Hollow Knight', 'Hollow Knight: Voidheart Edition', true },
+  { 'Final Fantasy VII', 'Final Fantasy VII Remake', true },
+  { "Assassin's Creed II", "Assassin's Creed 2", true },
+  { 'Grand Theft Auto V', 'Grand Theft Auto 5', true },
+  { 'Civilization VI', 'Civilization 6', true },
+  { 'Resident Evil 4', 'Resident Evil 4 (2023)', true },
+  { 'God of War', 'God of War (2018)', true },
+  { 'Pokémon Legends: Arceus', 'Pokemon Legends Arceus', true },
+  { 'NieR:Automata', 'Nier: Automata', true },
+  { 'LISA', 'LISA: The Painful', true },
+  { 'DuckMan', 'Duckman: The Graphic Adventures of a Private Dick', true },
+  { 'Celeste', 'Celeste', true },
+  -- sequels: the base game must never take its sequel's times, and vice versa
+  { 'Hades', 'Hades II', false },
+  { 'Hades', 'Hades 2', false },
+  { 'Hades II', 'Hades', false },
+  { 'Portal', 'Portal 2', false },
+  { 'Portal 2', 'Portal', false },
+  { 'Half-Life', 'Half-Life 2', false },
+  { 'Half-Life 2', 'Half-Life 2: Episode One', false },
+  { 'Half-Life 2', 'Half-Life 2: Episode 2', false },
+  { 'Left 4 Dead', 'Left 4 Dead 2', false },
+  { 'Dark Souls', 'Dark Souls II', false },
+  { 'Dark Souls II', 'Dark Souls III', false },
+  { 'The Witcher 2', 'The Witcher 3', false },
+  { 'God of War', 'God of War II', false },
+  { 'Mass Effect', 'Mass Effect 2', false },
+  { 'Mass Effect 2', 'Mass Effect 3', false },
+  { 'Dishonored', 'Dishonored 2', false },
+  { 'Titanfall', 'Titanfall 2', false },
+  { 'Overwatch', 'Overwatch 2', false },
+  { 'Destiny', 'Destiny 2', false },
+  { "Baldur's Gate", "Baldur's Gate II", false },
+  { 'Age of Empires II', 'Age of Empires III', false },
+  { 'Total War: Rome', 'Total War: Rome II', false },
+  { 'Grand Theft Auto V', 'Grand Theft Auto VI', false },
+  { 'Doom', 'DOOM Eternal', false },
+  { 'Hades', "Hades' Star", false },
+  { 'Football Manager 2024', 'Football Manager 2025', false },
+  -- remakes with the same name are the same page; a year in brackets is noise
+  { 'Resident Evil 4', 'Resident Evil 4 (2005)', true },
+  -- other games that share words
+  { 'Batman: Arkham Asylum', 'Batman: Arkham City', false },
+  { 'Hades', 'Saint Seiya: The Hades', false },
+  { 'Horizon Zero Dawn', 'Horizon Forbidden West', false },
+  { 'Wild World', 'Animal Crossing: Wild World', false },
+  -- non-game pages: a soundtrack, a demo, a playtest must be skipped
+  { 'Hollow Knight', 'Hollow Knight: Gods & Glory Soundtrack', false },
+  { 'Hades', 'Hades Original Soundtrack', false },
+  { 'Undertale', 'Undertale Soundtrack', false },
+  { 'Cyberpunk 2077', 'Cyberpunk 2077 Demo', false },
+  { 'Half-Life: Alyx', 'Half-Life: Alyx Playtest', false },
+  { 'Hades II', 'Hades II Playtest', false },
+  { 'Terraria', 'Terraria Dedicated Server', false },
+  { 'Cities: Skylines', 'Cities: Skylines - Expansion Pass', false },
+}
+
+local case_matched, case_refused = 0, 0
+for _, case in ipairs(MATCH_CASES) do
+  local value, kind = backend.name_score(case[1], case[2])
+  local confident = value ~= nil and kind ~= 'weak' and value >= 0.6
+  assert(confident == case[3], string.format(
+    'matching table: "%s" vs "%s" expected %s, got %s (%s)',
+    case[1], case[2], case[3] and 'match' or 'no match', tostring(value), tostring(kind)))
+  local row = backend.pick_match({ { game_name = case[2] } }, case[1])
+  assert((row ~= nil) == case[3], 'pick_match disagrees with name_score for: ' .. case[2])
+  if case[3] then case_matched = case_matched + 1 else case_refused = case_refused + 1 end
+end
+assert(#MATCH_CASES >= 40, 'the matching table needs at least 40 real-world pairs')
 
 -- ---------------------------------------------------------------- storage
 
@@ -685,3 +794,150 @@ assert(json.decode(registry.SlsLunaHealth()).health.steam.client.updatesBlocked 
   'a changed input must invalidate the health memo')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs, health')
+
+-- ------------------------------------------------------------ re-validation
+--
+-- A store written by an older scorer (or by another machine) is checked once
+-- against the Steam names in the library: a record whose title no longer scores
+-- as a confident match is flagged, never deleted, and the pass is idempotent.
+local function write_store_file(path, value)
+  local handle = assert(io.open(path, 'wb'))
+  handle:write(json.encode(value))
+  handle:close()
+end
+
+write_store_file(store_path, { version = 1, games = {
+  ['111'] = { id = 1, name = 'Hades II', match = 'exact', main = 100 },
+  ['222'] = { id = 2, name = 'Hades', match = 'exact', main = 200 },
+  ['333'] = { id = 3, name = 'Unrelated', match = 'manual', main = 50 },
+} })
+touch(store_path)
+out = call('SlsHltbLibrary', { raw = json.encode({ games = {
+  { appid = 111, name = 'Hades' }, { appid = 222, name = 'Hades' }, { appid = 333, name = 'Something Else' },
+  { appid = 444, name = 'Hades Original Soundtrack' }, { appid = 445, name = 'Half-Life: Alyx Playtest' },
+} }) })
+assert(out.success and out.count == 3 and out.skipped == 2,
+  'soundtrack/playtest inventory entries must be skipped: ' .. tostring(out.count) .. '/' .. tostring(out.skipped))
+out = call('SlsHltbRevalidate')
+assert(out.success and out.checked == 2 and out.flagged == 1 and out.applied == true,
+  'one stored sequel match must be flagged: ' .. json.encode(out))
+local reviewed = read_store()
+assert(reviewed.games['111'].needsReview == true and reviewed.games['111'].stale == true,
+  'the sequel record must be marked for review')
+assert(reviewed.games['111'].main == 100, 'a flagged record keeps its times (not deleted)')
+assert(reviewed.games['222'].needsReview == nil, 'a title that still matches must stay clean')
+assert(reviewed.games['333'].needsReview == nil, 'manual records are never reviewed')
+local after_first = json.encode(read_store())
+out = call('SlsHltbRevalidate')
+assert(out.applied == false and out.flagged == 1, 'a second pass must be a no-op')
+assert(json.encode(read_store()) == after_first, 'an idempotent pass must not rewrite the store')
+assert(call('SlsHltbGet').needsReview == 1, 'the read reply must expose the review count')
+
+-- ------------------------------------------------------------- durability
+--
+-- Torn store + good backup: restore it, keep the broken file and say so.
+local good_store = { version = 1, games = {
+  ['4242'] = { id = 0, name = 'Own', match = 'manual', main = 7200 } } }
+write_store_file(store_path .. '.bak', good_store)
+write_store_file(store_path, 'x') -- overwritten below with a truncated document
+local torn = assert(io.open(store_path, 'wb'))
+torn:write('{"version":1,"games":{"42')
+torn:close()
+touch(store_path)
+local rescued = call('SlsHltbGet')
+assert(rescued.recovered == true, 'a torn store with a good backup must be reported recovered')
+assert(rescued.recovery and rescued.recovery.message:find('restored', 1, true),
+  'the reply must carry a recovery message')
+assert(rescued.games['4242'] and rescued.games['4242'].main == 7200, 'the backup records must be served')
+local kept = io.open(rescued.recovery.kept and (home .. '/.local/share/slssteam-integrations/' .. rescued.recovery.kept)
+  or '/nonexistent', 'rb')
+assert(kept, 'the broken file must be kept as *.corrupt-<ts>')
+kept:close()
+
+-- Both copies bad: keep the broken file, start empty, report an error.
+write_store_file(store_path, 'not json at all')
+write_store_file(store_path .. '.bak', 'also broken')
+touch(store_path)
+local broken = call('SlsHltbGet')
+assert(broken.success == true and broken.count == 0, 'a lost store starts empty, it does not fail the read')
+assert(broken.recovery and broken.recovery.error and broken.recovery.error:find('started empty', 1, true),
+  'the reply must say the store started empty')
+assert(broken.recovery.kept, 'the unreadable original must be kept, never discarded')
+
+-- A failed write leaves the old file and no partial *.tmp behind.
+local before_fail = assert(io.open(store_path, 'rb')):read('*a')
+local data_dir_path = home .. '/.local/share/slssteam-integrations'
+os.execute('chmod 0555 ' .. string.format('%q', data_dir_path))
+local refused_put = call('SlsHltbPut', { raw = json.encode({ appid = 555, name = 'Blocked', main = 1 }) })
+os.execute('chmod 0755 ' .. string.format('%q', data_dir_path))
+assert(refused_put.success == false and type(refused_put.error) == 'string',
+  'a write into a read-only directory must fail visibly')
+local after_fail = assert(io.open(store_path, 'rb')):read('*a')
+assert(after_fail == before_fail, 'a failed write must leave the previous store intact')
+local leftovers = io.popen('ls -1 ' .. string.format('%q', data_dir_path) .. ' | grep -c "\\.tmp$"')
+local tmp_count = tonumber(leftovers:read('*a') or '0') or 0
+leftovers:close()
+assert(tmp_count == 0, 'a failed write must not leave a partial *.tmp file')
+
+-- ------------------------------------------------------- data-dir hygiene
+--
+-- Syncthing leaves *.sync-conflict-* copies in the shared directory. They are
+-- reported in Health and moved (never deleted) into conflicts/<date>/.
+local conflicts = {
+  'hltb-library.sync-conflict-20260101-120000-AAAAAAA.json',
+  'hltb-library.sync-conflict-20260102-120000-BBBBBBB.json',
+  'presence.sync-conflict-20260103-120000-CCCCCCC.json',
+}
+for _, name in ipairs(conflicts) do
+  local handle = assert(io.open(data_dir_path .. '/' .. name, 'wb'))
+  handle:write('{"version":1,"games":{}}')
+  handle:close()
+end
+-- A conflict copy can sit next to the playtime ledger too, not only next to
+-- hltb-library.json: the sweep covers the data directory's subdirectories.
+local nested = 'playtime.sync-conflict-20260104-120000-DDDDDDD.json'
+os.execute('mkdir -p ' .. string.format('%q', data_dir_path .. '/playtime'))
+local nested_handle = assert(io.open(data_dir_path .. '/playtime/' .. nested, 'wb'))
+nested_handle:write('{"events":[]}')
+nested_handle:close()
+local hygiene = call('SlsLunaHygiene', { raw = json.encode({ action = 'status' }) })
+assert(hygiene.success and hygiene.hygiene.count == 4, 'four conflict copies must be reported')
+assert(hygiene.hygiene.totalBytes > 0 and hygiene.hygiene.files[1].name ~= nil, 'each copy has a size')
+assert(hygiene.hygiene.caps.store == 4 * 1024 * 1024, 'the caps must be reported with the files')
+local health_payload = call('SlsLunaHealth', { raw = json.encode({ refresh = true }) })
+assert(health_payload.health.data.hygiene.conflicts.count == 4, 'Health must count the conflict copies')
+assert(health_payload.health.data.caps.hltb == 4 * 1024 * 1024
+  and health_payload.health.data.caps.records == 8000, 'Health must publish the growth caps')
+assert(type(health_payload.health.data.hltb.needsReview) == 'number',
+  'Health must expose the review count from the marker, not a store decode')
+local capped = false
+for _, file in ipairs(health_payload.health.data.files) do
+  if file.name == 'hltb.json' then
+    assert(file.size and file.cap == 4 * 1024 * 1024, 'Health must show each data file with its cap')
+    capped = true
+  end
+end
+assert(capped, 'Health must list the store with its cap')
+local clean = call('SlsLunaHygiene', { raw = json.encode({ action = 'clean' }) })
+assert(clean.success and clean.moved == 4 and type(clean.folder) == 'string', 'clean must move every copy')
+for _, name in ipairs(conflicts) do
+  local gone = io.open(data_dir_path .. '/' .. name, 'rb')
+  assert(gone == nil, 'clean must remove the copy from the live directory: ' .. name)
+  local moved = io.open(clean.folder .. '/' .. name, 'rb')
+  assert(moved, 'clean must keep the copy in conflicts/<date>/: ' .. name)
+  moved:close()
+end
+local kept_nested = io.open(clean.folder .. '/playtime/' .. nested, 'rb')
+assert(kept_nested, 'a subdirectory copy keeps its subdirectory under conflicts/<date>/')
+kept_nested:close()
+assert(call('SlsLunaHygiene', { raw = json.encode({ action = 'status' }) }).hygiene.count == 0,
+  'the live directory must be clean afterwards')
+-- Health stays memoised with the hygiene report inside it: building it must not
+-- write the sidecar it is keyed on.
+local health_once = registry.SlsLunaHealth()
+assert(registry.SlsLunaHealth() == health_once, 'Health must stay memoised after a hygiene clean')
+assert(call('SlsLunaHygiene', { raw = json.encode({ action = 'nonsense' }) }).success == false,
+  'an unknown hygiene action must be refused')
+
+print('Luna HLTB robustness OK: ' .. tostring(case_matched + case_refused) .. ' matching pairs, revalidation, '
+  .. '.bak recovery, corrupt retention, atomic write, sync-conflict status/clean, health caps')

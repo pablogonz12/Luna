@@ -294,6 +294,94 @@ if os.getenv('SLS_KIND')=='presence' then
     assert(call(reg,'SlsPresenceGet').state.discordAppId=='123456789012345678', 'settings exposed in state')
     assert(call(reg,'SlsPresencePut',json.encode({owned={},running={}})).success)
     assert(call(reg,'SlsPresenceGet').state.discordEnabled==false, 'Put must keep discord settings')
+    -- Discord honesty: the reply must say whether publishing can work at all.
+    local valid_app_id='1234567890123456789'
+    assert(plugin.app_id_valid(valid_app_id) and plugin.app_id_valid('12345678901234567'),
+      'a 17-20 digit Application ID is valid')
+    assert(not plugin.app_id_valid('1234') and not plugin.app_id_valid('123456789012345678901')
+      and not plugin.app_id_valid('1234567890123456a') and not plugin.app_id_valid(nil),
+      'short, long and non-numeric ids are invalid')
+    local empty=plugin.discord_status({discordEnabled=true,discordAppId=''},'idle',true)
+    assert(empty.enabled and empty.hasAppId==false and empty.appIdValid==false
+      and empty.publishing==false and empty.reason=='no-app-id', 'an empty id must reason no-app-id')
+    local short=plugin.discord_status({discordEnabled=true,discordAppId='12345'},'connected',true)
+    assert(short.reason=='invalid-app-id' and short.publishing==false and short.hasAppId==true,
+      'a malformed id must reason invalid-app-id, never report on')
+    local nosock=plugin.discord_status({discordEnabled=true,discordAppId=valid_app_id},'connected',false)
+    assert(nosock.reason=='no-socket' and nosock.publishing==false,
+      'a host without socket.unix must report no-socket rather than claim to publish')
+    local okay=plugin.discord_status({discordEnabled=true,discordAppId=valid_app_id},'connected',true)
+    assert(okay.publishing==true and okay.reason=='ok')
+    local off=plugin.discord_status({discordEnabled=false,discordAppId=valid_app_id},'connected',true)
+    assert(off.publishing==false and off.reason=='disabled')
+    local rejected_id=call(reg,'SlsPresenceSetDiscord',json.encode({appId='12345'}))
+    assert(rejected_id.success==false and rejected_id.code=='invalid-app-id',
+      'an invalid non-empty Application ID must be rejected with a structured error')
+    assert(call(reg,'SlsPresenceGet').state.discordAppId=='123456789012345678',
+      'a rejected Application ID must not be stored')
+    local saved_id=call(reg,'SlsPresenceSetDiscord',json.encode({appId=valid_app_id}))
+    assert(saved_id.success==true and saved_id.discord.appIdValid==true
+      and saved_id.discord.hasAppId==true, 'a valid id must be saved and reported')
+    assert(saved_id.discord.publishing==(saved_id.discord.reason=='ok'),
+      'publishing must never be true unless the reason is ok')
+    local honest=call(reg,'SlsPresenceGet')
+    assert(type(honest.discord)=='table' and honest.discord.appIdValid==true
+      and type(honest.discord.reason)=='string', 'Get must carry the discord verdict')
+    local status_honest=call(reg,'SlsPresenceDiscordStatus')
+    assert(type(status_honest.discord)=='table' and type(status_honest.socketAvailable)=='boolean',
+      'DiscordStatus must carry the same verdict')
+    -- Durability: a torn presence.json is healed from .bak and keeps `owned`;
+    -- the live file's stale running entry is retired on the next backend start.
+    local state_file=os.getenv('HOME')..'/.local/share/slssteam-integrations/presence.json'
+    assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={}})).success)
+    assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000001}})).success)
+    do
+      local f=assert(io.open(state_file,'rb'))
+      local good=f:read('*a'); f:close()
+      assert(good and #good>0, 'the state file must be written')
+      local bak=assert(io.open(state_file..'.bak','rb'))
+      local previous=bak:read('*a'); bak:close()
+      assert(previous and #previous>0, 'the previous good copy must be kept as .bak')
+      local torn=assert(io.open(state_file,'wb'))
+      torn:write('{"enabled": true, "owned": {"620"'); torn:close()
+    end
+    local reg2={}
+    local plugin2=assert(loadfile('addons/presence/plugin/backend/main.lua'))()
+    plugin2.register(reg2)
+    local revived=call(reg2,'SlsPresenceGet')
+    assert(revived.success and revived.recovered==true, 'a torn file must be reported as recovered from .bak')
+    assert(revived.state.owned['620']==3000000001, 'a torn file must not lose the owned ledger')
+    -- Running-entry TTL: alive keeps and heartbeats, gone expires, grace protects
+    -- a just-started game, and an unreadable process table only expires on the TTL.
+    local now=os.time()
+    local st={running={['620']=3000000001},runningAt={['620']=now}}
+    assert(#plugin.reconcile_running(st,{620},true,now+50,{grace=120,ttl=3600}).cleared==0
+      and st.running['620']==3000000001, 'a live game must be kept')
+    local beat=plugin.reconcile_running(st,{620},true,now+200,{grace=120,ttl=3600})
+    assert(beat.refreshed==1 and st.runningAt['620']==now+200, 'a live game must heartbeat')
+    local gone=plugin.reconcile_running(st,{},true,now+400,{grace=120,ttl=3600})
+    assert(#gone.cleared==1 and st.running['620']==nil and st.runningAt['620']==nil,
+      'an entry whose process is gone must expire')
+    local young={running={['621']=3000000002},runningAt={['621']=now}}
+    assert(#plugin.reconcile_running(young,{},true,now+30,{grace=120,ttl=3600}).cleared==0,
+      'the grace window must protect a game that just launched')
+    local blind={running={['622']=3000000003},runningAt={['622']=now}}
+    assert(#plugin.reconcile_running(blind,{},false,now+60,{grace=120,ttl=3600}).cleared==0,
+      'an incomplete process scan must not expire anything')
+    assert(#plugin.reconcile_running(blind,{},false,now+7200,{grace=120,ttl=3600}).cleared==1,
+      'without /proc the hard TTL must still expire the entry')
+    -- Restart cleanup: the file still calls a long-dead game running, the
+    -- process table says otherwise, so the start pass retires it.
+    assert(call(reg2,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000001}})).success)
+    local reg3={}
+    local plugin3=assert(loadfile('addons/presence/plugin/backend/main.lua'))()
+    plugin3.running_limits({grace=0,ttl=7200})
+    plugin3.scan_games=function() return {},true end
+    plugin3.register(reg3)
+    local restarted=call(reg3,'SlsPresenceGet')
+    assert(next(restarted.state.running)==nil, 'a start must clear a running entry whose game is gone')
+    assert(restarted.state.owned['620']==3000000001, 'cleanup must not touch the owned ledger')
+    assert(restarted.runtime.expiredRunning>=1, 'the expired count must be reported')
     assert(type(plugin.tick)=='function' and plugin.tick(1)==nil, 'tick hook never raises')
   end
 else

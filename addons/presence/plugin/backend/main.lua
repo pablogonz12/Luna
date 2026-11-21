@@ -7,12 +7,17 @@ local M = {}
 local HOME = os.getenv('HOME') or ''
 local DIR = HOME .. '/.local/share/slssteam-integrations'
 local FILE = DIR .. '/presence.json'
+local BAK = FILE .. '.bak'
 local MAX = 4294967295
 local function valid_id(v)
   local n = tonumber(v)
   return n and n >= 1 and n <= MAX and n == math.floor(n)
 end
-local function blank() return {enabled=false, sessionTime=true, discordEnabled=true, discordAppId='', owned={}, running={}, cleanup=0, account=nil, accountSource=nil} end
+-- runningAt is the heartbeat of a `running` entry: the epoch of the last time
+-- the backend saw the game's process alive (or the agent reported it started).
+-- It lives beside the numeric running map so the wire shape the agent reads is
+-- unchanged; without it an entry could outlive its game forever.
+local function blank() return {enabled=false, sessionTime=true, discordEnabled=true, discordAppId='', owned={}, running={}, runningAt={}, cleanup=0, account=nil, accountSource=nil} end
 -- Only the 8-hex FNV digest of an account identity is ever persisted; the raw
 -- SteamID or account name must never reach this file or a log line.
 local function valid_account(v)
@@ -21,12 +26,19 @@ end
 local function valid_source(v)
   return type(v)=='string' and v:match('^[a-z%-]+$')~=nil and #v>=4 and #v<=16
 end
-local function read_file()
-  local f = io.open(FILE, 'rb')
-  if not f then return blank() end
-  local s=f:read('*a'); f:close()
+local function read_all(path)
+  local f = io.open(path, 'rb')
+  if not f then return nil end
+  local s = f:read('*a')
+  f:close()
+  return s
+end
+-- A torn or hand-edited file must never cost the `owned` ledger: the last good
+-- copy is kept as presence.json.bak and restored from there.
+local function parse_state(s)
+  if type(s) ~= 'string' then return nil end
   local ok,value=pcall(json.decode,s)
-  if not ok or type(value)~='table' then return blank() end
+  if not ok or type(value)~='table' then return nil end
   local data=blank()
   data.enabled=value.enabled==true
   data.cleanup=tonumber(value.cleanup) or 0
@@ -49,23 +61,119 @@ local function read_file()
       data.running[tostring(original)]=tonumber(shortcut)
     end
   end
+  for original,at in pairs(type(value.runningAt)=='table' and value.runningAt or {}) do
+    local key = tostring(original)
+    if data.running[key] ~= nil and tonumber(at) and tonumber(at) > 0 then
+      data.runningAt[key] = math.floor(tonumber(at))
+    end
+  end
   return data
 end
-local function save_file(state)
-  fs.create_directories(DIR)
-  local tmp=FILE..'.tmp'
+local function read_file()
+  local raw = read_all(FILE)
+  local data = parse_state(raw)
+  if data then return data, {recovered=false} end
+  local restored = parse_state(read_all(BAK))
+  if restored then
+    -- Heal the live file from the backup on the next read so a torn write does
+    -- not keep costing the ledger on every call.
+    return restored, {recovered=true, reason='invalid'}
+  end
+  return blank(), {recovered=false, reason = raw and 'invalid' or 'missing'}
+end
+local function write_atomic(path, body)
+  local tmp=path..'.tmp'
   local f,err=io.open(tmp,'wb')
   if not f then return false,err end
-  local ok,body=pcall(json.encode,state)
-  if not ok then f:close(); os.remove(tmp); return false,body end
   local written,werr=f:write(body)
   local closed,cerr=f:close()
   if not written or not closed then os.remove(tmp);return false,werr or cerr or 'write failed' end
-  local done,why=os.rename(tmp,FILE)
+  local done,why=os.rename(tmp,path)
   if not done then os.remove(tmp);return false,why end
   return true
 end
+local function save_file(state)
+  fs.create_directories(DIR)
+  local ok,body=pcall(json.encode,state)
+  if not ok then return false,body end
+  -- Keep the previous good copy before replacing it: a crash between the write
+  -- and the rename, or a truncation afterwards, still leaves the ledger safe.
+  local previous=read_all(FILE)
+  if previous and parse_state(previous) then write_atomic(BAK,previous) end
+  return write_atomic(FILE,body)
+end
 local function response(o) return json.encode(o) end
+-- A `running` entry must not outlive its game. The agent records the entry when
+-- it launches a placeholder and the backend heartbeats it while the game's
+-- process is alive; an entry the process table no longer shows is retired after
+-- a short grace window, and one with no process evidence at all after a hard TTL.
+local RUNNING_LIMITS = {grace=120, ttl=6*3600}
+function M.running_limits(opts)
+  if type(opts)=='table' then
+    for _,key in ipairs({'grace','ttl'}) do
+      local value=tonumber(opts[key])
+      if value and value>=0 then RUNNING_LIMITS[key]=value end
+    end
+  end
+  return {grace=RUNNING_LIMITS.grace, ttl=RUNNING_LIMITS.ttl}
+end
+function M.reconcile_running(data, alive, complete, now, opts)
+  opts = opts or RUNNING_LIMITS
+  now = tonumber(now) or os.time()
+  local grace = tonumber(opts.grace) or 120
+  local ttl = tonumber(opts.ttl) or 0
+  local games = {}
+  for _,id in ipairs(type(alive)=='table' and alive or {}) do
+    if valid_id(id) then games[tostring(math.floor(tonumber(id)))]=true end
+  end
+  data.running = data.running or {}
+  local cleared, refreshed = {}, 0
+  for original in pairs(data.running) do
+    local at = tonumber((data.runningAt or {})[original]) or 0
+    local alive_now = complete==true and games[tostring(math.floor(tonumber(original) or 0))]==true
+    if alive_now then
+      data.runningAt = data.runningAt or {}
+      -- Heartbeat, but only when it moves: a steady game must not rewrite the
+      -- state file on every scan.
+      if at==0 or now-at>=30 then data.runningAt[original]=now; refreshed=refreshed+1 end
+    elseif complete==true and (at==0 or now-at>=grace) then
+      data.running[original]=nil
+      if data.runningAt then data.runningAt[original]=nil end
+      cleared[#cleared+1]=original
+    elseif at>0 and ttl>0 and now-at>ttl then
+      -- No trustworthy process table (missing /proc, unreadable) but the entry
+      -- is far older than any session: the TTL is the only guard left.
+      data.running[original]=nil
+      if data.runningAt then data.runningAt[original]=nil end
+      cleared[#cleared+1]=original
+    end
+  end
+  return {cleared=cleared, refreshed=refreshed}
+end
+-- Discord honesty: an enabled toggle with a missing or malformed Application ID
+-- (or a host with no unix socket) cannot publish anything, so every reply says
+-- so instead of leaving a green switch with no effect.
+function M.app_id_valid(value)
+  return type(value)=='string' and value:match('^%d+$')~=nil and #value>=17 and #value<=20
+end
+function M.socket_available()
+  local ok, socket = pcall(require, 'socket')
+  return ok and type(socket)=='table' and type(socket.unix)=='function'
+end
+function M.discord_status(state, status, socket)
+  local enabled = state.discordEnabled ~= false
+  local has = type(state.discordAppId)=='string' and state.discordAppId~=''
+  local valid = M.app_id_valid(state.discordAppId)
+  local reason
+  if not enabled then reason='disabled'
+  elseif not has then reason='no-app-id'
+  elseif not valid then reason='invalid-app-id'
+  elseif socket ~= true then reason='no-socket'
+  elseif status=='connected' then reason='ok'
+  elseif status=='no_discord' or status==nil then reason='no-discord'
+  else reason='idle' end
+  return {enabled=enabled, hasAppId=has, appIdValid=valid, publishing=reason=='ok', reason=reason}
+end
 -- A windowless RunGame shortcut still becomes Big Picture's active game. In
 -- Gamescope this leaves its loading screen selected instead of the real game.
 -- Require a verified selection-restoration capability in this process. The
@@ -476,17 +584,48 @@ local function manifests()
   return apps
 end
 local live = {}
+local expired_running = 0
+-- The games the process table currently shows, minus our own helper shortcuts.
+function M.scan_games()
+  local games, helpers, complete = collect_running(fs.list, function(path)
+    local f = io.open(path,'rb')
+    if not f then return nil end
+    local data = f:read('*a'); f:close(); return data
+  end)
+  local skip = {}
+  for _, id in ipairs(helpers) do skip[id] = true end
+  local out = {}
+  for _, id in ipairs(games) do if not skip[id] then out[#out + 1] = id end end
+  return out, complete
+end
 function M.register(registry)
-  local state=read_file()
+  -- Start-time recovery: a torn file is healed from .bak, and every entry the
+  -- file still calls running is reconciled with the processes that exist now,
+  -- so an entry whose game (and agent) is long gone cannot survive a restart.
+  local state,loaded=read_file()
+  if loaded.recovered then save_file(state) end
+  do
+    local alive,complete=nil,false
+    if next(state.running)~=nil then alive,complete=M.scan_games() end
+    if alive then
+      local change=M.reconcile_running(state,alive,complete,os.time())
+      expired_running=expired_running+#change.cleared
+      if #change.cleared>0 or change.refreshed>0 then save_file(state) end
+    end
+  end
   local runtime={active=0,healthy=false,error='',activeIds={},reportedAt=0,
     owned=0,running=0,accountMismatch=false,identityAmbiguous=false,accountSource='',
     reconciledActivate=0,reconciledOrphaned=0,hideStrategy='',hideVerified=false,contracts={},
-    helpersPaused=false,helperPauseReason='',restoredSelections=0}
+    helpersPaused=false,helperPauseReason='',restoredSelections=0,
+    expiredRunning=0,recovered=loaded.recovered==true}
   local titles={}
   registry.SlsPresenceGet=function()
     local apps=manifests()
+    runtime.expiredRunning=expired_running
     return response({success=true, state=state, apps=apps, libraryError=manifest_cache.error,
-      runtime=runtime,
+      runtime=runtime, recovered=loaded.recovered==true,
+      recoveredReason=loaded.reason or '',
+      discord=M.discord_status(state,live.session and live.session.status,M.socket_available()),
       titles=titles, identity=identity(), session=helper_policy()})
   end
   -- Read-only contract probe: proves the wire shape Lumen actually delivers
@@ -547,15 +686,31 @@ function M.register(registry)
     local dirs=root~='' and {fs.join(root,'steamapps')} or {}
     return {appid=appid,name=resolve_game_name(appid,titles,dirs,read_text)}
   end
+  local HEARTBEAT_SECONDS=30
+  local last_heartbeat=0
   live.tick=function(now)
     session.step({enabled=state.discordEnabled~=false,app_id=state.discordAppId},current_game(),now)
+    -- Running-entry heartbeat: while a game is alive its epoch moves, and one
+    -- the process table no longer shows is retired after the grace window.
+    if now-last_heartbeat<HEARTBEAT_SECONDS then return end
+    last_heartbeat=now
+    if next(state.running)==nil then return end
+    local alive,complete=M.scan_games()
+    local change=M.reconcile_running(state,alive,complete,now)
+    if #change.cleared>0 or change.refreshed>0 then
+      save_file(state)
+      expired_running=expired_running+#change.cleared
+    end
   end
   live.shutdown=function() session.shutdown() end
   live.session=session
   registry.SlsPresenceDiscordStatus=function()
     local game=current_game()
+    local socket=M.socket_available()
     return response({success=true,status=session.status,name=game and game.name or session.name,
-      appid=game and game.appid or nil,enabled=state.discordEnabled~=false,hasAppId=state.discordAppId~=''})
+      appid=game and game.appid or nil,enabled=state.discordEnabled~=false,hasAppId=state.discordAppId~='',
+      appIdValid=M.app_id_valid(state.discordAppId),socketAvailable=socket,
+      discord=M.discord_status(state,session.status,socket)})
   end
   registry.SlsPresenceSetDiscord=function(raw)
     if type(raw)~='string' or #raw>500 then return response({success=false,error='Invalid payload'}) end
@@ -567,14 +722,20 @@ function M.register(registry)
       updated.discordEnabled=obj.enabled
     end
     if obj.appId~=nil then
-      if type(obj.appId)~='string' or (obj.appId~='' and (not obj.appId:match('^%d+$') or #obj.appId<5 or #obj.appId>25)) then
-        return response({success=false,error='Application ID must be numeric'})
+      if type(obj.appId)~='string' then
+        return response({success=false,code='invalid-app-id',error='Application ID must be 17-20 digits.'})
+      end
+      if obj.appId~='' and not M.app_id_valid(obj.appId) then
+        return response({success=false,code='invalid-app-id',
+          error='Application ID must be 17-20 digits.',
+          discord=M.discord_status(state,live.session and live.session.status,M.socket_available())})
       end
       updated.discordAppId=obj.appId
     end
     local saved,err=save_file(updated)
     if saved then state=updated end
-    return response({success=saved,error=err,discordEnabled=state.discordEnabled,discordAppId=state.discordAppId})
+    return response({success=saved,error=err,discordEnabled=state.discordEnabled,discordAppId=state.discordAppId,
+      discord=M.discord_status(state,live.session and live.session.status,M.socket_available())})
   end
   registry.SlsPresencePut=function(raw)
     if type(raw)~='string' or #raw>1000000 then return response({success=false,error='Invalid payload'}) end
@@ -609,6 +770,8 @@ function M.register(registry)
         return response({success=false,error='Invalid active shortcut'})
       end
       next_state.running[tostring(original)]=tonumber(shortcut)
+      -- The agent has just seen this game running: that is the heartbeat.
+      next_state.runningAt[tostring(original)]=os.time()
     end
     local saved,err=save_file(next_state)
     if saved then state=next_state end

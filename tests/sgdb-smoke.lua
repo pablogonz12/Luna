@@ -485,4 +485,111 @@ assert(#wire.calls - calls_before <= 1, 'one poll must not chain requests: '
 assert(sync_poll.state == 'running', 'one request per poll cannot finish five slots')
 wire.start, wire.poll = real_start, real_poll
 
-print('Luna SteamGridDB backend OK: key gate, search, asset filtering, apply/backup/restore, wide, auto job (async, slow, failing), live, refusals, accounts')
+-- ---------------------------------------------------------------- durability, honesty, ids
+
+-- The API key is never echoed, not even on an error path: every handler's raw
+-- reply is scanned for the fixture secret.
+do
+  local secret = 'sgdb-smoke-SECRET-0123456789abcdef'
+  assert(call('SlsSgdbSetKey', { raw = json.encode({ key = secret }) }).success)
+  local get = call('SlsSgdbGet')
+  assert(get.keyMasked == '••••cdef' and get.apiKey == nil, 'only the key tail may be shown')
+  local probes = {
+    { 'SlsSgdbGet' }, { 'SlsSgdbTest' },
+    { 'SlsSgdbSearch', json.encode({ term = 'x' }) },
+    { 'SlsSgdbAssets', json.encode({ gameId = 1, kind = 'grid' }) },
+    { 'SlsSgdbApply', json.encode({ appid = 1, kind = 'grid',
+      url = 'http://127.0.0.1/x.png', mime = 'image/png' }) },
+    { 'SlsSgdbUndo', json.encode({ appid = 1, kind = 'grid' }) },
+    { 'SlsSgdbReset', json.encode({ appid = 1, kind = 'grid' }) },
+    { 'SlsSgdbHistory', json.encode({ appid = 1 }) },
+    { 'SlsSgdbLive', json.encode({ appid = 1, kind = 'icon' }) },
+    { 'SlsSgdbSetKey', json.encode({ key = 42 }) },
+  }
+  for _, probe in ipairs(probes) do
+    local raw = registry[probe[1]](probe[2])
+    assert(type(raw) == 'string' and raw:find(secret, 1, true) == nil,
+      'the API key leaked from ' .. probe[1])
+  end
+  assert(call('SlsSgdbSetKey', { raw = json.encode({ key = 'good-key' }) }).success)
+end
+
+-- A torn sgdb.json is restored from sgdb.json.bak, key included, with a note.
+do
+  local path = steam_root and (os.getenv('HOME') .. '/.local/share/slssteam-integrations/sgdb.json')
+  assert(path, 'the config path must be known')
+  call('SlsSgdbSetKey', { raw = json.encode({ key = 'good-key' }) })
+  call('SlsSgdbSetKey', { raw = json.encode({ key = 'good-key' }) })
+  assert(file_text(path .. '.bak'), 'the previous good key file must be kept as .bak')
+  local f = assert(io.open(path, 'wb')); f:write('{"version":1,"apiKey":"good'); f:close()
+  local restored = call('SlsSgdbGet')
+  assert(restored.success == true and restored.recovered == true,
+    'a torn key file must be reported as recovered')
+  assert(restored.hasKey == true and restored.keyMasked == '••••-key', 'the key must come back from .bak')
+end
+
+-- Per-slot timestamps of the last change, read from the existing op-log.
+local times = call('SlsSgdbHistory', { raw = json.encode({ appid = 1145360 }) })
+assert(times.success == true and type(times.times) == 'table'
+  and type(times.times.grid) == 'number' and times.times.grid > 0,
+  'the last change epoch must be reported per slot: ' .. tostring(times.times.grid))
+assert(times.times.wide == nil and times.times.hero == nil,
+  'a slot never changed must have no timestamp')
+
+-- A torn op-log is restored from its .bak and still carries the timestamps.
+do
+  local log_path = grid_dir .. '/.sls-luna-history/op-log.json'
+  assert(file_text(log_path .. '.bak'), 'the op-log must keep a .bak')
+  local f = assert(io.open(log_path, 'wb')); f:write('[{"at":1,'); f:close()
+  local recovered = call('SlsSgdbHistory', { raw = json.encode({ appid = 1145360 }) })
+  assert(recovered.success == true and recovered.recovered == true,
+    'a torn op-log must be reported as recovered')
+  assert(type(recovered.times.grid) == 'number', 'the timestamps must survive the recovery')
+end
+
+-- Rate limit, malformed body and network down each have their own code.
+do
+  local real_get = wire.get
+  wire.get = function()
+    return { status = 429, body = '{"success":false}', headers = { ['Retry-After'] = '42' } }
+  end
+  local limited = call('SlsSgdbTest')
+  assert(limited.success == false and limited.code == 'rate_limit' and limited.retryAfter == 42
+    and limited.error:find('42', 1, true) ~= nil,
+    'a rate limit must be structured, with retry-after')
+  local limited_assets = call('SlsSgdbAssets', { raw = json.encode({ gameId = 1, kind = 'grid' }) })
+  assert(limited_assets.code == 'rate_limit' and limited_assets.retryAfter == 42,
+    'the assets call must classify a rate limit the same way')
+  wire.get = function() return { status = 200, body = 'not json at all' } end
+  local malformed = call('SlsSgdbSearch', { raw = json.encode({ term = 'hades' }) })
+  assert(malformed.success == false and malformed.code == 'unexpected'
+    and type(malformed.error) == 'string', 'a malformed body must be a structured error')
+  wire.get = function() return nil, 'connection refused' end
+  local down = call('SlsSgdbSearch', { raw = json.encode({ term = 'hades' }) })
+  assert(down.success == false and down.code == 'unavailable' and type(down.error) == 'string',
+    'a dead network must be a structured error')
+  wire.get = real_get
+end
+
+-- Non-Steam shortcuts: the picker hands over the 32-bit AppID (the form
+-- Steam's app list and presence.json use). The 64-bit encoding that agent.js
+-- builds for Steam API calls resolves to the same 32-bit slot, so Apply, Undo,
+-- Reset, History and Live all name the same file for either form.
+assert(backend.normalize_appid(3913598990) == 3913598990, 'a 32-bit shortcut id must pass through')
+assert(backend.normalize_appid(3913598990 * 2 ^ 32) == 3913598990,
+  'the 64-bit shortcut encoding must map to the 32-bit id')
+assert(backend.normalize_appid(620) == 620, 'a normal app id must pass through')
+assert(backend.normalize_appid(0) == nil and backend.normalize_appid(-1) == nil
+  and backend.normalize_appid('x') == nil and backend.normalize_appid(1.5) == nil,
+  'invalid ids must still be refused')
+local shortcut = call('SlsSgdbApply', { raw = json.encode({ appid = 3913598990, kind = 'grid',
+  url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
+assert(shortcut.success == true and shortcut.appid == 3913598990,
+  'a 32-bit shortcut id must be accepted: ' .. tostring(shortcut.error))
+assert(file_text(grid_dir .. '/3913598990p.png') == 'PNG1DATA',
+  'shortcut artwork must land under the 32-bit AppID')
+local shortcut_undo = call('SlsSgdbUndo', { raw = json.encode({ appid = 3913598990, kind = 'icon' }) })
+assert(shortcut_undo.success == false and shortcut_undo.code == 'empty',
+  'Undo must resolve the same slot and fail closed when empty')
+
+print('Luna SteamGridDB backend OK: key gate, search, asset filtering, apply/backup/restore, wide, auto job (async, slow, failing), live, refusals, accounts, .bak recovery, key masking, slot times, rate limit, shortcut ids')
