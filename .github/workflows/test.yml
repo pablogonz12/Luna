@@ -25,5 +25,7 @@ jobs:
       # lua5.4 + luac for the backend suites; cc/make so the native luna-host
       # suite is built and run here too instead of being skipped.
       - run: sudo apt-get update && sudo apt-get install -y lua5.4 build-essential
+      # Build the native host so its suite runs instead of being skipped.
+      - run: make -C host all
       # One entry point, the same one a local run uses.
       - run: bash scripts/test-all.sh

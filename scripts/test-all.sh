@@ -56,6 +56,14 @@ shell_step() {
   done
 }
 
+# The upgrade matrix installs real old release tags, so it is its own visible
+# step with its own timing: a skip here must be obvious, not a quiet red flag.
+upgrade_step() {
+  local start=$SECONDS
+  python3 -m unittest tests.test_upgrade -v || return 1
+  echo "upgrade matrix: $((SECONDS - start))s"
+}
+
 failures=()
 step() {
   local label="$1"; shift
@@ -69,6 +77,7 @@ step() {
 step 'node: check + tests' node_step
 step 'lua: syntax + backend suites' lua_step
 step 'host: native luna-host tests (rt_* + cdp_*)' host_step
+step 'python: upgrade matrix (old tags, full history)' upgrade_step
 step 'python: installer tests + compile + verify' python_step
 step 'shell syntax' shell_step
 
