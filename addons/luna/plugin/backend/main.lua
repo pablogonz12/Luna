@@ -10,7 +10,7 @@
 local fs = require('fs')
 local json = require('json')
 local M = {}
-local VERSION = '0.14.18'
+local VERSION = '0.14.19'
 local home = os.getenv('HOME') or ''
 -- OPTIONAL third-party host (Lumen). This is the only place in this backend
 -- that names a path under Lumen: every other read goes through
