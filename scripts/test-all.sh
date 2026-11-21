@@ -18,7 +18,11 @@ if command -v lua5.4 >/dev/null 2>&1; then lua=lua5.4
 elif command -v lua >/dev/null 2>&1; then lua=lua
 else echo 'Lua runtime unavailable; install lua' >&2; exit 1
 fi
-luac -p tests/bridge-smoke.lua tests/presence/backend-smoke.lua tests/compressor-smoke.lua tests/hltb-smoke.lua \
+if command -v luac5.4 >/dev/null 2>&1; then luac=luac5.4
+elif command -v luac >/dev/null 2>&1; then luac=luac
+else echo 'luac unavailable; install lua5.4 (it ships luac5.4)' >&2; exit 1
+fi
+"$luac" -p tests/bridge-smoke.lua tests/presence/backend-smoke.lua tests/compressor-smoke.lua tests/hltb-smoke.lua \
   tests/sgdb-smoke.lua tests/graphics-smoke.lua bridge/bridge.lua \
   addons/*/plugin/backend/main.lua
 bash scripts/test-backend.sh

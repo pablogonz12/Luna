@@ -1,0 +1,43 @@
+name: Release SLS Luna
+# A tag is a promise to whoever runs the one-liner: the full suite must pass on
+# that exact tree before the bundle and its .sha256 are attached, and install.sh
+# installs the newest release that made it through here.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: sudo apt-get update && sudo apt-get install -y lua5.4 build-essential
+      # Never publish an untested tag.
+      - name: Full test suite
+        run: bash scripts/test-all.sh
+      - name: The tag matches the pinned Luna version
+        run: |
+          set -euo pipefail
+          have="v$(python3 -c "import json;print(json.load(open('vendor/MANIFEST.json'))['addons']['luna']['plugin_version'])")"
+          if [ "$have" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match the pinned Luna version ${have}" >&2
+            exit 1
+          fi
+      # luna release builds dist/luna-<version>.tar.gz + .sha256 and creates (or
+      # refreshes) the GitHub release v<version> with both attached.
+      - name: Build and publish the bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/luna.py release --out dist --publish
+          ls -l dist

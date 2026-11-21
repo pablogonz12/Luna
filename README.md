@@ -64,6 +64,12 @@ Default install, Luna's own host, nothing else required:
 curl -fsSL https://raw.githubusercontent.com/pgm1207/Luna/main/install.sh | bash
 ```
 
+The one-liner installs the newest *published release*, the tree CI ran the full
+suite on. `bash -s -- --main` installs the branch tip instead, and
+`LUNA_REF=<tag|sha>` pins one (see [docs/RELEASING.md](docs/RELEASING.md)). With
+no release yet, or an unreachable GitHub API, it says so in one line and
+installs `main`.
+
 Opt in to the full pipeline (pins the Steam client, installs the pinned upstream
 base, then Luna on top):
 
