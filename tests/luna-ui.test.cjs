@@ -165,7 +165,7 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
       const payload=args&&args.raw?JSON.parse(args.raw):(args||{});
       calls.push({fn,payload});
       if(fn==='SlsPlaytimeGet')return JSON.stringify(get||{success:true,apps:[],games:{},titles:{},shortcutNames:{},
-        stats:{today:0,last7d:0,last30d:0},runtime:{healthy:true,reportedAt:Date.now()/1000,file:'x.json'},account:'76561199026823325',manifestCount:0,shortcutCount:0});
+        stats:{today:0,last7d:0,last30d:0},runtime:{healthy:true,reportedAt:Date.now()/1000,file:'x.json'},account:'76561198000000042',manifestCount:0,shortcutCount:0});
       if(fn==='SlsPresenceGet')return JSON.stringify(presence||{success:true,state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}});
       if(fn==='SlsPlaytimeEdit')return JSON.stringify({success:true});
       if(fn==='SlsPresenceSetEnabled')return JSON.stringify({success:true,enabled:payload.enabled});
@@ -410,7 +410,7 @@ test('the menu opens with the sidebar, both settings sections and the account ro
   const {w,calls}=fakeWindow(document,{
     get:{success:true,apps:[620,3212112756],titles:{},shortcutNames:{'3212112756':'Minecraft'},
       games:{'620':{title:'Portal 2',trackedSeconds:7200,adjustmentSeconds:0}},stats:{today:7200,last7d:7200,last30d:7200},
-      runtime:{healthy:true,reportedAt:Date.now()/1000,file:'76561199026823325.json'},account:'76561199026823325',
+      runtime:{healthy:true,reportedAt:Date.now()/1000,file:'76561198000000042.json'},account:'76561198000000042',
       manifestCount:1,shortcutCount:1}});
   mount(w);
   document.getElementById('sls-luna-btn').click();

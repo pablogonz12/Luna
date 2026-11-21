@@ -486,6 +486,12 @@ def cmd_reconcile(options):
     return EXIT_OK
 
 
+# The single place that names the GitHub account the add-on payloads come from.
+# Override with LUNA_GITHUB_OWNER to point a fork at its own repositories.
+GITHUB_OWNER = os.environ.get('LUNA_GITHUB_OWNER') or 'pgm1207'
+GITHUB_URL = 'https://github.com/' + GITHUB_OWNER
+
+
 def home():
     return Path(os.environ.get('HOME') or Path.home())
 
@@ -1325,7 +1331,7 @@ def cmd_update(options):
         _release_lock(lock_path)
 
 
-LUNA_REPO = 'pgm1207/Luna'
+LUNA_REPO = GITHUB_OWNER + '/Luna'
 UPDATE_TTL = 6 * 3600
 
 
@@ -3270,6 +3276,7 @@ def _download_steam_file(url, destination, expected, limit=512 * 1024 * 1024,
                 raise OSError('HTTP %s from %s' % (error.code, url)) from error
             delay = _retry_after_seconds(error)
             reason = 'HTTP %s' % error.code
+            error.close()
         except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
             if attempt == attempts:
                 raise OSError('%s: %s' % (url, error)) from error
@@ -4530,7 +4537,7 @@ def cmd_vendor(options):
                 raise SystemExit('FAIL: %s differs from HEAD; commit it before pinning' % rel)
             files[dest_rel] = {'source_path': source_rel, 'sha256': sha256(path)}
         manifest['addons'][name] = {
-            'source_repo': 'https://github.com/pgm1207/Luna',
+            'source_repo': GITHUB_URL + '/Luna',
             'source_commit': repo_commit,
             'plugin_version': addon_version(name),
             'files': files,
@@ -4547,7 +4554,7 @@ def cmd_vendor(options):
                 raise SystemExit('FAIL: %s did not produce %s' % (name, source_rel))
             files[dest_rel] = {'source_path': source_rel, 'sha256': sha256(path)}
         manifest['addons'][name] = {
-            'source_repo': 'https://github.com/pgm1207/slsteam-' + name,
+            'source_repo': GITHUB_URL + '/slsteam-' + name,
             'source_commit': commit,
             'plugin_version': addon_version(name),
             'files': files,
@@ -4566,20 +4573,20 @@ def vendor_shared(manifest, shared_source, head, show, repo_commit):
     for rel, source_path in (('bridge/bridge.lua', 'bridge/bridge.lua'),
                              ('scripts/patch-lumen.py', 'scripts/patch-lumen.py')):
         (ROOT / rel).write_bytes(show(shared_source, shared_commit, source_path))
-        manifest['shared'][rel] = {'source_repo': 'https://github.com/pgm1207/slsteam-playtime',
+        manifest['shared'][rel] = {'source_repo': GITHUB_URL + '/slsteam-playtime',
                                    'source_commit': shared_commit, 'source_path': source_path,
                                    'sha256': sha256(ROOT / rel)}
         print('pinned %s from %s@%s' % (rel, shared_source.name, shared_commit[:12]))
     # First-party scripts come from this repository, pinned to its HEAD.
     manifest['shared']['scripts/steam-machine.py'] = {
-        'source_repo': 'https://github.com/pgm1207/Luna', 'source_commit': repo_commit,
+        'source_repo': GITHUB_URL + '/Luna', 'source_commit': repo_commit,
         'source_path': 'scripts/steam-machine.py', 'sha256': sha256(ROOT / 'scripts/steam-machine.py')}
     hook_rel = 'scripts/lumen-hook.py'
     committed_hook = subprocess.run(['git', '-C', str(ROOT), 'show', repo_commit + ':' + hook_rel],
                                     capture_output=True)
     hook_clean = committed_hook.returncode == 0 and committed_hook.stdout == (ROOT / hook_rel).read_bytes()
     manifest['shared'][hook_rel] = {
-        'source_repo': 'https://github.com/pgm1207/Luna',
+        'source_repo': GITHUB_URL + '/Luna',
         'source_commit': repo_commit if hook_clean else 'uncommitted-worktree',
         'source_path': hook_rel, 'sha256': sha256(ROOT / hook_rel)}
 
@@ -6142,6 +6149,7 @@ def _proton_json(url):
             if error.code not in STEAM_RETRY_STATUS:
                 raise OSError('HTTP %s from %s' % (error.code, url)) from error
             delay = _retry_after_seconds(error)
+            error.close()
         except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError) as error:
             last, delay = error, None
         if attempt == STEAM_DOWNLOAD_ATTEMPTS:
@@ -6801,6 +6809,7 @@ def _proton_download(url, destination, total=0, label=None):
             if error.code not in STEAM_RETRY_STATUS or attempt == STEAM_DOWNLOAD_ATTEMPTS:
                 raise OSError('HTTP %s from %s' % (error.code, url)) from error
             delay, reason = _retry_after_seconds(error), 'HTTP %s' % error.code
+            error.close()
         except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
             if attempt == STEAM_DOWNLOAD_ATTEMPTS:
                 raise OSError('%s: %s' % (url, error)) from error
@@ -9097,7 +9106,12 @@ def live_http_json(port, path, timeout=LIVE_TIMEOUT, host=LIVE_HOST):
         raise ValueError('refusing a non-loopback DevTools host: %s' % host)
     request = urllib.request.Request('http://%s:%d%s' % ('[::1]' if host == '::1' else host, port, path))
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)  # never via a proxy
-    with opener.open(request, timeout=timeout) as response:
+    try:
+        response = opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        error.close()  # a refused redirect or an error status still owns an open socket
+        raise
+    with response:
         return json.loads(response.read(LIVE_MAX_MESSAGE).decode('utf-8', 'replace'))
 
 

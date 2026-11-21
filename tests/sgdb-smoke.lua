@@ -139,8 +139,8 @@ local home = os.getenv('HOME')
 local repo = os.getenv('LUNA_REPO') or '.'
 
 -- A disposable, bootstrapped Steam root with one MostRecent account.
-local STEAMID = '76561199026823325'
-local ACCOUNT_ID = 1066557597
+local STEAMID = '76561198000000042'
+local ACCOUNT_ID = 39734314
 local steam_root = home .. '/.local/share/Steam'
 local grid_dir = steam_root .. '/userdata/' .. ACCOUNT_ID .. '/config/grid'
 do

@@ -90,11 +90,11 @@ class ConfigTests(FleetTestCase):
     def test_add_remove_list_roundtrip(self):
         self.assertEqual(self.run_cmd(options(fleet_action='add', hosts=['laptop']))[0], 0)
         self.run_cmd(options(fleet_action='add', hosts=['laptop']))  # idempotent
-        self.run_cmd(options(fleet_action='add', hosts=['me@box.lan']))
-        self.assertEqual(json.loads(self.config.read_text())['hosts'], ['laptop', 'me@box.lan'])
+        self.run_cmd(options(fleet_action='add', hosts=['me@host-1.example.invalid']))
+        self.assertEqual(json.loads(self.config.read_text())['hosts'], ['laptop', 'me@host-1.example.invalid'])
         self.assertIn('remote  laptop', self.run_cmd(options(fleet_action='list'))[1])
         self.assertEqual(self.run_cmd(options(fleet_action='remove', hosts=['laptop']))[0], 0)
-        self.assertEqual(luna.fleet_load_hosts(), ['me@box.lan'])
+        self.assertEqual(luna.fleet_load_hosts(), ['me@host-1.example.invalid'])
         self.assertEqual(self.run_cmd(options(fleet_action='remove', hosts=['nope']))[0], 1)
 
     def test_host_validation_rejects_injection(self):

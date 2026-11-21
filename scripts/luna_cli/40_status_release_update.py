@@ -453,7 +453,7 @@ def cmd_update(options):
         _release_lock(lock_path)
 
 
-LUNA_REPO = 'pgm1207/Luna'
+LUNA_REPO = GITHUB_OWNER + '/Luna'
 UPDATE_TTL = 6 * 3600
 
 

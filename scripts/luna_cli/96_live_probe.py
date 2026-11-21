@@ -125,7 +125,12 @@ def live_http_json(port, path, timeout=LIVE_TIMEOUT, host=LIVE_HOST):
         raise ValueError('refusing a non-loopback DevTools host: %s' % host)
     request = urllib.request.Request('http://%s:%d%s' % ('[::1]' if host == '::1' else host, port, path))
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)  # never via a proxy
-    with opener.open(request, timeout=timeout) as response:
+    try:
+        response = opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        error.close()  # a refused redirect or an error status still owns an open socket
+        raise
+    with response:
         return json.loads(response.read(LIVE_MAX_MESSAGE).decode('utf-8', 'replace'))
 
 
