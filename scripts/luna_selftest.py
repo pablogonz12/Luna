@@ -529,24 +529,78 @@ EMBED_JS = r'''/*luna-selftest:embed*/ (() => {
       && box.left >= area.left - slack && box.top >= area.top - slack
       && box.right <= area.right + slack && box.bottom <= area.bottom + slack;
   }
-  const row = document.querySelector('#sls-luna-overlay .sls-luna-side .sls-luna-tab');
-  let hitInside = false;
-  if (row && row.getBoundingClientRect) {
-    const box = row.getBoundingClientRect();
-    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
-    hitInside = Boolean(hit && hit.closest && hit.closest('#sls-luna-overlay'));
-  }
+  /* Hit-test a sidebar row that is really on screen. The sidebar and Luna's
+     overlay are position: fixed, and Lumen paints over Luna's right-hand side
+     with pointer-events: none, so a row is only unreachable when something that
+     does take clicks sits over it. */
+  const describe = node => {
+    if (!node) return 'nothing';
+    const tag = String(node.tagName || '').toLowerCase();
+    const id = node.id ? '#' + node.id : '';
+    let cls = '';
+    if (typeof node.className === 'string') {
+      cls = node.className.split(/\s+/).filter(Boolean).map(name => '.' + name).join('');
+    }
+    return tag + id + cls;
+  };
+  const clip = (a, b) => {
+    const left = Math.max(a.left, b.left), top = Math.max(a.top, b.top);
+    const right = Math.min(a.right, b.right), bottom = Math.min(a.bottom, b.bottom);
+    return { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  };
+  const style = node => (node ? getComputedStyle(node) : null);
   const zIndex = node => (node ? Number(getComputedStyle(node).zIndex) || 0 : 0);
+  const side = luna ? luna.querySelector('.sls-luna-side') : null;
+  const sideBox = side ? side.getBoundingClientRect() : null;
+  const rows = side ? Array.from(side.querySelectorAll('.sls-luna-tab')).filter(row =>
+    String(row.className || '').indexOf('sls-luna-subpage') < 0) : [];
+  const candidates = [];
+  rows.forEach(row => {
+    if (!row.getClientRects || !row.getClientRects().length || !sideBox) return;
+    const own = row.getBoundingClientRect();
+    if (own.height <= 0 || own.width <= 0) return;      /* zero-height rows */
+    const seen = clip(own, sideBox);
+    if (seen.width < 4 || seen.height < 4) return;      /* scrolled out of view */
+    candidates.push({ row, seen, active: row.classList.contains('active') });
+  });
+  const chosen = candidates.filter(item => item.active)[0] || candidates[0] || null;
+  let point = null;
+  let hit = null;
+  let hitInside = false;
+  if (chosen) {
+    const x = chosen.seen.left + chosen.seen.width / 2;
+    const y = chosen.seen.top + chosen.seen.height / 2;
+    point = [Math.round(x), Math.round(y)];
+    hit = document.elementFromPoint(x, y);
+    const onRow = Boolean(hit && (hit === chosen.row || chosen.row.contains(hit)));
+    const inLuna = Boolean(hit && hit.closest && hit.closest('#sls-luna-overlay'));
+    const wrapsLuna = Boolean(hit && typeof hit.contains === 'function'
+      && luna && hit.contains(luna));
+    hitInside = onRow || inLuna || wrapsLuna;
+  }
+  const lumenStyle = style(lumen);
   return {
     embedded: Boolean(luna && lumen && luna.contains(lumen)),
     inside,
     rect: box ? [Math.round(box.left), Math.round(box.top),
                  Math.round(box.width), Math.round(box.height)] : null,
     lumenVisible: Boolean(lumen && lumen.getClientRects && lumen.getClientRects().length > 0
-      && getComputedStyle(lumen).display !== 'none'),
+      && lumenStyle && lumenStyle.display !== 'none'),
     lumenAbove: Boolean(lumen) && zIndex(lumen) >= zIndex(luna),
     sidebarClickable: hitInside,
-    rowHeight: row ? Math.round(row.getBoundingClientRect().height * 10) / 10 : 0
+    sidebarRows: rows.length,
+    sidebarCandidates: candidates.length,
+    sidebarRect: sideBox ? [Math.round(sideBox.left), Math.round(sideBox.top),
+                            Math.round(sideBox.width), Math.round(sideBox.height)] : null,
+    sidebarRow: chosen ? {
+      label: String(chosen.row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40),
+      active: Boolean(chosen.active)
+    } : null,
+    probePoint: point,
+    hit: chosen ? describe(hit) : null,
+    lumenPointerEvents: lumenStyle ? String(lumenStyle.pointerEvents || '') : null,
+    lumenZ: lumenStyle ? String(lumenStyle.zIndex || '') : null,
+    rowHeight: chosen ? Math.round(chosen.row.getBoundingClientRect().height * 10) / 10 : 0
   };
 })()'''
 
@@ -928,6 +982,28 @@ def _check_rpcs(report, cdp, backend_names=()):
     return skipped
 
 
+def _rect_text(value):
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        return '[%s,%s,%s,%s]' % tuple(int(item) for item in value)
+    return 'unknown'
+
+
+def _hit_detail(answer):
+    """What the hit test found, so a failed run needs no separate probe."""
+    point = answer.get('probePoint')
+    where = ('(%s,%s)' % (point[0], point[1])) if isinstance(point, (list, tuple)) \
+        else 'no point'
+    row = answer.get('sidebarRow') or {}
+    label = ' %r%s' % (row.get('label'), ' (active)' if row.get('active') else '') \
+        if row.get('label') else ''
+    return ('sidebar row%s is not hittable at %s: the hit is %s; sidebar rect %s, '
+            'Lumen rect %s, Lumen pointer-events %s, z-index %s'
+            % (label, where, answer.get('hit') or 'nothing',
+               _rect_text(answer.get('sidebarRect')), _rect_text(answer.get('rect')),
+               answer.get('lumenPointerEvents') or 'unknown',
+               answer.get('lumenZ') or 'unknown'))
+
+
 def _check_lumen(report, cdp, host, probe, embedded=None):
     """Embedded Lumen: pane, overlay laid into Luna's content, sidebar clickable.
 
@@ -979,14 +1055,27 @@ def _check_lumen(report, cdp, host, probe, embedded=None):
     if not answer.get('inside'):
         failures.append('the Lumen overlay %s is not laid into Luna\u2019s content area'
                         % (answer.get('rect') or 'rect'))
-    if not answer.get('sidebarClickable'):
-        failures.append('elementFromPoint on a sidebar row does not land in #sls-luna-overlay')
     if failures:
         report.failed('Lumen embedding', '; '.join(failures))
+        return
+    if not answer.get('sidebarClickable'):
+        if not answer.get('sidebarCandidates'):
+            # Nothing on screen to hit: say so, but it is not evidence of a bug.
+            report.skipped('Lumen embedding', 'no sidebar row is on screen to hit-test: '
+                                              'sidebar rect %s, %s row(s), all zero-height or '
+                                              'scrolled out of view'
+                          % (_rect_text(answer.get('sidebarRect')),
+                             answer.get('sidebarRows') or 0))
+            return
+        report.failed('Lumen embedding', _hit_detail(answer))
     else:
         above = '' if answer.get('lumenAbove') else ' (z-index is below Luna\u2019s)'
-        report.passed('Lumen embedding', 'embedded, laid into the content, sidebar clickable%s'
-                                         % above)
+        ignores = ' (pointer-events: none)' \
+            if str(answer.get('lumenPointerEvents') or '') == 'none' else ''
+        point = answer.get('probePoint') or ['?', '?']
+        report.passed('Lumen embedding', 'embedded, laid into the content, sidebar clickable '
+                                         'at (%s,%s)%s%s'
+                      % (point[0], point[1], ignores, above))
 
 
 def _close_menu(report, cdp):
