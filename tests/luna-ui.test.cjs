@@ -198,7 +198,7 @@ const button=(document,label)=>findNode(document.getElementById('sls-luna-overla
   node=>node.tagName==='BUTTON'&&node.textContent===label&&typeof node.onclick==='function');
 const settle=ms=>new Promise(resolve=>setTimeout(resolve,ms||50));
 
-function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPending,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient,bootPatched,host,failFns,lumenPending,lumenTooling,lumenResult,lumen,update,gate,repair,sgdbAuto,sgdbAutoPlan,sgdbHistory,sgdbHistoryError,luatools,openLuaTools,lumenCloseOverlay,lumenOpenOverlay,channels,channelsRefusal,terminalRefusal,terminalStart}={}){
+function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPending,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient,bootPatched,host,failFns,lumenPending,lumenTooling,lumenResult,lumen,update,gate,repair,sgdbAuto,sgdbAutoPlan,sgdbHistory,sgdbHistoryError,luatools,openLuaTools,lumenCloseOverlay,lumenOpenOverlay,channels,channelsRefusal,terminalRefusal,terminalStart,discordRefusal,sgdbHistoryTimes,sgdbApplyFailure,playtimeRev,graphicsCheckedAt,graphicsGpus,graphicsGpu}={}){
   const bridgePatched = bootPatched !== false;
   const calls=[];
   const repairPlan=repair||null;
@@ -243,6 +243,7 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
   // The backend's undo history: per-slot depth, moved by apply and undo the way
   // the Lua does, so a refresh after a change is really visible in the page.
   const sgdbHistoryState=Object.assign({grid:0,wide:0,hero:0,logo:0,icon:0},sgdbHistory||{});
+  const sgdbTimesState=Object.assign({},sgdbHistoryTimes||{});
   const sgdbSteamState=Object.assign({build:'1791918634',pinned:'',match:false,updatesBlocked:true,
     cachedBuild:'',cacheReady:false,pacmanManaged:false,pacmanIgnored:false,pending:''},
     steamClient&&steamClient.pinned?steamClient:{});
@@ -293,9 +294,25 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
       // A test can hold one call open (a restarted or dead backend) and answer
       // it later, to prove the timeout really settles.
       if(gate){const held=gate(fn,payload,calls.length);if(held)return held;}
-      if(fn==='SlsPlaytimeGet')return JSON.stringify(get||{success:true,apps:[],games:{},titles:{},shortcutNames:{},
-        stats:{today:0,last7d:0,last30d:0},runtime:{healthy:true,reportedAt:Date.now()/1000,file:'x.json'},account:'76561198000000000',manifestCount:0,shortcutCount:0});
+      if(fn==='SlsPlaytimeGet'){
+        const base=get||{success:true,apps:[],games:{},titles:{},shortcutNames:{},
+          stats:{today:0,last7d:0,last30d:0},runtime:{healthy:true,reportedAt:Date.now()/1000,file:'x.json'},account:'76561198000000000',manifestCount:0,shortcutCount:0};
+        // With `playtimeRev` the fixture behaves like the backend: the same rev
+        // answers {unchanged:true}, anything else gets the full payload plus rev.
+        if(playtimeRev!==undefined&&playtimeRev!==null){
+          if(payload&&payload.rev===playtimeRev)return JSON.stringify({success:true,unchanged:true,rev:playtimeRev});
+          return JSON.stringify(Object.assign({},base,{rev:playtimeRev}));
+        }
+        return JSON.stringify(base);
+      }
       if(fn==='SlsPresenceGet')return JSON.stringify(presence||{success:true,state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}});
+      if(fn==='SlsPresenceSetDiscord'){
+        // The backend refuses an ID outside 17-20 digits with a structured
+        // `invalid-app-id`; `discordRefusal` makes every save refuse, so the
+        // page's handling of the reply is what the test sees.
+        if(discordRefusal)return JSON.stringify({success:false,code:'invalid-app-id',error:discordRefusal});
+        return JSON.stringify({success:true});
+      }
       if(fn==='SlsPlaytimeEdit')return JSON.stringify({success:true});
       if(fn==='SlsPresenceSetEnabled')return JSON.stringify({success:true,enabled:payload.enabled});
       if(fn==='SlsCompressorGet'){
@@ -486,12 +503,21 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
       if(fn==='SlsSgdbAssets')return JSON.stringify({success:true,total:1,assets:[
         {id:11,url:'https://cdn.example/grid1.png',thumb:'https://cdn.example/t1.png',
           width:600,height:900,style:'alternate',mime:'image/png',author:'artist1'}]});
-      if(fn==='SlsSgdbApply'){sgdbHistoryState[payload.kind]=(sgdbHistoryState[payload.kind]||0)+1;
+      if(fn==='SlsSgdbApply'){
+        // A test can make the apply fail the way the backend does on a 429.
+        if(sgdbApplyFailure)return JSON.stringify(sgdbApplyFailure);
+        sgdbHistoryState[payload.kind]=(sgdbHistoryState[payload.kind]||0)+1;
+        if(sgdbHistoryTimes){
+          sgdbTimesState[payload.kind]=Math.floor(Date.now()/1000)-30;
+        }
         return JSON.stringify({success:true,path:'/grid/out.png',
           kind:payload.kind,backedUp:true,live:payload.kind!=='icon'});}
       if(fn==='SlsSgdbHistory'){
         if(sgdbHistoryError)return JSON.stringify({success:false,code:'no_steam',error:sgdbHistoryError});
-        return JSON.stringify({success:true,history:sgdbHistoryState});
+        // `times` carries one epoch per slot; absent on an older backend.
+        return JSON.stringify(sgdbHistoryTimes
+          ?{success:true,history:sgdbHistoryState,times:sgdbTimesState}
+          :{success:true,history:sgdbHistoryState});
       }
       if(fn==='SlsSgdbUndo'){
         sgdbHistoryState[payload.kind]=Math.max(0,(sgdbHistoryState[payload.kind]||0)-1);
@@ -511,9 +537,11 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
           state==='running'?Math.min(sgdbAutoPolls-1,2):5);
       }
       if(fn==='SlsGraphicsGet')return JSON.stringify({success:true,version:'0.2.0',
+        checkedAt:graphicsCheckedAt!==undefined?graphicsCheckedAt:Math.floor(Date.now()/1000)-9,
+        gpu:graphicsGpu!==undefined?graphicsGpu:{in_use:'card0',primary:'card0',hybrid:false},
         system:{distro:'Arch Linux (test)',kernel:'6.12.4-arch1'},
-        gpus:[{card:'card0',vendor:'0x1002',vendor_name:'AMD',device:'0x744c',driver:'amdgpu',
-          product:'AMD Radeon RX 7900 XTX'}],
+        gpus:graphicsGpus||[{card:'card0',vendor:'0x1002',vendor_name:'AMD',device:'0x744c',driver:'amdgpu',
+          product:'AMD Radeon RX 7900 XTX',boot_vga:true,in_use:true}],
         lsfg:{layers:[{path:'/usr/share/vulkan/implicit_layer.d/VkLayer_LSFG_vk.json',version:2}],
           config:{path:'/home/tester/.config/lsfg-vk/conf.toml',size:22},
           decky_plugins:['/home/tester/homebrew/plugins/decky-lsfg-vk']},
@@ -709,6 +737,110 @@ test('the session-time switch defaults on and toggles through the real RPC',asyn
   const call=calls.filter(c=>c.fn==='SlsPresenceSetSessionTime').pop();
   assert.ok(call,'toggling must call SlsPresenceSetSessionTime');
   assert.equal(call.payload.sessionTime,false,'the switch must send the inverted value');
+});
+
+async function openPresence(document,options){
+  menubarFixture(document,true);
+  const made=fakeWindow(document,options||{});
+  mount(made.w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.className==='sls-luna-tab'&&node.textContent==='Presence');
+  assert.ok(tab,'the Presence tab was not found');
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const overlay=document.getElementById('sls-luna-overlay');
+  const input=findNode(overlay,node=>node.tagName==='INPUT'&&/Application ID/i.test(node.placeholder||''));
+  assert.ok(input,'the Discord Application ID field was not rendered');
+  return {made,overlay,input};
+}
+
+test('Discord says in plain words why nothing is published, without an Application ID',async()=>{
+  const document=fakeDom();
+  const {overlay}=await openPresence(document,{
+    presence:{success:true,state:{enabled:true,discordEnabled:true,discordAppId:'',owned:{},running:{},cleanup:0},
+      runtime:{healthy:true,error:''},
+      discord:{enabled:true,hasAppId:false,appIdValid:false,publishing:false,reason:'no-app-id'}}});
+  const text=textOf(overlay);
+  assert.match(text,/Discord needs an Application ID; nothing is published until one is set\./,
+    'the no-app-id reason must be spelled out under the field');
+  assert.match(text,/Discord: not publishing\./,'the status line must say it is not publishing');
+});
+
+test('each publishing reason gets its own line, and no-socket is not the missing-ID one',async()=>{
+  const document=fakeDom();
+  const {overlay}=await openPresence(document,{
+    presence:{success:true,state:{enabled:true,discordEnabled:true,discordAppId:'123456789012345678',owned:{},running:{},cleanup:0},
+      runtime:{healthy:true,error:''},
+      discord:{enabled:true,hasAppId:true,appIdValid:true,publishing:false,reason:'no-socket'}}});
+  const text=textOf(overlay);
+  assert.match(text,/Discord is not running on this machine; start Discord to publish again\./);
+  assert.doesNotMatch(text,/nothing is published until one is set/,'the missing-ID line must be for no-app-id only');
+
+  const invalidDom=fakeDom();
+  const invalid=await openPresence(invalidDom,{
+    presence:{success:true,state:{enabled:true,discordEnabled:true,discordAppId:'123',owned:{},running:{},cleanup:0},
+      runtime:{healthy:true,error:''},
+      discord:{enabled:true,hasAppId:true,appIdValid:false,publishing:false,reason:'invalid-app-id'}}});
+  assert.match(textOf(invalid.overlay),/That Application ID is not valid; nothing is published until it is fixed\./);
+});
+
+test('a publishing Discord shows no warning line',async()=>{
+  const document=fakeDom();
+  const {overlay}=await openPresence(document,{
+    presence:{success:true,state:{enabled:true,discordEnabled:true,discordAppId:'123456789012345678',owned:{},running:{},cleanup:0},
+      runtime:{healthy:true,error:''},
+      discord:{enabled:true,hasAppId:true,appIdValid:true,publishing:true,reason:'ok'}}});
+  const text=textOf(overlay);
+  assert.doesNotMatch(text,/not publishing/);
+  assert.doesNotMatch(text,/nothing is published/);
+});
+
+test('without the discord block the Presence page renders exactly as before',async()=>{
+  const document=fakeDom();
+  const {overlay}=await openPresence(document,{
+    presence:{success:true,state:{enabled:true,discordEnabled:false,discordAppId:'',owned:{},running:{},cleanup:0},
+      runtime:{healthy:true,error:''}}});
+  const text=textOf(overlay);
+  assert.match(text,/Enable Presence/);
+  assert.doesNotMatch(text,/not publishing|nothing is published|Discord is not running/,
+    'an older backend must not grow a line it never sent');
+});
+
+test('a non-empty Application ID outside 17-20 digits is refused before any RPC',async()=>{
+  const document=fakeDom();
+  const {made,input}=await openPresence(document,{
+    presence:{success:true,state:{enabled:true,discordEnabled:true,discordAppId:'',owned:{},running:{},cleanup:0},
+      runtime:{healthy:true,error:''},
+      discord:{enabled:true,hasAppId:false,appIdValid:false,publishing:false,reason:'no-app-id'}}});
+  const save=findNode(input.parentNode,node=>node.tagName==='BUTTON'&&node.textContent==='Save');
+  assert.ok(save,'the Save button was not rendered');
+  input.value='12345';
+  save.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(made.calls.filter(call=>call.fn==='SlsPresenceSetDiscord').length,0,
+    'a malformed ID must never reach the backend');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Application ID must be 17-20 digits\./);
+});
+
+test('the backend invalid-app-id reply is shown inline at the field',async()=>{
+  const document=fakeDom();
+  const {input}=await openPresence(document,{
+    presence:{success:true,state:{enabled:true,discordEnabled:true,discordAppId:'',owned:{},running:{},cleanup:0},
+      runtime:{healthy:true,error:''},
+      discord:{enabled:true,hasAppId:false,appIdValid:false,publishing:false,reason:'no-app-id'}},
+    discordRefusal:'Application ID must be 17-20 digits.'});
+  input.value='123456789012345678';
+  findNode(input.parentNode,node=>node.tagName==='BUTTON'&&node.textContent==='Save').onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const overlay=document.getElementById('sls-luna-overlay');
+  const errorNode=findNode(overlay,node=>node.className==='sls-luna-error'
+    && node.textContent==='Application ID must be 17-20 digits.');
+  assert.ok(errorNode,'the backend refusal must be shown visibly');
+  assert.ok(errorNode.parentNode&&errorNode.parentNode.parentNode,
+    'the line lives inside the Presence page, under the field');
+  assert.equal(input.value,'123456789012345678','a refused save keeps what the user typed');
 });
 
 async function openCompressor(document,subtab){
@@ -1572,6 +1704,68 @@ test('the Graphics beta page reports the detection read-only',async()=>{
   assert.match(text,/read side of the Luna port/,'the port must be described honestly');
   assert.match(text,/Steam root: \/home\/tester\/\.local\/share\/Steam/,'the Steam facts must be shown');
   assert.match(text,/Nothing here installs/,'the read-only promise must be stated');
+});
+
+async function openGraphicsPage(document,options){
+  menubarFixture(document,true);
+  const made=fakeWindow(document,options||{});
+  made.storage.set('slsLunaBeta','1');
+  mount(made.w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='Graphics');
+  assert.ok(tab,'the Graphics tab must exist with beta on');
+  tab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  return Object.assign(made,{overlay:document.getElementById('sls-luna-overlay')});
+}
+
+test('Graphics reads bypass the backend cache and the page says when it was checked',async()=>{
+  const document=fakeDom();
+  const checkedAt=Math.floor(Date.now()/1000)-12;
+  const {calls,overlay}=await openGraphicsPage(document,{graphicsCheckedAt:checkedAt});
+  assert.match(textOf(overlay),/Checked 1[12] s ago\./,
+    'the stamp comes from the report\'s own checkedAt');
+  const reads=calls.filter(entry=>entry.fn==='SlsGraphicsGet');
+  assert.ok(reads.length>=1);
+  reads.forEach(entry=>assert.equal(entry.payload.force,true,
+    'every Graphics read asks the backend to skip its cache'));
+
+  const before=calls.filter(entry=>entry.fn==='SlsGraphicsGet').length;
+  await clickRefresh(document);
+  const after=calls.filter(entry=>entry.fn==='SlsGraphicsGet');
+  assert.ok(after.length>before,'Refresh reads the report again');
+  assert.equal(after[after.length-1].payload.force,true,'the explicit Refresh forces it');
+});
+
+test('the GPU in use and the boot GPU are marked when the backend says so',async()=>{
+  const document=fakeDom();
+  const {overlay}=await openGraphicsPage(document,{
+    graphicsGpus:[
+      {card:'card0',vendor:'0x8086',vendor_name:'Intel',device:'0x46a6',driver:'i915',
+        product:'Intel Iris Xe',boot_vga:false,in_use:false},
+      {card:'card1',vendor:'0x10de',vendor_name:'NVIDIA',device:'0x2882',driver:'nvidia',
+        product:'NVIDIA RTX 4070',boot_vga:true,in_use:true}],
+    graphicsGpu:{in_use:'card1',primary:'card1',hybrid:true}});
+  const overlayText=textOf(overlay);
+  assert.match(overlayText,/card1: NVIDIA RTX 4070 .* · in use, primary/);
+  const intelLine=findNode(overlay,node=>(node.className||'').indexOf('sls-luna-note')===0
+    && /card0:/.test(node.textContent));
+  assert.ok(intelLine,'the second GPU must be listed');
+  assert.doesNotMatch(intelLine.textContent,/in use|primary/,
+    'a GPU the backend does not mark stays plain');
+});
+
+test('the checked-ago tick dies with the menu',async()=>{
+  const document=fakeDom();
+  const {w,overlay,timers}=await openGraphicsPage(document,{});
+  assert.ok(findNode(overlay,node=>(node.className||'').indexOf('sls-luna-graphics-age')>=0),
+    'the age line is on the page');
+  assert.ok(timers.intervals.size>0,'the page has timers while it is open');
+  w.__SlsLunaTeardown();
+  assert.equal(timers.intervals.size,0,'teardown clears every interval, the tick included');
+  assert.equal(document.getElementById('sls-luna-overlay'),null);
 });
 
 test('stale global HLTB preferences never relabel an alphabetical Steam dropdown',async()=>{
@@ -2548,9 +2742,11 @@ test('a hung RPC times out and still clears the busy flag',async()=>{
 test('a late answer after the timeout is ignored, and the timeout row is retryable',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
-  let release;
+  let release=null;
+  // Every health read hangs, not just the first: the Health data is now read
+  // when its page opens, so the page's own read must see the same dead backend.
   const gate=fn=>{
-    if(fn!=='SlsLunaHealth'||release)return null;
+    if(fn!=='SlsLunaHealth')return null;
     return new Promise(resolve=>{release=resolve;});
   };
   const {w}=fakeWindow(document,{gate});
@@ -2564,7 +2760,9 @@ test('a late answer after the timeout is ignored, and the timeout row is retryab
     node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent.startsWith('Updates'));
   assert.ok(updatesTab,'the Updates tab must still be there after a timeout');
   updatesTab.onclick();
-  await settle(20);
+  // The Updates page reads its own data (health included) on the switch; wait
+  // out that read's 20 ms budget before reading the rows.
+  await settle(80);
   const row=textOf(overlay());
   assert.match(row,/did not answer SlsLunaHealth/,'the timeout is a visible row, never silence');
   assert.match(row,/press Refresh to retry/,'the row must say how to retry');
@@ -4506,6 +4704,86 @@ test('the artwork history shows a backend error inline and an empty list says so
     'nothing to undo, nothing to press');
 });
 
+test('an icon apply says Steam must restart, and a live slot does not',async()=>{
+  const {document,storage}=await openSgdbPicker();
+  const icon=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Icon'&&typeof node.onclick==='function');
+  icon.onclick();
+  await settle(60);
+  const card=findNode(document.getElementById('sls-luna-overlay'),node=>node.className==='sls-luna-asset');
+  card.onclick();
+  await settle(60);
+  const text=textOf(document.getElementById('sls-luna-overlay'));
+  assert.match(text,/SteamGridDB artwork|Artwork applied/,'the page still renders');
+  assert.match(text,/Restart Steam to see this icon\./,'an icon is file-only and needs a restart');
+  assert.equal(storage.get('slsLunaArtworkLive'),undefined,
+    'no live refresh may be requested for a slot Steam cannot repaint');
+
+  const grid=await openSgdbPicker();
+  findNode(grid.document.getElementById('sls-luna-overlay'),
+    node=>node.className==='sls-luna-asset').onclick();
+  await settle(60);
+  const liveText=textOf(grid.document.getElementById('sls-luna-overlay'));
+  assert.match(liveText,/Artwork applied/);
+  assert.doesNotMatch(liveText,/Restart Steam to see this/,
+    'a grid is live: no restart notice');
+  const request=JSON.parse(grid.storage.get('slsLunaArtworkLive'));
+  assert.deepEqual(request.kinds,['grid']);
+});
+
+test('the recent-changes list dates a slot from the backend times',async()=>{
+  const {document}=await openSgdbPicker({
+    sgdbHistory:{grid:2,hero:1},
+    sgdbHistoryTimes:{grid:Math.floor(Date.now()/1000)-180,hero:Math.floor(Date.now()/1000)-7200}});
+  const overlay=document.getElementById('sls-luna-overlay');
+  const rows=collect(overlay,node=>node.className==='sls-luna-history-row');
+  const grid=rows.find(row=>/^Grid/.test(row.textContent));
+  const hero=rows.find(row=>/^Hero/.test(row.textContent));
+  assert.match(grid.textContent,/Grid · 2 undo steps · changed 3m ago/,
+    'times fills the date the session does not know');
+  assert.match(hero.textContent,/Hero · 1 undo step · changed 2h ago/);
+
+  const old=await openSgdbPicker({sgdbHistory:{grid:3}});
+  const undated=findNode(old.document.getElementById('sls-luna-overlay'),
+    node=>node.className==='sls-luna-history-row').textContent;
+  assert.match(undated,/Grid · 3 undo steps/);
+  assert.doesNotMatch(undated,/changed|ago/,'without times nothing is invented');
+});
+
+test('Undo is disabled at depth 0 and the reset asks for a second click',async()=>{
+  const {document,calls}=await openSgdbPicker({sgdbHistory:{grid:0,wide:0,hero:0,logo:0,icon:0}});
+  const overlay=document.getElementById('sls-luna-overlay');
+  const undoLast=findNode(overlay,node=>node.textContent==='Undo last change');
+  assert.equal(undoLast.disabled,true,'nothing to undo, nothing to press');
+  assert.equal(collect(overlay,node=>node.tagName==='BUTTON'&&node.textContent==='Undo').length,0,
+    'no per-slot Undo is offered at depth 0');
+
+  const armed=await openSgdbPicker({sgdbHistory:{grid:1}});
+  const reset=findNode(armed.document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Reset this game\u2019s artwork');
+  assert.ok(reset,'the Steam-artwork reset must be offered');
+  reset.onclick();
+  await settle(30);
+  assert.equal(armed.calls.filter(entry=>entry.fn==='SlsSgdbReset').length,0,
+    'one click only arms the reset');
+  const confirm=findNode(armed.document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Confirm reset');
+  assert.ok(confirm,'the reset asks for a second click, exactly like undo');
+  confirm.onclick();
+  await settle(60);
+  assert.equal(armed.calls.filter(entry=>entry.fn==='SlsSgdbReset').length,1);
+});
+
+test('a rate-limited apply says how long SteamGridDB wants to wait',async()=>{
+  const {document}=await openSgdbPicker({sgdbApplyFailure:{success:false,code:'rate_limit',
+    error:'SteamGridDB is rate-limiting requests.',retryAfter:42}});
+  findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.className==='sls-luna-asset').onclick();
+  await settle(60);
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),
+    /Could not apply artwork: SteamGridDB is rate-limiting; try again in 42 s/);
+});
+
 test('the playtime page draws the 30-day chart, the weekly line and the week top',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
@@ -4577,6 +4855,112 @@ test('the daily chart rejects malformed data instead of drawing it',()=>{
   assert.equal(minutesText(0),'0 min');
 });
 
+function playtimeFixture(overrides){
+  return Object.assign({success:true,apps:[],games:{},titles:{},shortcutNames:{},
+    stats:{today:0,last7d:0,last30d:0},
+    runtime:{healthy:true,reportedAt:Date.now()/1000,file:'playtime.json'},
+    account:'76561198000000000',manifestCount:0,shortcutCount:0},overrides||{});
+}
+
+async function openPlaytimePage(document,options){
+  menubarFixture(document,true);
+  const made=fakeWindow(document,options||{});
+  mount(made.w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  return Object.assign(made,{overlay:document.getElementById('sls-luna-overlay')});
+}
+
+test('the playtime totals use the one formatter, 0 min and under an hour included',async()=>{
+  const document=fakeDom();
+  const {overlay}=await openPlaytimePage(document,{get:playtimeFixture(
+    {stats:{today:0,last7d:2700,last30d:45000}})});
+  const text=textOf(overlay);
+  assert.match(text,/\b0 min\b/,'a zero total reads 0 min, never 0.00 h');
+  assert.match(text,/\b45 min\b/,'under an hour keeps minutes');
+  assert.match(text,/\b12 h 30 min\b/,'hours and minutes share one format');
+  assert.doesNotMatch(text,/\d+\.\d\d h/,'no decimal-hours total is left on the page');
+});
+
+test('a playtime Save goes busy and a second click cannot submit twice',async()=>{
+  let release=null;
+  const gate=fn=>{
+    if(fn!=='SlsPlaytimeEdit')return null;
+    return new Promise(resolve=>{release=()=>resolve(JSON.stringify({success:true}));});
+  };
+  const document=fakeDom();
+  const {calls,overlay}=await openPlaytimePage(document,{gate,get:playtimeFixture(
+    {apps:['620'],games:{'620':{title:'Portal 2',trackedSeconds:3600,adjustmentSeconds:0,lastPlayed:1}}})});
+  const row=findNode(overlay,node=>node.className==='sls-luna-game');
+  assert.ok(row,'the game row was not rendered');
+  const save=findNode(row,node=>node.tagName==='BUTTON'&&node.textContent==='Save');
+  assert.ok(save,'the row Save button was not rendered');
+  save.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(save.textContent,'Saving\u2026','the button must say it is working');
+  assert.equal(save.disabled,true,'the button is disabled while the write is out');
+  save.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls.filter(entry=>entry.fn==='SlsPlaytimeEdit').length,1,
+    'a held second click must not send a second write');
+  release();
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(save.textContent,'Save','the button returns to its label');
+  assert.equal(save.disabled,false);
+});
+
+test('replacing every playtime record needs a second in-page click',async()=>{
+  const document=fakeDom();
+  const {calls,overlay}=await openPlaytimePage(document,{get:playtimeFixture(
+    {apps:['620'],games:{'620':{title:'Portal 2',trackedSeconds:3600,adjustmentSeconds:0,lastPlayed:1}}})});
+  findNode(overlay,node=>node.tagName==='BUTTON'&&node.textContent==='Import JSON').onclick();
+  const area=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.tagName==='TEXTAREA');
+  assert.ok(area,'the paste area was not shown');
+  area.value='{"version":1,"games":{}}';
+  findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Replace ALL local records').onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls.filter(entry=>entry.fn==='SlsPlaytimeImport').length,0,
+    'the first click only asks');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),
+    /This replaces all 1 local record with the backup\./,
+    'the confirm states that every record is replaced');
+  findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Confirm replace').onclick();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.equal(calls.filter(entry=>entry.fn==='SlsPlaytimeImport').length,1,
+    'the second click performs the replace');
+});
+
+test('the playtime read sends its last rev and an unchanged reply keeps the page',async()=>{
+  const document=fakeDom();
+  const {calls,overlay}=await openPlaytimePage(document,{playtimeRev:'rev-7',
+    get:playtimeFixture({stats:{today:3600,last7d:3600,last30d:3600}})});
+  const first=calls.filter(entry=>entry.fn==='SlsPlaytimeGet').pop();
+  assert.equal(first.payload.rev,undefined,'the first read has no revision to send');
+  assert.match(textOf(overlay),/\b1 h\b/,'the full payload was painted');
+  await clickRefresh(document);
+  const second=calls.filter(entry=>entry.fn==='SlsPlaytimeGet').pop();
+  assert.equal(second.payload.rev,'rev-7','the page sends the revision it holds');
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/\b1 h\b/,
+    'an unchanged reply keeps the painted data, it never blanks the page');
+});
+
+test('a recovered ledger and merged sync copies are noted in one line each',async()=>{
+  const document=fakeDom();
+  const {overlay}=await openPlaytimePage(document,{get:playtimeFixture(
+    {recovered:true,merge:{conflictFiles:['playtime.sync-conflict-2026.json'],recovered:1}})});
+  const text=textOf(overlay);
+  assert.match(text,/recovered from the previous good backup/);
+  assert.match(text,/Steam sync left 1 conflicting ledger copy \(playtime\.sync-conflict-2026\.json\); the newest copy is in use\./);
+
+  const quiet=fakeDom();
+  const plain=await openPlaytimePage(quiet,{get:playtimeFixture()});
+  assert.doesNotMatch(textOf(plain.overlay),/recovered from the previous|c conflicting ledger/,
+    'a clean reply grows no diagnostic line');
+});
+
 test('the weekly line handles more, less, same and a missing previous week',()=>{
   assert.equal(weeklySentence({last7d:12600,prev7d:1800},null),
     'This week 3 h 30 min, 3 h more than last week.');
@@ -4592,6 +4976,104 @@ test('the weekly line handles more, less, same and a missing previous week',()=>
     {appid:3,name:'C',seconds:0},{appid:4,name:'D',seconds:NaN}]},{'2':'Portal 2'});
   assert.deepEqual(last7,[{appid:1,name:'A',seconds:3600},{appid:2,name:'Portal 2',seconds:1800}],
     'zero and NaN entries are dropped and names come from the library when absent');
+});
+
+function visiblePanes(document){
+  const overlay=document.getElementById('sls-luna-overlay');
+  return collect(overlay,node=>node.className==='sls-luna-pane'
+    && (!node.style||node.style.display!=='none'));
+}
+const shellReads=['SlsPlaytimeGet','SlsPresenceGet','SlsLunaInfo','SlsLunaLuaTools','SlsLunaUpdate'];
+
+test('the menu issues its reads together, before any of them answers',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const held=[];
+  let released=false;
+  const gate=fn=>{
+    if(released||shellReads.indexOf(fn)<0)return null;
+    return new Promise(resolve=>{held.push(resolve);});
+  };
+  const {w,calls}=fakeWindow(document,{gate});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await settle(40);
+  // Nothing has answered yet, and every shell read is already out: the chain
+  // is a fan-out, not one read waiting for the one before it.
+  shellReads.forEach(name=>assert.ok(calls.some(entry=>entry.fn===name),
+    name+' must be issued without waiting for the others'));
+  assert.ok(held.length>=shellReads.length,
+    'every read is in flight at once, not one after another');
+  released=true;
+  held.forEach(resolve=>resolve('{"success":true}'));
+  await settle(100);
+  assert.ok(document.getElementById('sls-luna-overlay'),'the menu stays usable');
+});
+
+test('one rejected read leaves the rest of the page rendered',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w}=fakeWindow(document,{failFns:['SlsPresenceGet'],
+    get:playtimeFixture({stats:{today:1800,last7d:1800,last30d:1800}})});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await settle(100);
+  const overlay=document.getElementById('sls-luna-overlay');
+  assert.ok(overlay,'a rejected read must not close the menu');
+  assert.match(textOf(overlay),/30 min/,'the totals from the other reads still render');
+  assert.match(textOf(overlay),/Import JSON/,'the page is still the Playtime page');
+  assert.equal(w.__SlsLunaSelftest.state().open,true,'the selftest probe still answers');
+});
+
+test('the HLTB cache is read for its page only, never by opening the menu',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{hltb:hltbFixture()});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await settle(100);
+  assert.equal(calls.filter(entry=>entry.fn==='SlsHltbGet').length,0,
+    'opening on Playtime must not read the megabyte HLTB cache');
+  const tab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>(node.className||'').startsWith('sls-luna-tab')&&node.textContent==='HowLongToBeat');
+  assert.ok(tab,'the HowLongToBeat tab must exist');
+  tab.onclick();
+  await settle(100);
+  assert.ok(calls.filter(entry=>entry.fn==='SlsHltbGet').length>=1,
+    'its own page reads it');
+});
+
+test('a pass for a page the user left never paints the pane now on screen',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  let releaseHealth=null;
+  const gate=fn=>{
+    if(fn!=='SlsLunaHealth')return null;
+    return new Promise(resolve=>{
+      releaseHealth=()=>resolve(JSON.stringify({success:true,health:{version:'late-ghost'}}));
+    });
+  };
+  const {w}=fakeWindow(document,{gate,
+    get:playtimeFixture({stats:{today:1800,last7d:1800,last30d:1800}})});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await settle(100);
+  const overlay=()=>document.getElementById('sls-luna-overlay');
+  findNode(overlay(),node=>(node.className||'').startsWith('sls-luna-tab')
+    &&node.textContent.startsWith('Updates')).onclick();
+  await settle(30);
+  findNode(overlay(),node=>(node.className||'').startsWith('sls-luna-tab')
+    &&node.textContent==='Playtime').onclick();
+  await settle(30);
+  releaseHealth();
+  await settle(120);
+  const panes=visiblePanes(document);
+  assert.equal(panes.length,1,'exactly one pane is on screen');
+  const visible=textOf(panes[0]);
+  assert.match(visible,/Import JSON/,'the Playtime pane is the one on screen');
+  assert.match(visible,/30 min/,'its own data is intact');
+  assert.doesNotMatch(visible,/late-ghost|Update everything/,
+    'the late Updates answer must not paint into the visible pane');
 });
 
 test('sidebar rows share one roving tabindex and move with the arrow keys',async()=>{

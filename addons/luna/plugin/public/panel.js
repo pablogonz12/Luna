@@ -747,6 +747,9 @@
           // (rate limiting) from permanent ones (no confident match).
           const error = Error(out.error || (method + ' failed'));
           error.code = out.code || '';
+          // Rate limiting carries its own wait; the page can tell the user how
+          // long to hold off instead of guessing.
+          if (out.retryAfter !== undefined) error.retryAfter = out.retryAfter;
           throw error;
         }
         return out;
@@ -995,6 +998,13 @@
     let overlay = null;
     let tab = 'playtime';
     let snapshot = null;
+    // The revision of the painted playtime payload and the diagnostics the last
+    // full reply carried (`recovered`, `merge`). A poll sends `rev`, and an
+    // `{unchanged:true}` answer leaves the painted snapshot exactly as it is.
+    let snapshotRev = null;
+    let playtimeRecovered = false;
+    let playtimeMerge = null;
+    let playtimeBusy = false;
     let presence = null;
     let compressor = null;
     let hltb = null;
@@ -1023,12 +1033,19 @@
     let sgdbUndoArmed = null;
     let sgdbResetArmed = 0;
     let sgdbChangedAt = {};
+    // Per-slot epochs from SlsSgdbHistory ({grid: <epoch>, ...}), so a change
+    // made before this page opened can still say when it happened.
+    let sgdbTimes = {};
     // The detached artwork pass: its id, progress and the last per-slot
     // results. Polled only while this tab is on screen.
     let sgdbAuto = null;
     let sgdbAutoTimer = null;
     let artworkRequest = '';
     let graphics = null;
+    // When the Graphics report was produced (its own `checkedAt`, else the
+    // moment this page received it) and the one text node that counts up.
+    let graphicsCheckedAt = 0;
+    let graphicsAgeNode = null;
     let lunaInfo = null;
     let lunaHealth = null;
     let lunaUpdate = null;
@@ -1448,6 +1465,33 @@
         && Date.now() / 1000 - Number(live.reportedAt) < 45);
     }
 
+    // One playtime read. With a known `rev` the backend answers a 59-byte
+    // {unchanged:true} when nothing moved, and the painted snapshot stays; a
+    // failed read keeps the last good payload instead of blanking the page.
+    // Returns true only when the painted data really changed.
+    async function readPlaytime() {
+      if (playtimeBusy) return false;
+      playtimeBusy = true;
+      try {
+        const out = await rpc(w, 'SlsPlaytimeGet',
+          snapshotRev === null ? {} : { raw: JSON.stringify({ rev: snapshotRev }) });
+        if (out && out.unchanged === true) {
+          if (out.rev !== undefined) snapshotRev = out.rev;
+          return false;
+        }
+        snapshot = out || {};
+        snapshotRev = out && out.rev !== undefined ? out.rev : null;
+        playtimeRecovered = Boolean(out && out.recovered === true);
+        playtimeMerge = out && out.merge && typeof out.merge === 'object' ? out.merge : null;
+        return true;
+      } catch (error) {
+        snapshot = snapshot || {};
+        return false;
+      } finally {
+        playtimeBusy = false;
+      }
+    }
+
     function statsRow() {
       const stats = (snapshot && snapshot.stats) || {};
       const wrap = document.createElement('div');
@@ -1455,7 +1499,9 @@
       [['Today', stats.today], ['Last 7 days', stats.last7d], ['Last 30 days', stats.last30d]].forEach(pair => {
         const cell = document.createElement('div');
         const value = document.createElement('b');
-        value.textContent = hours(pair[1]) + ' h';
+        // One formatter for the whole page: the totals, the bars and the week
+        // top all read "0 min", "45 min" or "12 h 30 min".
+        value.textContent = minutesText(pair[1]);
         const label = document.createElement('i');
         label.textContent = pair[0];
         cell.append(value, label);
@@ -1545,6 +1591,26 @@
         + (active.length ? ' <strong>Recording now:</strong> ' + active.join(', ') + '.' : '')
         + (live.error ? ' ' + live.error : '');
       body.appendChild(info);
+      // Two small diagnostics the backend can attach: a ledger recovered from
+      // a backup, or sync-conflict copies it had to merge. Both are one line,
+      // and an older backend sends neither.
+      if (snapshot && playtimeRecovered) {
+        const recovered = document.createElement('p');
+        recovered.className = 'sls-luna-note sls-luna-playtime-note';
+        recovered.textContent = 'The playtime ledger was recovered from the previous good backup.';
+        body.appendChild(recovered);
+      }
+      const conflicts = snapshot && playtimeMerge && Array.isArray(playtimeMerge.conflictFiles)
+        ? playtimeMerge.conflictFiles : [];
+      if (conflicts.length) {
+        const merged = document.createElement('p');
+        merged.className = 'sls-luna-note sls-luna-playtime-note';
+        merged.textContent = 'Steam sync left ' + conflicts.length + ' conflicting ledger cop'
+          + (conflicts.length === 1 ? 'y' : 'ies') + ' ('
+          + conflicts.slice(0, 3).map(name => String(name)).join(', ')
+          + (conflicts.length > 3 ? '\u2026' : '') + '); the newest copy is in use.';
+        body.appendChild(merged);
+      }
       if (snapshot) body.appendChild(statsRow());
       const chart = snapshot ? playtimeChart() : null;
       if (chart) body.appendChild(chart);
@@ -1585,15 +1651,41 @@
         const cancel = document.createElement('button');
         cancel.className = 'sls-luna-btn secondary';
         cancel.textContent = 'Cancel';
-        cancel.onclick = () => { area.remove(); row.remove(); };
+        const confirmLine = document.createElement('p');
+        confirmLine.className = 'sls-luna-note';
+        let armed = false;
+        cancel.onclick = () => {
+          area.remove();
+          row.remove();
+          if (confirmLine.parentNode && typeof confirmLine.remove === 'function') confirmLine.remove();
+        };
         replace.onclick = async () => {
           const raw = area.value.trim();
           if (!raw) { showError(body, Error('Paste a backup first.')); return; }
+          if (!armed) {
+            // Two clicks, in the page: a native confirm() freezes the shell, and
+            // replacing every record must never be one stray click away.
+            armed = true;
+            const total = Object.keys((snapshot && snapshot.games) || {}).length;
+            replace.textContent = 'Confirm replace';
+            confirmLine.textContent = 'This replaces all ' + total + ' local record'
+              + (total === 1 ? '' : 's') + ' with the backup. Click Confirm replace to continue, '
+              + 'or Cancel to keep what you have.';
+            body.insertBefore(confirmLine, row.nextSibling || null);
+            return;
+          }
+          armed = false;
+          replace.textContent = 'Replace ALL local records';
           try {
             await rpc(w, 'SlsPlaytimeImport', { raw });
             area.remove(); row.remove();
+            if (confirmLine.parentNode && typeof confirmLine.remove === 'function') confirmLine.remove();
             await refresh();
-          } catch (error) { showError(body, error); }
+          } catch (error) {
+            armed = true;
+            replace.textContent = 'Confirm replace';
+            showError(body, error);
+          }
         };
         row.append(replace, cancel);
         body.insertBefore(area, body.children[1] || null);
@@ -1639,11 +1731,23 @@
       const save = document.createElement('button');
       save.className = 'sls-luna-btn';
       save.textContent = 'Save';
+      let saving = false;
       save.onclick = async () => {
+        // One save per row at a time: the button goes busy and a second click
+        // (or a held Enter) cannot send a second write.
+        if (saving) return;
+        saving = true;
+        save.disabled = true;
+        save.textContent = 'Saving\u2026';
         try {
           await rpc(w, 'SlsPlaytimeEdit', { raw: JSON.stringify({ id: Number(entry.id), hours: Number(input.value) }) });
           await refresh();
         } catch (error) { showError(body, error); }
+        finally {
+          saving = false;
+          save.disabled = false;
+          save.textContent = 'Save';
+        }
       };
       row.append(name, input, save);
       return row;
@@ -1653,6 +1757,10 @@
       const body = document.createElement('div');
       const state = (presence && presence.state) || {};
       const runtime = (presence && presence.runtime) || {};
+      // The optional `discord` block (newer backend). Absent on an older one:
+      // then every line below renders exactly as it always did.
+      const discord = presence && presence.discord && typeof presence.discord === 'object'
+        ? presence.discord : null;
       const note = document.createElement('p');
       note.className = 'sls-luna-note';
       note.innerHTML = 'Publishes a hidden placeholder shortcut so friends see the game you are playing. '
@@ -1711,10 +1819,20 @@
         title: 'Discord', sub: 'Muestra el nombre real del juego en Discord mientras juegas.',
         hint: 'Crea una aplicación con el nombre de tu launcher en discord.com/developers y pega su Application ID',
         placeholder: 'Application ID de Discord', save: 'Guardar',
+        needId: 'Discord necesita un Application ID; no se publica nada hasta que lo pongas.',
+        badId: 'Ese Application ID no es válido; no se publica nada hasta corregirlo.',
+        noSocket: 'Discord no está abierto en esta máquina; ábrelo para volver a publicar.',
+        notPublishing: 'Discord está conectado pero ahora mismo no publica.',
+        appIdRule: 'El Application ID debe tener entre 17 y 20 dígitos.',
       } : {
         title: 'Discord', sub: 'Shows the real game name in Discord while you play.',
         hint: 'Create an application named after your launcher at discord.com/developers and paste its Application ID',
         placeholder: 'Discord Application ID', save: 'Save',
+        needId: 'Discord needs an Application ID; nothing is published until one is set.',
+        badId: 'That Application ID is not valid; nothing is published until it is fixed.',
+        noSocket: 'Discord is not running on this machine; start Discord to publish again.',
+        notPublishing: 'Discord is connected but is not publishing right now.',
+        appIdRule: 'Application ID must be 17-20 digits.',
       };
       const discordOn = state.discordEnabled !== false;
       const discordRow = document.createElement('div');
@@ -1748,11 +1866,31 @@
       const discordSave = document.createElement('button');
       discordSave.className = 'sls-luna-btn';
       discordSave.textContent = dTxt.save;
+      // A refused ID is a line under the field, not a banner at the top: the
+      // field is what the user is looking at. Both a local refusal and the
+      // backend's `invalid-app-id` land here.
+      let discordError = null;
+      const showDiscordError = message => {
+        if (discordError && typeof discordError.remove === 'function') discordError.remove();
+        discordError = document.createElement('p');
+        discordError.className = 'sls-luna-error';
+        discordError.textContent = message;
+        body.insertBefore(discordError, discordIdRow.nextSibling || null);
+      };
       discordSave.onclick = async () => {
+        const value = discordInput.value.trim();
+        // Discord application IDs are snowflakes: 17-20 digits. An older
+        // backend has no `discord` block and keeps the old accepted range.
+        if (discord && value !== '' && !/^\d{17,20}$/.test(value)) {
+          showDiscordError(dTxt.appIdRule);
+          return;
+        }
         try {
-          await rpc(w, 'SlsPresenceSetDiscord', { raw: JSON.stringify({ appId: discordInput.value.trim() }) });
+          await rpc(w, 'SlsPresenceSetDiscord', { raw: JSON.stringify({ appId: value }) });
           await refresh();
-        } catch (error) { showError(body, error); }
+        } catch (error) {
+          showDiscordError(String(error && error.message ? error.message : error));
+        }
       };
       discordIdRow.append(discordInput, discordSave);
       body.appendChild(discordIdRow);
@@ -1760,6 +1898,17 @@
       discordHint.className = 'sls-luna-note';
       discordHint.textContent = dTxt.hint;
       body.appendChild(discordHint);
+      // Why nothing is published, in plain words, only while Discord is on and
+      // the backend says it is not publishing.
+      if (discord && discordOn && discord.publishing === false) {
+        const reason = String(discord.reason || '');
+        const why = document.createElement('p');
+        why.className = 'sls-luna-note sls-luna-discord-note';
+        why.textContent = reason === 'no-app-id' ? dTxt.needId
+          : reason === 'invalid-app-id' ? dTxt.badId
+          : reason === 'no-socket' ? dTxt.noSocket : dTxt.notPublishing;
+        body.appendChild(why);
+      }
 
       const owned = Object.keys(state.owned || {}).length;
       const running = Object.keys(state.running || {}).length;
@@ -1769,6 +1918,7 @@
         + '. Placeholders owned: <strong>' + owned + '</strong>, in use: <strong>' + running + '</strong>.'
         + (state.account ? ' Account ' + String(state.account).slice(-5) + '.' : '')
         + (runtime.error ? ' ' + runtime.error : '')
+        + (discord && discord.publishing === false ? ' Discord: not publishing.' : '')
         + (runtime.accountMismatch ? ' Account mismatch detected; nothing is being published.' : '');
       body.appendChild(health);
 
@@ -2856,6 +3006,17 @@
         try {
           if (this.props && this.props.showcase && this.props.showcase.eSortBy === 12
             && collection && Array.isArray(collection.visibleApps)) {
+            shelfWantsHltb = true;
+            // A shelf sorted by HowLongToBeat needs the cached times even if
+            // the page was never opened: one read, then one re-walk so the
+            // shelf redraws with real times instead of name order.
+            if (!hltb && !hltbKick) {
+              hltbKick = true;
+              load('hltb').then(() => {
+                hltbKick = false;
+                if (hltb) { resetShelfWalk(); refreshLibraryShelves(); }
+              });
+            }
             return collection.visibleApps.slice().sort(compareHltbHere);
           }
         } catch (_) { /* fall through to Steam's sorter */ }
@@ -2904,6 +3065,10 @@
     let shelfPassStart = 0;
     let shelfSeen = new WeakSet();
     let shelfEpoch = { data: null, order: '' };
+    // Set once a shelf is really drawn with sort 12 ("HowLongToBeat"): only then
+    // is the HLTB cache worth reading outside its own page.
+    let shelfWantsHltb = false;
+    let hltbKick = false;
     let shelfQuietUntil = 0;
     let shelfSig = null;
     const shelfStats = { walks: 0, walkMsTotal: 0, observerCallbacks: 0 };
@@ -3571,8 +3736,7 @@
           loadSgdbAssets();
         }
       } catch (error) {
-        sgdbNotice = 'Search failed: '
-          + String(error && error.message ? error.message : error);
+        sgdbNotice = 'Search failed: ' + sgdbErrorText(error);
       }
       sgdbBusy = false;
       repaintIfOpen();
@@ -3600,8 +3764,7 @@
           sgdbNotice = 'No usable ' + sgdbKind + ' images for this game (PNG or JPEG only).';
         }
       } catch (error) {
-        sgdbNotice = 'Could not load artwork: '
-          + String(error && error.message ? error.message : error);
+        sgdbNotice = 'Could not load artwork: ' + sgdbErrorText(error);
       }
       sgdbBusy = false;
       repaintIfOpen();
@@ -3619,15 +3782,17 @@
         });
         sgdbNotice = 'Artwork applied' + (out && out.backedUp ? ' (the previous file is backed up)' : '') + '.';
         sgdbChangedAt = Object.assign({}, sgdbChangedAt, { [sgdbKind]: Date.now() });
-        const liveKinds = out && out.live ? [sgdbKind] : [];
+        // The kind decides whether Steam can repaint over the running client;
+        // an icon never can, so say plainly that a restart is needed.
+        const liveKinds = sgdbLive(sgdbKind) && (!out || out.live !== false) ? [sgdbKind] : [];
+        if (!liveKinds.length) sgdbNotice += ' Restart Steam to see this ' + sgdbKind + '.';
         const at = liveKinds.length ? requestLiveArtwork(sgdbGame.appid, liveKinds) : null;
         sgdbBusy = false;
         await refreshSgdbHistory();
         repaintIfOpen();
         if (at) finishLiveNotice(at, 'Applied and refreshed in Steam right away.');
       } catch (error) {
-        sgdbNotice = 'Could not apply artwork: '
-          + String(error && error.message ? error.message : error);
+        sgdbNotice = 'Could not apply artwork: ' + sgdbErrorText(error);
         sgdbBusy = false;
         repaintIfOpen();
       }
@@ -3803,6 +3968,20 @@
        4 s: a stale "Confirm undo" is never a hidden loaded gun. */
     const SGDB_CONFIRM_MS = 4000;
     const SGDB_KINDS = [['grid', 'Grid'], ['wide', 'Wide'], ['hero', 'Hero'], ['logo', 'Logo'], ['icon', 'Icon']];
+    // Mirrors the backend's LIVE_TYPES: the four slots Steam can repaint over
+    // its running client. Icons are file-only, so an applied icon needs a
+    // restart before Steam shows it.
+    const SGDB_LIVE_TYPES = ['grid', 'wide', 'hero', 'logo'];
+    const sgdbLive = kind => SGDB_LIVE_TYPES.indexOf(String(kind)) >= 0;
+    // SteamGridDB answers 429 with a wait; that is worth a sentence of its own
+    // instead of the raw backend string.
+    const sgdbErrorText = error => {
+      const wait = Number(error && error.retryAfter);
+      if (error && error.code === 'rate_limit' && Number.isFinite(wait) && wait > 0) {
+        return 'SteamGridDB is rate-limiting; try again in ' + Math.round(wait) + ' s';
+      }
+      return String(error && error.message ? error.message : error);
+    };
 
     function forgetSgdbHistory() {
       sgdbHistory = null;
@@ -3812,6 +3991,7 @@
       sgdbUndoArmed = null;
       sgdbResetArmed = 0;
       sgdbChangedAt = {};
+      sgdbTimes = {};
     }
 
     // {success:true, history:{grid:N, hero:N, ...}} or a structured refusal.
@@ -3827,6 +4007,7 @@
         const out = await rpc(w, 'SlsSgdbHistory', { raw: JSON.stringify({ appid: appid }) });
         if (!sgdbGame || Number(sgdbGame.appid) !== appid) return;
         sgdbHistory = out && out.history && typeof out.history === 'object' ? out.history : {};
+        sgdbTimes = out && out.times && typeof out.times === 'object' ? out.times : {};
         sgdbHistoryError = '';
       } catch (error) {
         if (!sgdbGame || Number(sgdbGame.appid) !== appid) return;
@@ -3844,7 +4025,11 @@
     // change made in an earlier session or by another tool.
     const sgdbAgo = kind => {
       const at = Number(sgdbChangedAt[kind]);
-      return at > 0 ? ' \u00b7 ' + age(at / 1000) + ' ago' : '';
+      if (at > 0) return ' \u00b7 ' + age(at / 1000) + ' ago';
+      // Nothing is invented: without a session change or a backend `times`
+      // stamp the row simply shows its depth.
+      const stamped = Number(sgdbTimes && sgdbTimes[kind]);
+      return Number.isFinite(stamped) && stamped > 0 ? ' \u00b7 changed ' + age(stamped) + ' ago' : '';
     };
 
     function armSgdbUndo(kind) {
@@ -4233,6 +4418,13 @@
 
     // ---- Graphics page (beta): read-only detection -------------------------
 
+    // "Checked 4 s ago." from the report's `checkedAt` (or the receipt time on
+    // an older backend). Spaces keep the unit readable at a glance.
+    function graphicsAge() {
+      if (!graphicsCheckedAt) return 'Not checked yet.';
+      return 'Checked ' + age(graphicsCheckedAt).replace(/(\d)([smh])$/, '$1 $2') + ' ago.';
+    }
+
     function graphicsBody() {
       const body = document.createElement('div');
       const report = graphics || {};
@@ -4242,6 +4434,7 @@
       const gpus = Array.isArray(report.gpus) ? report.gpus : [];
       const opti = Array.isArray(report.optiscaler) ? report.optiscaler : [];
       const steamInfo = report.steam || {};
+      const gpuSummary = report.gpu && typeof report.gpu === 'object' ? report.gpu : null;
 
       const note = document.createElement('p');
       note.className = 'sls-luna-note';
@@ -4249,6 +4442,13 @@
         + 'upscaling. Nothing here installs, downloads or changes files - the installers come later, '
         + 'each behind its own gates.';
       body.appendChild(note);
+      // The report's age, from its own `checkedAt`. Only the tick below touches
+      // this node; a page rebuild makes a fresh one.
+      const ageLine = document.createElement('p');
+      ageLine.className = 'sls-luna-note sls-luna-graphics-age';
+      ageLine.textContent = graphicsAge();
+      graphicsAgeNode = ageLine;
+      body.appendChild(ageLine);
 
       const stat = document.createElement('div');
       stat.className = 'sls-luna-stat';
@@ -4285,8 +4485,19 @@
       section('GPU');
       if (!gpus.length) line('No GPU was detected through sysfs.');
       gpus.forEach(gpu => {
+        // "in use" and "primary" come from the backend fields; an older report
+        // has neither and the line stays exactly as it was.
+        const marks = [];
+        if (gpu.in_use === true || (gpuSummary && gpuSummary.in_use && gpuSummary.in_use === gpu.card)) {
+          marks.push('in use');
+        }
+        if (gpu.boot_vga === true
+          || (gpuSummary && gpuSummary.primary && gpuSummary.primary === gpu.card)) {
+          marks.push('primary');
+        }
         line(gpu.card + ': ' + (gpu.product || gpu.vendor_name) + ' \u00b7 driver ' + (gpu.driver || '?')
-          + ' (' + gpu.vendor + ':' + (gpu.device || '?') + ')');
+          + ' (' + gpu.vendor + ':' + (gpu.device || '?') + ')'
+          + (marks.length ? ' \u00b7 ' + marks.join(', ') : ''));
       });
 
       section('Frame generation (lsfg-vk)');
@@ -6942,6 +7153,11 @@
       if (!shell || !document.getElementById(OVERLAY_ID)) { paint(); return; }
       syncShell(false);
       if (tab === 'lumen' && lumenEmbedState) applyLumenEmbed();
+      // The page on screen decides what is read: a switch starts that page's
+      // own pass (one per page, so a fast second click joins the first). The
+      // shell set is already in memory from the open, so a switch never
+      // re-reads the footer or the sidebar.
+      refreshPage(tab);
       // Back on the tab: resume following the same job, no second start.
       if (tab === 'steamgrid' && sgdbAuto && sgdbAuto.state === 'running') pollSgdbAuto();
     }
@@ -6967,158 +7183,261 @@
       }
     }
 
-    async function refresh() {
-      try {
-        snapshot = await rpc(w, 'SlsPlaytimeGet');
-      } catch (error) {
-        snapshot = snapshot || {};
-      }
-      try {
-        presence = await rpc(w, 'SlsPresenceGet');
-      } catch (error) {
-        presence = presence || {};
-      }
-      try {
-        // The per-game list and the statistics are only needed by their own
-        // tabs; every other view (and the one-second poll) asks for the light
-        // shape, which leaves both out.
-        const needFull = tab === 'compressor'
-          && (compressorTab === 'games' || compressorTab === 'stats');
-        compressor = await rpc(w, 'SlsCompressorGet', { raw: JSON.stringify({ light: !needFull }) });
-        // The optimistic "Starting..." line gives way once the backend reports
-        // this exact job (running, or already finished) from our request.
-        const job = compressor && compressor.job;
-        if (pendingAction && job
-          && (job.running || (Number(job.startedAt) >= pendingAction.at - 1))) {
-          pendingAction = null;
-        }
-        if (!(job && job.running)) cancelArmed = false;
-        if (job && job.running) confirmAction = null;
-      } catch (error) {
-        compressor = compressor || {};
-      }
-      try {
-        hltb = await readHltb();
-      } catch (error) {
-        hltb = hltb || {};
-      }
-      try { refreshLibraryShelves(); } catch (_) { /* shelves render later */ }
-      try {
-        sgdb = await rpc(w, 'SlsSgdbGet');
-        sgdbReadError = '';
-      } catch (error) {
-        sgdb = sgdb || {};
-        sgdbReadError = String(error && error.message ? error.message : error);
-      }
-      try {
-        graphics = await rpc(w, 'SlsGraphicsGet');
-      } catch (error) {
-        graphics = graphics || {};
-      }
-      try {
-        lunaInfo = await rpc(w, 'SlsLunaInfo');
-        delete rpcErrors.info;
-      } catch (error) {
-        rpcErrors.info = errorText(error);
-        lunaInfo = lunaInfo || {};
-      }
-      await migratePrefs();
-      try {
-        const report = await rpc(w, 'SlsLunaHealth');
-        lunaHealth = (report && report.health) || report || {};
-        delete rpcErrors.health;
-      } catch (error) {
-        rpcErrors.health = errorText(error);
-        lunaHealth = lunaHealth || {};
-      }
-      try {
-        const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'status' }) });
-        lunaUpdate = (out && out.update) || lunaUpdate || {};
-        delete rpcErrors.update;
-      } catch (error) {
-        rpcErrors.update = errorText(error);
-        lunaUpdate = lunaUpdate || {};
-      }
-      try {
-        const steamOut = await rpc(w, 'SlsLunaSteam', { raw: JSON.stringify({ action: 'status' }) });
-        lunaSteam = (steamOut && steamOut.steam) || lunaSteam || {};
-        delete rpcErrors.steam;
-      } catch (error) {
-        rpcErrors.steam = errorText(error);
-        lunaSteam = lunaSteam || {};
-      }
-      try {
-        const hostOut = await rpc(w, 'SlsLunaHost', {});
-        lunaHost = (hostOut && hostOut.host) || lunaHost || {};
-        delete rpcErrors.host;
-      } catch (error) {
-        rpcErrors.host = errorText(error);
-        lunaHost = lunaHost || {};
-      }
-      if ((lunaHost.configured || lunaHost.running) === 'lumen') {
+    /* ---- Page data ------------------------------------------------------
+       Every read below is one promise. A page asks for the shell set plus what
+       it actually shows, and the scheduler starts them together: a tab switch
+       then waits for the slowest read instead of for their sum. `load()` keeps
+       one call per name in flight, so a switch, a poll and a write racing each
+       other never send the same RPC twice. */
+    const SHELL_LOADS = ['playtime', 'presence', 'info', 'luatools', 'update'];
+
+    // What a page really shows. The HowLongToBeat cache is megabytes on a cold
+    // read: it is requested for its own page, and otherwise only once a library
+    // shelf is actually sorted by it (the walk below sees sort 12).
+    function pageLoads(id) {
+      let names;
+      if (id === 'hltb') names = ['hltb'];
+      else if (id === 'compressor') names = ['compressor'];
+      else if (id === 'steamgrid') names = ['sgdb', 'steam'];
+      else if (id === 'graphics') names = ['graphics'];
+      else if (id === 'health') names = ['health', 'steam', 'host', 'lumen', 'refresh'];
+      else if (id === 'updates') names = ['health', 'steam', 'host', 'lumen', 'refresh'];
+      else if (id === 'lumen') names = ['host', 'lumen', 'steam'];
+      else if (id === 'settings') names = ['host', 'lumen', 'steam', 'refresh'];
+      else names = [];
+      if (shelfWantsHltb && names.indexOf('hltb') < 0) names = names.concat('hltb');
+      return names;
+    }
+
+    const loads = {
+      playtime: () => readPlaytime(),
+      presence: async () => {
         try {
-          const lumenOut = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'status' }) });
-          lunaLumen = (lumenOut && lumenOut.lumen) || lunaLumen || {};
-          delete rpcErrors.lumen;
+          presence = await rpc(w, 'SlsPresenceGet');
         } catch (error) {
-          rpcErrors.lumen = errorText(error);
-          lunaLumen = lunaLumen || {};
+          presence = presence || {};
         }
-        // The channels come from `luna lumen channels`, which starts a bounded
-        // CLI read: once per page session, not on every status poll.
-        if (lunaChannels === null && !channelsBusy && !channelsTried) {
-          channelsBusy = true;
-          channelsTried = true;
-          try {
-            const chanOut = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'channels' }) });
-            if (chanOut && chanOut.channels) lunaChannels = chanOut.channels;
-            channelsError = '';
-          } catch (error) {
-            channelsError = errorText(error);
+      },
+      compressor: async () => {
+        try {
+          // The per-game list and the statistics are only needed by their own
+          // tabs; every other view asks for the light shape, which leaves both
+          // out.
+          const needFull = tab === 'compressor'
+            && (compressorTab === 'games' || compressorTab === 'stats');
+          compressor = await rpc(w, 'SlsCompressorGet', { raw: JSON.stringify({ light: !needFull }) });
+          // The optimistic "Starting..." line gives way once the backend reports
+          // this exact job (running, or already finished) from our request.
+          const job = compressor && compressor.job;
+          if (pendingAction && job
+            && (job.running || (Number(job.startedAt) >= pendingAction.at - 1))) {
+            pendingAction = null;
           }
-          channelsBusy = false;
+          if (!(job && job.running)) cancelArmed = false;
+          if (job && job.running) confirmAction = null;
+        } catch (error) {
+          compressor = compressor || {};
         }
-      }
+      },
+      hltb: async () => {
+        try {
+          hltb = await readHltb();
+        } catch (error) {
+          hltb = hltb || {};
+        }
+      },
+      sgdb: async () => {
+        try {
+          sgdb = await rpc(w, 'SlsSgdbGet');
+          sgdbReadError = '';
+        } catch (error) {
+          sgdb = sgdb || {};
+          sgdbReadError = String(error && error.message ? error.message : error);
+        }
+      },
+      graphics: async () => {
+        try {
+          // Refresh is an explicit request: bypass the backend's report cache so
+          // a newly attached GPU or lsfg config shows up now, not 30 s later.
+          graphics = await rpc(w, 'SlsGraphicsGet', { raw: JSON.stringify({ force: true }) });
+          graphicsCheckedAt = Number(graphics && graphics.checkedAt) || Math.floor(Date.now() / 1000);
+        } catch (error) {
+          graphics = graphics || {};
+        }
+      },
+      info: async () => {
+        try {
+          lunaInfo = await rpc(w, 'SlsLunaInfo');
+          delete rpcErrors.info;
+        } catch (error) {
+          rpcErrors.info = errorText(error);
+          lunaInfo = lunaInfo || {};
+        }
+        await migratePrefs();
+      },
+      health: async () => {
+        try {
+          const report = await rpc(w, 'SlsLunaHealth');
+          lunaHealth = (report && report.health) || report || {};
+          delete rpcErrors.health;
+        } catch (error) {
+          rpcErrors.health = errorText(error);
+          lunaHealth = lunaHealth || {};
+        }
+      },
+      update: async () => {
+        try {
+          const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'status' }) });
+          lunaUpdate = (out && out.update) || lunaUpdate || {};
+          delete rpcErrors.update;
+        } catch (error) {
+          rpcErrors.update = errorText(error);
+          lunaUpdate = lunaUpdate || {};
+        }
+        // A real check talks to GitHub through the updater; the Python side
+        // caches it for six hours, and opening the menu throttles it anyway.
+        // "Off" means never check: Health then only shows the last known status.
+        if ((lunaUpdate.autoUpdate || 'off') !== 'off' && Date.now() - lunaCheckedAt > 30 * 60 * 1000) {
+          lunaCheckedAt = Date.now();
+          try {
+            const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'check' }) });
+            if (out && out.update) lunaUpdate = out.update;
+            followUpdateCheck();
+          } catch (_) { /* offline or gh missing; the status stays */ }
+        }
+      },
+      steam: async () => {
+        try {
+          const steamOut = await rpc(w, 'SlsLunaSteam', { raw: JSON.stringify({ action: 'status' }) });
+          lunaSteam = (steamOut && steamOut.steam) || lunaSteam || {};
+          delete rpcErrors.steam;
+        } catch (error) {
+          rpcErrors.steam = errorText(error);
+          lunaSteam = lunaSteam || {};
+        }
+      },
+      host: async () => {
+        try {
+          const hostOut = await rpc(w, 'SlsLunaHost', {});
+          lunaHost = (hostOut && hostOut.host) || lunaHost || {};
+          delete rpcErrors.host;
+        } catch (error) {
+          rpcErrors.host = errorText(error);
+          lunaHost = lunaHost || {};
+        }
+      },
+      lumen: async () => {
+        // The host decides whether Lumen's own status is worth reading at all.
+        await load('host');
+        if ((lunaHost.configured || lunaHost.running) === 'lumen') {
+          try {
+            const lumenOut = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'status' }) });
+            lunaLumen = (lumenOut && lumenOut.lumen) || lunaLumen || {};
+            delete rpcErrors.lumen;
+          } catch (error) {
+            rpcErrors.lumen = errorText(error);
+            lunaLumen = lunaLumen || {};
+          }
+          // The channels come from `luna lumen channels`, which starts a bounded
+          // CLI read: once per page session, not on every status poll.
+          if (lunaChannels === null && !channelsBusy && !channelsTried) {
+            channelsBusy = true;
+            channelsTried = true;
+            try {
+              const chanOut = await rpc(w, 'SlsLunaLumen', { raw: JSON.stringify({ action: 'channels' }) });
+              if (chanOut && chanOut.channels) lunaChannels = chanOut.channels;
+              channelsError = '';
+            } catch (error) {
+              channelsError = errorText(error);
+            }
+            channelsBusy = false;
+          }
+        }
+      },
       // Footer connection: LuaTools' own signed-in session, read by the
       // backend. A failed RPC is "unavailable", never "connected".
-      try {
-        const out = await rpc(w, 'SlsLunaLuaTools', {});
-        if (out && out.success === false) throw new Error(out.error || 'not available');
-        const state = (out && out.luatools) || {};
-        luatools = { signedIn: state.signedIn === true, name: String(state.name || ''),
-          avatar: String(state.avatar || ''), expired: state.expired === true,
-          path: String(state.path || ''),
-          error: String(state.error || ''),
-          labelKey: state.signedIn === true ? 'signedIn' : 'out' };
-      } catch (error) {
-        luatools = { unavailable: true, signedIn: false, name: '',
-          error: 'the LuaTools state is not readable here: ' + errorText(error), labelKey: 'unavailable' };
-      }
-      try {
-        const refreshOut = await rpc(w, 'SlsLunaRefresh', { raw: JSON.stringify({ action: 'status' }) });
-        lunaRefresh = refreshOut || lunaRefresh || {};
-        delete rpcErrors.refresh;
-      } catch (error) {
-        rpcErrors.refresh = errorText(error);
-        lunaRefresh = lunaRefresh || {};
-      }
-      // A real check talks to GitHub through the updater; the Python side caches
-      // it for six hours, and opening the menu throttles the call anyway.
-      // "Off" means never check, even from the menu: the Health page then
-      // only shows the last known status.
-      if ((lunaUpdate.autoUpdate || 'off') !== 'off' && Date.now() - lunaCheckedAt > 30 * 60 * 1000) {
-        lunaCheckedAt = Date.now();
+      luatools: async () => {
         try {
-          const out = await rpc(w, 'SlsLunaUpdate', { raw: JSON.stringify({ action: 'check' }) });
-          if (out && out.update) lunaUpdate = out.update;
-          followUpdateCheck();
-        } catch (_) { /* offline or gh missing; the status stays */ }
-      }
-      maybeAutoFetch();
-      // New data: cached pages built before this pass are stale and rebuild on
-      // their next visit; the visible one is refreshed now.
-      shellDataRev += 1;
-      repaintIfOpen();
+          const out = await rpc(w, 'SlsLunaLuaTools', {});
+          if (out && out.success === false) throw new Error(out.error || 'not available');
+          const state = (out && out.luatools) || {};
+          luatools = { signedIn: state.signedIn === true, name: String(state.name || ''),
+            avatar: String(state.avatar || ''), expired: state.expired === true,
+            path: String(state.path || ''),
+            error: String(state.error || ''),
+            labelKey: state.signedIn === true ? 'signedIn' : 'out' };
+        } catch (error) {
+          luatools = { unavailable: true, signedIn: false, name: '',
+            error: 'the LuaTools state is not readable here: ' + errorText(error), labelKey: 'unavailable' };
+        }
+      },
+      refresh: async () => {
+        try {
+          const refreshOut = await rpc(w, 'SlsLunaRefresh', { raw: JSON.stringify({ action: 'status' }) });
+          lunaRefresh = refreshOut || lunaRefresh || {};
+          delete rpcErrors.refresh;
+        } catch (error) {
+          rpcErrors.refresh = errorText(error);
+          lunaRefresh = lunaRefresh || {};
+        }
+      },
+    };
+
+    const loading = new Map();
+    function load(name) {
+      const existing = loading.get(name);
+      if (existing) return existing;
+      const fn = loads[name];
+      if (!fn) return Promise.resolve(false);
+      const promise = Promise.resolve().then(fn).then(() => true, () => false)
+        .then(done => { loading.delete(name); return done; });
+      loading.set(name, promise);
+      return promise;
+    }
+
+    /* One pass per page at a time, and one repaint at the end of it: a pass
+       that began for a page the user has already left never paints the pane
+       now on screen. */
+    function runPass(wanted, names) {
+      return Promise.allSettled(names.map(name => load(name)))
+        .then(() => {
+          try { refreshLibraryShelves(); } catch (_) { /* shelves render later */ }
+          maybeAutoFetch();
+          if (!current() || tab !== wanted) return false;
+          if (!document.getElementById(OVERLAY_ID)) return false;
+          // New data for this page: its cached pane is stale and is rebuilt now.
+          shellDataRev += 1;
+          repaintIfOpen();
+          return true;
+        });
+    }
+
+    const refreshing = new Map();
+    // Shell + page: the open, the Refresh button and every write go through
+    // this, so what the user just changed is read again right away.
+    function refresh() {
+      const wanted = tab;
+      const running = refreshing.get(wanted);
+      if (running) return running;
+      const pass = runPass(wanted, SHELL_LOADS.concat(pageLoads(wanted)))
+        .then(result => { refreshing.delete(wanted); return result; },
+          () => { refreshing.delete(wanted); return false; });
+      refreshing.set(wanted, pass);
+      return pass;
+    }
+
+    // A tab switch fetches only what that page shows.
+    const pageRefreshing = new Map();
+    function refreshPage(id) {
+      const names = pageLoads(id);
+      if (!names.length) return Promise.resolve(false);
+      const running = pageRefreshing.get(id);
+      if (running) return running;
+      const pass = runPass(id, names)
+        .then(result => { pageRefreshing.delete(id); return result; },
+          () => { pageRefreshing.delete(id); return false; });
+      pageRefreshing.set(id, pass);
+      return pass;
     }
 
     let opening = false;
@@ -7393,6 +7712,30 @@
       removeFloating(document);
     }, 4000);
 
+    /* The Playtime page follows the ledger while it is the page on screen:
+       readPlaytime sends the last `rev`, so a quiet backend answers 59 bytes and
+       nothing is rebuilt. A poll that races the page's own load is skipped by
+       the busy flag, and one that started for another page never paints. */
+    /* The Graphics stamp follows the clock only while that page is on screen
+       and visible. It writes one text node: no rebuild, no RPC, and the tick
+       dies with the menu through the same `life` bookkeeping. */
+    life.interval(() => {
+      if (tornDown || document.hidden === true) return;
+      if (tab !== 'graphics' || !document.getElementById(OVERLAY_ID)) return;
+      if (graphicsAgeNode && graphicsAgeNode.parentNode) graphicsAgeNode.textContent = graphicsAge();
+    }, 5000);
+
+    life.interval(() => {
+      if (tornDown || document.hidden === true) return;
+      if (tab !== 'playtime' || !document.getElementById(OVERLAY_ID)) return;
+      readPlaytime().then(changed => {
+        if (!changed || !current() || tab !== 'playtime') return;
+        if (!document.getElementById(OVERLAY_ID)) return;
+        shellDataRev += 1;
+        repaintIfOpen();
+      });
+    }, 5000);
+
     /* The Lumen job follows itself only while the Updates page is open and
        visible. Fast while a job runs or a check is out, then slower and slower
        when nothing changes; never the network check, only the status files. */
@@ -7458,6 +7801,10 @@
     // Resume a background fetch pass after a Steam restart without making the
     // user open the menu: load the local times and continue where it left off.
     life.timeout(async () => {
+      // The local times are needed by a pass the user left running, and by a
+      // library shelf actually sorted by HowLongToBeat. Without either, the
+      // megabyte cache stays unread until its own page asks for it.
+      if (!hltbBackground() && !shelfWantsHltb) return;
       try {
         hltb = await readHltb();
       } catch (_) { /* the backend may still be starting */ }
