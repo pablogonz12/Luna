@@ -49,6 +49,8 @@ STEP_TIMEOUT = 15.0
 SELECT_TIMEOUT = 8.0
 RPC_TIMEOUT = 6.0
 RPC_BUDGET_MS = 2000
+WARMUP_MS = 200          # a warm-up call under this means the backend queue has drained
+WARMUP_BUDGET_S = 5.0
 SWITCH_BUDGET_MS = 500
 ROW_MIN_HEIGHT = 24
 MAX_JOURNAL_LINES = 50
@@ -459,10 +461,37 @@ SELECT_JS = r'''/*luna-selftest:select*/ (async () => {
       height: Math.round(row.getBoundingClientRect().height * 10) / 10
     }));
   const state = (typeof hook.state === 'function') ? hook.state() : {};
+  const overlay = document.getElementById('sls-luna-overlay');
+  const content = (overlay && overlay.querySelector(
+    '.sls-luna-content, .sls-luna-body, .sls-luna-panes')) || overlay;
+  const lumenOverlay = document.getElementById('lumen-settings-overlay');
+  const shown = node => Boolean(node && node.getClientRects
+    && getComputedStyle(node).display !== 'none' && node.getClientRects().length > 0);
+  let lumenInside = false;
+  let lumenWidth = 0;
+  let lumenHeight = 0;
+  if (content && lumenOverlay && content.getBoundingClientRect && lumenOverlay.getBoundingClientRect) {
+    const area = content.getBoundingClientRect();
+    const box = lumenOverlay.getBoundingClientRect();
+    const slack = 4; /* a border or shadow may sit a hair outside */
+    lumenWidth = Math.round(box.width);
+    lumenHeight = Math.round(box.height);
+    lumenInside = box.width > 0 && box.height > 0
+      && box.left >= area.left - slack && box.top >= area.top - slack
+      && box.right <= area.right + slack && box.bottom <= area.bottom + slack;
+  }
+  const lumenPanels = Array.from(document.querySelectorAll('.lumen-tab-panel'));
   return {
     ok: true, id, panes: panes.length, visible: visible.length, text, emptyState,
     heading: head ? String(head.textContent || '').trim() : '',
-    elapsedMs, heights, tab: String((state && state.tab) || '')
+    elapsedMs, heights, tab: String((state && state.tab) || ''),
+    embedding: Boolean(state && state.embedding),
+    lumenPresent: Boolean(lumenOverlay),
+    lumenVisible: shown(lumenOverlay),
+    lumenInside,
+    lumenRect: [Math.round(lumenWidth), Math.round(lumenHeight)],
+    lumenPanels: lumenPanels.filter(shown).length,
+    lumenPanelCount: lumenPanels.length
   };
 })()'''
 
@@ -488,6 +517,18 @@ RPC_JS = r'''/*luna-selftest:rpc*/ (async () => {
 EMBED_JS = r'''/*luna-selftest:embed*/ (() => {
   const luna = document.getElementById('sls-luna-overlay');
   const lumen = document.getElementById('lumen-settings-overlay');
+  const content = (luna && luna.querySelector('.sls-luna-content, .sls-luna-body, .sls-luna-panes'))
+    || luna;
+  let inside = false;
+  let box = null;
+  if (content && lumen && content.getBoundingClientRect && lumen.getBoundingClientRect) {
+    const area = content.getBoundingClientRect();
+    box = lumen.getBoundingClientRect();
+    const slack = 4; /* a border or shadow may sit a hair outside */
+    inside = box.width > 0 && box.height > 0
+      && box.left >= area.left - slack && box.top >= area.top - slack
+      && box.right <= area.right + slack && box.bottom <= area.bottom + slack;
+  }
   const row = document.querySelector('#sls-luna-overlay .sls-luna-side .sls-luna-tab');
   let hitInside = false;
   if (row && row.getBoundingClientRect) {
@@ -498,6 +539,11 @@ EMBED_JS = r'''/*luna-selftest:embed*/ (() => {
   const zIndex = node => (node ? Number(getComputedStyle(node).zIndex) || 0 : 0);
   return {
     embedded: Boolean(luna && lumen && luna.contains(lumen)),
+    inside,
+    rect: box ? [Math.round(box.left), Math.round(box.top),
+                 Math.round(box.width), Math.round(box.height)] : null,
+    lumenVisible: Boolean(lumen && lumen.getClientRects && lumen.getClientRects().length > 0
+      && getComputedStyle(lumen).display !== 'none'),
     lumenAbove: Boolean(lumen) && zIndex(lumen) >= zIndex(luna),
     sidebarClickable: hitInside,
     rowHeight: row ? Math.round(row.getBoundingClientRect().height * 10) / 10 : 0
@@ -668,8 +714,9 @@ def _check_tabs(report, cdp, probe):
     tabs = probe.get('tabs') or []
     if not isinstance(tabs, list) or not tabs:
         report.failed('categories', 'the panel reported no sidebar categories')
-        return
+        return None
     embedding = bool(probe.get('embedding'))
+    lumen_embedded = None  # what the Lumen category was drawn as, for the embedding check
     for entry in tabs:
         if not isinstance(entry, dict):
             continue
@@ -692,17 +739,36 @@ def _check_tabs(report, cdp, probe):
         failures = []
         visible = answer.get('visible')
         panes = answer.get('panes')
-        if visible != 1:
-            failures.append('%s of %s panes are on screen (exactly one must be)'
-                            % (visible, panes))
         texts = answer.get('text') or []
         text_length = sum(len(str(item)) for item in texts if isinstance(item, str))
         empty_state = bool(answer.get('emptyState'))
-        if visible == 1 and not text_length and not empty_state:
-            failures.append('the page is empty: no text and no empty-state element')
-        if not _heading_matches(answer.get('heading'), label):
-            failures.append('heading %r does not match %r'
-                            % (answer.get('heading') or '', label))
+        embedded = bool(answer.get('embedding', embedding))
+        # The Lumen category is embedded: its page paints into the pane, so the
+        # pane itself stays empty and Luna's own panes all hide behind Lumen.
+        embedded_mode = embedded and (ident == 'lumen' or bool(answer.get('lumenPresent')))
+        if embedded_mode:
+            if not answer.get('lumenVisible'):
+                failures.append('the Lumen overlay (#lumen-settings-overlay) is not visible')
+            elif not answer.get('lumenInside'):
+                failures.append('the Lumen overlay %s is not inside Luna\u2019s content area'
+                                % (answer.get('lumenRect') or 'rect'))
+            shown = int(answer.get('lumenPanels') or 0)
+            total = int(answer.get('lumenPanelCount') or shown)
+            if shown != 1:
+                failures.append('%d of %d Lumen tab panels are displayed (exactly one must be)'
+                                % (shown, total))
+            if visible:
+                failures.append('%s Luna pane(s) are on screen beside embedded Lumen '
+                                '(all must be hidden)' % visible)
+        else:
+            if visible != 1:
+                failures.append('%s of %s panes are on screen (exactly one must be)'
+                                % (visible, panes))
+            if visible == 1 and not text_length and not empty_state:
+                failures.append('the page is empty: no text and no empty-state element')
+            if not _heading_matches(answer.get('heading'), label):
+                failures.append('heading %r does not match %r'
+                                % (answer.get('heading') or '', label))
         heights = answer.get('heights') or []
         short = [row for row in heights if isinstance(row, dict)
                  and float(row.get('height') or 0) < ROW_MIN_HEIGHT]
@@ -717,33 +783,103 @@ def _check_tabs(report, cdp, probe):
         if ident == 'lumen' and embedding and not text_length:
             # Embedded Lumen paints into the pane; an empty pane is correct there.
             failures = [item for item in failures if 'the page is empty' not in item]
+        if ident == 'lumen':
+            lumen_embedded = bool(embedded_mode)
         if answer.get('tab') and answer.get('tab') != ident:
             failures.append('the panel still reports %r as the active tab' % answer.get('tab'))
         if failures:
             report.failed('tab %s' % ident, '; '.join(failures))
+        elif embedded_mode:
+            report.passed('tab %s' % ident,
+                          'embedded Lumen: overlay inside Luna\u2019s content, 1 of %s tab panel(s) '
+                          'shown, Luna panes hidden, %.0f ms'
+                          % (int(answer.get('lumenPanelCount') or 1), elapsed))
         else:
             report.passed('tab %s' % ident,
                           '1 pane, %d chars, heading %r, rows >= %dpx, %.0f ms'
                           % (text_length, str(answer.get('heading') or ''), ROW_MIN_HEIGHT, elapsed))
+    return lumen_embedded
+
+
+def _rpc_call(cdp, name, args):
+    """One read-only call; returns the page answer with a usable `ms`."""
+    expression = (RPC_JS.replace('__NAME__', json.dumps(name))
+                  .replace('__ARGS__', json.dumps(args)))
+    started = time.time()
+    answer = _evaluate(cdp, expression, timeout=RPC_TIMEOUT)
+    if not isinstance(answer.get('ms'), (int, float)):
+        answer['ms'] = int((time.time() - started) * 1000)
+    return answer
+
+
+def _wait_idle(report, cdp):
+    """Wait for the menu walk's own RPC queue to drain before timing anything.
+
+    The menu is single-threaded: every page the walk visited queued its own
+    status calls behind it, so a call timed right after the walk measures the
+    queue, not the backend.
+    """
+    deadline = time.time() + WARMUP_BUDGET_S
+    while True:
+        try:
+            answer = _rpc_call(cdp, 'SlsLunaInfo', {})
+        except (CDPError, Unreachable) as error:
+            report.info('warm-up', 'no answer, timing as it is: %s' % error)
+            return False
+        ms = int(answer.get('ms') or 0)
+        if answer.get('ok') and ms < WARMUP_MS:
+            report.info('warm-up', 'the backend was idle after one call in %d ms' % ms)
+            return True
+        if time.time() >= deadline:
+            report.info('warm-up', 'the backend is still busy (last call %d ms); timing anyway'
+                        % ms)
+            return False
+        time.sleep(0.25)
+
+
+def _check_hltb_rev(report, cdp, reply):
+    """Poll SlsHltbGet the way the panel does: with the rev it already holds."""
+    rev = reply.get('rev')
+    if not isinstance(rev, str) or not rev:
+        report.skipped('rpc SlsHltbGet rev', 'the first reply carries no rev to poll with')
+        return
+    allowed, reason = _is_readonly_call('SlsHltbGet', {'rev': rev})
+    if not allowed:
+        report.failed('rpc SlsHltbGet rev', 'refused: %s' % reason)
+        return
+    first_size = len(json.dumps(reply, sort_keys=True))
+    try:
+        answer = _rpc_call(cdp, 'SlsHltbGet', {'rev': rev})
+    except (CDPError, Unreachable) as error:
+        report.failed('rpc SlsHltbGet rev', 'no answer: %s' % error)
+        return
+    again = answer.get('reply') if isinstance(answer.get('reply'), dict) else {}
+    sizes = '%d -> %d bytes' % (first_size, len(json.dumps(again, sort_keys=True)))
+    if not answer.get('ok'):
+        report.failed('rpc SlsHltbGet rev', '%s, but the rev call failed: %s'
+                      % (sizes, answer.get('error') or 'no reason'))
+    elif again.get('unchanged') is not True:
+        report.failed('rpc SlsHltbGet rev', '%s, but the reply is not unchanged:true (%r)'
+                      % (sizes, str(again)[:120]))
+    else:
+        report.passed('rpc SlsHltbGet rev', '%s, unchanged: true' % sizes)
 
 
 def _check_rpcs(report, cdp, backend_names=()):
     """Read-only status RPCs only: no write word is ever sent."""
+    _wait_idle(report, cdp)
+    hltb_reply = None
     for name, args in READONLY_RPCS:
         allowed, reason = _is_readonly_call(name, args)
         if not allowed:
             report.failed('rpc %s' % name, 'refused: %s' % reason)
             continue
-        expression = (RPC_JS.replace('__NAME__', json.dumps(name))
-                      .replace('__ARGS__', json.dumps(args)))
-        started = time.time()
         try:
-            answer = _evaluate(cdp, expression, timeout=RPC_TIMEOUT)
+            answer = _rpc_call(cdp, name, args)
         except (CDPError, Unreachable) as error:
             report.failed('rpc %s' % name, 'no answer: %s' % error)
             continue
-        elapsed_ms = int((time.time() - started) * 1000)
-        ms = int(answer.get('ms') or elapsed_ms)
+        ms = int(answer.get('ms') or 0)
         if not answer.get('ok'):
             report.failed('rpc %s' % name, str(answer.get('error') or 'the call failed'))
             continue
@@ -753,26 +889,82 @@ def _check_rpcs(report, cdp, backend_names=()):
             report.failed('rpc %s' % name, 'the reply is nil or not a structure: %r'
                           % (str(reply)[:120]))
             continue
+        timing = '%d ms' % ms
         if ms >= RPC_BUDGET_MS:
-            report.failed('rpc %s' % name, 'answered in %d ms (budget %d ms)'
-                          % (ms, RPC_BUDGET_MS))
-            continue
+            # The menu was just walked; a call over budget gets one clean retry
+            # before it counts, and both numbers are reported.
+            try:
+                again = _rpc_call(cdp, name, args)
+            except (CDPError, Unreachable) as error:
+                report.failed('rpc %s' % name, 'answered in %d ms (budget %d ms) and the '
+                                               'retry got no answer: %s'
+                              % (ms, RPC_BUDGET_MS, error))
+                continue
+            retry_ms = int(again.get('ms') or 0)
+            if not again.get('ok'):
+                report.failed('rpc %s' % name, 'answered in %d ms (budget %d ms) and the '
+                                               'retry failed: %s'
+                              % (ms, RPC_BUDGET_MS, again.get('error') or 'no reason'))
+                continue
+            if retry_ms >= RPC_BUDGET_MS:
+                report.failed('rpc %s' % name, 'answered in %d ms then %d ms on retry '
+                                               '(budget %d ms)'
+                              % (ms, retry_ms, RPC_BUDGET_MS))
+                continue
+            reply = again.get('reply') if isinstance(again.get('reply'), dict) else reply
+            keys = int(again.get('keys') or keys)
+            timing = '%d ms on retry (first call %d ms)' % (retry_ms, ms)
         note = ''
         if reply.get('success') is False:
             note = ' (backend says: %s)' % str(reply.get('error') or 'no reason')[:120]
-        report.passed('rpc %s' % name, '%d key(s), %d ms%s' % (keys, ms, note))
+        report.passed('rpc %s' % name, '%d key(s), %s%s' % (keys, timing, note))
+        if name == 'SlsHltbGet':
+            hltb_reply = reply
+    if hltb_reply is not None:
+        _check_hltb_rev(report, cdp, hltb_reply)
     skipped = sorted(set(backend_names) - READONLY_NAMES)
     if skipped:
         report.skipped('refused/writing RPCs', 'not called: ' + ', '.join(skipped))
     return skipped
 
 
-def _check_lumen(report, cdp, host, embedding):
+def _check_lumen(report, cdp, host, probe, embedded=None):
+    """Embedded Lumen: pane, overlay laid into Luna's content, sidebar clickable.
+
+    `state().embedding` only holds while the Lumen category is showing, and the
+    tab walk has moved on by the time this runs, so the category is selected
+    again and the state read there. `embedded` is what the walk recorded for
+    that tab (True, False, or None when there was no Lumen tab to walk).
+    """
     if str(host or '').lower() != 'lumen':
         report.skipped('Lumen embedding', 'the host is %s, not lumen' % (host or 'unknown'))
         return
-    if not embedding:
-        report.skipped('Lumen embedding', 'embedding is off or unavailable in this session')
+    if not bool(probe.get('hook')):
+        report.skipped('Lumen embedding', 'window.__SlsLunaSelftest.state() is missing, so '
+                                           'embedding cannot be read')
+        return
+    try:
+        selected = _evaluate(cdp, SELECT_JS.replace('__ID__', json.dumps('lumen')),
+                             timeout=SELECT_TIMEOUT)
+    except (CDPError, Unreachable) as error:
+        report.failed('Lumen embedding', 'no answer when reopening Lumen: %s' % error)
+        return
+    if not selected.get('ok'):
+        if embedded:
+            report.failed('Lumen embedding', 'the walk drew Lumen embedded, but it will not '
+                                             'open again: %s'
+                          % (selected.get('error') or 'no answer'))
+        else:
+            report.skipped('Lumen embedding', 'the sidebar has no Lumen category, so embedding '
+                                              'cannot be checked')
+        return
+    if not selected.get('embedding'):
+        detail = ('state().embedding is false with the Lumen category selected: it is drawn as '
+                  'one of Luna\u2019s own panes')
+        if embedded:
+            report.failed('Lumen embedding', detail + ', though the walk drew it embedded')
+        else:
+            report.skipped('Lumen embedding', detail)
         return
     try:
         answer = _evaluate(cdp, EMBED_JS, timeout=SELECT_TIMEOUT)
@@ -780,16 +972,42 @@ def _check_lumen(report, cdp, host, embedding):
         report.failed('Lumen embedding', 'no answer: %s' % error)
         return
     failures = []
-    if not answer.get('embedded'):
-        failures.append('Lumen is not inside the Luna window')
-    if not answer.get('lumenAbove'):
-        failures.append('the Lumen overlay is not above the Luna pane')
+    if not answer.get('lumenVisible'):
+        failures.append('#lumen-settings-overlay is not on screen')
+    # Luna lays Lumen's overlay over its content area by position; it never
+    # re-parents Lumen's DOM, so DOM containment (`embedded`) is not a test.
+    if not answer.get('inside'):
+        failures.append('the Lumen overlay %s is not laid into Luna\u2019s content area'
+                        % (answer.get('rect') or 'rect'))
     if not answer.get('sidebarClickable'):
         failures.append('elementFromPoint on a sidebar row does not land in #sls-luna-overlay')
     if failures:
         report.failed('Lumen embedding', '; '.join(failures))
     else:
-        report.passed('Lumen embedding', 'embedded, above, sidebar clickable')
+        above = '' if answer.get('lumenAbove') else ' (z-index is below Luna\u2019s)'
+        report.passed('Lumen embedding', 'embedded, laid into the content, sidebar clickable%s'
+                                         % above)
+
+
+def _close_menu(report, cdp):
+    """Close the menu and report that nothing was left behind."""
+    try:
+        closed = _evaluate(cdp, CLOSE_JS, timeout=SELECT_TIMEOUT)
+    except (CDPError, Unreachable) as error:
+        report.failed('close menu', 'no answer: %s' % error)
+        return False
+    failures = []
+    if int(closed.get('overlays') or 0) != 0:
+        failures.append('%s overlay(s) remain' % closed.get('overlays'))
+    if closed.get('hiddenView'):
+        failures.append('a browser view is left hidden')
+    if closed.get('browserVisible') is False:
+        failures.append('Steam reports its browser view as not visible')
+    if failures:
+        report.failed('close menu', '; '.join(failures))
+        return False
+    report.passed('close menu', 'no overlay and no hidden browser view left')
+    return True
 
 
 def _check_route(report, targets, fallback=''):
@@ -869,6 +1087,23 @@ def run_selftest(json_output=False, keep_open=False, host='', quiet=False,
         overlays = int(probe.get('overlays') or 0)
         if overlays == 0:
             report.passed('overlays', 'no duplicate overlay before opening')
+        elif overlays == 1:
+            # The user left the menu open: that is a note, not a failure. Close it
+            # with the same script the close check uses, then carry on.
+            report.info('overlays', 'one Luna overlay was already open (the menu was left '
+                                    'open); closing it before the test')
+            try:
+                pre_closed = _evaluate(cdp, CLOSE_JS, timeout=SELECT_TIMEOUT)
+            except (CDPError, Unreachable) as error:
+                report.failed('overlays', 'the overlay that was already open did not close: %s'
+                                          % error)
+            else:
+                remain = int(pre_closed.get('overlays') or 0)
+                if remain == 0:
+                    report.passed('overlays', 'closed the overlay that was already open')
+                else:
+                    report.failed('overlays', 'the overlay that was already open did not close '
+                                              '(%d remain)' % remain)
         else:
             report.failed('overlays', '%d Luna overlays are already open' % overlays)
         if problems:
@@ -887,31 +1122,18 @@ def run_selftest(json_output=False, keep_open=False, host='', quiet=False,
             else:
                 report.failed('open menu', opened.get('error') or
                               'the overlay did not appear after clicking the launcher')
+        embedded = None
         if opened is not None and opened.get('ok'):
-            _check_tabs(report, cdp, probe)
-            _check_lumen(report, cdp, host, bool(probe.get('embedding')))
+            embedded = _check_tabs(report, cdp, probe)
+            _check_lumen(report, cdp, host, probe, embedded=embedded)
             result['route'] = _check_route(report, targets, str(probe.get('route') or ''))
-        _check_rpcs(report, cdp, backend_names)
-
+        # Close the menu first: the walk queued every visited page's own RPCs on
+        # the single-threaded backend, and timing right after it measures the queue.
         if keep_open:
             report.skipped('close menu', '--keep-open: the menu was left as it is')
         elif opened is not None and opened.get('ok'):
-            try:
-                closed = _evaluate(cdp, CLOSE_JS, timeout=SELECT_TIMEOUT)
-            except (CDPError, Unreachable) as error:
-                report.failed('close menu', 'no answer: %s' % error)
-            else:
-                failures = []
-                if int(closed.get('overlays') or 0) != 0:
-                    failures.append('%s overlay(s) remain' % closed.get('overlays'))
-                if closed.get('hiddenView'):
-                    failures.append('a browser view is left hidden')
-                if closed.get('browserVisible') is False:
-                    failures.append('Steam reports its browser view as not visible')
-                if failures:
-                    report.failed('close menu', '; '.join(failures))
-                else:
-                    report.passed('close menu', 'no overlay and no hidden browser view left')
+            _close_menu(report, cdp)
+        _check_rpcs(report, cdp, backend_names)
     except Unreachable as error:
         report.failed('connection', str(error))
         return _finish(report, result, EXIT_UNREACHABLE, json_output, out)

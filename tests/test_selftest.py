@@ -34,6 +34,7 @@ TABS = [{'id': ident, 'label': label}
         for ident, label in (('playtime', 'Playtime'), ('presence', 'Presence'),
                              ('updates', 'Updates'), ('settings', 'Settings'),
                              ('about', 'About'))]
+TABS_WITH_LUMEN = TABS + [{'id': 'lumen', 'label': 'Lumen'}]
 
 
 def _recv(sock, count):
@@ -79,19 +80,39 @@ def _send_frame(sock, opcode, payload):
 class FakeSteam:
     """Canned page answers, plus every call the selftest makes."""
 
-    def __init__(self, tabs=None, select=None, exception_on=None, close=None, probe=None):
+    def __init__(self, tabs=None, select=None, exception_on=None, close=None, probe=None,
+                 embed=None, rpc_ms=None):
         self.tabs = tabs or TABS
         self.select = select or {}
         self.exception_on = exception_on
         self.close_answer = close or {'overlays': 0, 'launchers': 1,
                                       'browserVisible': True, 'hiddenView': False}
+        self.embed_answer = embed or {'embedded': True, 'inside': True, 'lumenVisible': True,
+                                      'lumenAbove': True, 'sidebarClickable': True,
+                                      'rect': [255, 442, 700, 555], 'rowHeight': 40.0}
         self.probe_override = probe or {}
+        # name -> [ms, ...]: each call takes the next value, the last one repeats.
+        self.rpc_ms = dict(rpc_ms or {})
         self.calls = []
         self.lock = threading.Lock()
+
+    def next_ms(self, name):
+        values = self.rpc_ms.get(name)
+        if not values:
+            return 4
+        return values.pop(0) if len(values) > 1 else values[0]
 
     def record(self, method, params):
         with self.lock:
             self.calls.append((method, params))
+
+    def expressions(self, marker):
+        hits = []
+        for method, params in self.calls:
+            expression = str((params or {}).get('expression') or '')
+            if method == 'Runtime.evaluate' and marker in expression:
+                hits.append(expression)
+        return hits
 
     def rpc_names(self):
         names = []
@@ -136,13 +157,19 @@ class FakeSteam:
             }, notification
         if 'luna-selftest:rpc' in expression:
             name = json.loads(re.search(r'const name = ("[^"]+");', expression).group(1))
-            return {'ok': True, 'name': name, 'ms': 4,
-                    'reply': {'success': True, 'ok': True}, 'keys': 2}, None
+            args = json.loads(re.search(r'const args = (.+);', expression).group(1))
+            reply = {'success': True, 'ok': True}
+            if name == 'SlsHltbGet':
+                reply = ({'success': True, 'unchanged': True, 'rev': args['rev']}
+                         if args.get('rev')
+                         else {'success': True, 'rev': 'rev-1',
+                               'games': {'1': {'minutes': 90}}, 'count': 1})
+            return {'ok': True, 'name': name, 'ms': self.next_ms(name),
+                    'reply': reply, 'keys': len(reply)}, None
         if 'luna-selftest:close' in expression:
             return dict(self.close_answer), None
         if 'luna-selftest:embed' in expression:
-            return {'embedded': True, 'lumenAbove': True, 'sidebarClickable': True,
-                    'rowHeight': 40.0}, None
+            return dict(self.embed_answer), None
         if 'luna-selftest:route' in expression:
             return {'route': '/store/'}, None
         return None, None
@@ -378,6 +405,153 @@ class SelftestTests(SelftestBase):
         code, report, text = self.run_selftest(keep_open=True)
         self.assertEqual(code, 0, text)
         self.assertIn('--keep-open', text)
+
+    def test_overlay_left_open_is_a_note_and_gets_closed(self):
+        steam = FakeSteam(probe={'overlays': 1, 'open': True})
+        self.serve(steam)
+        code, report, text = self.run_selftest()
+        self.assertEqual(code, 0, text)
+        self.assertIn('was already open', text)
+        self.assertIn('INFO  overlays', text)
+        self.assertIn('closed the overlay that was already open', text)
+        # One close before the launcher click, one for the close check at the end.
+        self.assertEqual(len(steam.expressions('luna-selftest:close')), 2)
+
+    def test_two_open_overlays_still_fail(self):
+        steam = FakeSteam(probe={'overlays': 2, 'open': True})
+        self.serve(steam)
+        code, report, _text = self.run_selftest()
+        self.assertEqual(code, 1)
+        self.assertIn('2 Luna overlays are already open', self.fail_text(report))
+
+    def test_embedded_lumen_tab_passes_and_the_embedding_check_runs(self):
+        steam = FakeSteam(tabs=TABS_WITH_LUMEN, probe={'embedding': True},
+                          select={'lumen': _embedded_lumen()})
+        self.serve(steam)
+        code, report, text = self.run_selftest(host='lumen')
+        self.assertEqual(code, 0, text)
+        self.assertIn('embedded Lumen', text)
+        self.assertIn('PASS  Lumen embedding', text)
+        self.assertTrue(steam.expressions('luna-selftest:embed'))
+
+    def test_embedded_lumen_tab_fails_with_the_reason(self):
+        cases = [
+            ({'lumenPanels': 0}, '0 of 9 Lumen tab panels'),
+            ({'lumenPanels': 2}, '2 of 9 Lumen tab panels'),
+            ({'lumenInside': False}, 'not inside Luna'),
+            ({'lumenVisible': False}, 'is not visible'),
+            ({'visible': 1}, '1 Luna pane(s) are on screen'),
+        ]
+        for patch, expected in cases:
+            with self.subTest(patch=patch):
+                select = _embedded_lumen(**patch)
+                steam = FakeSteam(tabs=TABS_WITH_LUMEN, probe={'embedding': True},
+                                  select={'lumen': select})
+                self.serve(steam)
+                code, report, _text = self.run_selftest(host='lumen')
+                self.assertEqual(code, 1)
+                failed = self.fail_text(report)
+                self.assertIn('tab lumen', failed)
+                self.assertIn(expected, failed)
+
+    def test_embedding_false_keeps_the_normal_pane_rule(self):
+        select = {'lumen': {'ok': True, 'id': 'lumen', 'panes': 1, 'visible': 1,
+                            'text': ['Lumen content'], 'emptyState': False,
+                            'heading': 'Lumen', 'elapsedMs': 9.0,
+                            'heights': [{'label': 'Lumen', 'height': 40.0}], 'tab': 'lumen',
+                            'embedding': False, 'lumenPresent': True}}
+        steam = FakeSteam(tabs=TABS_WITH_LUMEN, select={'lumen': dict(select['lumen'])})
+        self.serve(steam)
+        code, _report, text = self.run_selftest(host='lumen')
+        self.assertEqual(code, 0, text)
+        self.assertIn('PASS  tab lumen', text)
+        self.assertIn('state().embedding is false', text)
+
+        empty = dict(select['lumen'])
+        empty.update({'panes': 1, 'visible': 0, 'text': [], 'emptyState': False})
+        steam = FakeSteam(tabs=TABS_WITH_LUMEN, select={'lumen': empty})
+        self.serve(steam)
+        code, report, _text = self.run_selftest(host='lumen')
+        self.assertEqual(code, 1)
+        self.assertIn('0 of 1 panes are on screen', self.fail_text(report))
+
+    def test_lumen_embedded_check_selects_the_category_again(self):
+        # Live shape: state().embedding is false while another tab is selected,
+        # and true only inside the Lumen category.
+        steam = FakeSteam(tabs=TABS_WITH_LUMEN, probe={'embedding': False},
+                          select={'lumen': _embedded_lumen()})
+        self.serve(steam)
+        code, report, text = self.run_selftest(host='lumen')
+        self.assertEqual(code, 0, text)
+        self.assertIn('PASS  tab lumen', text)
+        self.assertIn('PASS  Lumen embedding', text)
+        self.assertNotIn('SKIP  Lumen embedding', text)
+        selects = [item for item in steam.expressions('luna-selftest:select')
+                   if '"lumen"' in item]
+        self.assertEqual(len(selects), 2, 'the walk and the embedding check each select Lumen')
+
+    def test_lumen_tab_without_embedding_skips_the_embedding_check(self):
+        pane = {'ok': True, 'id': 'lumen', 'panes': 1, 'visible': 1, 'text': ['Lumen'],
+                'emptyState': False, 'heading': 'Lumen', 'elapsedMs': 9.0,
+                'heights': [{'label': 'Lumen', 'height': 40.0}], 'tab': 'lumen',
+                'embedding': False, 'lumenPresent': True}
+        steam = FakeSteam(tabs=TABS_WITH_LUMEN, select={'lumen': pane})
+        self.serve(steam)
+        code, _report, text = self.run_selftest(host='lumen')
+        self.assertEqual(code, 0, text)
+        self.assertIn('SKIP  Lumen embedding: state().embedding is false', text)
+        self.assertIn('drawn as one of Luna', text)
+
+    def test_rpc_timing_waits_for_the_backend_queue(self):
+        steam = FakeSteam(rpc_ms={'SlsLunaInfo': [2900, 5, 6]})
+        self.serve(steam)
+        code, _report, text = self.run_selftest()
+        self.assertEqual(code, 0, text)
+        self.assertIn('warm-up', text)
+        self.assertIn('the backend was idle', text)
+
+    def test_rpc_over_budget_gets_one_retry(self):
+        steam = FakeSteam(rpc_ms={'SlsLunaInfo': [4, 2900, 5]})
+        self.serve(steam)
+        code, _report, text = self.run_selftest()
+        self.assertEqual(code, 0, text)
+        self.assertIn('5 ms on retry (first call 2900 ms)', text)
+
+    def test_rpc_slow_twice_still_fails_with_both_numbers(self):
+        steam = FakeSteam(rpc_ms={'SlsLunaInfo': [4, 2900, 2900]})
+        self.serve(steam)
+        code, report, _text = self.run_selftest()
+        self.assertEqual(code, 1)
+        failed = self.fail_text(report)
+        self.assertIn('rpc SlsLunaInfo', failed)
+        self.assertIn('answered in 2900 ms then 2900 ms on retry', failed)
+
+    def test_hltb_rev_poll_reports_both_sizes(self):
+        steam = FakeSteam()
+        self.serve(steam)
+        code, report, text = self.run_selftest()
+        self.assertEqual(code, 0, text)
+        line = [item for item in report.lines if item['name'] == 'rpc SlsHltbGet rev']
+        self.assertEqual(len(line), 1, text)
+        self.assertEqual(line[0]['status'], 'PASS', line[0]['detail'])
+        self.assertIn('unchanged: true', line[0]['detail'])
+        self.assertIn(' -> ', line[0]['detail'])
+        rev_calls = [item for item in steam.expressions('luna-selftest:rpc')
+                     if '"SlsHltbGet"' in item and '"rev"' in item]
+        self.assertEqual(len(rev_calls), 1, 'the second call must send the rev it was given')
+
+
+def _embedded_lumen(**patch):
+    """The page answer for the embedded Lumen category, as the live panel gives it."""
+    answer = {
+        'ok': True, 'id': 'lumen', 'panes': 9, 'visible': 0, 'text': [], 'emptyState': False,
+        'heading': 'Lumen', 'elapsedMs': 30.0,
+        'heights': [{'label': tab['label'], 'height': 40.0} for tab in TABS_WITH_LUMEN],
+        'tab': 'lumen', 'embedding': True, 'lumenPresent': True, 'lumenVisible': True,
+        'lumenInside': True, 'lumenRect': [700, 555], 'lumenPanels': 1, 'lumenPanelCount': 9,
+    }
+    answer.update(patch)
+    return answer
 
 
 class DoctorTests(SelftestBase):
