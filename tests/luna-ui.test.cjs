@@ -6,7 +6,8 @@
 // their real RPC names.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {mount,RPC_TIMEOUT,buildRows,buildHltbRows,findMenubar,restoreMainView,prepareView}=require('../addons/luna/plugin/public/panel.js');
+const {mount,RPC_TIMEOUT,buildRows,buildHltbRows,findMenubar,restoreMainView,prepareView,
+  dailyBars,weeklySentence,weekTop,minutesText}=require('../addons/luna/plugin/public/panel.js');
 const agentApi=require('../addons/luna/plugin/public/agent.js');
 
 function fakeDom(){
@@ -123,6 +124,30 @@ function findNode(node,predicate){
   return null;
 }
 
+function collect(node,predicate){
+  const found=[];
+  (function walk(current){
+    if(!current)return;
+    if(predicate(current))found.push(current);
+    for(const child of current.children||[])walk(child);
+  })(node);
+  return found;
+}
+
+// "YYYY-MM-DD" for a day N days before today, in local time, the way the
+// backend stamps `daily30`.
+function dayKey(offset){
+  const now=new Date();
+  const date=new Date(now.getFullYear(),now.getMonth(),now.getDate()-offset);
+  return date.getFullYear()+'-'+String(date.getMonth()+1).padStart(2,'0')+'-'
+    +String(date.getDate()).padStart(2,'0');
+}
+
+function dailyFixture(values){
+  return values.map((seconds,index)=>({day:dayKey(29-index),seconds}));
+}
+
+
 function menubarFixture(document,lumenButton){
   const bar=document.createElement('div');
   ['Steam','View','Friends','Games','Help'].forEach(label=>{
@@ -173,7 +198,7 @@ const button=(document,label)=>findNode(document.getElementById('sls-luna-overla
   node=>node.tagName==='BUTTON'&&node.textContent===label&&typeof node.onclick==='function');
 const settle=ms=>new Promise(resolve=>setTimeout(resolve,ms||50));
 
-function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPending,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient,bootPatched,host,failFns,lumenPending,lumenTooling,lumenResult,lumen,update,gate,repair,sgdbAuto,sgdbAutoPlan,luatools,openLuaTools,lumenCloseOverlay,lumenOpenOverlay,channels,channelsRefusal,terminalRefusal,terminalStart}={}){
+function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPending,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient,bootPatched,host,failFns,lumenPending,lumenTooling,lumenResult,lumen,update,gate,repair,sgdbAuto,sgdbAutoPlan,sgdbHistory,sgdbHistoryError,luatools,openLuaTools,lumenCloseOverlay,lumenOpenOverlay,channels,channelsRefusal,terminalRefusal,terminalStart}={}){
   const bridgePatched = bootPatched !== false;
   const calls=[];
   const repairPlan=repair||null;
@@ -215,6 +240,9 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
     autoUpdate:'notify',last:{result:'current',version:'0.14.3',at:Math.floor(Date.now()/1000)-3600}};
   Object.assign(updateState,update||{});
   const sgdbState={apiKey:sgdbKey||'',gridDir:'/home/tester/.local/share/Steam/userdata/1/config/grid',gridError:''};
+  // The backend's undo history: per-slot depth, moved by apply and undo the way
+  // the Lua does, so a refresh after a change is really visible in the page.
+  const sgdbHistoryState=Object.assign({grid:0,wide:0,hero:0,logo:0,icon:0},sgdbHistory||{});
   const sgdbSteamState=Object.assign({build:'1791918634',pinned:'',match:false,updatesBlocked:true,
     cachedBuild:'',cacheReady:false,pacmanManaged:false,pacmanIgnored:false,pending:''},
     steamClient&&steamClient.pinned?steamClient:{});
@@ -458,9 +486,16 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
       if(fn==='SlsSgdbAssets')return JSON.stringify({success:true,total:1,assets:[
         {id:11,url:'https://cdn.example/grid1.png',thumb:'https://cdn.example/t1.png',
           width:600,height:900,style:'alternate',mime:'image/png',author:'artist1'}]});
-      if(fn==='SlsSgdbApply')return JSON.stringify({success:true,path:'/grid/out.png',
-        kind:payload.kind,backedUp:true,live:payload.kind!=='icon'});
-      if(fn==='SlsSgdbUndo')return JSON.stringify({success:true,undone:true,history:0});
+      if(fn==='SlsSgdbApply'){sgdbHistoryState[payload.kind]=(sgdbHistoryState[payload.kind]||0)+1;
+        return JSON.stringify({success:true,path:'/grid/out.png',
+          kind:payload.kind,backedUp:true,live:payload.kind!=='icon'});}
+      if(fn==='SlsSgdbHistory'){
+        if(sgdbHistoryError)return JSON.stringify({success:false,code:'no_steam',error:sgdbHistoryError});
+        return JSON.stringify({success:true,history:sgdbHistoryState});
+      }
+      if(fn==='SlsSgdbUndo'){
+        sgdbHistoryState[payload.kind]=Math.max(0,(sgdbHistoryState[payload.kind]||0)-1);
+        return JSON.stringify({success:true,undone:true,history:sgdbHistoryState[payload.kind]});}
       if(fn==='SlsSgdbReset')return JSON.stringify({success:true,removed:true});
       if(fn==='SlsSgdbAuto'){
         if(sgdbAuto==='error')return JSON.stringify({success:false,
@@ -1189,18 +1224,31 @@ test('a right-click artwork request opens the picker and applying calls the back
   await new Promise(resolve=>setTimeout(resolve,40));
   const heroAssets=calls.filter(entry=>entry.fn==='SlsSgdbAssets').pop();
   assert.equal(heroAssets.payload.kind,'hero','switching kind must reload assets');
+  // The slot the backend now holds a step for is the one that was applied.
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Grid · 1 undo step/,
+    'the applied slot must appear in Recent changes');
   const undo=findNode(document.getElementById('sls-luna-overlay'),
-    node=>node.textContent==='Undo hero'&&typeof node.onclick==='function');
-  assert.ok(undo,'the Undo button must be offered per slot');
+    node=>node.textContent==='Undo'&&typeof node.onclick==='function');
+  assert.ok(undo,'each history row must offer Undo');
   undo.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls.filter(entry=>entry.fn==='SlsSgdbUndo').length,0,
+    'the first click only arms the undo');
+  findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Confirm undo'&&typeof node.onclick==='function').onclick();
   await new Promise(resolve=>setTimeout(resolve,40));
   const undoCall=calls.filter(entry=>entry.fn==='SlsSgdbUndo').pop();
-  assert.deepEqual(undoCall.payload,{appid:1145360,kind:'hero'});
+  assert.deepEqual(undoCall.payload,{appid:1145360,kind:'grid'});
   assert.match(textOf(document.getElementById('sls-luna-overlay')),/Undone/);
   const reset=findNode(document.getElementById('sls-luna-overlay'),
-    node=>node.textContent==='Steam artwork'&&typeof node.onclick==='function');
-  assert.ok(reset,'the Steam-artwork reset must be offered');
+    node=>node.textContent==='Reset this game\u2019s artwork'&&typeof node.onclick==='function');
+  assert.ok(reset,'the per-game reset must be offered');
   reset.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls.filter(entry=>entry.fn==='SlsSgdbReset').length,0,
+    'reset is armed too, never a single click');
+  findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Confirm reset'&&typeof node.onclick==='function').onclick();
   await new Promise(resolve=>setTimeout(resolve,40));
   const resetCall=calls.filter(entry=>entry.fn==='SlsSgdbReset').pop();
   assert.deepEqual(resetCall.payload,{appid:1145360,kind:'hero'});
@@ -4380,4 +4428,220 @@ test('the lua.tools account sub-entry exists only with Lumen\u2019s own entry an
   openLumenTab(plain);
   await wait(120);
   assert.equal(subEntry(plain),null,'no entry without Lumen\u2019s own button');
+});
+
+test('the artwork page lists recent changes and undoes one only after a confirm',async()=>{
+  const {document,calls}=await openSgdbPicker({sgdbHistory:{grid:2,hero:1}});
+  const overlay=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(overlay),/Recent changes/,'the history list must be on the page');
+  assert.match(textOf(overlay),/Grid · 2 undo steps/);
+  assert.match(textOf(overlay),/Hero · 1 undo step/);
+  const read=calls.filter(entry=>entry.fn==='SlsSgdbHistory').pop();
+  assert.deepEqual(read.payload,{appid:1145360},'the history is read for the game on screen');
+  assert.equal(collect(overlay,node=>node.className==='sls-luna-history-row').length,2,
+    'one row per slot that still has a step');
+  const undoLast=findNode(overlay,node=>node.textContent==='Undo last change');
+  assert.ok(undoLast,'an Undo last change button must be offered');
+  assert.equal(undoLast.disabled,false);
+  // One click only arms it; the second click is the undo.
+  let row=collect(overlay,node=>node.className==='sls-luna-history-row')
+    .find(node=>/Grid/.test(node.textContent));
+  findNode(row,node=>node.textContent==='Undo').onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls.filter(entry=>entry.fn==='SlsSgdbUndo').length,0,
+    'the first click must not undo anything');
+  const confirm=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Confirm undo');
+  assert.ok(confirm,'the row must ask for a second click');
+  confirm.onclick();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const undo=calls.filter(entry=>entry.fn==='SlsSgdbUndo').pop();
+  assert.deepEqual(undo.payload,{appid:1145360,kind:'grid'});
+  const after=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(after),/Undone/);
+  assert.match(textOf(after),/Grid · 1 undo step\b/,'the list must refresh from the backend');
+  assert.equal(calls.filter(entry=>entry.fn==='SlsSgdbHistory').length>1,true,
+    'the history is read again after a change');
+});
+
+test('an artwork undo disables the buttons while the call is in flight',async()=>{
+  let release=null;
+  const gate=fn=>{
+    if(fn!=='SlsSgdbUndo')return null;
+    return new Promise(resolve=>{release=()=>resolve(JSON.stringify({success:true,undone:true,history:1}));});
+  };
+  const {document,calls}=await openSgdbPicker({sgdbHistory:{grid:2},gate});
+  const overlay=document.getElementById('sls-luna-overlay');
+  const row=findNode(overlay,node=>node.className==='sls-luna-history-row');
+  findNode(row,node=>node.textContent==='Undo').onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.textContent==='Confirm undo').onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.ok(calls.some(entry=>entry.fn==='SlsSgdbUndo'),'the confirm click sends the call');
+  const busy=document.getElementById('sls-luna-overlay');
+  assert.match(textOf(busy),/Working/,'an in-flight call says so');
+  assert.equal(findNode(busy,node=>node.textContent==='Undo last change').disabled,true,
+    'no second undo while one is in flight');
+  const history=findNode(busy,node=>node.className==='sls-luna-history');
+  const waiting=collect(history,node=>(node.className||'').indexOf('sls-luna-btn')===0);
+  assert.ok(waiting.length>=2,'the history buttons are still there');
+  waiting.forEach(button=>assert.equal(button.disabled,true,'every history button waits'));
+  release();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.match(textOf(document.getElementById('sls-luna-overlay')),/Undone/);
+});
+
+test('the artwork history shows a backend error inline and an empty list says so',async()=>{
+  const failed=await openSgdbPicker({sgdbHistoryError:'Steam folder not found'});
+  const broken=failed.document.getElementById('sls-luna-overlay');
+  const errorNode=findNode(broken,node=>node.className==='sls-luna-error');
+  assert.ok(errorNode,'the backend refusal must be inline, not a blank page');
+  assert.match(errorNode.textContent,/Could not read the artwork history: Steam folder not found/);
+  assert.match(textOf(broken),/Artwork for/,'the rest of the page still renders');
+  const empty=await openSgdbPicker({sgdbHistory:{grid:0,hero:0}});
+  const blank=empty.document.getElementById('sls-luna-overlay');
+  assert.match(textOf(blank),/No artwork changes yet\./);
+  assert.equal(findNode(blank,node=>node.textContent==='Undo last change').disabled,true,
+    'nothing to undo, nothing to press');
+});
+
+test('the playtime page draws the 30-day chart, the weekly line and the week top',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const values=new Array(30).fill(0);
+  values[29]=8040; // today
+  values[27]=3600;
+  const {w}=fakeWindow(document,{get:{success:true,apps:[],games:{},titles:{},shortcutNames:{},
+    stats:{today:8040,last7d:12600,last30d:12000,prev7d:1800,
+      daily30:dailyFixture(values),week_top:[{appid:1145360,name:'Hades',seconds:8040}]},
+    runtime:{healthy:true,reportedAt:Date.now()/1000,file:'playtime.json'},
+    account:'76561198000000000',manifestCount:0,shortcutCount:0}});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const overlay=document.getElementById('sls-luna-overlay');
+  const bars=collect(overlay,node=>(node.className||'').startsWith('sls-luna-bar'));
+  assert.equal(bars.length,30,'one bar per day');
+  assert.equal(bars.filter(bar=>/is-today/.test(bar.className)).length,1,'today is marked once');
+  assert.ok(bars.filter(bar=>/is-weekend/.test(bar.className)).length>=8,'weekends differ');
+  const today=bars.find(bar=>/is-today/.test(bar.className));
+  assert.match(today.title,/: 2 h 14 min$/,'the tooltip names the day and the time');
+  bars.forEach(bar=>assert.doesNotMatch(bar.title,/NaN/,'no NaN ever reaches a tooltip'));
+  const plot=findNode(overlay,node=>node.className==='sls-luna-chart');
+  assert.equal(plot.getAttribute('role'),'img');
+  assert.match(plot.getAttribute('aria-label'),/^Playtime for the last 30 days: 3 h 14 min in total, busiest day /);
+  assert.match(textOf(overlay),/This week 3 h 30 min, 3 h more than last week\./);
+  assert.match(textOf(overlay),/Hades/,'the games of the week are listed');
+});
+
+test('an older backend without the new playtime fields renders the old totals only',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w}=fakeWindow(document,{get:{success:true,apps:[],games:{},titles:{},shortcutNames:{},
+    stats:{today:3600,last7d:7200,last30d:9000},
+    runtime:{healthy:true,reportedAt:Date.now()/1000,file:'playtime.json'},
+    account:'76561198000000000',manifestCount:0,shortcutCount:0}});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  const overlay=document.getElementById('sls-luna-overlay');
+  assert.equal(findNode(overlay,node=>(node.className||'').startsWith('sls-luna-chart')),null,
+    'no chart without daily30');
+  assert.doesNotMatch(textOf(overlay),/This week/,'no weekly line without the new fields');
+  assert.doesNotMatch(textOf(overlay),/per day/);
+  assert.match(textOf(overlay),/Last 30 days/,'the three totals are unchanged');
+  assert.match(textOf(overlay),/2\.00 h|2 h/,'the totals still show');
+});
+
+test('the daily chart rejects malformed data instead of drawing it',()=>{
+  const zeros=new Array(30).fill(0);
+  assert.equal(dailyBars({}),null,'absent daily30 means no chart');
+  assert.equal(dailyBars({daily30:'nope'}),null);
+  assert.equal(dailyBars({daily30:zeros}),null,'a bare number is not a day');
+  assert.equal(dailyBars({daily30:dailyFixture(zeros.slice(0,29))}),null,'29 days is not 30');
+  const nan=dailyFixture(zeros);
+  nan[4].seconds=NaN;
+  assert.equal(dailyBars({daily30:nan}),null,'NaN is treated as absent, never as a bar');
+  const broken=dailyFixture(zeros);
+  broken[3].day='2026-02-31';
+  assert.equal(dailyBars({daily30:broken}),null,'an impossible date is not a bar');
+  const negative=dailyFixture(zeros.map(()=>-600));
+  const clamped=dailyBars({daily30:negative});
+  assert.ok(clamped,'negative playtime still draws');
+  assert.equal(clamped.total,0);
+  assert.equal(clamped.max,0,'a zero maximum must not divide by zero');
+  assert.ok(clamped.bars.every(bar=>bar.seconds===0));
+  assert.equal(clamped.busiest,null,'nothing is busiest in an empty month');
+  assert.equal(minutesText(8040),'2 h 14 min');
+  assert.equal(minutesText(0),'0 min');
+});
+
+test('the weekly line handles more, less, same and a missing previous week',()=>{
+  assert.equal(weeklySentence({last7d:12600,prev7d:1800},null),
+    'This week 3 h 30 min, 3 h more than last week.');
+  assert.equal(weeklySentence({last7d:1800,prev7d:5400},null),
+    'This week 30 min, 1 h less than last week.');
+  assert.equal(weeklySentence({last7d:3600,prev7d:3600},null),
+    'This week 1 h, same as last week.');
+  assert.equal(weeklySentence({last7d:0,prev7d:0},null),
+    'This week 0 min, same as last week.');
+  assert.equal(weeklySentence({last7d:3600},null),'This week 1 h.','no prev7d, no comparison');
+  assert.equal(weeklySentence({},null),null,'nothing to say, nothing rendered');
+  const last7=weekTop({week_top:[{appid:1,name:'A',seconds:3600},{appid:2,seconds:1800},
+    {appid:3,name:'C',seconds:0},{appid:4,name:'D',seconds:NaN}]},{'2':'Portal 2'});
+  assert.deepEqual(last7,[{appid:1,name:'A',seconds:3600},{appid:2,name:'Portal 2',seconds:1800}],
+    'zero and NaN entries are dropped and names come from the library when absent');
+});
+
+test('sidebar rows share one roving tabindex and move with the arrow keys',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w}=fakeWindow(document);
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,40));
+  const overlay=()=>document.getElementById('sls-luna-overlay');
+  const rowFor=label=>collect(overlay(),node=>(node.className||'').startsWith('sls-luna-tab'))
+    .find(node=>node.textContent===label);
+  const playtime=rowFor('Playtime');
+  assert.ok(playtime,'the sidebar must render');
+  assert.equal(playtime.getAttribute('tabindex'),'0','the active row is the tab stop');
+  assert.equal(playtime.getAttribute('aria-current'),'page','the active category is current');
+  assert.equal(playtime.getAttribute('role'),'button');
+  assert.equal(collect(overlay(),node=>(node.className||'').startsWith('sls-luna-tab'))
+    .filter(node=>node.getAttribute('tabindex')==='0').length,1,'exactly one tab stop');
+  const presence=rowFor('Presence');
+  assert.equal(presence.getAttribute('tabindex'),'-1');
+  assert.equal(presence.getAttribute('aria-current'),undefined);
+  presence.onkeydown({key:'ArrowUp',target:presence,preventDefault(){}});
+  assert.equal(playtime.getAttribute('tabindex'),'0','ArrowUp moves the tab stop up');
+  assert.equal(presence.getAttribute('tabindex'),'-1');
+  playtime.onkeydown({key:'ArrowDown',target:playtime,preventDefault(){}});
+  assert.equal(presence.getAttribute('tabindex'),'0','ArrowDown moves the tab stop back down');
+  presence.onkeydown({key:'End',target:presence,preventDefault(){}});
+  assert.equal(rowFor('About').getAttribute('tabindex'),'0','End jumps to the last row');
+  rowFor('About').onkeydown({key:'Home',target:rowFor('About'),preventDefault(){}});
+  assert.equal(rowFor('Playtime').getAttribute('tabindex'),'0','Home jumps to the first row');
+  // Enter and Space activate the row, without a mouse.
+  rowFor('Presence').onkeydown({key:'Enter',target:rowFor('Presence'),preventDefault(){}});
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.equal(w.__SlsLunaSelftest.state().tab,'presence','Enter opens the row');
+  assert.equal(rowFor('Presence').getAttribute('aria-current'),'page');
+  rowFor('Compressor').onkeydown({key:' ',target:rowFor('Compressor'),preventDefault(){}});
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.equal(w.__SlsLunaSelftest.state().tab,'compressor','Space opens the row too');
+  // Keys typed into a field are never the sidebar's.
+  rowFor('Presence').onkeydown({key:'ArrowDown',target:{tagName:'INPUT'},preventDefault(){}});
+  assert.equal(rowFor('Compressor').getAttribute('tabindex'),'0','an input keeps its arrow keys');
+  assert.equal(rowFor('Playtime').getAttribute('tabindex'),'-1');
+  // With the menu closed nothing responds, and teardown unbinds the document.
+  const stale=rowFor('Presence');
+  document.custom('document:keydown',{key:'Escape'});
+  assert.equal(overlay(),null,'Escape still closes the menu');
+  stale.onkeydown({key:'ArrowUp',target:stale});
+  assert.equal(stale.getAttribute('tabindex'),'-1','a closed menu takes no keys');
+  w.__SlsLunaTeardown();
+  assert.equal((document.listeners['document:keydown']||[]).length,0,
+    'nothing stays bound after teardown');
 });

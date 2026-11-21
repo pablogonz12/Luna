@@ -144,6 +144,92 @@
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+  /* ---- Playtime chart (pure) -------------------------------------------
+     The backend may send `stats.daily30` (30 days, oldest first, zero filled)
+     and `stats.prev7d` / `stats.week_top`. An older backend sends none of
+     them: every reader below then returns null and the page renders exactly
+     what it always rendered, with no error. Hostile values are treated as
+     absent rather than drawn as NaN widths. */
+  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const finiteSeconds = value => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, number) : null;
+  };
+  // "2 h 14 min", "45 min", "0 min": tooltips and the weekly line share it.
+  const minutesText = seconds => {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    const whole = Math.floor(total / 3600);
+    const rest = Math.floor((total % 3600) / 60);
+    if (!whole) return rest + ' min';
+    return whole + ' h' + (rest ? ' ' + rest + ' min' : '');
+  };
+  const dayParts = day => {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day == null ? '' : day));
+    if (!match) return null;
+    const stamp = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    const date = new Date(stamp);
+    if (date.getUTCFullYear() !== Number(match[1]) || date.getUTCMonth() !== Number(match[2]) - 1
+      || date.getUTCDate() !== Number(match[3])) return null;
+    return { y: Number(match[1]), m: Number(match[2]), d: Number(match[3]), days: stamp / 86400000 };
+  };
+  const localDayKey = date => date.getFullYear() + '-'
+    + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
+  function dailyBars(stats, now) {
+    const daily = stats && stats.daily30;
+    if (!Array.isArray(daily) || daily.length !== 30) return null;
+    const today = localDayKey(now instanceof Date ? now : new Date());
+    const bars = [];
+    for (let index = 0; index < daily.length; index += 1) {
+      const entry = daily[index];
+      if (!entry || typeof entry !== 'object') return null;
+      const parts = dayParts(entry.day);
+      const seconds = finiteSeconds(entry.seconds);
+      if (!parts || seconds === null) return null;
+      const weekday = new Date(parts.days * 86400000).getUTCDay();
+      bars.push({
+        day: String(entry.day), seconds, weekday,
+        weekend: weekday === 0 || weekday === 6,
+        today: String(entry.day) === today,
+        label: WEEKDAYS[weekday] + ' ' + parts.d + ' ' + MONTHS[parts.m - 1],
+      });
+    }
+    const total = bars.reduce((sum, bar) => sum + bar.seconds, 0);
+    const max = bars.reduce((top, bar) => Math.max(top, bar.seconds), 0);
+    let busiest = null;
+    bars.forEach(bar => { if (bar.seconds > 0 && (!busiest || bar.seconds > busiest.seconds)) busiest = bar; });
+    return { bars, total, max, busiest };
+  }
+  function weeklySentence(stats, chart) {
+    const source = stats || {};
+    const chartData = chart || dailyBars(source, new Date());
+    const direct = finiteSeconds(source.last7d);
+    const week = direct !== null ? direct
+      : (chartData ? chartData.bars.slice(23).reduce((sum, bar) => sum + bar.seconds, 0) : null);
+    if (week === null) return null;
+    const head = 'This week ' + minutesText(week);
+    const previous = finiteSeconds(source.prev7d);
+    if (previous === null) return head + '.';
+    const diff = Math.round(week - previous);
+    if (Math.abs(diff) < 60) return head + ', same as last week.';
+    return head + ', ' + minutesText(Math.abs(diff)) + (diff > 0 ? ' more' : ' less') + ' than last week.';
+  }
+  function weekTop(stats, names) {
+    const list = asList(stats && stats.week_top);
+    const known = names || {};
+    const rows = [];
+    list.forEach(entry => {
+      if (!entry || typeof entry !== 'object') return;
+      const seconds = finiteSeconds(entry.seconds);
+      if (seconds === null || seconds <= 0) return;
+      const appid = Number(entry.appid) || 0;
+      const name = String(entry.name || known[appid] || known[String(appid)] || '').trim();
+      if (!name) return;
+      rows.push({ appid, name, seconds });
+    });
+    return rows.length ? rows.slice(0, 5) : null;
+  }
+
   function styled(document) {
     if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement('style');
@@ -172,6 +258,11 @@
       'flex:0 0 auto;color:#b8bcbf;font-size:14px;cursor:pointer;}',
       '.sls-luna-tab:hover{background:rgba(255,255,255,.04);}',
       '.sls-luna-tab.active{background:#3d4450;color:#fff;}',
+      // Keyboard focus must be visible on a dark sidebar, and the ring sits
+      // inside the row so an overflow-hidden row never clips it away.
+      '.sls-luna-tab:focus{outline:2px solid #8ab4f8;outline-offset:-2px;}',
+      '.sls-luna-tab:focus:not(:focus-visible){outline:none;}',
+      '.sls-luna-tab:focus-visible{outline:2px solid #8ab4f8;outline-offset:-2px;}',
       // Nested list under Lumen: Lumen's own pages, one line each, indented
       // under the category and built by the same row builder as the categories
       // (this rule only changes indent, type and colour, never the height).
@@ -922,6 +1013,16 @@
     let sgdbBusy = false;
     let sgdbNotice = null;
     let sgdbReadError = '';
+    // Undo history for the game on screen: per-slot depths from the backend
+    // (SlsSgdbHistory), read once per game and after every change, plus when
+    // this session last touched each slot so the list can say "3m ago".
+    let sgdbHistory = null;
+    let sgdbHistoryFor = '';
+    let sgdbHistoryError = '';
+    let sgdbHistoryBusy = false;
+    let sgdbUndoArmed = null;
+    let sgdbResetArmed = 0;
+    let sgdbChangedAt = {};
     // The detached artwork pass: its id, progress and the last per-slot
     // results. Polled only while this tab is on screen.
     let sgdbAuto = null;
@@ -1054,10 +1155,17 @@
 
     /* One sidebar row, used by the categories and by Lumen's nested pages: the
        same builder means the same height, spacing and hover behaviour. A nested
-       row only adds `.sls-luna-subpage` for its indent and smaller type. */
+       row only adds `.sls-luna-subpage` for its indent and smaller type.
+       Roving tabindex: exactly one row is in the tab order (the active one),
+       so Tab never has to walk a dozen rows and the arrow keys are what move
+       inside the list. `aria-current` marks the category on screen. */
     function sidebarRow({ label, iconId, active, sub, onclick }) {
       const item = document.createElement('div');
       item.className = 'sls-luna-tab' + (sub ? ' sls-luna-subpage' : '') + (active ? ' active' : '');
+      item.setAttribute('role', 'button');
+      item.setAttribute('tabindex', active ? '0' : '-1');
+      if (active) item.setAttribute('aria-current', 'page');
+      item.__lunaNav = { sub: Boolean(sub), id: '' };
       if (iconId) {
         const icon = document.createElement('span');
         icon.className = 'ico';
@@ -1068,7 +1176,63 @@
       text.textContent = label;
       item.appendChild(text);
       item.onclick = onclick;
+      item.onkeydown = event => onSidebarKey(event, item);
       return item;
+    }
+
+    // The rows currently in the sidebar, in the order the user sees them.
+    function navRows() {
+      if (!shell || !shell.side) return [];
+      return Array.from(shell.side.children || []).filter(node => node && node.__lunaNav);
+    }
+
+    function focusNavRow(node) {
+      if (!node) return;
+      // Roving: moving focus also moves the single tab stop.
+      navRows().forEach(row => row.setAttribute('tabindex', row === node ? '0' : '-1'));
+      try { if (typeof node.focus === 'function') node.focus(); } catch (_) { /* no focus here */ }
+    }
+
+    // Keys typed into a field, or into Lumen's own page, are never the
+    // sidebar's: both would otherwise lose their text or their navigation.
+    function editingTarget(node) {
+      if (!node || typeof node !== 'object') return false;
+      const tag = String(node.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+      return node.isContentEditable === true || node.contentEditable === 'true';
+    }
+
+    function insideNode(node, root) {
+      let walk = node;
+      for (let depth = 0; walk && depth < 40; depth += 1) {
+        if (walk === root) return true;
+        walk = walk.parentNode || null;
+      }
+      return false;
+    }
+
+    function onSidebarKey(event, item) {
+      if (!event || !current()) return;
+      if (editingTarget(event.target)) return;
+      const embed = lumenEmbedState && lumenEmbedState.overlay;
+      if (embed && insideNode(event.target, embed)) return;
+      const key = String(event.key || event.code || '');
+      const rows = navRows();
+      const index = rows.indexOf(item);
+      if (index < 0) return;
+      if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        if (typeof item.onclick === 'function') item.onclick(event);
+        return;
+      }
+      let next = -1;
+      if (key === 'ArrowDown') next = Math.min(rows.length - 1, index + 1);
+      else if (key === 'ArrowUp') next = Math.max(0, index - 1);
+      else if (key === 'Home') next = 0;
+      else if (key === 'End') next = rows.length - 1;
+      if (next < 0) return;
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      focusNavRow(rows[next]);
     }
 
     let lumenSubtabsDrawn = false;
@@ -1082,6 +1246,7 @@
           active: entry.id === tab,
           onclick: () => { selectCategory(entry.id); },
         });
+        item.__lunaNav.id = entry.id;
         items.push(item);
         if (entry.id === 'lumen' && lumenSubtabsWanted()) {
           const subs = lumenSubEntries();
@@ -1299,6 +1464,74 @@
       return wrap;
     }
 
+    /* The 30-day view the newer backend can answer for: 30 plain divs, no
+       canvas and no per-pixel work, so a menu repaint stays cheap. An older
+       backend sends no `daily30`, which returns null here and the page keeps
+       exactly its three totals above: no chart, no warning, no empty box. */
+    function playtimeChart() {
+      const stats = (snapshot && snapshot.stats) || {};
+      const chart = dailyBars(stats);
+      if (!chart) return null;
+      const wrap = document.createElement('div');
+      wrap.className = 'sls-luna-chart-wrap';
+      const caption = document.createElement('p');
+      caption.className = 'sls-luna-note';
+      caption.textContent = 'Playtime per day, last 30 days';
+      wrap.appendChild(caption);
+
+      const plot = document.createElement('div');
+      plot.className = 'sls-luna-chart';
+      plot.style.cssText = 'display:flex;align-items:flex-end;gap:2px;height:64px;'
+        + 'padding:2px 0;border-bottom:1px solid rgba(255,255,255,.12);';
+      plot.setAttribute('role', 'img');
+      plot.setAttribute('aria-label', chart.max > 0
+        ? 'Playtime for the last 30 days: ' + minutesText(chart.total) + ' in total, busiest day '
+          + chart.busiest.label + ' with ' + minutesText(chart.busiest.seconds) + '.'
+        : 'No playtime recorded in the last 30 days.');
+      chart.bars.forEach(bar => {
+        const node = document.createElement('div');
+        node.className = 'sls-luna-bar' + (bar.today ? ' is-today' : '') + (bar.weekend ? ' is-weekend' : '');
+        node.title = bar.label + ': ' + minutesText(bar.seconds);
+        node.setAttribute('aria-hidden', 'true');
+        const share = chart.max > 0 ? Math.round((bar.seconds / chart.max) * 100) : 0;
+        node.style.cssText = 'flex:1 1 0;min-width:0;align-self:flex-end;border-radius:2px 2px 0 0;'
+          + 'height:' + (bar.seconds > 0 ? Math.max(3, share) : 0) + '%;'
+          + 'background:' + (bar.today ? '#8ab4f8'
+            : bar.weekend ? 'rgba(255,255,255,.20)' : 'rgba(255,255,255,.38)') + ';';
+        plot.appendChild(node);
+      });
+      wrap.appendChild(plot);
+
+      const sentence = weeklySentence(stats, chart);
+      if (sentence) {
+        const week = document.createElement('p');
+        week.className = 'sls-luna-note sls-luna-week';
+        week.textContent = sentence;
+        wrap.appendChild(week);
+      }
+      const names = Object.assign({}, (snapshot && snapshot.titles) || {},
+        (snapshot && snapshot.shortcutNames) || {});
+      const top = weekTop(stats, names);
+      if (top) {
+        const list = document.createElement('div');
+        list.className = 'sls-luna-weektop';
+        top.forEach(entry => {
+          const row = document.createElement('div');
+          row.className = 'sls-luna-weektop-row';
+          row.style.cssText = 'display:flex;gap:8px;justify-content:space-between;';
+          const name = document.createElement('span');
+          name.className = 'gname';
+          name.textContent = entry.name;
+          const value = document.createElement('span');
+          value.textContent = minutesText(entry.seconds);
+          row.append(name, value);
+          list.appendChild(row);
+        });
+        wrap.appendChild(list);
+      }
+      return wrap;
+    }
+
     function playtimeBody() {
       const body = document.createElement('div');
       const live = (snapshot && snapshot.runtime) || {};
@@ -1313,6 +1546,8 @@
         + (live.error ? ' ' + live.error : '');
       body.appendChild(info);
       if (snapshot) body.appendChild(statsRow());
+      const chart = snapshot ? playtimeChart() : null;
+      if (chart) body.appendChild(chart);
 
       search.value = query;
       body.appendChild(search);
@@ -3383,9 +3618,11 @@
             url: asset.url, mime: asset.mime }),
         });
         sgdbNotice = 'Artwork applied' + (out && out.backedUp ? ' (the previous file is backed up)' : '') + '.';
+        sgdbChangedAt = Object.assign({}, sgdbChangedAt, { [sgdbKind]: Date.now() });
         const liveKinds = out && out.live ? [sgdbKind] : [];
         const at = liveKinds.length ? requestLiveArtwork(sgdbGame.appid, liveKinds) : null;
         sgdbBusy = false;
+        await refreshSgdbHistory();
         repaintIfOpen();
         if (at) finishLiveNotice(at, 'Applied and refreshed in Steam right away.');
       } catch (error) {
@@ -3480,6 +3717,10 @@
       if (sgdbGame) {
         const liveKinds = ok.filter(entry => entry.live).map(entry => entry.kind);
         const at = liveKinds.length ? requestLiveArtwork(sgdbGame.appid, liveKinds) : null;
+        ok.forEach(entry => {
+          sgdbChangedAt = Object.assign({}, sgdbChangedAt, { [entry.kind]: Date.now() });
+        });
+        refreshSgdbHistory().then(() => { if (current()) repaintIfOpen(); });
         repaintIfOpen();
         if (at) finishLiveNotice(at, 'Steam refreshed every slot live.');
         return;
@@ -3556,21 +3797,101 @@
       }
     }
 
-    async function undoSgdbAsset() {
+    /* Undo and reset replace or remove a file, so both are armed with a second
+       click in the page (native confirm() freezes the Steam shell, and a
+       mis-click must not cost the user their artwork). The arm expires after
+       4 s: a stale "Confirm undo" is never a hidden loaded gun. */
+    const SGDB_CONFIRM_MS = 4000;
+    const SGDB_KINDS = [['grid', 'Grid'], ['wide', 'Wide'], ['hero', 'Hero'], ['logo', 'Logo'], ['icon', 'Icon']];
+
+    function forgetSgdbHistory() {
+      sgdbHistory = null;
+      sgdbHistoryFor = '';
+      sgdbHistoryError = '';
+      sgdbHistoryBusy = false;
+      sgdbUndoArmed = null;
+      sgdbResetArmed = 0;
+      sgdbChangedAt = {};
+    }
+
+    // {success:true, history:{grid:N, hero:N, ...}} or a structured refusal.
+    // One read per game, never while the menu is closed.
+    async function refreshSgdbHistory() {
+      if (!sgdbGame) { sgdbHistory = null; sgdbHistoryFor = ''; return; }
+      if (document.hidden === true) return;
+      const appid = Number(sgdbGame.appid);
+      if (!Number.isFinite(appid) || appid <= 0) { sgdbHistory = null; return; }
+      sgdbHistoryFor = String(appid);
+      sgdbHistoryBusy = true;
+      try {
+        const out = await rpc(w, 'SlsSgdbHistory', { raw: JSON.stringify({ appid: appid }) });
+        if (!sgdbGame || Number(sgdbGame.appid) !== appid) return;
+        sgdbHistory = out && out.history && typeof out.history === 'object' ? out.history : {};
+        sgdbHistoryError = '';
+      } catch (error) {
+        if (!sgdbGame || Number(sgdbGame.appid) !== appid) return;
+        sgdbHistoryError = String(error && error.message ? error.message : error);
+      }
+      sgdbHistoryBusy = false;
+    }
+
+    const sgdbDepth = kind => {
+      const value = Number(sgdbHistory && sgdbHistory[kind]);
+      return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+    };
+
+    // "3m ago" for a slot this session changed; nothing is invented for a
+    // change made in an earlier session or by another tool.
+    const sgdbAgo = kind => {
+      const at = Number(sgdbChangedAt[kind]);
+      return at > 0 ? ' \u00b7 ' + age(at / 1000) + ' ago' : '';
+    };
+
+    function armSgdbUndo(kind) {
+      const slot = kind || sgdbKind;
+      const now = Date.now();
+      if (sgdbUndoArmed && sgdbUndoArmed.kind === slot
+        && now - sgdbUndoArmed.at <= SGDB_CONFIRM_MS) {
+        undoSgdbAsset(slot);
+        return;
+      }
+      sgdbUndoArmed = { kind: slot, at: now };
+      sgdbResetArmed = 0;
+      repaintIfOpen();
+    }
+
+    function armSgdbReset() {
+      const now = Date.now();
+      if (sgdbResetArmed && now - sgdbResetArmed <= SGDB_CONFIRM_MS) {
+        resetSgdbAsset();
+        return;
+      }
+      sgdbResetArmed = now;
+      sgdbUndoArmed = null;
+      repaintIfOpen();
+    }
+
+    async function undoSgdbAsset(kind) {
       if (!sgdbGame) return;
+      const slot = kind || sgdbKind;
       sgdbNotice = null;
+      sgdbUndoArmed = null;
+      sgdbResetArmed = 0;
       sgdbBusy = true;
       repaintIfOpen();
+      const appid = Number(sgdbGame.appid);
       try {
         const out = await rpc(w, 'SlsSgdbUndo', {
-          raw: JSON.stringify({ appid: Number(sgdbGame.appid), kind: sgdbKind }),
+          raw: JSON.stringify({ appid: appid, kind: slot }),
         });
+        sgdbChangedAt = Object.assign({}, sgdbChangedAt, { [slot]: Date.now() });
         sgdbNotice = 'Undone: the previous artwork is back'
           + (out && typeof out.history === 'number' && out.history > 0
             ? ' (' + out.history + ' step' + (out.history === 1 ? '' : 's') + ' left)' : '')
           + '.';
-        const at = requestLiveArtwork(sgdbGame.appid, [sgdbKind]);
         sgdbBusy = false;
+        await refreshSgdbHistory();
+        const at = requestLiveArtwork(appid, [slot]);
         repaintIfOpen();
         if (at) finishLiveNotice(at, '');
       } catch (error) {
@@ -3584,6 +3905,8 @@
     async function resetSgdbAsset() {
       if (!sgdbGame) return;
       sgdbNotice = null;
+      sgdbResetArmed = 0;
+      sgdbUndoArmed = null;
       sgdbBusy = true;
       repaintIfOpen();
       try {
@@ -3593,11 +3916,13 @@
         sgdbNotice = out && out.removed
           ? 'Custom artwork removed; Steam shows its own again.'
           : 'Nothing custom in this slot; Steam already shows its own.';
+        sgdbBusy = false;
+        await refreshSgdbHistory();
       } catch (error) {
         sgdbNotice = 'Could not remove the custom artwork: '
           + String(error && error.message ? error.message : error);
+        sgdbBusy = false;
       }
-      sgdbBusy = false;
       repaintIfOpen();
     }
 
@@ -3632,6 +3957,7 @@
       sgdbAssets = null;
       sgdbNotice = null;
       sgdbKind = 'grid';
+      forgetSgdbHistory();
       tab = 'steamgrid';
       openMenu();
       // The status (key, grid folder) may not be loaded yet: refresh first,
@@ -3779,6 +4105,76 @@
         + (sgdbGame.sgdbId ? '' : ' \u00b7 <span style="color:#8d97a1">searching\u2026</span>');
       body.appendChild(head);
 
+      // One history read per game, only on this page and only while it is on
+      // screen. Nothing here undoes anything by itself: the list only offers.
+      if (sgdbHistoryFor !== String(sgdbGame.appid) && !sgdbHistoryBusy) {
+        refreshSgdbHistory().then(() => { if (current()) repaintIfOpen(); });
+      }
+
+      // Recent changes, straight from the backend's undo history: one row per
+      // slot that still has a step to go back to, each with its own Undo.
+      const history = document.createElement('div');
+      history.className = 'sls-luna-history';
+      const historyHead = document.createElement('p');
+      historyHead.className = 'sls-luna-note';
+      historyHead.innerHTML = '<strong>Recent changes</strong> for ' + esc(sgdbGame.name);
+      history.appendChild(historyHead);
+      const steps = SGDB_KINDS.filter(pair => sgdbDepth(pair[0]) > 0);
+      if (sgdbHistoryError) {
+        const bad = document.createElement('p');
+        bad.className = 'sls-luna-error';
+        bad.textContent = 'Could not read the artwork history: ' + sgdbHistoryError;
+        history.appendChild(bad);
+      } else if (!steps.length && sgdbHistory) {
+        const empty = document.createElement('p');
+        empty.className = 'sls-luna-note';
+        empty.textContent = 'No artwork changes yet.';
+        history.appendChild(empty);
+      }
+      steps.forEach(pair => {
+        const kind = pair[0];
+        const depth = sgdbDepth(kind);
+        const row = document.createElement('div');
+        row.className = 'sls-luna-history-row';
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;justify-content:space-between;';
+        const text = document.createElement('span');
+        text.textContent = pair[1] + ' \u00b7 ' + depth + ' undo step' + (depth === 1 ? '' : 's')
+          + sgdbAgo(kind);
+        const armed = Boolean(sgdbUndoArmed && sgdbUndoArmed.kind === kind
+          && Date.now() - sgdbUndoArmed.at <= SGDB_CONFIRM_MS);
+        const button = document.createElement('button');
+        button.className = 'sls-luna-btn secondary';
+        button.textContent = armed ? 'Confirm undo' : 'Undo';
+        button.title = 'Undo the last ' + kind + ' change for this game';
+        button.disabled = sgdbBusy;
+        button.onclick = () => armSgdbUndo(kind);
+        row.append(text, button);
+        history.appendChild(row);
+      });
+      const historyActions = document.createElement('div');
+      historyActions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 0;';
+      const undoLast = document.createElement('button');
+      undoLast.className = 'sls-luna-btn secondary';
+      undoLast.textContent = 'Undo last change';
+      undoLast.title = 'Step back the most recent artwork change for this game';
+      undoLast.disabled = sgdbBusy || !steps.length;
+      undoLast.onclick = () => {
+        // Newest first by when this session changed it, then by kind order.
+        const sorted = steps.slice().sort((a, b) =>
+          (Number(sgdbChangedAt[b[0]]) || 0) - (Number(sgdbChangedAt[a[0]]) || 0));
+        if (sorted.length) armSgdbUndo(sorted[0][0]);
+      };
+      const resetGame = document.createElement('button');
+      resetGame.className = 'sls-luna-btn secondary';
+      resetGame.textContent = sgdbResetArmed ? 'Confirm reset' : 'Reset this game\u2019s artwork';
+      resetGame.title = 'Remove the custom ' + sgdbKind
+        + ' file so Steam shows its own artwork again (the history is kept)';
+      resetGame.disabled = sgdbBusy;
+      resetGame.onclick = () => armSgdbReset();
+      historyActions.append(undoLast, resetGame);
+      history.appendChild(historyActions);
+      body.appendChild(history);
+
       const kinds = [['grid', 'Grid 600\u00d7900'], ['wide', 'Wide 920\u00d7430'], ['hero', 'Hero'],
         ['logo', 'Logo'], ['icon', 'Icon']];
       const chips = document.createElement('div');
@@ -3820,18 +4216,6 @@
       auto.textContent = 'Apply best to every slot';
       auto.disabled = sgdbBusy || !sgdbGame.sgdbId;
       auto.onclick = () => autoApplySgdb();
-      const undo = document.createElement('button');
-      undo.className = 'sls-luna-btn secondary';
-      undo.textContent = 'Undo ' + sgdbKind;
-      undo.title = 'Step back through Luna-applied artwork for this slot';
-      undo.disabled = sgdbBusy;
-      undo.onclick = () => undoSgdbAsset();
-      const reset = document.createElement('button');
-      reset.className = 'sls-luna-btn secondary';
-      reset.textContent = 'Steam artwork';
-      reset.title = 'Remove the custom file so Steam shows its own artwork';
-      reset.disabled = sgdbBusy;
-      reset.onclick = () => resetSgdbAsset();
       const close = document.createElement('button');
       close.className = 'sls-luna-btn secondary';
       close.textContent = 'Close picker';
@@ -3839,9 +4223,10 @@
         stopSgdbAuto();
         sgdbAuto = null;
         sgdbGame = null; sgdbAssets = null; sgdbResults = null; sgdbNotice = null;
+        forgetSgdbHistory();
         repaintIfOpen();
       };
-      actions.append(auto, undo, reset, close);
+      actions.append(auto, close);
       body.appendChild(actions);
       return body;
     }
@@ -6091,7 +6476,6 @@
             selectLumenSubPage(tabNode, index);
           },
         });
-        sub.tabIndex = 0;
         return sub;
       });
       // Lumen's account page is the sixth panel and has no tab of its own; the
@@ -6107,7 +6491,6 @@
             repaintIfOpen();
           },
         });
-        account.tabIndex = 0;
         rows.push(account);
       }
       return rows;
@@ -6858,6 +7241,10 @@
       cleanupArmed = false;
       pendingReveal = false;
       stopSgdbAuto();
+      // An armed "Confirm undo" never survives a close: reopening the picker
+      // starts from a plain Undo again.
+      sgdbUndoArmed = null;
+      sgdbResetArmed = 0;
       // Lumen goes back to its own window (and every style Luna wrote on it is
       // restored) before Luna's overlay goes away.
       leaveLumenEmbed();
@@ -7126,7 +7513,8 @@
         || (b.record.lastPlayed || 0) - (a.record.lastPlayed || 0) || a.name.localeCompare(b.name));
   }
 
-  return { mount, RPC_TIMEOUT, buildRows, buildHltbRows, findMenubar, hours, findMainBrowser,
+  return { mount, RPC_TIMEOUT, buildRows, buildHltbRows, dailyBars, weeklySentence, weekTop,
+    minutesText, findMenubar, hours, findMainBrowser,
     hideMainView, restoreMainView, leaveBrowserRoute, prepareView, requestView, rememberView,
     onBrowserRoutePath, VIEW_REQUEST_KEY, VIEW_RESULT_KEY };
 });
