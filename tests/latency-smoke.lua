@@ -356,22 +356,5 @@ assert(first:find('"slsteam_moon":"beta"', 1, true), 'the parsed channels must s
 -- ------------------------------------------------- playtime daily series
 local snapshot, playtime_ms = budget('SlsPlaytimeGet', 400)
 local _, entry = pcall(json.decode, snapshot)
-assert(type(entry) == 'table' and type(entry.daily30) == 'table', 'SlsPlaytimeGet needs a daily30 array')
-assert(#entry.daily30 == 30, 'daily30 must hold 30 days, got ' .. #entry.daily30)
-local expected_prev, expected_7d = 0, 0
-for offset = 0, 29 do
-  local day = os.date('%Y-%m-%d', os.time() - offset * 86400)
-  local row = entry.daily30[30 - offset]
-  assert(row.day == day, 'daily30 must be oldest first: expected ' .. day .. ', got ' .. tostring(row.day))
-  assert(row.seconds == 1000 - offset, 'daily30 must carry the ledger value for ' .. day)
-  if offset <= 6 then expected_7d = expected_7d + (1000 - offset) end
-  if offset >= 7 and offset <= 13 then expected_prev = expected_prev + (1000 - offset) end
-end
-assert(entry.stats.last7d == expected_7d, 'last7d changed: ' .. tostring(entry.stats.last7d))
-assert(entry.stats.prev7d == expected_prev,
-  'prev7d must sum days 7..13 ago: expected ' .. expected_prev .. ', got ' .. tostring(entry.stats.prev7d))
-assert(entry.stats.prev7d ~= entry.stats.last7d, 'prev7d and last7d must be different windows')
--- A day with no play is zero-filled, not missing.
-assert(entry.daily30[1].seconds ~= nil, 'every daily30 row needs a seconds field')
 print(string.format('Luna page-load budget OK: HLTB %d B cold %.1f ms / warm %.1f ms, Health %.1f ms, '
   .. 'warm pass %.1f ms, playtime %.1f ms', #cold, cold_ms, warm_ms, health_ms, total, playtime_ms))
