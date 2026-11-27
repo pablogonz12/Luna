@@ -8387,15 +8387,38 @@ def cmd_vendor(options):
     for name in SOURCED:
         if only is not None and name not in only:
             continue
-        source = Path(options.source_dir or (home() / 'Documents/Scripts' / ('slsteam-' + name)))
-        if not (source / '.git').is_dir():
+        # --source-dir is the parent holding slsteam-<name> (as its help says);
+        # a path that is itself the checkout is accepted too. `.git` may be a
+        # file: a git worktree is a valid source.
+        parent = Path(options.source_dir).expanduser() if options.source_dir else home() / 'Documents/Scripts'
+        source = parent / ('slsteam-' + name)
+        if options.source_dir and not (source / '.git').exists() and (parent / '.git').exists():
+            source = parent
+        if not (source / '.git').exists():
             print('FAIL: no git checkout for %s at %s (pass --source-dir)' % (name, source), file=sys.stderr)
             return 1
         sources[name] = source
 
     def head(source):
-        return subprocess.run(['git', '-C', str(source), 'rev-parse', 'HEAD'],
-                              capture_output=True, text=True).stdout.strip()
+        # Strict: a worktree whose owning repository is gone still has a .git
+        # file, and an empty revision would only fail after a payload is deleted.
+        result = subprocess.run(['git', '-C', str(source), 'rev-parse', '--verify', 'HEAD^{commit}'],
+                                capture_output=True, text=True)
+        commit = result.stdout.strip()
+        if result.returncode != 0 or not commit:
+            raise SystemExit('FAIL: cannot resolve HEAD of %s: %s' % (source, result.stderr.strip() or 'no commit'))
+        return commit
+
+    # Resolve every source before anything on disk changes, so one broken
+    # checkout cannot leave an earlier payload replaced but unrecorded. Every
+    # later read uses these commits: a HEAD that moves mid-run cannot make the
+    # payload and the manifest disagree.
+    resolved = {str(source): head(source) for source in sources.values()}
+    resolve = head
+
+    def head(source):
+        key = str(source)
+        return resolved[key] if key in resolved else resolve(source)
 
     def show(source, commit, path):
         result = subprocess.run(['git', '-C', str(source), 'show', '%s:%s' % (commit, path)],
