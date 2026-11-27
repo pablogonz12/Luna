@@ -8005,22 +8005,35 @@ def check_upstream(manifest):
                     git('cat-file', '-e', pin + '^{commit}', cwd=repo)
                 except subprocess.CalledProcessError:
                     git('fetch', '--quiet', '--', url, pin, cwd=repo)
+                paths = sorted({('addons/%s/' % name if name in FIRST_PARTY else '')
+                                + meta['source_path'] for meta in entry.get('files', {}).values()})
+                if not paths:
+                    problems.append('%s: no pinned source files' % name)
+                    continue
+                pathspecs = [':(literal)' + path for path in paths]
                 ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', pin, head],
                                           cwd=repo, env=env, timeout=60)
-                if ancestor.returncode:
-                    problems.append('%s: pinned commit is not an ancestor of upstream head' % name)
-                    continue
-                count = int(git('rev-list', '--count', pin + '..' + head, cwd=repo).stdout)
-                files = git('diff', '--name-only', '-z', pin, head, cwd=repo).stdout.decode(
+                if ancestor.returncode not in (0, 1):
+                    raise subprocess.CalledProcessError(ancestor.returncode, 'git merge-base')
+                files = git('diff', '--no-renames', '--name-only', '-z', pin, head,
+                            '--', *pathspecs, cwd=repo).stdout.decode(
                     'utf-8', errors='replace').split('\0')
-                if count:
+                files = [path for path in files if path]
+                if ancestor.returncode == 1:
+                    counts = git('rev-list', '--left-right', '--count', pin + '...' + head,
+                                 cwd=repo).stdout.decode().split()
+                    print('  %s: diverged (pin-only %s commit(s), upstream-only %s commit(s)); '
+                          'changed pinned files:' % (name, counts[0], counts[1]))
+                    problems.append('%s: diverged upstream history' % name)
+                elif files:
+                    count = int(git('rev-list', '--count', pin + '..' + head,
+                                    '--', *pathspecs, cwd=repo).stdout)
                     print('  %s: behind by %d commit(s); changed files:' % (name, count))
-                    for path in files:
-                        if path:
-                            print('    %s' % path)
                     problems.append('%s: stale upstream pin' % name)
                 else:
-                    print('  %s: up to date' % name)
+                    print('  %s: ok (pinned files unchanged)' % name)
+                for path in files:
+                    print('    %s' % path)
             except (OSError, subprocess.SubprocessError, KeyError) as exc:
                 print('  %s: unreachable (upstream comparison unavailable: %s)' % (name, exc))
     if problems:

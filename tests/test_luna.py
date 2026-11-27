@@ -587,27 +587,74 @@ class LunaTestCase(unittest.TestCase):
         git('add', '.')
         git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'first')
         pin = git('rev-parse', 'HEAD')
-        for text in ('two', 'three'):
-            (repo / 'X').write_text(text)
-            git('add', '.')
-            git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', text)
+        git('checkout', '-qb', 'diverged')
+        (repo / 'X').write_text('branch')
+        git('add', '.')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'branch')
+        divergent = git('rev-parse', 'HEAD')
+        git('checkout', '-q', 'main')
+        (repo / 'X').write_text('two')
+        git('add', '.')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'change')
+        changed = git('rev-parse', 'HEAD')
+        (repo / 'unrelated').write_text('nothing to do with payload')
+        git('add', '.')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'unrelated')
         head = git('rev-parse', 'HEAD')
         subprocess.run(['git', 'clone', '-q', '--bare', str(repo), str(bare)], check=True)
+        files = {'X': {'source_path': 'X'}}
         manifest = {'addons': {
-            'old': {'source_repo': str(bare), 'source_commit': pin},
-            'current': {'source_repo': str(bare), 'source_commit': head},
-            'missing': {'source_repo': str(self.home / 'absent.git'), 'source_commit': pin}}}
+            'old': {'source_repo': str(bare), 'source_commit': pin, 'files': files},
+            'unrelated': {'source_repo': str(bare), 'source_commit': changed, 'files': files},
+            'current': {'source_repo': str(bare), 'source_commit': head, 'files': files},
+            'divergent': {'source_repo': str(bare), 'source_commit': divergent, 'files': files},
+            'missing': {'source_repo': str(self.home / 'absent.git'), 'source_commit': pin, 'files': files}}}
         spec = importlib.util.spec_from_file_location('luna_upstream_test', LUNA)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             problems = module.check_upstream(manifest)
-        self.assertEqual(problems, ['old: stale upstream pin'])
-        self.assertIn('old: behind by 2 commit(s)', output.getvalue())
+        self.assertEqual(problems, ['old: stale upstream pin', 'divergent: diverged upstream history'])
+        self.assertIn('old: behind by 1 commit(s)', output.getvalue())
         self.assertIn('    X', output.getvalue())
-        self.assertIn('current: up to date', output.getvalue())
+        self.assertIn('unrelated: ok (pinned files unchanged)', output.getvalue())
+        self.assertIn('current: ok (pinned files unchanged)', output.getvalue())
+        self.assertIn('divergent: diverged (pin-only 1 commit(s), upstream-only 2 commit(s)); '
+                      'changed pinned files:\n    X', output.getvalue())
+        self.assertNotIn('    unrelated', output.getvalue())
         self.assertIn('missing: unreachable', output.getvalue())
+
+    def test_upstream_first_party_paths_use_addon_root(self):
+        import contextlib
+        import importlib.util
+        import io
+        repo = self.home / 'first-party'
+        bare = self.home / 'origin.git'
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(repo)], check=True)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+        payload = repo / 'addons/graphics/plugin/file'
+        payload.parent.mkdir(parents=True)
+        payload.write_text('pinned')
+        git('add', '.')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'pin')
+        pin = git('rev-parse', 'HEAD')
+        payload.write_text('changed')
+        git('add', '.')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'change')
+        subprocess.run(['git', 'clone', '-q', '--bare', str(repo), str(bare)], check=True)
+        git('remote', 'add', 'origin', str(bare))
+        manifest = {'addons': {'graphics': {'source_commit': pin, 'files': {
+            'file': {'source_path': 'plugin/file'}}}}}
+        spec = importlib.util.spec_from_file_location('luna_first_party_test', LUNA)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = io.StringIO()
+        with mock.patch.object(module, 'ROOT', repo), contextlib.redirect_stdout(output):
+            self.assertEqual(module.check_upstream(manifest), ['graphics: stale upstream pin'])
+        self.assertIn('graphics: behind by 1 commit(s)', output.getvalue())
+        self.assertIn('    addons/graphics/plugin/file', output.getvalue())
 
     # -- release / update / snapshot -------------------------------------
     def bundle_version(self):

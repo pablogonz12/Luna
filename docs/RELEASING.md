@@ -4,9 +4,12 @@
 
 `python3 scripts/luna.py verify` stays offline. Run
 `python3 scripts/luna.py verify --upstream` to fetch source branch heads into
-temporary repositories and report commits and files changed since each pin.
+temporary repositories and report changes to each add-on's pinned files since
+its pin. Commit counts include only commits touching those files; unrelated
+repository changes do not make a pin stale. Diverged histories report pin-only
+and upstream-only repository commit counts and differing pinned files.
 First-party add-ons use this checkout's `origin/main`; external add-ons use
-their repository's default branch. Stale pins fail the check. Unreachable
+their repository's default branch. Stale and diverged pins fail the check. Unreachable
 repositories are reported separately and do not fail it; review those manually,
 especially when private repositories cannot be accessed without credentials.
 The weekly workflow runs the same check without secrets.
