@@ -387,6 +387,7 @@ local function push_history(directory, appid, kind, author)
     if tonumber(s) == stamp and tonumber(n) > seq then seq = tonumber(n) end
   end
   local written = {}
+  local written_current = {}
   local function rollback(why)
     for _, file in ipairs(written) do os.remove(file); os.remove(file .. '.bak') end
     return nil, why
@@ -412,12 +413,15 @@ local function push_history(directory, appid, kind, author)
   for _, path in ipairs(current) do
     local ok, why = stash(path)
     if not ok then return rollback(why) end
+    written_current[#written_current + 1] = written[#written]
   end
   for _, path in ipairs(legacy) do os.remove(path) end
   prune_history(directory, slot, kind)
   log_op(directory, { at = stamp, appid = slot, kind = kind,
     author = tostring(author or ''), files = #written })
-  return #written
+  -- The entries copied from the live slot, so a caller whose own write then
+  -- fails can drop just those (imported legacy entries stay for Undo).
+  return #written, nil, written_current
 end
 
 -- Files removed by Undo go to <slot history>/undone/ (same naming, newest
@@ -650,26 +654,27 @@ local function store_asset(appid, kind, body, mime, author)
   -- bytes are safe in history before anything is removed; if the write
   -- fails, the stashed copies are put back and the slot is unchanged.
   local stashed = 0
+  local copies = {}
   if #existing > 0 then
-    local count, stash_why = push_history(directory, slot, kind, author)
+    local count, stash_why, current_copies = push_history(directory, slot, kind, author)
     if not count then
       -- Without a safe copy the current artwork is not replaced.
       return false, { code = 'io', error = 'Could not keep a copy of the current artwork; nothing was changed: '
         .. tostring(stash_why) }
     end
     stashed = count
+    copies = current_copies or {}
   end
   local extension = ALLOWED_MIME[tostring(mime)]
   local target = base .. '.' .. extension
   local saved, save_why = write_file_atomic(target, body)
   if not saved then
-    if stashed > 0 then
-      os.remove(target)
-      for _, item in ipairs(pop_entries(directory, slot, kind, stashed)) do
-        write_file_atomic(base .. '.' .. item.ext, item.body)
-      end
-    end
-    return false, { code = 'io', error = tostring(save_why) }
+    -- The atomic write never touched the slot, so the active art is still in
+    -- place: leave it alone (restoring from history could put an imported
+    -- legacy backup over it) and drop only the copies of it made above.
+    for _, file in ipairs(copies) do os.remove(file); os.remove(file .. '.bak') end
+    return false, { code = 'io', error = 'Could not write the new artwork; nothing was changed: '
+      .. tostring(save_why) }
   end
   for _, path in ipairs(existing) do
     if path ~= target then os.remove(path) end

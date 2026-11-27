@@ -456,6 +456,25 @@ do
     'the older legacy backup comes back next, as a JPEG')
 end
 
+-- A failed write leaves the active art exactly as it was; an imported legacy
+-- backup stays in history and is never written over the current art.
+do
+  local legacy = io.open(grid_dir .. '/405p.sls-luna.bak', 'wb'); legacy:write('LEGACYPNG'); legacy:close()
+  local cur = io.open(grid_dir .. '/405p.png', 'wb'); cur:write('CURRENTPNG'); cur:close()
+  os.execute("mkdir -p '" .. grid_dir .. "/405p.jpg.tmp'") -- the JPEG write cannot land
+  local r = call('SlsSgdbApply', { raw = json.encode({ appid = 405, kind = 'grid',
+    url = 'https://cdn.example/grid2.jpg', mime = 'image/jpeg' }) })
+  os.execute("rmdir '" .. grid_dir .. "/405p.jpg.tmp'")
+  assert(r.success == false and r.code == 'io', 'a failed write must be reported')
+  assert(file_text(grid_dir .. '/405p.png') == 'CURRENTPNG', 'the active art must stay as it was, not the legacy backup')
+  assert(file_text(grid_dir .. '/405p.jpg') == nil)
+  local depth = call('SlsSgdbHistory', { raw = json.encode({ appid = 405 }) }).history.grid
+  assert(depth == 1, 'only the imported legacy entry stays in history, got ' .. tostring(depth))
+  local u = call('SlsSgdbUndo', { raw = json.encode({ appid = 405, kind = 'grid' }) })
+  assert(u.success == true and file_text(grid_dir .. '/405p.png') == 'LEGACYPNG',
+    'the legacy backup is still reachable through Undo')
+end
+
 -- ---------------------------------------------------------------- refusals
 
 local bad_mime = call('SlsSgdbApply', { raw = json.encode({ appid = 1145360, kind = 'grid',
