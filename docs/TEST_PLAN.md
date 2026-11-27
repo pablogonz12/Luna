@@ -12,7 +12,8 @@
 | Bootstrap installer | `bash -n install.sh`; `./install.sh --help`; `./install.sh --dry-run` on a ready host | syntax/help; existing stack is reused; dry run performs no writes; upstream bootstrap is checksum-verified and uses `--nolaunch` |
 | Composition | `bash scripts/test-backend.sh` | the shipped bridge and add-on backends register in one registry, expected assets are injected in order, and a deliberately broken add-on is skipped instead of stopping healthy add-ons |
 | Payload pinning | `python3 scripts/luna.py verify` | every payload and shared file matches `vendor/MANIFEST.json`, and no file exists that the manifest does not list |
-| Drift | `python3 scripts/luna.py verify --sources` | the pinned bytes equal the local add-on checkouts (skipped where they are absent) |
+| Drift | `python3 scripts/luna.py verify --sources` | the pinned bytes equal the pinned commits in local add-on checkouts (skipped where they are absent) |
+| Upstream drift | `python3 scripts/luna.py verify --upstream` | opt-in network check for stale pins; unreachable sources are reported separately |
 | Health i18n | UI suite (`luna-ui.test.cjs`) + Lua smoke | Spanish attention list, headers and actions behind the Settings language switch; English output byte-identical; preference validation rejects unknown languages |
 | Syntax | local gate (`test-all.sh`; hosted CI blocked, see below) | `python3 -m py_compile`, `luac -p`, `bash -n` |
 
