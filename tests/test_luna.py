@@ -1522,6 +1522,47 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(self.luna('uninstall').returncode, 0)
         self.assertFalse(flag.exists())
 
+    def test_standalone_owns_flags_in_both_steam_roots(self):
+        shutil.rmtree(self.home / '.local/share/Lumen')
+        alternate = self.home / '.steam/steam'
+        alternate.mkdir(parents=True)
+        self.assertEqual(self.luna('install').returncode, 0)
+        alt_flag = alternate / '.cef-enable-remote-debugging'
+        self.assertTrue(alt_flag.is_file())
+        native = self.home / '.local/share/Steam'
+        native.mkdir(parents=True)
+        result = self.luna('install', '--force')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        native_flag = native / '.cef-enable-remote-debugging'
+        self.assertTrue(native_flag.is_file())
+        owned = json.loads((self.luna_home / 'state/standalone-setup.json').read_text())['flags']
+        self.assertEqual(sorted(owned), sorted([str(alt_flag), str(native_flag)]))
+        self.assertEqual(self.luna('uninstall').returncode, 0)
+        self.assertFalse(alt_flag.exists())
+        self.assertFalse(native_flag.exists())
+
+    def test_standalone_keeps_ownership_when_disable_fails(self):
+        shutil.rmtree(self.home / '.local/share/Lumen')
+        env = dict(self.env, LUNA_TEST_UNIT_STATE='disabled')
+        self.assertEqual(self.luna('install', env=env).returncode, 0)
+        failing = dict(env, LUNA_TEST_SYSTEMCTL_FAIL='disable --now luna-host.service')
+        result = self.luna('uninstall', env=failing)
+        self.assertIn('could not disable', result.stderr)
+        state = json.loads((self.luna_home / 'state/standalone-setup.json').read_text())
+        self.assertTrue(state['enabled'], 'a failed disable must stay recorded for a retry')
+
+    def test_standalone_reads_the_older_single_flag_record(self):
+        shutil.rmtree(self.home / '.local/share/Lumen')
+        (self.home / '.local/share/Steam').mkdir(parents=True)
+        self.assertEqual(self.luna('install').returncode, 0)
+        record = self.luna_home / 'state/standalone-setup.json'
+        state = json.loads(record.read_text())
+        path, identity = next(iter(state.pop('flags').items()))
+        state['flag'], state['flag_path'] = identity, path
+        record.write_text(json.dumps(state))
+        self.assertEqual(self.luna('uninstall').returncode, 0)
+        self.assertFalse(Path(path).exists())
+
     def test_standalone_skips_missing_steam_root(self):
         shutil.rmtree(self.home / '.local/share/Lumen')
         result = self.luna('install')

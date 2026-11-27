@@ -2492,8 +2492,11 @@ def standalone_setup():
             else:
                 st = os.fstat(fd)
                 os.close(fd)
-                state['flag'] = [st.st_dev, st.st_ino]
-                state['flag_path'] = str(flag)
+                flags = _owned_flags(state)
+                flags[str(flag)] = [st.st_dev, st.st_ino]
+                state.pop('flag', None)
+                state.pop('flag_path', None)
+                state['flags'] = flags
                 write_json_file(ownership, state)
         enabled = unit_state(HOST_UNIT)['enabled'] in ('enabled', 'enabled-runtime', 'linked', 'linked-runtime')
         if not enabled:
@@ -2512,19 +2515,53 @@ def standalone_setup():
         print('host      : WARNING: standalone setup failed: %s' % error, file=sys.stderr)
 
 
+def _owned_flags(state):
+    """{flag path: [dev, ino]} for every debugging flag this install created.
+    Reads the older single-flag record too, so an upgrade keeps its ownership."""
+    flags = dict(state.get('flags') or {}) if isinstance(state.get('flags'), dict) else {}
+    if isinstance(state.get('flag'), list):
+        legacy = state.get('flag_path') or str(steam_home() / '.cef-enable-remote-debugging')
+        flags.setdefault(legacy, state['flag'])
+    return flags
+
+
 def undo_standalone_setup():
+    """Undo only what standalone_setup created. Anything that fails to undo stays
+    recorded, so a later rollback or uninstall can retry it."""
     ownership = luna_home() / 'state/standalone-setup.json'
     state = read_json_file(ownership) or {}
+    remaining = {}
     if state.get('enabled'):
-        systemctl_user('disable', '--now', HOST_UNIT)
-    flag = Path(state.get('flag_path') or (steam_home() / '.cef-enable-remote-debugging'))
-    try:
-        st = flag.lstat()
-        if state.get('flag') == [st.st_dev, st.st_ino] and flag.is_file() and not flag.is_symlink():
+        result = systemctl_user('disable', '--now', HOST_UNIT)
+        if result.returncode:
+            print('host      : WARNING: could not disable %s (kept for a retry): %s'
+                  % (HOST_UNIT, result.stderr.strip()), file=sys.stderr)
+            remaining['enabled'] = True
+    kept = {}
+    for path, identity in _owned_flags(state).items():
+        flag = Path(path)
+        try:
+            st = flag.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            print('host      : WARNING: cannot check %s (kept for a retry): %s' % (flag, error),
+                  file=sys.stderr)
+            kept[path] = identity
+            continue
+        if identity != [st.st_dev, st.st_ino] or flag.is_symlink() or not flag.is_file():
+            continue  # replaced by someone else since: not ours any more
+        try:
             flag.unlink()
-    except FileNotFoundError:
-        pass
-    if ownership.is_file():
+        except OSError as error:
+            print('host      : WARNING: cannot remove %s (kept for a retry): %s' % (flag, error),
+                  file=sys.stderr)
+            kept[path] = identity
+    if kept:
+        remaining['flags'] = kept
+    if remaining:
+        write_json_file(ownership, remaining)
+    elif ownership.is_file():
         ownership.unlink()
 
 
