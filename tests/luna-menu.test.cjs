@@ -922,7 +922,7 @@ test('the HLTB read sends its revision and keeps the payload when unchanged',asy
   assert.equal(hltbMinutesFor(1),60,'the full reply becomes the records');
   reply={unchanged:true,rev:'r1'};
   assert.equal(await refreshHltbData(w),true);
-  assert.deepEqual(payloads[1],{rev:'r1'},'the second call asks with the last revision');
+  assert.deepEqual(payloads[1],{rev:'r1',gamesOnly:true},'the second call asks with the last revision');
   assert.equal(hltbMinutesFor(1),60,'an unchanged reply keeps the previous payload');
 });
 
@@ -939,10 +939,10 @@ test('a write or an error drops the cached HLTB revision',async()=>{
   await pushLibrary(w); // SlsHltbLibrary writes the library (and its cache rev).
   reply={success:true,rev:'r2',games:{'1':{main:3600}}};
   await refreshHltbData(w);
-  assert.deepEqual(calls[calls.length-1].payload,{},'a library write clears the revision');
+  assert.deepEqual(calls[calls.length-1].payload,{gamesOnly:true},'a library write clears the revision');
   fail=true;
   assert.equal(await refreshHltbData(w),false);
   fail=false;
   await refreshHltbData(w);
-  assert.deepEqual(calls[calls.length-1].payload,{},'an error clears the revision too');
+  assert.deepEqual(calls[calls.length-1].payload,{gamesOnly:true},'an error clears the revision too');
 });
