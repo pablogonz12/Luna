@@ -1181,6 +1181,11 @@ def bridge_status():
     as before (an alive pid means attached), so the two versions never break each
     other. Level is 'ok', 'warn' or 'info'.
     """
+    if active_host() == 'luna':
+        if luna_host_running():
+            return 'ok', ['Luna host is running; it loads add-ons directly (no Lumen bridge heartbeat).',
+                          'Run luna selftest to check Steam attachment and add-on RPCs.']
+        return 'info', ['Luna host is not running; it loads add-ons directly (no Lumen bridge heartbeat).']
     data = read_json_file(bridge_heartbeat_path())
     data = data if isinstance(data, dict) else {}
     now = int(time.time())
@@ -1870,6 +1875,17 @@ exit 1
 
 # The pre-runtime launcher Luna wrote itself (v3): still ours, upgraded in place on install.
 LEGACY_CLI_LAUNCHERS = ('''#!/bin/sh
+# Managed by SLS Luna CLI v1
+# Recovery remains available even if a base update replaces Lumen's tooling.
+if [ "${1:-}" = hook ] && [ -f "$HOME/.local/share/slssteam-luna/lumen-hook.py" ]; then
+    shift
+    action="${1:-status}"
+    case "$action" in on) action=enable;; off) action=disable;; esac
+    [ "$#" -eq 0 ] || shift
+    exec python3 "$HOME/.local/share/slssteam-luna/lumen-hook.py" "$action" "$@"
+fi
+exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
+''', '''#!/bin/sh
 # Managed by SLS Luna CLI v2
 # Runs the copy of luna.py kept by the active plugin host (see: luna host status).
 LUNA_HOME="${LUNA_HOME:-$HOME/.local/share/Luna}"
@@ -2375,6 +2391,54 @@ def write_legacy_plugins():
     target.write_text(json.dumps([str(luatools)], indent=2) + '\n')
 
 
+def standalone_setup():
+    """Enable the managed host and remember only settings this install created."""
+    unit = host_unit_path()
+    if unit.is_symlink() or not unit.is_file() or HOST_UNIT_MARK not in unit.read_text(errors='replace'):
+        print('host      : WARNING: no managed host unit; not enabling it', file=sys.stderr)
+        return
+    ownership = luna_home() / 'state/standalone-setup.json'
+    state = read_json_file(ownership) or {}
+    flag = home() / '.local/share/Steam/.cef-enable-remote-debugging'
+    try:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(flag, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        except FileExistsError:
+            pass
+        else:
+            st = os.fstat(fd)
+            os.close(fd)
+            state['flag'] = [st.st_dev, st.st_ino]
+            write_json_file(ownership, state)
+        enabled = unit_state(HOST_UNIT)['enabled'] in ('enabled', 'enabled-runtime', 'linked', 'linked-runtime')
+        result = systemctl_user('enable', '--now', HOST_UNIT)
+        if result.returncode:
+            print('host      : WARNING: could not enable %s: %s' % (HOST_UNIT, result.stderr.strip()),
+                  file=sys.stderr)
+        elif not enabled:
+            state['enabled'] = True
+            write_json_file(ownership, state)
+    except OSError as error:
+        print('host      : WARNING: standalone setup failed: %s' % error, file=sys.stderr)
+
+
+def undo_standalone_setup():
+    ownership = luna_home() / 'state/standalone-setup.json'
+    state = read_json_file(ownership) or {}
+    if state.get('enabled'):
+        systemctl_user('disable', '--now', HOST_UNIT)
+    flag = home() / '.local/share/Steam/.cef-enable-remote-debugging'
+    try:
+        st = flag.lstat()
+        if state.get('flag') == [st.st_dev, st.st_ino] and flag.is_file() and not flag.is_symlink():
+            flag.unlink()
+    except FileNotFoundError:
+        pass
+    if ownership.is_file():
+        ownership.unlink()
+
+
 def install_luna_host(dry_run=False):
     """Deploy luna-host into LUNA_HOME next to Lumen. Never enables the unit
     unless the cutover already happened. Failures warn; add-on install goes on."""
@@ -2417,6 +2481,7 @@ def install_luna_host(dry_run=False):
     print('host      : luna-host installed in %s (active host: %s)' % (luna_home(), active_host()))
     if active_host() == 'luna':
         patch_wrapper()
+        standalone_setup()
         print('host      : restart %s to load this version' % HOST_UNIT)
 
 
@@ -2619,6 +2684,7 @@ def cmd_host(options):
             return 1
         _carry_state(luna_home() / 'state', lumen_tools_dir())
         _write_host_state('lumen', 'luna')
+        undo_standalone_setup()
         unpatch_wrapper()
         _refresh_tooling_after_switch()
         print('host      : rolled back; Lumen is the active plugin host (restart Steam to attach)')
@@ -7729,6 +7795,8 @@ def cmd_uninstall(options):
                   % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
             return EXIT_PATCH
         print(result.stdout.strip())
+    else:
+        undo_standalone_setup()
     for name in targets:
         shutil.rmtree(addons_dir() / name, ignore_errors=True)
         print('removed %s' % name)

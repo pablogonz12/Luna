@@ -90,7 +90,7 @@ esac
     systemctl = directory / 'systemctl'
     systemctl.write_text('#!/bin/sh\necho "$*" >> "$HOME/systemctl.log"\n'
                          '[ -n "$LUNA_TEST_SYSTEMCTL_FAIL" ] && case "$*" in *"$LUNA_TEST_SYSTEMCTL_FAIL"*) exit 1;; esac\n'
-                         'case "$2" in is-enabled) echo enabled;; is-active) echo active;; esac\nexit 0\n')
+                         'case "$2" in is-enabled) echo "${LUNA_TEST_UNIT_STATE:-enabled}";; is-active) echo active;; esac\nexit 0\n')
     systemctl.chmod(0o755)
     pkill = directory / 'pkill'
     pkill.write_text('#!/bin/sh\necho "pkill $*" >> "$HOME/systemctl.log"\nexit 0\n')
@@ -529,19 +529,25 @@ class LunaTestCase(unittest.TestCase):
     def test_verify_compares_against_local_sources_when_asked(self):
         sources = self.home / 'Documents/Scripts'
         sources.mkdir(parents=True)
-        for name in ('playtime', 'presence'):
-            origin = Path(os.environ.get('HOME', str(Path.home()))) / 'Documents/Scripts' / ('slsteam-' + name)
-            if not (origin / '.git').is_dir():
-                self.skipTest('no local %s checkout to compare against' % name)
-            shutil.copytree(origin, sources / ('slsteam-' + name),
-                            ignore=shutil.ignore_patterns('.git', '__pycache__'))
         manifest = json.loads((HERE / 'vendor/MANIFEST.json').read_text())
+        for name in ('playtime', 'presence'):
+            for meta in manifest['addons'][name]['files'].values():
+                relative = Path(meta['source_path'])
+                dest = sources / ('slsteam-' + name) / relative
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(HERE / 'addons' / name / relative, dest)
         env = dict(self.env, LUNA_TEST_SOURCES='1')
         result = subprocess.run([sys.executable, str(LUNA), 'verify', '--sources',
                                  '--source-dir', str(sources)],
                                 capture_output=True, text=True, env=env)
         self.assertIn('compared against', result.stdout)
         self.assertEqual(result.returncode, 0, result.stdout)
+        dest.write_bytes(dest.read_bytes() + b'\nchanged')
+        result = subprocess.run([sys.executable, str(LUNA), 'verify', '--sources',
+                                 '--source-dir', str(sources)],
+                                capture_output=True, text=True, env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('differs from the source checkout', result.stdout)
 
     # -- release / update / snapshot -------------------------------------
     def bundle_version(self):
@@ -1391,6 +1397,8 @@ class LunaTestCase(unittest.TestCase):
         self.assertTrue((self.luna_home / 'addons/playtime/backend/main.lua').is_file())
         self.assertTrue((self.home / '.local/bin/luna').is_file())
         self.assertTrue((self.home / '.config/systemd/user/luna-host.service').is_file())
+        self.assertIn('--user enable --now luna-host.service', self.systemctl_log())
+        self.assertTrue((self.home / '.local/share/Steam/.cef-enable-remote-debugging').is_file())
         self.assertFalse((self.home / '.local/share/SLSsteam/path/steam').exists(),
                          'no wrapper may be patched')
         for cfg in ('steam.cfg', 'Steam.cfg'):
@@ -1404,6 +1412,50 @@ class LunaTestCase(unittest.TestCase):
         verify = self.luna('verify')
         self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
         self.assertIn('host       : luna (standalone)', verify.stdout)
+
+    def test_standalone_setup_is_reversible_and_preserves_existing_flag(self):
+        shutil.rmtree(self.home / '.local/share/Lumen')
+        flag = self.home / '.local/share/Steam/.cef-enable-remote-debugging'
+        result = self.luna('install', '--dry-run')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(flag.exists())
+        env = dict(self.env, LUNA_TEST_UNIT_STATE='disabled')
+        self.assertEqual(self.luna('install', env=env).returncode, 0)
+        self.assertTrue(flag.exists())
+        self.assertEqual(self.luna('uninstall', env=env).returncode, 0)
+        self.assertIn('--user disable --now luna-host.service', self.systemctl_log())
+        self.assertFalse(flag.exists())
+        flag.write_text('user')
+        self.assertEqual(self.luna('install').returncode, 0)
+        self.assertEqual(self.luna('uninstall').returncode, 0)
+        self.assertEqual(flag.read_text(), 'user')
+
+    def test_standalone_doctor_does_not_expect_lumen_bridge(self):
+        shutil.rmtree(self.home / '.local/share/Lumen')
+        result = self.luna('doctor', running='luna-host,steam')
+        self.assertIn('loads add-ons directly', result.stdout)
+        self.assertNotIn('bridge has not loaded', result.stdout)
+
+    def test_old_v1_launcher_is_upgraded(self):
+        launcher = self.home / '.local/bin/luna'
+        launcher.parent.mkdir(parents=True)
+        old = '''#!/bin/sh
+# Managed by SLS Luna CLI v1
+# Recovery remains available even if a base update replaces Lumen's tooling.
+if [ "${1:-}" = hook ] && [ -f "$HOME/.local/share/slssteam-luna/lumen-hook.py" ]; then
+    shift
+    action="${1:-status}"
+    case "$action" in on) action=enable;; off) action=disable;; esac
+    [ "$#" -eq 0 ] || shift
+    exec python3 "$HOME/.local/share/slssteam-luna/lumen-hook.py" "$action" "$@"
+fi
+exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
+'''
+        launcher.write_text(old)
+        self.assertEqual(self.luna('install').returncode, 0)
+        text = launcher.read_text()
+        self.assertIn('Managed by SLS Luna CLI v4', text)
+        self.assertIn('$LUNA_HOME/state/luna.py', text)
 
     def test_steam_machine_launcher_is_generated_without_luatools(self):
         shutil.rmtree(self.home / '.local/share/Lumen', ignore_errors=True)
@@ -2170,7 +2222,7 @@ class BridgeHeartbeatTestCase(unittest.TestCase):
         self.luna_home = self.home / '.local/share/Luna'
         self.state = self.luna_home / 'state'
         self.state.mkdir(parents=True)
-        (self.luna_home / 'host.json').write_text('{"active": "luna"}\n')
+        (self.luna_home / 'host.json').write_text('{"active": "lumen"}\n')
         self.beat = self.state / 'bridge-heartbeat.json'
         self.bin = stub_bin(self.home)
         self.env = dict(os.environ, HOME=str(self.home), LUNA_HOME=str(self.luna_home),
