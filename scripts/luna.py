@@ -8000,7 +8000,11 @@ def check_upstream(manifest):
                     # installed copy or an unpacked release has no git, so it
                     # falls back to the repository the manifest names.
                     try:
-                        url = git('remote', 'get-url', 'origin', cwd=ROOT).stdout.decode().strip() or url
+                        # Only when ROOT itself is the checkout: git would
+                        # otherwise discover an enclosing, unrelated repository.
+                        top = git('rev-parse', '--show-toplevel', cwd=ROOT).stdout.decode().strip()
+                        if top and Path(top).resolve() == Path(ROOT).resolve():
+                            url = git('remote', 'get-url', 'origin', cwd=ROOT).stdout.decode().strip() or url
                     except (OSError, subprocess.SubprocessError):
                         pass
                 repo = Path(tmp) / name
