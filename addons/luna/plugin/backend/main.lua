@@ -353,9 +353,31 @@ end
 local store_memo = { rev = '', data = nil }
 local count_path = data_dir .. '/hltb-count.json'
 
+-- Write token: every persist_store/persist_library replaces it with a fresh
+-- random value. Size + whole-second mtime cannot tell two same-size writes in
+-- one second apart (the second one was then answered `unchanged` forever, in
+-- every backend VM); the token can, and it costs one tiny read per poll.
+local gen_path = data_dir .. '/hltb.gen'
+
+local function read_gen()
+  local handle = io.open(gen_path, 'rb')
+  if not handle then return '0' end
+  local text = handle:read('*a') or ''
+  handle:close()
+  text = text:match('^[%w%.%-]+') or ''
+  return text ~= '' and text or '0'
+end
+
+local function bump_gen()
+  local token = string.format('%d.%d', os.time(), math.random(1, 2147483646))
+  -- Best effort: a failed token write only weakens same-second detection
+  -- back to what size + mtime already give.
+  pcall(atomic_write, gen_path, token, 64)
+end
+
 local function store_stamp()
   if not has_stat then return nil end
-  return file_stamp(store_path)
+  return file_stamp(store_path) .. '#' .. read_gen()
 end
 
 local function read_sidecar_count(rev)
@@ -494,6 +516,7 @@ local function persist_store(data)
   end
   local ok, err = atomic_write(store_path, json.encode(data), FILE_CAPS.store)
   if not ok then return false, tostring(err) end
+  bump_gen()
   cache_drop(hltb_cache)
   cache_drop(hltb_games_cache)
   cache_drop(wire_cache)
@@ -519,6 +542,7 @@ end
 local function persist_library(data)
   local ok, err = atomic_write(library_path, json.encode(data), FILE_CAPS.library)
   if not ok then return false, tostring(err) end
+  bump_gen()
   cache_drop(hltb_cache)
   cache_drop(hltb_games_cache)
   return true
@@ -2613,6 +2637,7 @@ function M.register(registry)
       write_scorer_marker(store_stamp(), SCORER_VERSION, flagged)
     end
     local rev = stamps_rev({ store_path, library_path })
+    if rev then rev = rev .. '#' .. read_gen() end
     local now = os.time()
     -- Opt-in: the Steam agent only consumes games, not the inventory. Legacy
     -- callers (and the panel) continue receiving the original full shape.

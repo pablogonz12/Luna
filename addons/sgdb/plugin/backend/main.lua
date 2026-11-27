@@ -356,13 +356,18 @@ end
 
 -- Stash the slot's current file(s) into history before they are replaced.
 -- Old single-level `.sls-luna.bak` files are imported, not dropped.
+-- All or nothing: returns the number stored, or nil and why after removing any
+-- entry this call wrote. Legacy backups are deleted only once their copy is
+-- safely in history, and the caller must not touch the slot on nil.
 local function push_history(directory, appid, kind, author)
   local slot = math.floor(appid)
   local current = slot_files(directory, slot, kind)
   local legacy = {}
   do
     local base = directory .. '/' .. tostring(slot) .. KINDS[kind]
-    os.remove(base .. '.sls-luna.bak') -- legacy naming, if any
+    -- The oldest naming carried no image extension; keep it as PNG or JPEG by
+    -- its magic bytes instead of deleting it unseen.
+    if fs.exists(base .. '.sls-luna.bak') then legacy[#legacy + 1] = base .. '.sls-luna.bak' end
     for _, ext in ipairs(SLOT_EXTS) do
       local path = base .. '.' .. ext .. '.sls-luna.bak'
       if fs.exists(path) then legacy[#legacy + 1] = path end
@@ -370,36 +375,55 @@ local function push_history(directory, appid, kind, author)
   end
   if #current == 0 and #legacy == 0 then return 0 end
   local dir = slot_history_dir(directory, slot, kind)
-  fs.create_directories(dir)
-  local stamp = os.time()
-  local stored = 0
-  -- Entries sort by name, so the sequence continues after any entry already
-  -- stamped this second: two changes within one second never collide (which
-  -- overwrote the older step) and the newer one always sorts last.
-  local seq = 0
+  local made, made_why = pcall(fs.create_directories, dir)
+  if not made then return nil, tostring(made_why) end
+  -- Entries sort by (stamp, sequence). The stamp never goes below the newest
+  -- entry (a clock that moved backwards would otherwise sort this copy first
+  -- and prune it straight away), and the sequence continues after any entry
+  -- with that stamp, so two changes within one second never collide.
+  local stamp, seq = os.time(), 0
   for _, name in ipairs(history_entries(directory, slot, kind)) do
     local s, n = name:match('^(%d+)%-(%d+)%.')
-    if tonumber(s) == stamp and tonumber(n) > seq then seq = tonumber(n) end
+    s, n = tonumber(s), tonumber(n)
+    if s > stamp then stamp, seq = s, 0 end
+    if s == stamp and n > seq then seq = n end
+  end
+  local written = {}
+  local written_current = {}
+  local function rollback(why)
+    for _, file in ipairs(written) do os.remove(file); os.remove(file .. '.bak') end
+    return nil, why
   end
   local function stash(path)
     local body = read_bytes(path)
-    if not body then return end
-    local ext = path:match('%.([%w]+)$') or 'png'
+    if not body then return false, 'cannot read ' .. path end
+    local ext = path:match('%.(%w+)%.sls%-luna%.bak$') or path:match('%.([%w]+)$') or 'png'
+    if ext == 'bak' then ext = body:sub(1, 3) == '\255\216\255' and 'jpg' or 'png' end
     seq = seq + 1
-    local name = string.format('%d-%06d.%s', stamp, seq, ext)
-    if write_file_atomic(dir .. '/' .. name, body) then stored = stored + 1 end
+    local file = dir .. '/' .. string.format('%d-%06d.%s', stamp, seq, ext)
+    local ok, why = write_file_atomic(file, body)
+    if not ok then return false, why or ('cannot write ' .. file) end
+    written[#written + 1] = file
+    return true
   end
-  for _, path in ipairs(current) do stash(path) end
+  -- Legacy backups are older than the current art: stash them first so the
+  -- current art is the newest entry and Undo restores it before them.
   for _, path in ipairs(legacy) do
-    stash(path)
-    os.remove(path)
+    local ok, why = stash(path)
+    if not ok then return rollback(why) end
   end
+  for _, path in ipairs(current) do
+    local ok, why = stash(path)
+    if not ok then return rollback(why) end
+    written_current[#written_current + 1] = written[#written]
+  end
+  for _, path in ipairs(legacy) do os.remove(path) end
   prune_history(directory, slot, kind)
-  if stored > 0 then
-    log_op(directory, { at = stamp, appid = slot, kind = kind,
-      author = tostring(author or ''), files = stored })
-  end
-  return stored
+  log_op(directory, { at = stamp, appid = slot, kind = kind,
+    author = tostring(author or ''), files = #written })
+  -- The entries copied from the live slot, so a caller whose own write then
+  -- fails can drop just those (imported legacy entries stay for Undo).
+  return #written, nil, written_current
 end
 
 -- Files removed by Undo go to <slot history>/undone/ (same naming, newest
@@ -410,15 +434,12 @@ local function keep_undone(directory, appid, kind, paths)
   local dir = slot_history_dir(directory, math.floor(appid), kind) .. '/undone'
   local made, made_why = pcall(fs.create_directories, dir)
   if not made then return false, tostring(made_why) end
-  local stamp = os.time()
-  local names = {}
+  local stamp, seq = os.time(), 0
   for _, name in ipairs(list_dir(dir)) do
-    if name:match('^%d+%-%d+%.[%w]+$') then names[#names + 1] = name end
-  end
-  local seq = 0
-  for _, name in ipairs(names) do
-    local st, n = name:match('^(%d+)%-(%d+)%.')
-    if tonumber(st) == stamp and tonumber(n) > seq then seq = tonumber(n) end
+    local st, n = name:match('^(%d+)%-(%d+)%.[%w]+$')
+    st, n = tonumber(st), tonumber(n)
+    if st and st > stamp then stamp, seq = st, 0 end
+    if st and st == stamp and n > seq then seq = n end
   end
   local created = {}
   local function undo_created()
@@ -632,20 +653,27 @@ local function store_asset(appid, kind, body, mime, author)
   -- bytes are safe in history before anything is removed; if the write
   -- fails, the stashed copies are put back and the slot is unchanged.
   local stashed = 0
+  local copies = {}
   if #existing > 0 then
-    stashed = push_history(directory, slot, kind, author)
+    local count, stash_why, current_copies = push_history(directory, slot, kind, author)
+    if not count then
+      -- Without a safe copy the current artwork is not replaced.
+      return false, { code = 'io', error = 'Could not keep a copy of the current artwork; nothing was changed: '
+        .. tostring(stash_why) }
+    end
+    stashed = count
+    copies = current_copies or {}
   end
   local extension = ALLOWED_MIME[tostring(mime)]
   local target = base .. '.' .. extension
   local saved, save_why = write_file_atomic(target, body)
   if not saved then
-    if stashed > 0 then
-      os.remove(target)
-      for _, item in ipairs(pop_entries(directory, slot, kind, stashed)) do
-        write_file_atomic(base .. '.' .. item.ext, item.body)
-      end
-    end
-    return false, { code = 'io', error = tostring(save_why) }
+    -- The atomic write never touched the slot, so the active art is still in
+    -- place: leave it alone (restoring from history could put an imported
+    -- legacy backup over it) and drop only the copies of it made above.
+    for _, file in ipairs(copies) do os.remove(file); os.remove(file .. '.bak') end
+    return false, { code = 'io', error = 'Could not write the new artwork; nothing was changed: '
+      .. tostring(save_why) }
   end
   for _, path in ipairs(existing) do
     if path ~= target then os.remove(path) end
@@ -1176,7 +1204,22 @@ function M.register(registry)
     if not directory then return reply({ success = false, code = 'no_steam', error = tostring(why) }) end
     local current = slot_files(directory, appid, kind)
     if #current == 0 then return reply({ success = true, removed = false }) end
-    for _, path in ipairs(current) do os.remove(path) end
+    -- The removed artwork goes onto the undo stack first, so Undo brings it
+    -- back (it may be the user's own art, not a Luna change).
+    local count, stash_why = push_history(directory, appid, kind, nil)
+    if not count then
+      return reply({ success = false, code = 'io',
+        error = 'Could not keep a copy of the current artwork; nothing was changed: ' .. tostring(stash_why) })
+    end
+    local failed = {}
+    for _, path in ipairs(current) do
+      local removed, remove_why = os.remove(path)
+      if not removed then failed[#failed + 1] = tostring(remove_why or path) end
+    end
+    if #failed > 0 then
+      return reply({ success = false, code = 'io', error = 'Could not remove: ' .. table.concat(failed, '; '),
+        history = history_depth(directory, appid, kind) })
+    end
     return reply({ success = true, removed = true,
       history = history_depth(directory, appid, kind) })
   end
