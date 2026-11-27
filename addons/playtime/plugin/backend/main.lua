@@ -1661,8 +1661,11 @@ function M.register(registry)
       if ok and type(attr)=='table' then mtime=tonumber(attr.modification) or 0 end
     end
     f:seek('set',0)
-    local raw=f:read('*a') or ''
+    -- Bounded like read_file: an oversized file is rejected there anyway, so
+    -- its bytes are never read in full or retained here.
+    local raw=f:read(MAX_BYTES+1) or ''
     f:close()
+    if #raw>MAX_BYTES then raw=false end
     local old=fingerprints[path]
     local version=old and old.version or 0
     if not old or old.raw~=raw then version=version+1 end
@@ -1690,11 +1693,12 @@ function M.register(registry)
     end
   end
   local function reload_peers()
-    local list,index={},{}
+    local list,index,seen={},{},{}
     peerNotes,nameMismatch={},{}
     duplicateHost=false
     if scoped then
       for _,file in ipairs(contribution_files(account)) do
+        seen[file.path]=true
         local state=file_state(file.path)
         index[#index+1]=file.name..'='..state
         if file.path~=own_path then
@@ -1741,6 +1745,10 @@ function M.register(registry)
         end
       end
     end
+    -- Forget files that are gone, so deleted peers release their bytes and a
+    -- recreated path never reuses a stale entry.
+    for path in pairs(fingerprints) do if not seen[path] then fingerprints[path]=nil end end
+    for path in pairs(peer_cache) do if not seen[path] then peer_cache[path]=nil end end
     table.sort(index)
     peerSignature=table.concat(index,';')
     peers=list
