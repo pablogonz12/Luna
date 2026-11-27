@@ -106,7 +106,7 @@
     "sgdb": {
       "files": {
         "backend/main.lua": {
-          "sha256": "65b487bf56ea9586b69cca52a178f5a55f0df63e803508a1b8c0a9ac1c85d0fe",
+          "sha256": "b7de83b4e950c67c11d1b44ac2d3447d46eeb90cba80465ab7bae9ee5bba2c1f",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
@@ -115,11 +115,11 @@
         }
       },
       "plugin_version": "0.2.3",
-      "source_commit": "150ef6b82659ac4ce6dde4f405abb60d26e91159",
+      "source_commit": "04f917a03052727f992ffaa840638e738cfc8266",
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-11-27T20:39:14+0100",
+  "generated": "2026-11-27T20:48:37+0100",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "aeced944f64c5dc779c24ecf912bee2570760e7d5e35f90b26f9aa1042cccb2c",
