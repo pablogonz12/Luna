@@ -6,6 +6,8 @@
 // their real RPC names.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const vm=require('node:vm');
 const {mount,RPC_TIMEOUT,buildRows,buildHltbRows,findMenubar,restoreMainView,prepareView,
   dailyBars,weeklySentence,weekTop,minutesText}=require('../addons/luna/plugin/public/panel.js');
 const agentApi=require('../addons/luna/plugin/public/agent.js');
@@ -111,6 +113,86 @@ function fakeDom(){
     custom(type,event){(listeners[type]||[]).forEach(fn=>fn(event||{}));},
   };
 }
+
+test('standalone snapshot toggle stays pending and polling preserves focus',async()=>{
+  const document=fakeDom();
+  let active=null, poll;
+  document.createElement=((original)=>tag=>{
+    const element=original(tag);
+    element.focus=()=>{
+      if(!element.disabled && findNode(document.body,node=>node===element)) active=element;
+    };
+    element.contains=other=>!!findNode(element,node=>node===other);
+    return element;
+  })(document.createElement);
+  Object.defineProperty(document,'activeElement',{get:()=>
+    active && findNode(document.body,node=>node===active) ? active : document.body});
+  const choice={enabled:false,enabledKnown:true,button:'Allow',title:'Choice',text:'text'};
+  let result={success:true,tool:{found:true},status:{accept_snapshots_unknown:false},
+    snapshots:{choice},job:{action:'scan',running:false}};
+  const window={document,setInterval:fn=>{poll=fn;},setTimeout,
+    Millennium:{callServerMethod:async(_,method)=>method==='SlsCompressorGet'
+      ? result : {success:true,message:'saved'}}};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../addons/compressor/plugin/public/panel.js'),'utf8'),
+    {window,document,console});
+  document.getElementById('sls-compressor-panel-button').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const pane=document.getElementById('sls-compressor-panel');
+  const button=()=>findNode(pane,node=>node.tagName==='BUTTON' && node.textContent==='Allow');
+  button().focus(); poll();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(document.activeElement,button());
+  await button().onclick();
+  assert.equal(button().disabled,true);
+  poll(); await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(button().disabled,true);
+  result={...result,status:{accept_snapshots_unknown:true},job:{action:'scan',running:false},
+    snapshots:{choice:{...choice,enabled:true,button:'Turn off'}}};
+  poll(); await new Promise(resolve=>setImmediate(resolve));
+  const off=findNode(pane,node=>node.tagName==='BUTTON' && node.textContent==='Turn off');
+  assert.ok(off && !off.disabled);
+  assert.equal(document.activeElement,off,'focus returns after pending renders');
+});
+
+test('standalone snapshot RPC failure re-enables the replacement toggle without another poll',async()=>{
+  const document=fakeDom();
+  let active=null, poll, rejectWrite, getCalls=0;
+  document.createElement=((original)=>tag=>{
+    const element=original(tag);
+    element.focus=()=>{
+      if(!element.disabled && findNode(document.body,node=>node===element)) active=element;
+    };
+    element.contains=other=>!!findNode(element,node=>node===other);
+    return element;
+  })(document.createElement);
+  Object.defineProperty(document,'activeElement',{get:()=>
+    active && findNode(document.body,node=>node===active) ? active : document.body});
+  const result={success:true,tool:{found:true},status:{accept_snapshots_unknown:false},
+    snapshots:{choice:{enabled:false,enabledKnown:true,button:'Allow',title:'Choice',text:'text'}}};
+  const window={document,setInterval:fn=>{poll=fn;},setTimeout,
+    Millennium:{callServerMethod:(_,method)=>{
+      if(method==='SlsCompressorGet'){getCalls++; return Promise.resolve(result);}
+      return new Promise((_,reject)=>{rejectWrite=reject;});
+    }}};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../addons/compressor/plugin/public/panel.js'),'utf8'),
+    {window,document,console});
+  document.getElementById('sls-compressor-panel-button').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const pane=document.getElementById('sls-compressor-panel');
+  const button=()=>findNode(pane,node=>node.tagName==='BUTTON' && node.textContent==='Allow');
+  const original=button();
+  original.focus();
+  const pending=original.onclick();
+  poll(); await new Promise(resolve=>setImmediate(resolve));
+  assert.notEqual(button(),original);
+  assert.equal(button().disabled,true);
+  rejectWrite(new Error('write failed'));
+  await pending;
+  assert.equal(getCalls,2,'failure must not depend on a successful refresh');
+  assert.equal(button().disabled,false);
+  assert.equal(document.activeElement,button());
+  assert.match(textOf(pane),/write failed/);
+});
 
 function textOf(node){
   if(!node)return '';
@@ -5020,6 +5102,20 @@ test('compressor sizes use one unit-aware formatter, bytes or MiB',async()=>{
   assert.doesNotMatch(textOf(statsOverlay),/TiB/);
   assert.doesNotMatch(textOf(statsOverlay),/Luna passes\s*12\.9 KiB|Luna passes.*12 MB/,
     'a MiB stat is never read as bytes');
+});
+
+test('compressor distinguishes estimate-only from measured zero and legacy payloads',async()=>{
+  for(const [savings,expected] of [
+    [{measuredGames:0,measuredBytes:0,estimateBytes:1048576},/saved about 1\.0 MiB \(estimate\)/],
+    [{measuredGames:1,measuredBytes:0,estimateBytes:1048576},/saved 0 B/],
+    [{measuredBytes:0,estimateBytes:1048576},/saved 0 B/],
+  ]){
+    const document=fakeDom(); menubarFixture(document,true);
+    const fixture=compressorFixture({queue:{active:false,total:1,done:1,finished:true,
+      saved:0,games:[],next:[],savings}});
+    mount(fakeWindow(document,{compressor:fixture}).w);
+    assert.match(textOf(await openCompressor(document)),expected);
+  }
 });
 
 test('a refused library says the last run did not start, an empty queue keeps the old line',async()=>{

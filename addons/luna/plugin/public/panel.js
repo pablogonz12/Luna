@@ -2198,7 +2198,8 @@
       const failed = Number(queue.failed) || 0;
       const skipped = Number(queue.skipped) || 0;
       const savings = queue.savings && typeof queue.savings === 'object' ? queue.savings : null;
-      const measuredText = savingsSize(savings, 'measured');
+      const measuredText = savings && savings.measuredGames != null && Number(savings.measuredGames) === 0
+        ? '' : savingsSize(savings, 'measured');
       const estimateText = savingsSize(savings, 'estimate');
       const savedText = measuredText
         || (Number(queue.saved) > 0 ? formatSize(queue.saved, 'bytes') : '')
