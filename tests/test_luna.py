@@ -911,6 +911,67 @@ class LunaTestCase(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, 'a corrupt bundle must not install')
         self.assertFalse(self.addons.exists(), 'a corrupt bundle must not install')
 
+    def _repack(self, bundle, mutate):
+        """Unpack a bundle, let `mutate(root)` change it, repack with a fresh sidecar."""
+        import hashlib, tarfile
+        work = self.temp / ('repack-%d' % len(list(self.temp.glob('repack-*'))))
+        work.mkdir()
+        with tarfile.open(bundle) as tar:
+            tar.extractall(work, filter='data')
+        root = next(work.iterdir())
+        mutate(root)
+        with tarfile.open(bundle, 'w:gz') as tar:
+            tar.add(root, arcname=root.name)
+        Path(str(bundle) + '.sha256').write_text(
+            '%s  %s\n' % (hashlib.sha256(bundle.read_bytes()).hexdigest(), bundle.name))
+
+    def test_update_refuses_any_flipped_byte_with_a_recomputed_sidecar(self):
+        import hashlib
+        out = self.temp / 'dist-flip'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        raw = bundle.read_bytes()
+        for fraction in (0.15, 0.35, 0.5, 0.65, 0.9):
+            mutated = bytearray(raw)
+            mutated[int(len(mutated) * fraction)] ^= 0x01
+            bundle.write_bytes(bytes(mutated))
+            Path(str(bundle) + '.sha256').write_text(
+                '%s  %s\n' % (hashlib.sha256(bytes(mutated)).hexdigest(), bundle.name))
+            result = self.luna('update', '--bundle', str(bundle))
+            self.assertNotEqual(result.returncode, 0, 'byte at %.2f: a corrupt bundle installed' % fraction)
+            self.assertFalse(self.addons.exists(), 'byte at %.2f: a corrupt bundle installed' % fraction)
+
+    def test_update_refuses_a_rebuilt_bundle_with_tampered_tooling(self):
+        out = self.temp / 'dist-tool'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        def tamper(root):
+            script = root / 'scripts/luna.py'
+            script.write_text(script.read_text() + '\n# tampered\n')
+        self._repack(bundle, tamper)
+        result = self.luna('update', '--bundle', str(bundle))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('scripts/luna.py does not match the bundle file list', result.stderr)
+        self.assertFalse(self.addons.exists())
+
+    def test_update_refuses_an_unlisted_file_in_the_bundle(self):
+        out = self.temp / 'dist-extra'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        self._repack(bundle, lambda root: (root / 'scripts/extra.py').write_text('print(1)\n'))
+        result = self.luna('update', '--bundle', str(bundle))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unlisted file scripts/extra.py', result.stderr)
+
+    def test_update_accepts_an_older_bundle_without_a_file_list(self):
+        out = self.temp / 'dist-old'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        self._repack(bundle, lambda root: (root / 'BUNDLE-FILES.json').unlink())
+        result = self.luna('update', '--bundle', str(bundle))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('bundle predates BUNDLE-FILES.json', result.stdout)
+
     def test_status_degrades_on_a_missing_installed_file(self):
         self.assertEqual(self.luna('install').returncode, 0)
         (self.addons / 'presence/public/panel.js').unlink()

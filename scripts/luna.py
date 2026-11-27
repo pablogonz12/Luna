@@ -1381,6 +1381,68 @@ def _manifest_problems(manifest, root):
     return problems
 
 
+# Every regular file a bundle carries, with its sha256. The add-on manifest only
+# pins payloads; this also covers luna.py, the host binary and the bridge, so a
+# bundle whose sidecar was recomputed after corruption still cannot install.
+BUNDLE_FILES = 'BUNDLE-FILES.json'
+
+
+def _bundle_file_hashes(entries):
+    files = {}
+    for arcname, path in entries:
+        if path.is_symlink() or not path.exists():
+            continue
+        if path.is_file():
+            files[arcname] = sha256(path)
+            continue
+        for parent, dirs, names in os.walk(path):
+            dirs.sort()
+            for entry in sorted(names):
+                full = Path(parent) / entry
+                if full.is_file() and not full.is_symlink():
+                    rel = PurePosixPath(arcname, full.relative_to(path).as_posix())
+                    files[str(rel)] = sha256(full)
+    return files
+
+
+def _bundle_file_problems(root):
+    """None when the bundle predates the file list; else a list of problems."""
+    listing = root / BUNDLE_FILES
+    if not listing.is_file():
+        return None
+    try:
+        files = json.loads(listing.read_text()).get('files')
+    except (ValueError, AttributeError):
+        return ['%s is not valid JSON' % BUNDLE_FILES]
+    if not isinstance(files, dict):
+        return ['%s has no file list' % BUNDLE_FILES]
+    problems = []
+    seen = set()
+    for parent, _dirs, names in os.walk(root):
+        for entry in names:
+            full = Path(parent) / entry
+            rel = full.relative_to(root).as_posix()
+            if rel == BUNDLE_FILES or full.is_symlink() or not full.is_file():
+                continue
+            seen.add(rel)
+            if rel not in files:
+                problems.append('unlisted file %s' % rel)
+            elif sha256(full) != files[rel]:
+                problems.append('%s does not match the bundle file list' % rel)
+    for rel in sorted(set(files) - seen):
+        problems.append('missing file %s' % rel)
+    return sorted(problems)
+
+
+def _check_gzip_stream(bundle):
+    """Read the whole compressed stream so its CRC is checked; tar alone stops
+    at the end-of-archive marker and can miss a corrupt tail."""
+    import gzip
+    with gzip.open(bundle, 'rb') as handle:
+        while handle.read(1 << 20):
+            pass
+
+
 def cmd_release(options):
     """Build a bundle another machine can install with `luna update`."""
     manifest = load_manifest()  # fail early when the pins are missing
@@ -1422,9 +1484,14 @@ def cmd_release(options):
     changelog = ROOT / 'CHANGELOG.md'
     if changelog.is_file():
         entries.append(('CHANGELOG.md', changelog))
+    files = _bundle_file_hashes(entries)
+    listing = (json.dumps({'version': 1, 'files': files}, indent=2, sort_keys=True) + '\n').encode()
     with tarfile.open(bundle, 'w:gz') as tar:
         for arcname, path in entries:
             tar.add(path, arcname='%s/%s' % (name, arcname), recursive=path.is_dir())
+        info = tarfile.TarInfo('%s/%s' % (name, BUNDLE_FILES))
+        info.size, info.mtime, info.mode = len(listing), int(time.time()), 0o644
+        tar.addfile(info, io.BytesIO(listing))
     digest = sha256(bundle)
     checksum = out_dir / (bundle.name + '.sha256')
     checksum.write_text('%s  %s\n' % (digest, bundle.name))
@@ -1606,8 +1673,10 @@ def install_bundle(bundle, only=None, dry_run=False):
         extract_dir = Path(work) / 'unpacked'
         extract_dir.mkdir()
         try:
+            if str(bundle).endswith(('.gz', '.tgz')):
+                _check_gzip_stream(bundle)
             _safe_extract(bundle, extract_dir)
-        except (tarfile.TarError, ValueError, OSError) as error:
+        except (tarfile.TarError, ValueError, OSError, EOFError, zlib.error) as error:
             print('REFUSING: cannot safely unpack the bundle: %s' % error, file=sys.stderr)
             return 1
         roots = [entry for entry in extract_dir.iterdir() if entry.is_dir()]
@@ -1628,6 +1697,15 @@ def install_bundle(bundle, only=None, dry_run=False):
         except ValueError:
             print('REFUSING: the bundled manifest is not valid JSON', file=sys.stderr)
             return 1
+        listed = _bundle_file_problems(root)
+        if listed:
+            print('REFUSING: the bundle contents do not match its file list:')
+            for problem in listed[:20]:
+                print('  - %s' % problem, file=sys.stderr)
+            return 1
+        if listed is None:
+            print('note   : bundle predates %s; only the pinned payloads are verified'
+                  % BUNDLE_FILES)
         problems = _manifest_problems(manifest, root)
         if problems:
             print('REFUSING: the bundle contents do not match its own manifest:')
