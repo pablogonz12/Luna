@@ -194,7 +194,7 @@ if [ "$acc" = true ] && [ -n "$libs" ]; then
 fi
 case "$1" in
   --status)
-    sleep 0.3
+    if [ "$mode" = scanlong ]; then sleep 2; else sleep 0.3; fi
     if [ -n "$libs" ]; then
       printf '{"version":"9.9.9","schema":2,"accept_snapshots_unknown":%s,"libraries":["/lib"],"libraries_detail":%s,"games":%s,"summary":%s}\n' "$acc" "$libs" "$games" "$summary"
     else
@@ -513,8 +513,7 @@ assert(stats.compression.games[1].name == 'Alpha' and stats.compression.games[1]
   'the compression chart must sort by savings')
 assert(stats.dedupe.passes == 3 and stats.dedupe.saved_bytes == 104857600 + 524288, 'dedupe totals are wrong')
 assert(stats.dedupe.newest == 1700000400, 'the newest dedupe stamp is wrong')
-assert(stats.luna.saved_bytes >= 12345678 * 1048576
-  and stats.luna.saved_bytes % (12345678 * 1048576) == 0,
+assert(stats.luna.saved_bytes == 12345678 * 1048576 and #stats.luna.games == 1,
   'Luna per-game savings were not joined')
 assert(stats.luna.games[1].name == 'A'
   and stats.luna.games[1].saved_bytes == 12345678 * 1048576,
@@ -573,12 +572,11 @@ local function scanned(name)
 end
 local function queue_run(name)
   mode(name)
-  assert(call(reg, 'SlsCompressorRun', json.encode({ action = 'run' })).success,
+  local launched = call(reg, 'SlsCompressorRun', json.encode({ action = 'run' }))
+  assert(launched.success,
     'the queue run was refused for ' .. name)
   return wait_for(reg, function(state)
-    local queue = state.queue
-    return queue and (queue.finished
-      or (queue.outcome and queue.outcome.kind == 'not-started'))
+    return state.queue and state.job and state.job.pid == launched.job.pid and not state.job.running
   end, 30)
 end
 
@@ -617,13 +615,19 @@ assert(estimate.games[1].estimate == true and estimate.games[1].estimateMib == 9
 assert(estimate.savings.estimateGames == 1 and estimate.savings.estimateMib == 900
   and estimate.savings.measuredGames == 0, 'the estimate was mixed into the measurement')
 assert(estimate.savings.text:find('estimate', 1, true), 'the estimate is not labelled')
+write_file(dir .. '/run.log', string.rep('x', 600000))
+local durable_estimate = call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue
+assert(durable_estimate.savings.estimateMib == 900 and durable_estimate.savings.measuredGames == 0,
+  'the estimate must survive loss of the log tail')
 
-scanned('interrupt')
+scanned('twogames')
 local interrupted = queue_run('interrupt').queue
 assert(interrupted.games[1].status == 'interrupted', 'exit 143 was not an interrupt')
 assert(interrupted.failed == 0, 'an interrupted game was counted as failed')
 assert(interrupted.outcome.kind == 'interrupted' and interrupted.outcome.game == 'A',
   'the page cannot say where the run was interrupted')
+assert(not interrupted.finished and interrupted.games[2].status == 'pending',
+  'interruption must leave the rest of the queue unfinished')
 
 -- A library refusal (exit 5/6) means nothing was attempted: "not started", the
 -- engine's next step, and the untouched games still pending.
@@ -765,6 +769,56 @@ assert(lost.queue.games[1].status == 'done' and lost.queue.games[1].unmeasured =
 assert(lost.queue.savings.measuredGames == 0 and lost.queue.savings.unmeasuredGames == 1
   and lost.queue.savings.measuredMib == 0 and lost.queue.saved == 0,
   'a lost measurement turned into a measured zero')
+write_file(dir .. '/queue.state', 'done\t1\t1\t0\t123\nfinish\t1\t1\n')
+local legacy = call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue
+assert(legacy.savings.measuredMib == 123 and legacy.games[1].saved == 123 * 1048576)
+write_file(dir .. '/queue.state', 'done\t1\t1\t0\t0\nfinish\t1\t1\n')
+assert(call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue.savings.unmeasuredGames == 1)
+
+-- A new pass must not inherit the preceding refusal or its progress sample.
+write_file(dir .. '/run.log', 'RUN\t1\nREFUSED|locked|/lib|old\nPROGRESS|compress|10|100\n')
+local offset = stat_size(dir .. '/run.log')
+write_file(dir .. '/queue.state', 'pass\tnew-pass\t' .. offset .. '\nstart\t1\t1\t10\tA\t/games/A\n')
+local fresh = call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue
+assert(fresh.outcome.kind == 'stopped' and fresh.refusal == nil and fresh.eta == nil)
+local real_time = os.time
+local clock = real_time()
+os.time = function(...) if select('#', ...) > 0 then return real_time(...) end return clock end
+write_file(dir .. '/run.log', 'PROGRESS|compress|10|100\n')
+write_file(dir .. '/queue.state', 'pass\tpass-one\t0\nstart\t1\t1\t100\tA\t/games/A\n')
+assert(call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue.eta == nil)
+clock = clock + 2
+write_file(dir .. '/run.log', 'PROGRESS|compress|20|100\n')
+assert(call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue.eta ~= nil)
+clock = clock + 2
+write_file(dir .. '/queue.state', 'pass\tpass-two\t0\nstart\t1\t1\t100\tA\t/games/A\n')
+write_file(dir .. '/run.log', 'PROGRESS|compress|30|100\n')
+assert(call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue.eta == nil,
+  'a new pass must not inherit an ETA sample')
+write_file(dir .. '/queue.state', 'pass\tpass-two\t0\nstart\t2\t2\t100\tB\t/games/B\n')
+clock = clock + 2
+write_file(dir .. '/run.log', 'PROGRESS|compress|40|100\n')
+assert(call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue.eta == nil,
+  'a new game must not inherit an ETA sample')
+os.time = real_time
+write_file(dir .. '/queue.state', 'pass\tanother-pass\t' .. offset .. '\n'
+  .. 'done\t1\t2\t3\tCOMPACT|skip|A|running|/games/A\nstart\t2\t2\t10\tB\t/games/B\n')
+write_file(dir .. '/queue.list', 'A\t/games/A\t10\nB\t/games/B\t10\n')
+mode('scanlong')
+local scan_job = call(reg, 'SlsCompressorRun', json.encode({action = 'scan'}))
+assert(scan_job.success)
+local job_file = dir .. '/job.json'
+local scan_record = read(job_file)
+write_file(job_file, json.encode({action = 'run', pid = scan_job.job.pid, startedAt = os.time()}))
+local running_after_skip = call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue
+assert(running_after_skip.outcome.kind == 'running' and running_after_skip.games[1].status == 'skipped')
+write_file(job_file, scan_record)
+local scanning_after_skip = call(reg, 'SlsCompressorGet', json.encode({refresh = true}))
+assert(scanning_after_skip.job.running and scanning_after_skip.job.action == 'scan'
+  and scanning_after_skip.queue.outcome.kind == 'stopped',
+  'a scan must not make an abandoned queue look running')
+wait_for(reg, function(state) return state.job and not state.job.running end, 15)
+mode('snapnone')
 
 -- Nothing is written without the explicit click, and the click writes only the
 -- one key: the other config files survive untouched.
@@ -839,6 +893,8 @@ local override = plugin.build_snapshots(
 assert(override and override.choice and override.choice.enabled == true
   and override.choice.button == 'Turn the override off',
   'an override left on must remain visible and reversible')
+assert(plugin.build_snapshots({}, true).choice.enabled == true)
+assert(plugin.build_snapshots({}, false) == nil)
 for _, other in ipairs({ 'configured', 'unknown', 'missing' }) do
   local mixed = plugin.build_snapshots({
     { path = '/a', snapshots = 'unknown', reason = 'snapshots-unknown', snapshotTool = 'none' },
@@ -857,6 +913,12 @@ assert(known_snap and known_snap.detected and known_snap.choice == nil,
 scanned('plain')
 local qlog = dir .. '/run.log'
 local qprev = qlog .. '.1'
+write_file(qprev, 'previous audit')
+local rename = os.rename
+os.rename = function() return nil end
+local rotated_fail, _, fail_reason = plugin.rotate_log(0)
+os.rename = rename
+assert(not rotated_fail and fail_reason == 'rename-failed' and read(qprev) == 'previous audit')
 os.remove(qprev)
 assert(os.execute('dd if=/dev/zero of=' .. string.format('%q', qlog) .. ' bs=1048576 count=9 status=none'))
 local grown = stat_size(qlog)

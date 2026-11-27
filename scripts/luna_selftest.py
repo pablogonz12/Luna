@@ -592,10 +592,7 @@ EMBED_JS = r'''/*luna-selftest:embed*/ (() => {
     point = [Math.round(x), Math.round(y)];
     hit = document.elementFromPoint(x, y);
     const onRow = Boolean(hit && (hit === chosen.row || chosen.row.contains(hit)));
-    const inLuna = Boolean(hit && hit.closest && hit.closest('#sls-luna-overlay'));
-    const wrapsLuna = Boolean(hit && typeof hit.contains === 'function'
-      && luna && hit.contains(luna));
-    hitInside = onRow || inLuna || wrapsLuna;
+    hitInside = onRow;
   }
   const lumenStyle = style(lumen);
   return {

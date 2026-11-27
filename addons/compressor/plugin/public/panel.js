@@ -94,7 +94,12 @@
       });
       info.appendChild(table);
     }
+    let snapshotPending = null;
+    let snapshotAcknowledged = false;
+    let restoreSnapshotFocus = false;
+    let snapshotButton = null;
     function paintSnapshots(result) {
+      snapshotButton = null;
       const snapshots = result.snapshots || null;
       if (!snapshots) return;
       if (snapshots.detected) info.appendChild(line(snapshots.detected.text));
@@ -109,27 +114,48 @@
       }
       // The engine reports its own view of the setting, so this toggle always
       // shows the current choice: allow, or turn it back off.
+      let allow = null;
       if (choice.enabledKnown === true) {
-        const allow = document.createElement('button');
+        allow = document.createElement('button');
         allow.textContent = choice.button;
+        allow.disabled = snapshotPending !== null;
         allow.style.cssText = 'margin-top:6px;padding:6px;background:#6b5422;color:white;border:0;border-radius:5px;cursor:pointer';
         allow.onclick = async () => {
+          if (document.activeElement === allow) restoreSnapshotFocus = true;
+          snapshotPending = choice.enabled !== true;
+          snapshotAcknowledged = false;
           allow.disabled = true;
           try {
             const out = await rpc('SlsCompressorAcceptSnapshots',
-              { raw: JSON.stringify({ enabled: choice.enabled !== true }) });
+              { raw: JSON.stringify({ enabled: snapshotPending }) });
+            snapshotAcknowledged = true;
             // The backend only starts a detached read-only scan; the next
             // refresh shows the engine's own answer, not an assumption.
             status.textContent = out.message || 'Snapshot setting written.';
             await refresh();
           } catch (e) {
-            allow.disabled = false;
+            snapshotPending = null;
+            snapshotAcknowledged = false;
+            if (snapshotButton) {
+              snapshotButton.disabled = false;
+              if (restoreSnapshotFocus && (document.activeElement === document.body
+                || document.activeElement === document.documentElement
+                || document.activeElement === snapshotButton)) {
+                snapshotButton.focus();
+                restoreSnapshotFocus = false;
+              }
+            }
             atend(status, detail, e);
           }
         };
         box.appendChild(allow);
       }
       info.appendChild(box);
+      snapshotButton = allow;
+      if (restoreSnapshotFocus && allow && !allow.disabled) {
+        allow.focus();
+        restoreSnapshotFocus = false;
+      }
     }
     function paintQueue(result) {
       const queue = result.queue || {};
@@ -162,6 +188,17 @@
         if (pane.hidden) return;
         const summary = (result.status && result.status.summary) || {};
         const job = result.job || {};
+        const focusedSnapshot = info.contains(document.activeElement)
+          && document.activeElement.tagName === 'BUTTON';
+        if (focusedSnapshot) restoreSnapshotFocus = true;
+        else if (document.activeElement && document.activeElement !== document.body
+          && document.activeElement !== document.documentElement) restoreSnapshotFocus = false;
+        if (snapshotPending !== null && snapshotAcknowledged
+          && !(job.running && job.action === 'scan')
+          && result.status && result.status.accept_snapshots_unknown === snapshotPending) {
+          snapshotPending = null;
+          snapshotAcknowledged = false;
+        }
         info.textContent = '';
         paintLibraries(result);
         paintSnapshots(result);

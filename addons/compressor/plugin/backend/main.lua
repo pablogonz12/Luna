@@ -530,7 +530,6 @@ LIST=@LIST@
 LOG=@LOG@
 STATE=@STATE@
 printf 'RUN\t%s\n' "$(date +%s)" >> "$LOG"
-: > "$STATE"
 total=0
 while IFS=$'\t' read -r name path size; do
     [ -n "$path" ] || continue
@@ -550,7 +549,8 @@ while IFS=$'\t' read -r name path size; do
     slice=$(tail -c +$((start+1)) "$LOG" 2>/dev/null)
     record=$(printf '%s\n' "$slice" | grep -a '^COMPACT|done|' | head -n 1)
     [ -n "$record" ] || record=$(printf '%s\n' "$slice" | grep -a '^COMPACT|\(skip\|fail\|estimate\)|' | head -n 1)
-    printf 'done\t%s\t%s\t%s\t%s\n' "$i" "$total" "$rc" "$record" >> "$STATE"
+    estimate=$(printf '%s\n' "$slice" | grep -a '^COMPACT|estimate|' | head -n 1)
+    printf 'done\t%s\t%s\t%s\t%s\t%s\n' "$i" "$total" "$rc" "$record" "$estimate" >> "$STATE"
     # Interrupted, or the library refused before the next game could start:
     # nothing more is attempted, and the remaining games are not failures.
     if [ "$rc" -eq 130 ] || [ "$rc" -eq 143 ]; then
@@ -571,12 +571,13 @@ printf 'finish\t%s\t%s\n' "$i" "$total" >> "$STATE"
   return true
 end
 
-local function read_tail_bytes(path, bytes)
+local function read_tail_bytes(path, bytes, floor_offset)
   local f = io.open(path, 'rb')
   if not f then return '' end
   local size = f:seek('end') or 0
   local start = size - (bytes or 262144)
   if start < 0 then start = 0 end
+  start = math.max(start, floor_offset or 0)
   f:seek('set', start)
   local data = f:read('*a') or ''
   f:close()
@@ -726,7 +727,7 @@ end
 -- Everything the panel needs about the queue: per-game outcomes from the
 -- engine's own lines, a pass-level outcome that distinguishes "not started"
 -- from "failed", the current phase and byte counts, and a rolling ETA.
-local function read_queue(limit)
+local function read_queue(limit, job)
   local raw = read_text(QUEUE_LIST)
   if not raw then return nil end
   local games, byIndex, byName = {}, {}, {}
@@ -754,12 +755,15 @@ local function read_queue(limit)
   -- therefore wins over any later `finish`.
   local cancelled = false
   local lastRc = nil
+  local passId, logOffset
   local state = read_text(QUEUE_STATE)
   if state then
     for line in state:gmatch('[^\n]+') do
       local fields = split_tabs(line)
       local kind = fields[1] or ''
-      if kind == 'start' then
+      if kind == 'pass' then
+        passId, logOffset = fields[2], tonumber(fields[3])
+      elseif kind == 'start' then
         queue.index = tonumber(fields[2]) or 0
         queue.total = tonumber(fields[3]) or queue.total
         queue.current = {
@@ -785,6 +789,16 @@ local function read_queue(limit)
               log_record(entry, rec)
               entry.recorded = true
             end
+          else
+            local legacy = tonumber(record)
+            if legacy and legacy ~= 0 then
+              entry.savedMib, entry.saved, entry.unmeasured = legacy, legacy * MIB, false
+              entry.recorded = true
+            end
+          end
+          local estimate = tostring(fields[6] or '')
+          if estimate:sub(1, 17) == 'COMPACT|estimate|' then
+            log_record(entry, pipe_fields(estimate:sub(9)))
           end
           if rc == 0 then
             entry.status = 'done'
@@ -819,13 +833,9 @@ local function read_queue(limit)
   end
   queue.cancelled = cancelled
   -- The engine's own lines for this pass: reasons, savings, refusal, progress.
-  local log = read_tail_bytes(QUEUE_LOG, limit or 262144)
+  local log = read_tail_bytes(QUEUE_LOG, limit or 262144, logOffset)
   local lines = log_lines(log)
   local start = pass_start(lines)
-  local runEpoch = 0
-  if start > 1 then
-    runEpoch = tonumber(tostring(lines[start - 1]):match('^RUN\t(%d+)') or '') or 0
-  end
   local refusalSeen = nil
   for position = start, #lines do
     local line = lines[position]
@@ -872,8 +882,10 @@ local function read_queue(limit)
   end
   -- A rolling rate and ETA for the current file, from two polls apart.
   local eta = nil
-  if queue.phase == 'compress' and queue.totalBytes > 0 and queue.current then
-    local sampleKey = tostring(runEpoch) .. ':' .. tostring(queue.index)
+  local sampleKey = passId and queue.current and (passId .. ':' .. tostring(queue.index)
+    .. ':' .. queue.current.path) or nil
+  if progress_samples.key ~= sampleKey then progress_samples = { key = sampleKey } end
+  if sampleKey and queue.phase == 'compress' and queue.totalBytes > 0 and queue.current then
     local cur = { at = os.time(), doneBytes = queue.doneBytes, totalBytes = queue.totalBytes }
     local prev = progress_samples[sampleKey]
     eta = eta_from(prev, cur)
@@ -966,15 +978,15 @@ local function read_queue(limit)
   elseif cancelled then
     outcome = { kind = 'stopped', reason = 'cancelled',
       reasonText = 'stopped by you', nextStep = 'the next run resumes with the current game' }
-  elseif lastRc and lastRc ~= 0 then
-    outcome = { kind = 'stopped', reason = 'stopped', reasonText = 'the queue stopped early',
-      nextStep = 'read the log, then run again' }
   elseif queue.total == 0 then
     outcome = { kind = 'empty', reasonText = '' }
+  elseif not (job and job.action == 'run' and job.running) then
+    outcome = { kind = 'stopped', reason = 'stopped', reasonText = 'the queue stopped early',
+      nextStep = 'read the log, then run again' }
   else
     outcome = { kind = 'running', reasonText = '' }
   end
-  if refusalSeen then queue.finished = false end
+  if refusalSeen or outcome.kind == 'interrupted' then queue.finished = false end
   queue.outcome = outcome
   queue.refusal = refusalSeen
   -- A short "next up" list so even the light poll can show what follows.
@@ -1077,7 +1089,8 @@ end
 M.accept_snapshots_file = SNAPSHOT_FILE
 
 local function build_snapshots(libraries, accept)
-  if type(libraries) ~= 'table' or #libraries == 0 then return nil end
+  if type(libraries) ~= 'table' then return nil end
+  if #libraries == 0 and accept ~= true then return nil end
   local enabled = nil
   if type(accept) == 'boolean' then enabled = accept end
   local tool, paths = nil, {}
@@ -1192,7 +1205,6 @@ local function rotate_log(limit)
   if job and alive(job.pid) then return false, file_bytes(QUEUE_LOG), 'live' end
   local size = file_bytes(QUEUE_LOG)
   if size <= limit then return false, size, 'small' end
-  os.remove(LOG_PREV)
   local ok = os.rename(QUEUE_LOG, LOG_PREV)
   if not ok then return false, size, 'rename-failed' end
   return true, 0, 'rotated'
@@ -1369,7 +1381,7 @@ function M.register(registry)
       end
     end
     local plan = build_plan(status, settings)
-    local queue = read_queue(light and 262144 or 524288)
+    local queue = read_queue(light and 262144 or 524288, job)
     if queue then
       queue.active = job ~= nil and job.running and job.action == 'run' and not queue.finished
       queue.next = json.array(queue.next or {})
@@ -1590,7 +1602,10 @@ function M.register(registry)
     end
     -- Per-pass state: a stale `finish` (or a cancel marker) from the previous
     -- pass must not colour this one.
-    if not write_text(QUEUE_STATE, '') then
+    local passId = read_text('/proc/sys/kernel/random/uuid')
+    passId = passId and passId:match('^[%x%-]+')
+    if not passId then return response({success = false, error = 'Could not identify the queue pass'}) end
+    if not write_text(QUEUE_STATE, 'pass\t' .. passId .. '\t' .. file_bytes(QUEUE_LOG) .. '\n') then
       return response({success = false, error = 'Could not reset the queue state'})
     end
     if not write_driver(tool) then
