@@ -818,6 +818,7 @@ assert(scanning_after_skip.job.running and scanning_after_skip.job.action == 'sc
   and scanning_after_skip.queue.outcome.kind == 'stopped',
   'a scan must not make an abandoned queue look running')
 wait_for(reg, function(state) return state.job and not state.job.running end, 15)
+mode('snapnone')
 
 -- Nothing is written without the explicit click, and the click writes only the
 -- one key: the other config files survive untouched.
