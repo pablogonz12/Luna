@@ -60,7 +60,7 @@ MAX_JOURNAL_LINES = 50
 # refresh, check, channels set, terminal, Auto/Apply/Set/Save) is absent on
 # purpose; a name that is not listed here is reported as skipped, never called.
 READONLY_RPCS = (
-    ('SlsLunaInfo', {}),
+    ('SlsLunaInfo', {'raw': '{"observe": true}'}),
     ('SlsLunaHealth', {}),
     ('SlsLunaHost', {}),
     ('SlsLunaLuaTools', {}),
@@ -72,7 +72,7 @@ READONLY_RPCS = (
     ('SlsLunaRefresh', {'raw': '{"action": "status"}'}),
     ('SlsPlaytimeGet', {}),
     ('SlsPresenceGet', {}),
-    ('SlsCompressorGet', {'raw': '{"light": true}'}),
+    ('SlsCompressorGet', {'raw': '{"light": true, "observe": true}'}),
     ('SlsHltbGet', {}),
     ('SlsHltbGames', {}),
     ('SlsSgdbGet', {}),
@@ -895,7 +895,7 @@ def _wait_idle(report, cdp):
     deadline = time.time() + WARMUP_BUDGET_S
     while True:
         try:
-            answer = _rpc_call(cdp, 'SlsLunaInfo', {})
+            answer = _rpc_call(cdp, 'SlsLunaInfo', dict(READONLY_RPCS)['SlsLunaInfo'])
         except (CDPError, Unreachable) as error:
             report.info('warm-up', 'no answer, timing as it is: %s' % error)
             return False

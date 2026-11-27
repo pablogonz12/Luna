@@ -1272,6 +1272,10 @@ def sidecar_freshness(host, installed):
         executable = host_binary() if host == 'luna' else lumen_root() / 'lumen'
         paths = [boot_file(), executable] + [row[3] for row in plan(installed)]
         mtimes = [path.stat().st_mtime for path in paths if path.is_file()]
+        # install copies the executable with copy2, which keeps the build's
+        # mtime; its change time is when it was replaced.
+        if executable.is_file():
+            mtimes.append(executable.stat().st_ctime)
         if not mtimes:
             result['message'] = 'installed payload timestamps unavailable'
             return result
@@ -1289,7 +1293,8 @@ def live_health(reply):
     """Keep health indicators, not account data, game lists or logs."""
     fields = ('success', 'ok', 'healthy', 'error', 'reason', 'enabled', 'running',
               'publishing', 'accountMismatch', 'identityAmbiguous', 'helpersPaused',
-              'helperPauseReason', 'recovered', 'recoveredReason', 'found', 'failed')
+              'helperPauseReason', 'recovered', 'recoveredReason', 'found', 'failed',
+              'prefsDamaged')
     health = {key: reply[key] for key in fields
               if key in reply and isinstance(reply[key], (bool, int, float, str))}
     for section in ('health', 'runtime', 'discord', 'session', 'tool'):
@@ -1410,6 +1415,10 @@ def live_addon_summary(state):
             severity = 'warn'
         reason = runtime.get('helperPauseReason')
         facts.append('helpers paused%s' % (' (' + ' '.join(str(reason).split()) + ')' if reason else ''))
+    if health.get('prefsDamaged') is True:
+        if severity == 'ok':
+            severity = 'warn'
+        facts.append('luna.json unreadable (left as is; opening the Luna panel restores it)')
     if health.get('recovered') or health.get('recoveredReason'):
         reason = health.get('recoveredReason')
         facts.append('recovered%s' % (' (' + ' '.join(str(reason).split()) + ')' if reason else ''))

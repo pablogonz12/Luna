@@ -236,10 +236,10 @@ local function call(registry, name, arg)
   return json.decode(registry[name](arg))
 end
 
-local function wait_for(registry, predicate, seconds)
+local function wait_for(registry, predicate, seconds, arg)
   local deadline = os.time() + (seconds or 5)
   while os.time() <= deadline do
-    local state = call(registry, 'SlsCompressorGet')
+    local state = call(registry, 'SlsCompressorGet', arg)
     if predicate(state) then return state end
     os.execute('sleep 0.15')
   end
@@ -281,6 +281,16 @@ do
     'a carriage-return redraw was not collapsed to its last frame')
 end
 
+-- An observe-only Get (status --live, the selftest) never starts the scan.
+local data_dir = home .. '/.local/share/slssteam-integrations/compressor'
+local function exists(path) local f = io.open(path, 'rb'); if f then f:close() end; return f ~= nil end
+local OBSERVE = json.encode({ light = true, observe = true })
+local looked = call(reg, 'SlsCompressorGet', OBSERVE)
+assert(looked.success and looked.tool.found, 'observe must still report the tool')
+assert(looked.autoStarted == false and looked.job == nil, 'an observe-only Get started a scan')
+assert(not exists(data_dir .. '/attempt.at') and not exists(data_dir .. '/job.json'),
+  'an observe-only Get wrote scan state')
+
 -- First open: the tool is found and the read-only scan starts on its own.
 local first = call(reg, 'SlsCompressorGet')
 assert(first.success, 'Get failed')
@@ -288,6 +298,10 @@ assert(first.tool.found and first.tool.path == tool, 'the installed tool was not
 assert(first.autoStarted == true and first.job and first.job.running and first.job.action == 'scan',
   'the first Get must start the read-only scan')
 
+-- Observing the finished scan neither stamps it done nor adopts its report;
+-- the next ordinary Get does both.
+local seen = wait_for(reg, function(state) return state.job and not state.job.running end, nil, OBSERVE)
+assert(seen.status == nil and not exists(data_dir .. '/job.done'), 'an observe-only Get adopted the report')
 local done = wait_for(reg, function(state) return state.job and not state.job.running end)
 assert(done.status and done.status.summary.pending == 1, 'the scan output was not adopted')
 assert(done.status.games[1].name == 'A' and done.tool.version == '9.9.9', 'the report was not decoded')
