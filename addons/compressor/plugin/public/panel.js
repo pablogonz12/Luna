@@ -94,7 +94,9 @@
       });
       info.appendChild(table);
     }
-    function paintSnapshots(result) {
+    let snapshotPending = null;
+    let snapshotAcknowledged = false;
+    function paintSnapshots(result, restoreFocus) {
       const snapshots = result.snapshots || null;
       if (!snapshots) return;
       if (snapshots.detected) info.appendChild(line(snapshots.detected.text));
@@ -112,22 +114,29 @@
       if (choice.enabledKnown === true) {
         const allow = document.createElement('button');
         allow.textContent = choice.button;
+        allow.disabled = snapshotPending !== null;
         allow.style.cssText = 'margin-top:6px;padding:6px;background:#6b5422;color:white;border:0;border-radius:5px;cursor:pointer';
         allow.onclick = async () => {
+          snapshotPending = choice.enabled !== true;
+          snapshotAcknowledged = false;
           allow.disabled = true;
           try {
             const out = await rpc('SlsCompressorAcceptSnapshots',
-              { raw: JSON.stringify({ enabled: choice.enabled !== true }) });
+              { raw: JSON.stringify({ enabled: snapshotPending }) });
+            snapshotAcknowledged = true;
             // The backend only starts a detached read-only scan; the next
             // refresh shows the engine's own answer, not an assumption.
             status.textContent = out.message || 'Snapshot setting written.';
             await refresh();
           } catch (e) {
+            snapshotPending = null;
+            snapshotAcknowledged = false;
             allow.disabled = false;
             atend(status, detail, e);
           }
         };
         box.appendChild(allow);
+        if (restoreFocus && !allow.disabled) allow.focus();
       }
       info.appendChild(box);
     }
@@ -162,9 +171,17 @@
         if (pane.hidden) return;
         const summary = (result.status && result.status.summary) || {};
         const job = result.job || {};
+        const focusedSnapshot = info.contains(document.activeElement)
+          && document.activeElement.tagName === 'BUTTON';
+        if (snapshotPending !== null && snapshotAcknowledged
+          && !(job.running && job.action === 'scan')
+          && result.status && result.status.accept_snapshots_unknown === snapshotPending) {
+          snapshotPending = null;
+          snapshotAcknowledged = false;
+        }
         info.textContent = '';
         paintLibraries(result);
-        paintSnapshots(result);
+        paintSnapshots(result, focusedSnapshot);
         paintQueue(result);
         paintHealth(result);
         status.textContent = result.tool.found

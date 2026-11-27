@@ -10,6 +10,7 @@ import os
 import re
 import socket
 import socketserver
+import subprocess
 import struct
 import sys
 import tempfile
@@ -24,6 +25,29 @@ SCRIPTS = HERE / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 
 import luna_selftest  # noqa: E402
+
+
+class EmbedProbeTest(unittest.TestCase):
+    def test_ancestor_hit_is_not_clickable_but_row_descendant_is(self):
+        fixture = r"""
+const rect={left:0,top:0,right:100,bottom:40,width:100,height:40};
+const child={tagName:'SPAN'};
+const row={tagName:'BUTTON',className:'sls-luna-tab',textContent:'Lumen',
+  getClientRects:()=>[rect],getBoundingClientRect:()=>rect,
+  classList:{contains:()=>true},contains:x=>x===child};
+const side={getBoundingClientRect:()=>rect,querySelectorAll:()=>[row]};
+const luna={tagName:'DIV',querySelector:s=>s==='.sls-luna-side'?side:null,
+  contains:()=>false,getBoundingClientRect:()=>rect};
+const body={tagName:'BODY',contains:()=>true};
+global.document={getElementById:id=>id==='sls-luna-overlay'?luna:null,
+  elementFromPoint:()=>process.argv[1]==='ancestor'?body:child};
+global.getComputedStyle=()=>({zIndex:'0',display:'block'});
+console.log(JSON.stringify(PROBE));
+""".replace('PROBE', luna_selftest.EMBED_JS)
+        for target, expected in [('ancestor', False), ('child', True)]:
+            result = subprocess.run(['node', '-e', fixture, target], check=True,
+                                    capture_output=True, text=True)
+            self.assertEqual(json.loads(result.stdout)['sidebarClickable'], expected)
 
 TITLES = {'playtime': 'Playtime', 'presence': 'Presence', 'compressor': 'Compressor',
           'hltb': 'HowLongToBeat', 'steamgrid': 'SteamGridDB artwork',
