@@ -475,6 +475,23 @@ do
     'the legacy backup is still reachable through Undo')
 end
 
+-- A clock that moved backwards must not let pruning delete the copy that
+-- authorises a Reset: history stamps never go below the newest entry.
+do
+  local future = os.time() + 100000
+  local hist = grid_dir .. '/.sls-luna-history/406p'
+  os.execute("mkdir -p '" .. hist .. "'")
+  for k = 1, 5 do
+    local f = io.open(hist .. '/' .. future .. '-00000' .. k .. '.png', 'wb'); f:write('FUTURE' .. k); f:close()
+  end
+  local cur = io.open(grid_dir .. '/406p.png', 'wb'); cur:write('ACTIVE'); cur:close()
+  local r = call('SlsSgdbReset', { raw = json.encode({ appid = 406, kind = 'grid' }) })
+  assert(r.success == true and r.removed == true, tostring(r.error))
+  local u = call('SlsSgdbUndo', { raw = json.encode({ appid = 406, kind = 'grid' }) })
+  assert(u.success == true and file_text(grid_dir .. '/406p.png') == 'ACTIVE',
+    'undo after a reset must restore the active art even with future-stamped history')
+end
+
 -- ---------------------------------------------------------------- refusals
 
 local bad_mime = call('SlsSgdbApply', { raw = json.encode({ appid = 1145360, kind = 'grid',

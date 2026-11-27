@@ -377,14 +377,16 @@ local function push_history(directory, appid, kind, author)
   local dir = slot_history_dir(directory, slot, kind)
   local made, made_why = pcall(fs.create_directories, dir)
   if not made then return nil, tostring(made_why) end
-  local stamp = os.time()
-  -- Entries sort by (stamp, sequence), so the sequence continues after any
-  -- entry already stamped this second: two changes within one second never
-  -- collide (which overwrote the older step) and the newer one sorts last.
-  local seq = 0
+  -- Entries sort by (stamp, sequence). The stamp never goes below the newest
+  -- entry (a clock that moved backwards would otherwise sort this copy first
+  -- and prune it straight away), and the sequence continues after any entry
+  -- with that stamp, so two changes within one second never collide.
+  local stamp, seq = os.time(), 0
   for _, name in ipairs(history_entries(directory, slot, kind)) do
     local s, n = name:match('^(%d+)%-(%d+)%.')
-    if tonumber(s) == stamp and tonumber(n) > seq then seq = tonumber(n) end
+    s, n = tonumber(s), tonumber(n)
+    if s > stamp then stamp, seq = s, 0 end
+    if s == stamp and n > seq then seq = n end
   end
   local written = {}
   local written_current = {}
@@ -432,15 +434,12 @@ local function keep_undone(directory, appid, kind, paths)
   local dir = slot_history_dir(directory, math.floor(appid), kind) .. '/undone'
   local made, made_why = pcall(fs.create_directories, dir)
   if not made then return false, tostring(made_why) end
-  local stamp = os.time()
-  local names = {}
+  local stamp, seq = os.time(), 0
   for _, name in ipairs(list_dir(dir)) do
-    if name:match('^%d+%-%d+%.[%w]+$') then names[#names + 1] = name end
-  end
-  local seq = 0
-  for _, name in ipairs(names) do
-    local st, n = name:match('^(%d+)%-(%d+)%.')
-    if tonumber(st) == stamp and tonumber(n) > seq then seq = tonumber(n) end
+    local st, n = name:match('^(%d+)%-(%d+)%.[%w]+$')
+    st, n = tonumber(st), tonumber(n)
+    if st and st > stamp then stamp, seq = st, 0 end
+    if st and st == stamp and n > seq then seq = n end
   end
   local created = {}
   local function undo_created()
