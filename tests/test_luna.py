@@ -2567,6 +2567,23 @@ class VendorTestCase(unittest.TestCase):
         self.assertIn('pinned addons/playtime', result.stdout)
 
 
+    def test_a_source_whose_head_cannot_be_resolved_changes_nothing(self):
+        # A worktree whose owning repository was removed keeps its .git file.
+        parent = Path(self.temp.name) / 'sources'
+        broken = parent / 'slsteam-playtime'
+        broken.mkdir(parents=True)
+        (broken / '.git').write_text('gitdir: %s\n' % (Path(self.temp.name) / 'gone/.git/worktrees/x'))
+        manifest_path = self.repo / 'vendor/MANIFEST.json'
+        before = manifest_path.read_bytes()
+        payload = self.repo / 'addons/playtime/plugin/backend/main.lua'
+        payload_before = payload.read_bytes()
+        result = self.vendor('--only', 'playtime', '--source-dir', str(parent))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cannot resolve HEAD', result.stderr + result.stdout)
+        self.assertEqual(manifest_path.read_bytes(), before)
+        self.assertEqual(payload.read_bytes(), payload_before)
+
+
 BRIDGE_STATUS_SCRIPT = '''
 import importlib.util, json
 spec = importlib.util.spec_from_file_location('luna_beat', %r)

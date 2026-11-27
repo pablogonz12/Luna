@@ -8151,8 +8151,19 @@ def cmd_vendor(options):
         sources[name] = source
 
     def head(source):
-        return subprocess.run(['git', '-C', str(source), 'rev-parse', 'HEAD'],
-                              capture_output=True, text=True).stdout.strip()
+        # Strict: a worktree whose owning repository is gone still has a .git
+        # file, and an empty revision would only fail after a payload is deleted.
+        result = subprocess.run(['git', '-C', str(source), 'rev-parse', '--verify', 'HEAD^{commit}'],
+                                capture_output=True, text=True)
+        commit = result.stdout.strip()
+        if result.returncode != 0 or not commit:
+            raise SystemExit('FAIL: cannot resolve HEAD of %s: %s' % (source, result.stderr.strip() or 'no commit'))
+        return commit
+
+    # Resolve every source before anything on disk changes, so one broken
+    # checkout cannot leave an earlier payload replaced but unrecorded.
+    for source in sources.values():
+        head(source)
 
     def show(source, commit, path):
         result = subprocess.run(['git', '-C', str(source), 'show', '%s:%s' % (commit, path)],
