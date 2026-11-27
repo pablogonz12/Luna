@@ -1670,7 +1670,9 @@ function M.register(registry)
     local version=old and old.version or 0
     if not old or old.raw~=raw then version=version+1 end
     fingerprints[path]={raw=raw,version=version}
-    return tostring(size)..':'..tostring(mtime)..':'..version
+    -- The bytes are returned too, so the caller parses exactly what was
+    -- fingerprinted (a second read could see a newer write).
+    return tostring(size)..':'..tostring(mtime)..':'..version, raw
   end
   -- A newer backup import supersedes every machine's earlier contribution (it
   -- is a replace-all by design; the RPC already refuses to run during a live
@@ -1699,7 +1701,7 @@ function M.register(registry)
     if scoped then
       for _,file in ipairs(contribution_files(account)) do
         seen[file.path]=true
-        local state=file_state(file.path)
+        local state,content=file_state(file.path)
         index[#index+1]=file.name..'='..state
         if file.path~=own_path then
           local cached=peer_cache[file.path]
@@ -1710,7 +1712,7 @@ function M.register(registry)
             if cached.mismatch then nameMismatch[#nameMismatch+1]=cached.mismatch end
           else
             local problem=nil
-            local raw=read_file(file.path)
+            local raw=type(content)=='string' and #content>0 and content or nil
             if raw then
               local ok,obj=pcall(json.decode,raw)
               if ok then peer=sanitize_own(obj,account) end
