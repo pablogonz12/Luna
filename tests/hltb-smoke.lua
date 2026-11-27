@@ -796,7 +796,7 @@ cfg:write('BootStrapperInhibitAll\n'); cfg:close()
 assert(json.decode(registry.SlsLunaHealth()).health.steam.client.updatesBlocked == true,
   'a changed input must invalidate the health memo')
 cfg = io.open(home .. '/.local/share/Steam/steam.cfg', 'wb')
-cfg:write('BootStrapperInhibitNone\n'); cfg:close() -- same size and stamp
+cfg:write('BootStrapperInhibitOff\n'); cfg:close() -- same size and stamp
 assert(call('SlsLunaHealth').health.steam.client.updatesBlocked == true, 'same stamp stays cached')
 assert(call('SlsLunaHealth', {raw = json.encode({refresh = true})}).health.steam.client.updatesBlocked == false,
   'serialized refresh must bypass the health cache through positional dispatch')
