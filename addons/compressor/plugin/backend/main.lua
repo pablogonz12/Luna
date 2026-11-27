@@ -978,11 +978,11 @@ local function read_queue(limit, job)
   elseif cancelled then
     outcome = { kind = 'stopped', reason = 'cancelled',
       reasonText = 'stopped by you', nextStep = 'the next run resumes with the current game' }
-  elseif job and job.action == 'run' and not job.running then
-    outcome = { kind = 'stopped', reason = 'stopped', reasonText = 'the queue stopped early',
-      nextStep = 'read the log, then run again' }
   elseif queue.total == 0 then
     outcome = { kind = 'empty', reasonText = '' }
+  elseif not (job and job.action == 'run' and job.running) then
+    outcome = { kind = 'stopped', reason = 'stopped', reasonText = 'the queue stopped early',
+      nextStep = 'read the log, then run again' }
   else
     outcome = { kind = 'running', reasonText = '' }
   end

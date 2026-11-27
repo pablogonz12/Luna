@@ -96,7 +96,8 @@
     }
     let snapshotPending = null;
     let snapshotAcknowledged = false;
-    function paintSnapshots(result, restoreFocus) {
+    let restoreSnapshotFocus = false;
+    function paintSnapshots(result) {
       const snapshots = result.snapshots || null;
       if (!snapshots) return;
       if (snapshots.detected) info.appendChild(line(snapshots.detected.text));
@@ -111,12 +112,14 @@
       }
       // The engine reports its own view of the setting, so this toggle always
       // shows the current choice: allow, or turn it back off.
+      let allow = null;
       if (choice.enabledKnown === true) {
-        const allow = document.createElement('button');
+        allow = document.createElement('button');
         allow.textContent = choice.button;
         allow.disabled = snapshotPending !== null;
         allow.style.cssText = 'margin-top:6px;padding:6px;background:#6b5422;color:white;border:0;border-radius:5px;cursor:pointer';
         allow.onclick = async () => {
+          if (document.activeElement === allow) restoreSnapshotFocus = true;
           snapshotPending = choice.enabled !== true;
           snapshotAcknowledged = false;
           allow.disabled = true;
@@ -136,9 +139,12 @@
           }
         };
         box.appendChild(allow);
-        if (restoreFocus && !allow.disabled) allow.focus();
       }
       info.appendChild(box);
+      if (restoreSnapshotFocus && allow && !allow.disabled) {
+        allow.focus();
+        restoreSnapshotFocus = false;
+      }
     }
     function paintQueue(result) {
       const queue = result.queue || {};
@@ -173,6 +179,9 @@
         const job = result.job || {};
         const focusedSnapshot = info.contains(document.activeElement)
           && document.activeElement.tagName === 'BUTTON';
+        if (focusedSnapshot) restoreSnapshotFocus = true;
+        else if (document.activeElement && document.activeElement !== document.body
+          && document.activeElement !== document.documentElement) restoreSnapshotFocus = false;
         if (snapshotPending !== null && snapshotAcknowledged
           && !(job.running && job.action === 'scan')
           && result.status && result.status.accept_snapshots_unknown === snapshotPending) {
@@ -181,7 +190,7 @@
         }
         info.textContent = '';
         paintLibraries(result);
-        paintSnapshots(result, focusedSnapshot);
+        paintSnapshots(result);
         paintQueue(result);
         paintHealth(result);
         status.textContent = result.tool.found

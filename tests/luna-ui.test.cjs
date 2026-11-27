@@ -119,11 +119,14 @@ test('standalone snapshot toggle stays pending and polling preserves focus',asyn
   let active=null, poll;
   document.createElement=((original)=>tag=>{
     const element=original(tag);
-    element.focus=()=>{active=element;};
+    element.focus=()=>{
+      if(!element.disabled && findNode(document.body,node=>node===element)) active=element;
+    };
     element.contains=other=>!!findNode(element,node=>node===other);
     return element;
   })(document.createElement);
-  Object.defineProperty(document,'activeElement',{get:()=>active});
+  Object.defineProperty(document,'activeElement',{get:()=>
+    active && findNode(document.body,node=>node===active) ? active : document.body});
   const choice={enabled:false,enabledKnown:true,button:'Allow',title:'Choice',text:'text'};
   let result={success:true,tool:{found:true},status:{accept_snapshots_unknown:false},
     snapshots:{choice},job:{action:'scan',running:false}};
@@ -141,11 +144,14 @@ test('standalone snapshot toggle stays pending and polling preserves focus',asyn
   assert.equal(document.activeElement,button());
   await button().onclick();
   assert.equal(button().disabled,true);
+  poll(); await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(button().disabled,true);
   result={...result,status:{accept_snapshots_unknown:true},job:{action:'scan',running:false},
     snapshots:{choice:{...choice,enabled:true,button:'Turn off'}}};
   poll(); await new Promise(resolve=>setImmediate(resolve));
   const off=findNode(pane,node=>node.tagName==='BUTTON' && node.textContent==='Turn off');
   assert.ok(off && !off.disabled);
+  assert.equal(document.activeElement,off,'focus returns after pending renders');
 });
 
 function textOf(node){

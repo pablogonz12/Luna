@@ -194,7 +194,7 @@ if [ "$acc" = true ] && [ -n "$libs" ]; then
 fi
 case "$1" in
   --status)
-    sleep 0.3
+    if [ "$mode" = scanlong ]; then sleep 2; else sleep 0.3; fi
     if [ -n "$libs" ]; then
       printf '{"version":"9.9.9","schema":2,"accept_snapshots_unknown":%s,"libraries":["/lib"],"libraries_detail":%s,"games":%s,"summary":%s}\n' "$acc" "$libs" "$games" "$summary"
     else
@@ -780,7 +780,7 @@ write_file(dir .. '/run.log', 'RUN\t1\nREFUSED|locked|/lib|old\nPROGRESS|compres
 local offset = stat_size(dir .. '/run.log')
 write_file(dir .. '/queue.state', 'pass\tnew-pass\t' .. offset .. '\nstart\t1\t1\t10\tA\t/games/A\n')
 local fresh = call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue
-assert(fresh.outcome.kind == 'running' and fresh.refusal == nil and fresh.eta == nil)
+assert(fresh.outcome.kind == 'stopped' and fresh.refusal == nil and fresh.eta == nil)
 local real_time = os.time
 local clock = real_time()
 os.time = function(...) if select('#', ...) > 0 then return real_time(...) end return clock end
@@ -804,8 +804,20 @@ os.time = real_time
 write_file(dir .. '/queue.state', 'pass\tanother-pass\t' .. offset .. '\n'
   .. 'done\t1\t2\t3\tCOMPACT|skip|A|running|/games/A\nstart\t2\t2\t10\tB\t/games/B\n')
 write_file(dir .. '/queue.list', 'A\t/games/A\t10\nB\t/games/B\t10\n')
+mode('scanlong')
+local scan_job = call(reg, 'SlsCompressorRun', json.encode({action = 'scan'}))
+assert(scan_job.success)
+local job_file = dir .. '/job.json'
+local scan_record = read(job_file)
+write_file(job_file, json.encode({action = 'run', pid = scan_job.job.pid, startedAt = os.time()}))
 local running_after_skip = call(reg, 'SlsCompressorGet', json.encode({refresh = true})).queue
 assert(running_after_skip.outcome.kind == 'running' and running_after_skip.games[1].status == 'skipped')
+write_file(job_file, scan_record)
+local scanning_after_skip = call(reg, 'SlsCompressorGet', json.encode({refresh = true}))
+assert(scanning_after_skip.job.running and scanning_after_skip.job.action == 'scan'
+  and scanning_after_skip.queue.outcome.kind == 'stopped',
+  'a scan must not make an abandoned queue look running')
+wait_for(reg, function(state) return state.job and not state.job.running end, 15)
 
 -- Nothing is written without the explicit click, and the click writes only the
 -- one key: the other config files survive untouched.
