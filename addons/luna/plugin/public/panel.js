@@ -1800,7 +1800,11 @@
           fresh.disabled = true;
           try {
             await rpc(w, 'SlsPresenceAcknowledgeCorruption', { raw: JSON.stringify({ acknowledge: true }) });
+            // A pass already in flight may have read the locked state before
+            // the acknowledgement: let it finish, then read presence afresh.
             await refresh();
+            await loads.presence();
+            paint();
           } catch (error) { showError(body, error); } finally { fresh.disabled = false; }
         };
         body.appendChild(fresh);

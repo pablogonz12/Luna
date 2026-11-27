@@ -397,7 +397,10 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
       }
       if(fn==='SlsPlaytimeEdit')return JSON.stringify({success:true});
       if(fn==='SlsPresenceSetEnabled')return JSON.stringify({success:true,enabled:payload.enabled});
-      if(fn==='SlsPresenceAcknowledgeCorruption')return JSON.stringify({success:true});
+      if(fn==='SlsPresenceAcknowledgeCorruption'){
+        if(presence)presence.corruptionRequiresAcknowledgement=false;
+        return JSON.stringify({success:true});
+      }
       if(fn==='SlsCompressorGet'){
         // Mirror the backend: the light shape drops the per-game list and the
         // statistics, so a tab that needs either must ask for the full one.
@@ -827,6 +830,44 @@ test('a corrupt presence state shows the notice, pauses the controls and starts 
   const call=calls.filter(c=>c.fn==='SlsPresenceAcknowledgeCorruption').pop();
   assert.ok(call,'Start fresh must call SlsPresenceAcknowledgeCorruption');
   assert.deepEqual(call.payload,{acknowledge:true},"Start fresh must send the serialized acknowledgement");
+});
+
+test('Start fresh reads presence again even when a refresh was already in flight',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const presence={success:true,corrupt:true,corruptionRequiresAcknowledgement:true,quarantineDirectory:'/q',
+    quarantinePaths:[],state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}};
+  let hold=false,release=null;
+  const {w,calls}=fakeWindow(document,{presence,gate:(fn)=>{
+    if(fn!=='SlsPresenceGet'||!hold)return null;
+    hold=false;
+    // This read saw the locked state; it answers only after the acknowledgement.
+    const locked=JSON.stringify(presence);
+    return new Promise(resolve=>{release=()=>resolve(locked);});
+  }});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const overlay=document.getElementById('sls-luna-overlay');
+  findNode(overlay,node=>node.className==='sls-luna-tab' && node.textContent==='Presence').onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  hold=true;
+  const refreshButton=findNode(overlay,node=>node.textContent==='Refresh' && typeof node.onclick==='function');
+  assert.ok(refreshButton,'the header Refresh button was not found');
+  refreshButton.onclick();
+  await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(release,'the in-flight presence read was not held');
+  const fresh=findNode(overlay,node=>node.id==='sls-luna-presence-start-fresh');
+  const clicked=fresh.onclick();
+  await new Promise(resolve=>setTimeout(resolve,10));
+  release();
+  await clicked;
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const ack=calls.findIndex(c=>c.fn==='SlsPresenceAcknowledgeCorruption');
+  assert.ok(ack>=0,'Start fresh did not acknowledge');
+  assert.ok(calls.slice(ack+1).some(c=>c.fn==='SlsPresenceGet'),'presence was not read after the acknowledgement');
+  assert.equal(findNode(document.getElementById('sls-luna-overlay'),node=>node.id==='sls-luna-presence-corruption'),null,
+    'the stale locked state was rendered after Start fresh');
 });
 
 test('the session-time switch defaults on and toggles through the real RPC',async()=>{
