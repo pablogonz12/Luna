@@ -2205,8 +2205,7 @@ def apply_unit_paths():
 def systemd_available():
     """True when a user manager can start the waiter unit."""
     try:
-        result = subprocess.run(['systemctl', '--user', 'is-system-running'],
-                                capture_output=True, text=True, timeout=10)
+        result = systemctl_user('is-system-running', timeout=10)
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0 or result.stdout.strip() in ('running', 'degraded', 'starting')
@@ -2234,7 +2233,7 @@ def write_apply_unit():
         'KillMode=mixed\n'
         'TimeoutStopSec=300\n'
         'ExecStart=%s %s autoupdate --wait-steam\n' % (sys.executable, luna_tools_dir() / 'luna.py'))
-    subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+    systemctl_user('daemon-reload')
     return service
 
 
@@ -2245,15 +2244,14 @@ def start_apply_service():
     unit_dir, service = apply_unit_paths()
     if not service.is_file():
         write_apply_unit()
-    result = subprocess.run(['systemctl', '--user', 'start', '--no-block', APPLY_UNIT],
-                            capture_output=True, text=True)
+    result = systemctl_user('start', '--no-block', APPLY_UNIT)
     return 'service' if result.returncode == 0 else 'timer'
 
 
 def stop_apply_service():
     unit_dir, service = apply_unit_paths()
     if service.is_file():
-        subprocess.run(['systemctl', '--user', 'stop', APPLY_UNIT], capture_output=True)
+        systemctl_user('stop', APPLY_UNIT)
 
 
 def cmd_check(options):
@@ -2280,10 +2278,8 @@ def cmd_timer(options):
     """Enable, disable or report the unattended-update timer."""
     unit_dir, service, timer = unit_paths()
     if options.action == 'status':
-        enabled = subprocess.run(['systemctl', '--user', 'is-enabled', 'luna-autoupdate.timer'],
-                                 capture_output=True, text=True)
-        active = subprocess.run(['systemctl', '--user', 'is-active', 'luna-autoupdate.timer'],
-                                capture_output=True, text=True)
+        enabled = systemctl_user('is-enabled', 'luna-autoupdate.timer')
+        active = systemctl_user('is-active', 'luna-autoupdate.timer')
         print(json.dumps({'enabled': enabled.stdout.strip() or 'unknown',
                           'active': active.stdout.strip() or 'unknown',
                           'units': str(unit_dir)}, sort_keys=True))
@@ -2309,21 +2305,19 @@ def cmd_timer(options):
             'RandomizedDelaySec=120\n\n'
             '[Install]\n'
             'WantedBy=timers.target\n')
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
-        result = subprocess.run(['systemctl', '--user', 'enable', '--now', 'luna-autoupdate.timer'],
-                                capture_output=True, text=True)
+        systemctl_user('daemon-reload')
+        result = systemctl_user('enable', '--now', 'luna-autoupdate.timer')
         if result.returncode != 0:
             print('FAILED: %s' % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
             return 1
         print('unattended updates: on (%s)' % timer)
         return EXIT_OK
     if options.action == 'off':
-        subprocess.run(['systemctl', '--user', 'disable', '--now', 'luna-autoupdate.timer'],
-                       capture_output=True)
+        systemctl_user('disable', '--now', 'luna-autoupdate.timer')
         for path in (timer, service):
             if path.exists():
                 path.unlink()
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        systemctl_user('daemon-reload')
         print('unattended updates: off')
         return EXIT_OK
     print('unknown timer action: %s' % options.action, file=sys.stderr)
@@ -2342,8 +2336,7 @@ def retire_lumen_hook():
     names = ['luna-lumen-hook.' + kind for kind in ('path', 'timer', 'service')]
     found = [unit_dir / name for name in names if (unit_dir / name).is_file()]
     if found:
-        subprocess.run(['systemctl', '--user', 'disable', '--now', names[0], names[1]],
-                       capture_output=True)
+        systemctl_user('disable', '--now', names[0], names[1])
         for path in found:
             try:
                 if mark in path.read_text():
@@ -2352,7 +2345,7 @@ def retire_lumen_hook():
                     print('note: %s is not Luna-managed; left in place' % path, file=sys.stderr)
             except OSError:
                 pass
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        systemctl_user('daemon-reload')
         print('hook      : retired the automatic Lumen recovery units')
     store_dir = home() / '.local/share/slssteam-luna'
     for stale in ('lumen-hook.py',):
@@ -2387,11 +2380,15 @@ def host_unit_path():
     return home() / '.config/systemd/user' / HOST_UNIT
 
 
-def systemctl_user(*args):
+def systemctl_user(*args, timeout=None):
+    """The one way Luna talks to the user's systemd manager (tests replace it)."""
     try:
-        return subprocess.run(['systemctl', '--user'] + list(args), capture_output=True, text=True)
+        return subprocess.run(['systemctl', '--user'] + list(args), capture_output=True, text=True,
+                              timeout=timeout)
     except FileNotFoundError:
         return subprocess.CompletedProcess(args, 127, '', 'systemctl not found')
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 124, '', 'systemctl timed out')
 
 
 def unit_state(unit):
@@ -7938,8 +7935,7 @@ def cmd_uninstall(options):
     # reinstall after the user asked for removal.
     try:
         unit_dir, service, timer = unit_paths()
-        subprocess.run(['systemctl', '--user', 'disable', '--now', 'luna-autoupdate.timer'],
-                       capture_output=True)
+        systemctl_user('disable', '--now', 'luna-autoupdate.timer')
         stop_apply_service()
         for path in (timer, service, apply_unit_paths()[1]):
             try:
@@ -7947,7 +7943,7 @@ def cmd_uninstall(options):
                     path.unlink()
             except OSError:
                 pass
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        systemctl_user('daemon-reload')
         pending = luna_tools_dir() / 'pending.json'
         try:
             if pending.exists():

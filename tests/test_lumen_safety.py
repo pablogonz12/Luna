@@ -116,6 +116,17 @@ class SafetyBase(unittest.TestCase):
             patch = mock.patch.object(self.m, name, value)
             patch.start()
             self.addCleanup(patch.stop)
+        real_run = subprocess.run
+
+        def guarded(cmd, *args, **kwargs):
+            # Tripwire: a systemctl that escapes the mocks would drive the
+            # developer's real user units (it once started luna-apply.service).
+            if isinstance(cmd, (list, tuple)) and cmd and os.path.basename(str(cmd[0])) == 'systemctl':
+                raise AssertionError('test reached the real systemctl: %r' % (list(cmd),))
+            return real_run(cmd, *args, **kwargs)
+        tripwire = mock.patch.object(subprocess, 'run', guarded)
+        tripwire.start()
+        self.addCleanup(tripwire.stop)
 
     # -- helpers
     def snapshot(self):

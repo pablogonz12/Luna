@@ -18,6 +18,7 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parents[1]
 LUNA = HERE / 'scripts' / 'luna.py'
@@ -100,6 +101,20 @@ esac
     niri.chmod(0o755)
     return directory
 
+
+
+def no_real_systemctl(case):
+    """Tripwire for in-process tests: any systemctl that escapes the mocks fails
+    the test instead of starting or stopping the developer's real user units."""
+    real_run = subprocess.run
+
+    def guarded(cmd, *args, **kwargs):
+        if isinstance(cmd, (list, tuple)) and cmd and os.path.basename(str(cmd[0])) == 'systemctl':
+            raise AssertionError('test reached the real systemctl: %r' % (list(cmd),))
+        return real_run(cmd, *args, **kwargs)
+    patch = mock.patch.object(subprocess, 'run', guarded)
+    patch.start()
+    case.addCleanup(patch.stop)
 
 class LunaTestCase(unittest.TestCase):
     def setUp(self):
@@ -1716,6 +1731,8 @@ class LumenUpdateTestCase(unittest.TestCase):
             out += 'lumen self-update blocked\n' if 'LUNA-LUMEN-UPDATE-BLOCK' in about else ''
             return subprocess.CompletedProcess([], 0, out, '')
 
+        self.systemctl_calls = []
+
         def install(options):
             self.installs.append('luna-install')
             (self.lumen / 'lua/boot.lua').write_text('boot v2 SLS-ADDONS-INTEGRATION')
@@ -1726,10 +1743,12 @@ class LumenUpdateTestCase(unittest.TestCase):
                             ('verify_base_installer', lambda ref, sha: 'f' * 64),
                             ('lumen_upstream_state', lambda *a, **k: {'overall': 'newer', 'components': [], 'channels': {}}),
                             ('patcher', fake_patcher), ('cmd_install', install),
-                            ('systemctl_user', lambda *a, **k: subprocess.CompletedProcess([], 0, 'inactive', ''))):
+                            ('systemctl_user', lambda *a, **k: self.systemctl_calls.append(a)
+                             or subprocess.CompletedProcess([], 0, 'inactive', ''))):
             patch = mock.patch.object(self.m, name, value)
             patch.start()
             self.addCleanup(patch.stop)
+        no_real_systemctl(self)
 
     def tearDown(self):
         shutil.rmtree(self.temp, ignore_errors=True)
@@ -1787,6 +1806,18 @@ class LumenUpdateTestCase(unittest.TestCase):
         self.assertEqual(self.installs, [], 'queueing must not run the installer')
         self.assertEqual(self.run_lumen('cancel'), 0)
         self.assertFalse(self.m.read_lumen_pending())
+
+    def test_queue_and_cancel_drive_systemd_only_through_systemctl_user(self):
+        # Regression: start/stop of luna-apply.service used to call subprocess
+        # directly, so this in-process test started the real user unit.
+        import io, contextlib
+        self.steam_running = True
+        self.m.systemd_available = lambda: True
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_lumen('update', queue=True), 0)
+            self.assertEqual(self.run_lumen('cancel'), 0)
+        self.assertIn(('start', '--no-block', 'luna-apply.service'), self.systemctl_calls)
+        self.assertIn(('stop', 'luna-apply.service'), self.systemctl_calls)
 
     def test_queued_update_waits_for_steam_then_runs(self):
         self.m.write_json_file(self.m.lumen_pending_path(), {'action': 'update'})
