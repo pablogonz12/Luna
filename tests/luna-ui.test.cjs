@@ -1185,6 +1185,29 @@ test('Run now is gated by the enabled operations and sends the composed run',asy
   assert.equal(called.payload.action,'run','the drawer must start the composed run');
 });
 
+test('an open run confirmation cannot start while a snapshot refresh is pending',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const fixture=compressorFixture();
+  const {w,calls}=fakeWindow(document,{compressor:fixture});
+  mount(w);
+  let overlay=await openCompressor(document);
+  findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Run now').onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  fixture.rescan={generation:5,failed:'Refresh failed; retry.'};
+  await clickRefresh(document);
+  overlay=document.getElementById('sls-luna-overlay');
+  const start=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Start the pass');
+  assert.ok(start && start.disabled,'the confirmation must be disabled during refresh');
+  start.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls.filter(c=>c.fn==='SlsCompressorRun').length,0);
+  delete fixture.rescan;
+  await clickRefresh(document);
+  const ready=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Start the pass');
+  assert.ok(ready && !ready.disabled,'the confirmation must unlock after refresh');
+});
+
 test('the status tab shows live progress while a run is in flight',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);

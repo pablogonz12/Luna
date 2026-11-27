@@ -247,7 +247,7 @@ end
 
 -- A hard link claims the lock and publishes its owner in the same operation.
 -- flock serializes claim, release and stale-owner cleanup, not the job itself.
-local reap_lock = 'read owner started boot < ' .. shq(JOB_LOCK) .. ' || :; '
+local reap_lock = 'read owner started boot nonce < ' .. shq(JOB_LOCK) .. ' || :; '
   .. 'case "$owner" in ""|*[!0-9]*) exit 0;; esac; '
   .. 'current=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || exit 0; '
   .. 'printf "%s\\n" "$current" | '
@@ -272,15 +272,17 @@ local function lock_job()
   local stat = read_text('/proc/self/stat') or ''
   local pid = tonumber(stat:match('^(%d+)'))
   local identity = pid and process_identity(pid)
-  if not identity or not identity.start or not BOOT_ID then return false end
+  local nonce = (read_text('/proc/sys/kernel/random/uuid') or ''):match('^[%x%-]+')
+  if not identity or not identity.start or not BOOT_ID or not nonce then return false end
+  local owner = pid .. ' ' .. identity.start .. ' ' .. BOOT_ID .. ' ' .. nonce
   local ownerFile = JOB_LOCK .. '.owner.' .. pid
-  if not write_text(ownerFile, pid .. ' ' .. identity.start .. ' ' .. BOOT_ID .. '\n') then return false end
+  if not write_text(ownerFile, owner .. '\n') then return false end
   for attempt = 1, 120 do
     local ok = os.execute((HAS_FLOCK and ('flock -x ' .. shq(JOB_LOCK .. '.reap') .. ' ') or '') .. 'ln '
       .. shq(ownerFile) .. ' ' .. shq(JOB_LOCK) .. ' 2>/dev/null')
     if ok == true or ok == 0 then
       os.remove(ownerFile)
-      return true
+      return true, owner
     end
     if HAS_FLOCK then os.execute(reap_command) end
     os.execute('sleep 0.05')
@@ -289,9 +291,10 @@ local function lock_job()
   return false
 end
 
-local function unlock_job()
+local function unlock_job(owner)
+  local release = '[ "$(cat "$1" 2>/dev/null)" != "$2" ] || rm -f "$1"'
   os.execute((HAS_FLOCK and ('flock -x ' .. shq(JOB_LOCK .. '.reap') .. ' ') or '')
-    .. 'rm -f ' .. shq(JOB_LOCK))
+    .. 'sh -c ' .. shq(release) .. ' owner-release ' .. shq(JOB_LOCK) .. ' ' .. shq(owner))
 end
 
 -- ---------------------------------------------------------------------------
@@ -1501,7 +1504,9 @@ local function spawn_detached(command, action, scan, generation)
       '  nohup ' .. command .. ' > "$report" 2>> "$log" < /dev/null',
       '  rc=$?; printf "%s" "$rc" > "$report.exit"; [ "$rc" = 0 ] && : > "$report.ok"',
       '  n=0',
-      '  owner_file="$lock.owner.$$"; printf "%s %s %s\\n" "$$" "$proc_start" "$boot" > "$owner_file" || exit 1',
+      '  owner_file="$lock.owner.$$"; nonce=$(cat /proc/sys/kernel/random/uuid); [ -n "$nonce" ] || exit 1',
+      '  owner="$$ $proc_start $boot $nonce"; printf "%s\\n" "$owner" > "$owner_file" || exit 1',
+      [[  release_lock() { ]] .. (HAS_FLOCK and 'flock -x "$lock.reap" ' or '') .. [[sh -c '[ "$(cat "$1" 2>/dev/null)" != "$2" ] || rm -f "$1"' owner-release "$lock" "$owner"; }]],
       '  while ! ' .. (HAS_FLOCK and 'flock -x "$lock.reap" ' or '') .. 'ln "$owner_file" "$lock" 2>/dev/null; do',
       '    n=$((n+1)); [ "$n" -gt 120 ] && { rm -f "$owner_file"; exit 1; }',
       '    ' .. (HAS_FLOCK and reap_command or ':'),
@@ -1514,12 +1519,12 @@ local function spawn_detached(command, action, scan, generation)
       '  actual=$(cat "$setting" 2>/dev/null)',
       [=[  if [ -n "$next" ] && [ "$next" != "$generation" ] && [ "$enabled" = "$actual" ] && ! printf '%s' "$request" | grep -q '"failed"[[:space:]]*:'; then]=],
       '    generation=$next; report_id=$(cat /proc/sys/kernel/random/uuid); started=$(date +%s)',
-      [[    printf '{"action":"scan","pid":%s,"pgid":%s,"procStart":"%s","boot":"%s","token":"%s","startedAt":%s,"generation":%s,"reportId":"%s"}' "$$" "$$" "$proc_start" "$boot" "$token" "$started" "$generation" "$report_id" > "$job.chain.$$" && mv -f "$job.chain.$$" "$job" || { : > "$report.state-error"; ]] .. (HAS_FLOCK and 'flock -x "$lock.reap" ' or '') .. [[rm -f "$lock"; exit 1; }]],
+      [[    printf '{"action":"scan","pid":%s,"pgid":%s,"procStart":"%s","boot":"%s","token":"%s","startedAt":%s,"generation":%s,"reportId":"%s"}' "$$" "$$" "$proc_start" "$boot" "$token" "$started" "$generation" "$report_id" > "$job.chain.$$" && mv -f "$job.chain.$$" "$job" || { : > "$report.state-error"; release_lock; exit 1; }]],
       '    rm -f "$report" "$report.ok" "$report.started" "$report.exit"',
-      '    ' .. (HAS_FLOCK and 'flock -x "$lock.reap" ' or '') .. 'rm -f "$lock"; continue',
+      '    release_lock; continue',
       '  fi',
       [[  printf '{"action":"scan","pid":%s,"pgid":%s,"procStart":"%s","boot":"%s","token":"%s","startedAt":%s,"generation":%s,"reportId":"%s","closed":true}' "$$" "$$" "$proc_start" "$boot" "$token" "$started" "$generation" "$report_id" > "$job.chain.$$" && mv -f "$job.chain.$$" "$job" || : > "$report.state-error"]],
-      '  ' .. (HAS_FLOCK and 'flock -x "$lock.reap" ' or '') .. 'rm -f "$lock"; exit "$rc"',
+      '  release_lock; exit "$rc"',
       'done',
     }, '\n')
   else
@@ -1578,18 +1583,24 @@ local function adopt_status(job, pending)
   local ok, report = pcall(json.decode, trimmed)
   if not ok or type(report) ~= 'table' or #trimmed < 16
     or trimmed:sub(1, 1) ~= '{' or trimmed:sub(-1) ~= '}' then return false end
-  if pending and job.generation ~= pending.generation then os.remove(path); return false end
+  if pending and job.generation ~= pending.generation then return false end
   local existing = read_text(STATUS)
   local oldgen = existing and tonumber(existing:match('"__luna_generation"%s*:%s*(%d+)')) or 0
   local gen = job.generation or 0
-  if gen < oldgen then os.remove(path); return false end
+  if gen < oldgen then return false end
   if pending and report.accept_snapshots_unknown ~= pending.enabled then return false end
   local tagged = '{"__luna_generation":' .. tostring(gen) .. ',' .. trimmed:sub(2)
   if not write_text(STATUS, tagged) then return false end
   if not write_text(STATUS_AT, tostring(os.time())) then return false end
-  os.remove(path)
-  os.remove(path .. '.ok')
   return true
+end
+
+local function cleanup_report(job)
+  local path = report_file(job.generation, job.reportId)
+  for _, suffix in ipairs({'', '.ok', '.started', '.exit', '.state-error', '.cancelled'}) do
+    os.remove(path .. suffix)
+  end
+  if job.reportId then os.remove(DIR .. '/ready.' .. job.reportId) end
 end
 
 -- observe: report the job as it is, without recording its completion or
@@ -1638,14 +1649,14 @@ local function job_state(observe)
           failure, blocked = 'Could not save refresh recovery state.', true
         end
       else
-        adopted = adopt_status(job, pending)
+        if not cancelled then adopted = adopt_status(job, pending) end
         if not adopted and (not pending or matching) then
           failure = cancelled and 'The scan was cancelled.'
             or (exitCode and exitCode ~= 0 and ('The scan failed (exit ' .. exitCode .. ').')
               or 'The scan did not produce a valid report.')
         end
       end
-      if failure and pending then
+      if failure and matching then
         pending.failed = pending.failed or (failure .. ' Use Scan library or Check now to retry.')
         if not save_rescan(pending) then blocked = true end
       end
@@ -1654,7 +1665,7 @@ local function job_state(observe)
       end
       if not write_text(JOB_DONE, tostring(finishedAt)) then
         failure, blocked = 'Could not save the final scan state. Retry the library scan.', true
-        if pending then
+        if matching then
           pending.failed = failure
           save_rescan(pending)
         end
@@ -1666,14 +1677,15 @@ local function job_state(observe)
           write_text(JOB_ERROR, failure)
         end
       end
-      if job.reportId then
-        os.remove(DIR .. '/ready.' .. job.reportId)
-      end
     else
       if not write_text(JOB_DONE, tostring(finishedAt)) then
         failure, blocked = 'Could not save the final job state.', true
       end
     end
+  end
+  if not observe and not running and finishedAt > 0 and not blocked and fs.exists(JOB_DONE)
+    and job.action == 'scan' then
+    cleanup_report(job)
   end
   if running then finishedAt = 0 end
   local jobLog = tail(JOB_LOG, 40, 65536)
@@ -1998,6 +2010,9 @@ function M.register(registry)
       if job and job.running then
         return response({success = false, error = 'A job is already running'})
       end
+      if job and job.recoveryBlocked then
+        return response({success = false, error = job.error or 'Could not save the previous job state; retry later.'})
+      end
       if read_text(SNAPSHOT_FILE) ~= (pending.enabled and 'true\n' or 'false\n') then
         return response({success = false, error = 'Choose the snapshot setting again before retrying.'})
       end
@@ -2149,11 +2164,12 @@ function M.register(registry)
       if name == 'SlsCompressorGet' and not find_tool() and not read_job() and not read_rescan() then
         return handler(raw)
       end
-      if not lock_job() then
+      local locked, owner = lock_job()
+      if not locked then
         return response({success = false, error = 'Compressor job state is busy; retry.'})
       end
       local ok, result = pcall(handler, raw)
-      unlock_job()
+      unlock_job(owner)
       if not ok then error(result) end
       if name == 'SlsCompressorGet' and result == get_cache.text and get_cache.rekey then
         get_cache.rev = get_cache.rekey()

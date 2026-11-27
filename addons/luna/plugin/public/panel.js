@@ -2150,7 +2150,11 @@
       const start = document.createElement('button');
       start.className = 'sls-luna-btn';
       start.textContent = 'Start the pass';
-      start.onclick = () => startJob(body, 'run');
+      start.disabled = Boolean(compressor && (compressor.rescan || (compressor.job && compressor.job.running)));
+      start.onclick = () => {
+        if (!compressor || compressor.rescan || (compressor.job && compressor.job.running)) return;
+        startJob(body, 'run');
+      };
       const back = document.createElement('button');
       back.className = 'sls-luna-btn secondary';
       back.textContent = 'Back';

@@ -200,7 +200,12 @@ case "$1" in
       setsid sh -c 'echo $$ > "$HOME/.escaped-scan"; exec timeout 120 tail -f /dev/null' </dev/null >/dev/null 2>&1 &
       sleep 120
     fi
-    if [ "$mode" = scanblock ]; then sleep 6
+    if [ "$mode" = scanhandoff ] && [ "$acc" = true ]; then
+      : > "$HOME/.successor-started"
+      for _ in {1..600}; do [ -f "$HOME/.successor-release" ] && break; sleep 0.1; done
+      [ -f "$HOME/.successor-release" ] || exit 1
+    elif [ "$mode" = scanhandoff ]; then sleep 2
+    elif [ "$mode" = scanblock ]; then sleep 6
     elif [ "$mode" = scanlong ]; then sleep 2; else sleep 0.3; fi
     if [ -n "$libs" ]; then
       printf '{"version":"9.9.9","schema":2,"accept_snapshots_unknown":%s,"libraries":["/lib"],"libraries_detail":%s,"games":%s,"summary":%s}\n' "$acc" "$libs" "$games" "$summary"
@@ -929,9 +934,29 @@ assert(observed_recovery.status.accept_snapshots_unknown == true)
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":false}').success)
 wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
 
+-- A delayed release must not unlink a later acquisition by the same process.
+do
+local exec_for_release = os.execute
+local replacement
+os.execute = function(command)
+  if command:find('owner-release', 1, true) and not replacement then
+    local owner = assert(read(dir .. '/job.lock'))
+    replacement = owner:gsub('(%S+)%s*$', 'different-acquisition\n')
+    os.remove(dir .. '/job.lock')
+    write_file(dir .. '/job.lock', replacement)
+  end
+  return exec_for_release(command)
+end
+assert(call(reg, 'SlsCompressorGet', '{"refresh":true}').success)
+os.execute = exec_for_release
+assert(replacement and read(dir .. '/job.lock') == replacement,
+  'a stale release removed a newer acquisition')
+os.remove(dir .. '/job.lock')
+end
+
 -- A scan that captured the old setting cannot publish after an explicit
 -- setting change. The reservation survives a backend reload and blocks runs.
-mode('scanlong')
+mode('scanhandoff')
 local old = call(reg, 'SlsCompressorRun', json.encode({action = 'scan'}))
 assert(old.success)
 os.execute('sleep 0.3') -- the fixture captures its configuration before sleeping
@@ -947,7 +972,11 @@ local function scans()
   return count
 end
 local before_chain = scans()
-os.execute('sleep 2.6')
+for _ = 1, 150 do
+  if read(home .. '/.successor-started') then break end
+  os.execute('sleep 0.1')
+end
+assert(read(home .. '/.successor-started'), 'the successor never reached its hold point')
 assert(scans() == before_chain + 1, 'the detached job did not start its successor without polling')
 local chained_record = json.decode(read(job_file))
 assert(chained_record.generation == queued.rescan.generation and chained_record.pid == old.job.pid,
@@ -960,6 +989,7 @@ assert(loadfile(repo .. '/addons/compressor/plugin/backend/main.lua'))().registe
 local fresh = wait_for(restarted, function(s) return s.rescan and s.job
   and s.job.running and s.job.generation == s.rescan.generation end, 10)
 assert(fresh.status.accept_snapshots_unknown == false, 'old scan was adopted while a refresh was pending')
+write_file(home .. '/.successor-release', 'release\n')
 local settled = wait_for(restarted, function(s) return not s.rescan and s.job and not s.job.running end, 15)
 assert(settled.status.accept_snapshots_unknown == true, 'fresh scan was not adopted after restart')
 
@@ -1264,6 +1294,7 @@ assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":false}').success)
 wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
 
 -- A failed final publication keeps the fresh reservation and reports retry.
+do
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":true}').success)
 local state_job = json.decode(read(job_file))
 local state_path = dir .. '/status.scan.' .. state_job.generation .. '.' .. state_job.reportId
@@ -1283,6 +1314,8 @@ assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
 wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
 
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":false}').success)
+local uncommitted_job = json.decode(read(job_file))
+local uncommitted_path = dir .. '/status.scan.' .. uncommitted_job.generation .. '.' .. uncommitted_job.reportId
 os.execute('sleep 1')
 local rename_done = os.rename
 os.rename = function(from, to)
@@ -1290,13 +1323,76 @@ os.rename = function(from, to)
   return rename_done(from, to)
 end
 local failed_done = call(reg, 'SlsCompressorGet', '{"refresh":true}')
+local blocked_generation = failed_done.rescan.generation
+local blocked_retry = call(reg, 'SlsCompressorRun', '{"action":"scan"}')
+local still_reserved = json.decode(read(dir .. '/rescan.json'))
 os.rename = rename_done
 assert(failed_done.job.error and failed_done.rescan and failed_done.rescan.failed,
   'a failed completion write lost the reservation')
+assert(not blocked_retry.success and still_reserved.generation == blocked_generation and still_reserved.failed,
+  'a blocked retry replaced the reservation or reported success')
+assert(read(uncommitted_path .. '.exit'), 'uncommitted scan evidence was removed')
 assert(call(reg, 'SlsCompressorGet', '{"refresh":true}').rescan.failed,
   'a later poll cleared the failed reservation without a retry')
 assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
 wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
+end
+
+do
+local function fixture_finished_scan(generation, id)
+  local record = {action='scan', pid=99999999, pgid=99999999, procStart='1',
+    boot=read('/proc/sys/kernel/random/boot_id'):match('^[%x%-]+'),
+    token='abcd', startedAt=os.time(), generation=generation, reportId=id, closed=true}
+  write_file(job_file, json.encode(record))
+  os.remove(dir .. '/job.done')
+  os.remove(dir .. '/job.error')
+  local path = dir .. '/status.scan.' .. generation .. '.' .. id
+  write_file(path, '{"version":"cancelled-report","accept_snapshots_unknown":false}')
+  write_file(path .. '.ok', '')
+  write_file(path .. '.exit', '0')
+  write_file(path .. '.started', '')
+  return path
+end
+
+-- Even a valid, successful report is not adoptable after cancellation.
+local last_status = read(dir .. '/status.json')
+local generation = tonumber(read(dir .. '/generation')) + 1
+write_file(dir .. '/generation', tostring(generation))
+local cancelled_path = fixture_finished_scan(generation, 'cafe')
+write_file(cancelled_path .. '.cancelled', 'true')
+write_file(dir .. '/rescan.json', json.encode({generation=generation, enabled=false}))
+local cancelled_report = call(reg, 'SlsCompressorGet', '{"refresh":true}')
+assert(cancelled_report.rescan and cancelled_report.rescan.failed
+  and read(dir .. '/status.json') == last_status,
+  'a cancelled report was adopted or its reservation was cleared')
+assert(not read(cancelled_path) and not read(cancelled_path .. '.started')
+  and not read(cancelled_path .. '.exit') and not read(cancelled_path .. '.cancelled'),
+  'committed cancelled attempts left per-attempt files')
+assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
+wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
+
+-- A failed final-state write belongs to scan A, not the reserved successor B.
+local old_generation = tonumber(read(dir .. '/generation')) + 1
+local next_gen = old_generation + 1
+write_file(dir .. '/generation', tostring(next_gen))
+local failed_old_path = fixture_finished_scan(old_generation, 'babe')
+write_file(failed_old_path .. '.state-error', '')
+write_file(dir .. '/rescan.json', json.encode({generation=next_gen, enabled=false}))
+local old_failure = call(reg, 'SlsCompressorGet', '{"refresh":true}')
+assert(old_failure.rescan and not old_failure.rescan.failed
+  and old_failure.job.running and old_failure.job.generation == next_gen,
+  'a previous scan failure blocked its reserved successor')
+wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
+
+-- Per-attempt artifacts survive only until a completed outcome is committed.
+assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
+local cleanup_job = json.decode(read(job_file))
+local cleanup_path = dir .. '/status.scan.' .. cleanup_job.generation .. '.' .. cleanup_job.reportId
+wait_for(reg, function(s) return s.job and not s.job.running end, 15)
+for _, suffix in ipairs({'', '.ok', '.started', '.exit', '.cancelled', '.state-error'}) do
+  assert(not read(cleanup_path .. suffix), 'committed scan left ' .. suffix .. ' behind')
+end
+end
 
 -- The portable Lua binding cannot fsync; its stated power-loss limitation is
 -- part of the contract rather than a claim of transactional durability.
