@@ -18,6 +18,7 @@ import threading
 import time
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -25,6 +26,7 @@ SCRIPTS = HERE / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 
 import luna_selftest  # noqa: E402
+import luna  # noqa: E402
 
 
 class EmbedProbeTest(unittest.TestCase):
@@ -721,6 +723,73 @@ class DoctorTests(SelftestBase):
         self.assertIn('tab updates: the page is empty', text)
         self.assertNotIn(steamid, text)
         self.assertIn('<steamid>', text)
+
+
+class LiveStatusTest(SelftestBase):
+    def setUp(self):
+        super().setUp()
+        self.freshness = luna.sidecar_freshness
+        self.boot = self.temp / 'boot.lua'
+        self.boot.write_text(luna.MARKER)
+        for name, value in [('active_host', 'lumen'), ('installed_addons', ('playtime', 'presence')),
+                            ('bridge_status', ('ok', ['attached']))]:
+            patcher = mock.patch.object(luna, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name, value in [('boot_file', self.boot), ('sidecar_freshness', {'stale': False}),
+                            ('read_json_file', {'pid': 42, 'format': 2, 'attachedAt': 1,
+                                                'addons': ['playtime', 'presence']}),
+                            ('pid_alive', True)]:
+            patcher = mock.patch.object(luna, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(luna, '_selftest_module', return_value=luna_selftest)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_steam_closed(self):
+        with mock.patch.object(luna, 'steam_running', return_value=False):
+            result = luna.live_status(('playtime',))
+        self.assertIn('Steam is closed', result['message'])
+        self.assertIsNone(result['addons']['playtime']['answered'])
+        self.assertTrue(result['bridge']['attached'])
+        self.assertEqual(result['bridge']['addon_count'], 2)
+
+    def test_missing_port(self):
+        with mock.patch.object(luna, 'steam_running', return_value=True), \
+             mock.patch.object(luna_selftest, 'cef_port', side_effect=luna_selftest.Unreachable('port missing')):
+            result = luna.live_status(('playtime',))
+        self.assertIn('port missing', result['message'])
+        self.assertIsNone(result['addons']['playtime']['answered'])
+
+    def test_backend_failure_and_allowlist(self):
+        steam = FakeSteam()
+        original = steam.answer
+        def answer(expression):
+            if 'const name = "SlsPresenceGet";' in expression:
+                return {'ok': False, 'error': 'backend unavailable'}, None
+            return original(expression)
+        steam.answer = answer
+        server = FakeServer(steam)
+        port = server.start()
+        self.addCleanup(server.stop)
+        with mock.patch.object(luna, 'steam_running', return_value=True), \
+             mock.patch.object(luna_selftest, 'cef_port', return_value=port):
+            result = luna.live_status(('playtime', 'presence'))
+        self.assertTrue(result['addons']['playtime']['answered'])
+        self.assertFalse(result['addons']['presence']['answered'])
+        self.assertEqual(result['addons']['presence']['error'], 'backend unavailable')
+        self.assertEqual(set(steam.rpc_names()), {'SlsPlaytimeGet', 'SlsPresenceGet'})
+        self.assertTrue(all(luna_selftest._is_readonly_call(name, {})[0] for name in steam.rpc_names()))
+
+    def test_stale_sidecar(self):
+        with mock.patch.object(luna, 'process_pids', return_value=[42]), \
+             mock.patch.object(luna, '_proc_start', return_value=1), \
+             mock.patch.object(luna, 'plan', return_value=[]):
+            for host in ('lumen', 'luna'):
+                result = self.freshness(host, ('playtime',))
+                self.assertTrue(result['stale'])
+                self.assertIn('restart needed', result['message'])
 
 
 if __name__ == '__main__':
