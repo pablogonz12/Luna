@@ -3,7 +3,7 @@
     "compressor": {
       "files": {
         "backend/main.lua": {
-          "sha256": "659524207eedc4900e4920746f6b63277c79881edf705249777c7beb07361299",
+          "sha256": "431c2eeaad1ec6f52ff50c249a2a7c5d39a1c2c676c6a492b9e9dbde03328782",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
@@ -16,7 +16,7 @@
         }
       },
       "plugin_version": "0.3.1",
-      "source_commit": "4b8e77b42ec3e521859208c42e1e3bd0aa2760b5",
+      "source_commit": "61f3c3520ee86b1f6eeb0f5a96c12a56544a84fc",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "graphics": {
@@ -37,7 +37,7 @@
     "luna": {
       "files": {
         "backend/main.lua": {
-          "sha256": "bf9bb05e2efcba9c7ead90dda8e39838469d5be21f8042f715b2122201683f5f",
+          "sha256": "c14af72db0c1612d733d26ef711a42446ab803d39385e57e2b9f7ef2654984a5",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
@@ -54,7 +54,7 @@
         }
       },
       "plugin_version": "0.14.19",
-      "source_commit": "ded99df95748fead5ec97dab07bc28340f9df262",
+      "source_commit": "61f3c3520ee86b1f6eeb0f5a96c12a56544a84fc",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -119,7 +119,7 @@
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-11-27T22:11:45+0100",
+  "generated": "2026-11-27T22:59:24+0100",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "aeced944f64c5dc779c24ecf912bee2570760e7d5e35f90b26f9aa1042cccb2c",
