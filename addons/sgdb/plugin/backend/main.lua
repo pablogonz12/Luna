@@ -432,15 +432,24 @@ local function keep_undone(directory, appid, kind, paths)
     local ok, why = write_file_atomic(dir .. '/' .. name, body)
     if not ok then undo_created(); return false, why or ('cannot write ' .. dir .. '/' .. name) end
     created[#created + 1] = dir .. '/' .. name
-    names[#names + 1] = name
+  end
+  -- No pruning here: the caller prunes (prune_undone) only after its restore
+  -- succeeded, and removes these files again if it failed.
+  return true, nil, created
+end
+
+-- Keep at most HISTORY_KEEP files in undone/, oldest removed first.
+local function prune_undone(directory, appid, kind)
+  local dir = slot_history_dir(directory, math.floor(appid), kind) .. '/undone'
+  local names = {}
+  for _, name in ipairs(list_dir(dir)) do
+    if name:match('^%d+%-%d+%.[%w]+$') then names[#names + 1] = name end
   end
   table.sort(names)
   while #names > HISTORY_KEEP do
     os.remove(dir .. '/' .. names[1])
     table.remove(names, 1)
   end
-  -- The caller removes these again if its own later step fails.
-  return true, nil, created
 end
 
 local function history_depth(directory, appid, kind)
@@ -1146,6 +1155,7 @@ function M.register(registry)
       if path ~= target then os.remove(path) end
     end
     os.remove(history_dir .. '/' .. name)
+    prune_undone(directory, appid, kind)
     return reply({ success = true, undone = true, path = target,
       history = history_depth(directory, appid, kind) })
   end

@@ -377,6 +377,11 @@ do
   if uid == 0 then
     io.stderr:write('SKIP sgdb restore-failure case: running as root, chmod cannot force the failure\n')
   else
+    -- A full undone/ must survive a failed restore untouched (no early prune).
+    os.execute("mkdir -p '" .. slot_hist .. "/undone'")
+    for k = 1, 5 do
+      local f = io.open(slot_hist .. '/undone/' .. (1000 + k) .. '-000001.png', 'w'); f:write('OLD' .. k); f:close()
+    end
     os.execute("chmod 555 '" .. grid_dir .. "'")
     local r2 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
     os.execute("chmod 755 '" .. grid_dir .. "'")
@@ -384,11 +389,13 @@ do
     assert(file_text(grid_dir .. '/401p.jpg') == 'JPG2DATA', 'a failed restore must keep the current artwork')
     assert(call('SlsSgdbHistory', { raw = json.encode({ appid = 401 }) }).history.grid == 1,
       'a failed restore must keep the history step for a retry')
-    assert(undone_count() == 0, 'a failed restore must remove the archive copy it made')
+    assert(undone_count() == 5, 'a failed restore must remove only its own copy and keep the 5 older ones')
+    assert(file_text(slot_hist .. '/undone/1001-000001.png') == 'OLD1', 'the oldest kept copy must not be pruned')
   end
   -- 3. the retry then works.
   local r3 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
   assert(r3.success == true, tostring(r3.error))
+  assert(undone_count() <= 5, 'a successful undo prunes undone/ to HISTORY_KEEP')
   assert(file_text(grid_dir .. '/401p.png') == 'PNG1DATA' and file_text(grid_dir .. '/401p.jpg') == nil)
 end
 
