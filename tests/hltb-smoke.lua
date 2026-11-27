@@ -947,5 +947,44 @@ assert(registry.SlsLunaHealth() == health_once, 'Health must stay memoised after
 assert(call('SlsLunaHygiene', { raw = json.encode({ action = 'nonsense' }) }).success == false,
   'an unknown hygiene action must be refused')
 
+-- Regression: two same-size writes inside one second must still change the
+-- rev (size + whole-second mtime could not tell them apart, so a poll with the
+-- first rev was answered `unchanged` forever).
+do
+  local function put(main)
+    local r = call('SlsHltbPut', { raw = json.encode({ appid = 777001, name = 'Same Size', main = main }) })
+    assert(r.success == true, tostring(r.error))
+  end
+  local function rev_of(name)
+    local r = call(name, {})
+    assert(type(r.rev) == 'string' and r.rev ~= '', name .. ' must carry a rev')
+    return r.rev
+  end
+  -- Deterministic: pin the store's mtime to the same whole second for both
+  -- writes, so only the write token can tell them apart (otherwise a second
+  -- boundary between the writes would let the old size+mtime rev pass too).
+  local pinned = os.time() - 60
+  local function pin_mtime()
+    assert(os.execute("touch -m -d @" .. pinned .. " '" .. store_path .. "'"), 'touch failed')
+  end
+  local function size()
+    local f = assert(io.open(store_path, 'rb')); local n = f:seek('end'); f:close(); return n
+  end
+  put(11)
+  pin_mtime()
+  local size_before = size()
+  local first_get, first_games = rev_of('SlsHltbGet'), rev_of('SlsHltbGames')
+  put(22) -- same digit count, so the store's size does not change
+  pin_mtime()
+  assert(size() == size_before, 'the two writes must have the same size')
+  local again = call('SlsHltbGet', { rev = first_get })
+  assert(again.unchanged ~= true, 'a same-size write in the same second must change the SlsHltbGet rev')
+  local again_games = call('SlsHltbGames', { rev = first_games })
+  assert(again_games.unchanged ~= true, 'a same-size write in the same second must change the SlsHltbGames rev')
+  assert(type(again_games.games) == 'table', 'the changed reply must carry the games')
+  local record = again_games.games['777001']
+  assert(record and record.main == 79200, 'the changed reply must carry the second write (main = 22 h)')
+end
+
 print('Luna HLTB robustness OK: ' .. tostring(case_matched + case_refused) .. ' matching pairs, revalidation, '
   .. '.bak recovery, corrupt retention, atomic write, sync-conflict status/clean, health caps')
