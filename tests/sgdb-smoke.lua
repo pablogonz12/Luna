@@ -306,6 +306,99 @@ assert(file_text(grid_dir .. '/1145360p.jpg') == nil)
 local empty = call('SlsSgdbUndo', { raw = json.encode({ appid = 1145360, kind = 'wide' }) })
 assert(empty.success == false and empty.code == 'empty', 'undo with no history must fail closed')
 
+-- Regression: Undo must restore the previous step even when a second or more
+-- separates the change and the undo (it used to stash the current file first
+-- and then pop that same file back), and two changes inside one second must
+-- not overwrite each other's history entry.
+do
+  local real_time = os.time
+  local clock = real_time()
+  os.time = function(t) if t then return real_time(t) end return clock end
+  local function apply(url, mime)
+    local r = call('SlsSgdbApply', { raw = json.encode({ appid = 400, kind = 'grid', url = url, mime = mime }) })
+    assert(r.success == true, tostring(r.error))
+  end
+  apply('https://cdn.example/grid1.png', 'image/png')   -- step 1: PNG1DATA
+  apply('https://cdn.example/wide1.png', 'image/png')   -- step 2: WIDEDATA, same second, same ext
+  apply('https://cdn.example/grid2.jpg', 'image/jpeg')  -- step 3: JPG2DATA, same second
+  local depth = call('SlsSgdbHistory', { raw = json.encode({ appid = 400 }) })
+  assert(depth.history.grid == 2, 'two changes in one second must keep two undo steps, got '
+    .. tostring(depth.history.grid))
+  clock = clock + 5
+  local first = call('SlsSgdbUndo', { raw = json.encode({ appid = 400, kind = 'grid' }) })
+  assert(first.success == true, tostring(first.error))
+  assert(file_text(grid_dir .. '/400p.png') == 'WIDEDATA',
+    'undo after the clock moved must restore the previous step, not the current file')
+  assert(file_text(grid_dir .. '/400p.jpg') == nil)
+  clock = clock + 5
+  local second = call('SlsSgdbUndo', { raw = json.encode({ appid = 400, kind = 'grid' }) })
+  assert(second.success == true, tostring(second.error))
+  assert(file_text(grid_dir .. '/400p.png') == 'PNG1DATA',
+    'a second undo must go one step further back (the same-second entry must not be overwritten)')
+  local kept = 0
+  local pipe = io.popen("ls -1 '" .. grid_dir .. "/.sls-luna-history/400p/undone' 2>/dev/null")
+  for _ in pipe:lines() do kept = kept + 1 end
+  pipe:close()
+  assert(kept == 2, 'both undone files must be kept outside the undo stack, found ' .. kept)
+  local after = call('SlsSgdbHistory', { raw = json.encode({ appid = 400 }) })
+  assert(after.history.grid == 0, 'two undos must use up both steps, not count the undone files')
+  os.time = real_time
+end
+
+-- Undo is transactional: if the current artwork cannot be archived, or the
+-- previous artwork cannot be written back, nothing is deleted and the step
+-- stays available for a retry.
+do
+  local function apply(url, mime)
+    local r = call('SlsSgdbApply', { raw = json.encode({ appid = 401, kind = 'grid', url = url, mime = mime }) })
+    assert(r.success == true, tostring(r.error))
+  end
+  apply('https://cdn.example/grid1.png', 'image/png')
+  apply('https://cdn.example/grid2.jpg', 'image/jpeg')
+  local slot_hist = grid_dir .. '/.sls-luna-history/401p'
+  -- 1. archive fails: undone/ is a plain file, so nothing can be written in it.
+  local blocker = io.open(slot_hist .. '/undone', 'w'); blocker:write('x'); blocker:close()
+  local r1 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
+  assert(r1.success == false and r1.code == "io", "a failed archive must refuse the undo: " .. json.encode(r1))
+  assert(file_text(grid_dir .. '/401p.jpg') == 'JPG2DATA', 'a failed archive must keep the current artwork')
+  assert(call('SlsSgdbHistory', { raw = json.encode({ appid = 401 }) }).history.grid == 1,
+    'a failed archive must keep the history step')
+  os.remove(slot_hist .. '/undone')
+  local function undone_count()
+    local n, pipe = 0, io.popen("ls -1 '" .. slot_hist .. "/undone' 2>/dev/null")
+    for _ in pipe:lines() do n = n + 1 end
+    pipe:close()
+    return n
+  end
+  assert(undone_count() == 0, 'a refused undo must not leave archive copies behind')
+  -- 2. restore fails: the grid folder is read-only, so the restored file cannot land.
+  -- A read-only directory does not stop root, so this case only runs unprivileged.
+  local id = io.popen('id -u'); local uid = tonumber(id:read('*l')); id:close()
+  if uid == 0 then
+    io.stderr:write('SKIP sgdb restore-failure case: running as root, chmod cannot force the failure\n')
+  else
+    -- A full undone/ must survive a failed restore untouched (no early prune).
+    os.execute("mkdir -p '" .. slot_hist .. "/undone'")
+    for k = 1, 5 do
+      local f = io.open(slot_hist .. '/undone/' .. (1000 + k) .. '-000001.png', 'w'); f:write('OLD' .. k); f:close()
+    end
+    os.execute("chmod 555 '" .. grid_dir .. "'")
+    local r2 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
+    os.execute("chmod 755 '" .. grid_dir .. "'")
+    assert(r2.success == false and r2.code == 'io', 'a failed restore must refuse the undo')
+    assert(file_text(grid_dir .. '/401p.jpg') == 'JPG2DATA', 'a failed restore must keep the current artwork')
+    assert(call('SlsSgdbHistory', { raw = json.encode({ appid = 401 }) }).history.grid == 1,
+      'a failed restore must keep the history step for a retry')
+    assert(undone_count() == 5, 'a failed restore must remove only its own copy and keep the 5 older ones')
+    assert(file_text(slot_hist .. '/undone/1001-000001.png') == 'OLD1', 'the oldest kept copy must not be pruned')
+  end
+  -- 3. the retry then works.
+  local r3 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
+  assert(r3.success == true, tostring(r3.error))
+  assert(undone_count() <= 5, 'a successful undo prunes undone/ to HISTORY_KEEP')
+  assert(file_text(grid_dir .. '/401p.png') == 'PNG1DATA' and file_text(grid_dir .. '/401p.jpg') == nil)
+end
+
 -- Reset removes the custom file so Steam shows its own art; history survives.
 call('SlsSgdbApply', { raw = json.encode({ appid = 620, kind = 'hero',
   url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })

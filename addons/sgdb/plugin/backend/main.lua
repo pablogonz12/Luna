@@ -305,7 +305,18 @@ local function history_entries(directory, appid, kind)
   for _, name in ipairs(list_dir(slot_history_dir(directory, appid, kind))) do
     if name:match('^%d+%-%d+%.[%w]+$') then out[#out + 1] = name end
   end
-  table.sort(out)
+  -- Numeric (stamp, sequence) order: oldest first, newest last.
+  local function key(name)
+    local s, n = name:match('^(%d+)%-(%d+)%.')
+    return tonumber(s), tonumber(n)
+  end
+  table.sort(out, function(a, b)
+    local sa, na = key(a)
+    local sb, nb = key(b)
+    if sa ~= sb then return sa < sb end
+    if na ~= nb then return na < nb end
+    return a < b
+  end)
   return out
 end
 
@@ -362,11 +373,20 @@ local function push_history(directory, appid, kind, author)
   fs.create_directories(dir)
   local stamp = os.time()
   local stored = 0
+  -- Entries sort by name, so the sequence continues after any entry already
+  -- stamped this second: two changes within one second never collide (which
+  -- overwrote the older step) and the newer one always sorts last.
+  local seq = 0
+  for _, name in ipairs(history_entries(directory, slot, kind)) do
+    local s, n = name:match('^(%d+)%-(%d+)%.')
+    if tonumber(s) == stamp and tonumber(n) > seq then seq = tonumber(n) end
+  end
   local function stash(path)
     local body = read_bytes(path)
     if not body then return end
     local ext = path:match('%.([%w]+)$') or 'png'
-    local name = string.format('%d-%d.%s', stamp, stored + 1, ext)
+    seq = seq + 1
+    local name = string.format('%d-%06d.%s', stamp, seq, ext)
     if write_file_atomic(dir .. '/' .. name, body) then stored = stored + 1 end
   end
   for _, path in ipairs(current) do stash(path) end
@@ -380,6 +400,56 @@ local function push_history(directory, appid, kind, author)
       author = tostring(author or ''), files = stored })
   end
   return stored
+end
+
+-- Files removed by Undo go to <slot history>/undone/ (same naming, newest
+-- last, pruned like the history) so an Undo never destroys artwork outright.
+-- Returns true (plus the files it wrote), or false and why after removing
+-- anything it wrote; the caller must not delete on false.
+local function keep_undone(directory, appid, kind, paths)
+  local dir = slot_history_dir(directory, math.floor(appid), kind) .. '/undone'
+  local made, made_why = pcall(fs.create_directories, dir)
+  if not made then return false, tostring(made_why) end
+  local stamp = os.time()
+  local names = {}
+  for _, name in ipairs(list_dir(dir)) do
+    if name:match('^%d+%-%d+%.[%w]+$') then names[#names + 1] = name end
+  end
+  local seq = 0
+  for _, name in ipairs(names) do
+    local st, n = name:match('^(%d+)%-(%d+)%.')
+    if tonumber(st) == stamp and tonumber(n) > seq then seq = tonumber(n) end
+  end
+  local created = {}
+  local function undo_created()
+    for _, file in ipairs(created) do os.remove(file); os.remove(file .. '.bak') end
+  end
+  for _, path in ipairs(paths) do
+    local body = read_bytes(path)
+    if not body then undo_created(); return false, 'cannot read ' .. path end
+    seq = seq + 1
+    local name = string.format('%d-%06d.%s', stamp, seq, path:match('%.([%w]+)$') or 'png')
+    local ok, why = write_file_atomic(dir .. '/' .. name, body)
+    if not ok then undo_created(); return false, why or ('cannot write ' .. dir .. '/' .. name) end
+    created[#created + 1] = dir .. '/' .. name
+  end
+  -- No pruning here: the caller prunes (prune_undone) only after its restore
+  -- succeeded, and removes these files again if it failed.
+  return true, nil, created
+end
+
+-- Keep at most HISTORY_KEEP files in undone/, oldest removed first.
+local function prune_undone(directory, appid, kind)
+  local dir = slot_history_dir(directory, math.floor(appid), kind) .. '/undone'
+  local names = {}
+  for _, name in ipairs(list_dir(dir)) do
+    if name:match('^%d+%-%d+%.[%w]+$') then names[#names + 1] = name end
+  end
+  table.sort(names)
+  while #names > HISTORY_KEEP do
+    os.remove(dir .. '/' .. names[1])
+    table.remove(names, 1)
+  end
 end
 
 local function history_depth(directory, appid, kind)
@@ -1050,15 +1120,42 @@ function M.register(registry)
       return reply({ success = false, code = 'empty', error = 'Nothing to undo for this slot.' })
     end
     local base = directory .. '/' .. tostring(appid) .. KINDS[kind]
-    if #current > 0 then push_history(directory, appid, kind, nil) end
-    for _, path in ipairs(current) do os.remove(path) end
-    local popped = pop_entries(directory, appid, kind, 1)
-    if #popped == 0 then
+    -- Transactional, so a failed write never loses artwork:
+    --   1. read the previous step without consuming it;
+    --   2. archive the current file(s) to undone/ (outside the undo stack:
+    --      stashing them on the stack made a second Undo act as a redo);
+    --   3. write the restored artwork;
+    --   4. only then remove the replaced file(s) and consume the history entry.
+    -- Any failure before step 4 leaves the current artwork and the history
+    -- entry in place for a retry.
+    local entries = history_entries(directory, appid, kind)
+    local name = entries[#entries]
+    local history_dir = slot_history_dir(directory, math.floor(appid), kind)
+    local body = name and read_bytes(history_dir .. '/' .. name)
+    if not body then
       return reply({ success = false, code = 'io', error = 'Could not read the undo entry.' })
     end
-    local target = base .. '.' .. popped[1].ext
-    local saved, save_why = write_file_atomic(target, popped[1].body)
-    if not saved then return reply({ success = false, code = 'io', error = tostring(save_why) }) end
+    local archive_files = {}
+    if #current > 0 then
+      local archived, archive_why, written = keep_undone(directory, appid, kind, current)
+      archive_files = written or {}
+      if not archived then
+        return reply({ success = false, code = 'io',
+          error = 'Could not keep a copy of the current artwork; nothing was changed: ' .. tostring(archive_why) })
+      end
+    end
+    local target = base .. '.' .. (name:match('%.([%w]+)$') or 'png')
+    local saved, save_why = write_file_atomic(target, body)
+    if not saved then
+      for _, file in ipairs(archive_files) do os.remove(file); os.remove(file .. '.bak') end
+      return reply({ success = false, code = 'io',
+        error = 'Could not restore the previous artwork; nothing was changed: ' .. tostring(save_why) })
+    end
+    for _, path in ipairs(current) do
+      if path ~= target then os.remove(path) end
+    end
+    os.remove(history_dir .. '/' .. name)
+    prune_undone(directory, appid, kind)
     return reply({ success = true, undone = true, path = target,
       history = history_depth(directory, appid, kind) })
   end
