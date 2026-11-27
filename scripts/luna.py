@@ -20,7 +20,8 @@ add-on; Luna owns the combination:
 
 Commands:
     luna preflight [--only NAME]        read-only environment and state report
-    luna status [--only NAME]           what is installed, and whether it matches
+    luna status [--only NAME] [--live] [--json]
+                                        installed state and optional live backend health
     luna install [--only NAME] [--force] [--dry-run] [--lumen] [--lock-steam-client]
                                         default: luna-host (standalone); --lumen opts in to the
                                         full Steam-pin + Lumen/LuaTools/SLSsteam pipeline
@@ -1245,7 +1246,255 @@ def pid_alive(pid):
     return True
 
 
+def process_pids(name):
+    """PIDs belonging to this user, using the same exact-name lookup as process_running."""
+    try:
+        result = subprocess.run(['pgrep', '-u', str(os.getuid()), '-x', name],
+                                capture_output=True, text=True)
+        return [int(pid) for pid in result.stdout.split() if pid.isdigit()]
+    except OSError:
+        return []
+
+
+def sidecar_freshness(host, installed):
+    names = ('luna-host', 'luna_host') if host == 'luna' else ('lumen',)
+    pids = sorted({pid for name in names for pid in process_pids(name)})
+    result = {'pids': pids, 'stale': None, 'message': 'host process start time unavailable'}
+    try:
+        boot_time = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines()
+                         if line.startswith('btime '))
+        ticks = os.sysconf('SC_CLK_TCK')
+        starts = [_proc_start(pid) for pid in pids]
+        if not starts or not all(starts):
+            return result
+        # The host executable too: an update can replace only the binary, and
+        # the running process would still be the old one.
+        executable = host_binary() if host == 'luna' else lumen_root() / 'lumen'
+        paths = [boot_file(), executable] + [row[3] for row in plan(installed)]
+        mtimes = [path.stat().st_mtime for path in paths if path.is_file()]
+        # install copies the executable with copy2, which keeps the build's
+        # mtime; its change time is when it was replaced.
+        if executable.is_file():
+            mtimes.append(executable.stat().st_ctime)
+        if not mtimes:
+            result['message'] = 'installed payload timestamps unavailable'
+            return result
+        result.update(started_at=min(boot_time + start / ticks for start in starts),
+                      newest_payload_at=max(mtimes))
+        result['stale'] = result['started_at'] < result['newest_payload_at']
+        result['message'] = ('host predates installed files; restart needed to load them'
+                             if result['stale'] else 'host started after installed files')
+    except (OSError, ValueError, StopIteration):
+        pass
+    return result
+
+
+def live_health(reply):
+    """Keep health indicators, not account data, game lists or logs."""
+    fields = ('success', 'ok', 'healthy', 'error', 'reason', 'enabled', 'running',
+              'publishing', 'accountMismatch', 'identityAmbiguous', 'helpersPaused',
+              'helperPauseReason', 'recovered', 'recoveredReason', 'found', 'failed',
+              'prefsDamaged')
+    health = {key: reply[key] for key in fields
+              if key in reply and isinstance(reply[key], (bool, int, float, str))}
+    for section in ('health', 'runtime', 'discord', 'session', 'tool'):
+        value = reply.get(section)
+        if isinstance(value, dict):
+            health[section] = {key: value[key] for key in fields
+                               if key in value and isinstance(value[key], (bool, int, float, str))}
+    return health
+
+
+def live_status(targets):
+    """Observe the host and call only the selftest's allowlisted status RPCs."""
+    host = active_host()
+    installed = installed_addons()
+    heartbeat = read_json_file(bridge_heartbeat_path())
+    heartbeat = heartbeat if isinstance(heartbeat, dict) else {}
+    result = {'host': host, 'steam_running': steam_running(),
+              'sidecar': sidecar_freshness(host, installed),
+              'bridge': {}, 'addons': {}, 'message': ''}
+    rpc_names = {'luna': 'SlsLunaInfo', 'sgdb': 'SlsSgdbGet',
+                 'graphics': 'SlsGraphicsGet', 'playtime': 'SlsPlaytimeGet',
+                 'presence': 'SlsPresenceGet', 'compressor': 'SlsCompressorGet'}
+    for name in targets:
+        result['addons'][name] = {'installed': name in installed, 'answered': None,
+                                  'health': None}
+    cdp = None
+    if result['steam_running']:
+        selftest = _selftest_module()
+        if selftest is None:
+            result['message'] = 'live status unavailable: selftest support is missing'
+            result['bridge'] = {'marker_present': MARKER in (boot_file().read_text(errors='replace')
+                                        if boot_file().is_file() else ''),
+                                'attached': None, 'addon_count': None}
+            return result
+        try:
+            port = selftest.cef_port(prefer=(host,))
+            target = selftest.pick_target(selftest.list_targets(port))
+            if not target or not selftest._is_websocket(target):
+                raise selftest.Unreachable('Steam Library CDP target unavailable')
+            cdp = selftest.CDP(target['webSocketDebuggerUrl']).connect()
+            allowed_rpcs = dict(selftest.READONLY_RPCS)
+            for name, state in result['addons'].items():
+                if not state['installed']:
+                    continue
+                rpc = rpc_names[name]
+                stale = result['sidecar'].get('stale')
+                if name in ('luna', 'compressor') and stale is not False:
+                    # A stale host runs the backend loaded before the installed
+                    # files, which may predate observe and ignore it: the old
+                    # SlsLunaInfo recovers a damaged luna.json, the old
+                    # SlsCompressorGet can start a scan.
+                    state.update(answered=None, skipped='host predates installed files' if stale
+                                 else 'host freshness unknown')
+                    continue
+                args = allowed_rpcs[rpc]
+                allowed, reason = selftest._is_readonly_call(rpc, args)
+                if not allowed:
+                    state.update(answered=False, error='refused: ' + reason)
+                    continue
+                try:
+                    answer = selftest._rpc_call(cdp, rpc, args)
+                    reply = answer.get('reply')
+                    state.update(answered=bool(answer.get('ok') and isinstance(reply, dict)),
+                                 health=live_health(reply) if isinstance(reply, dict) else None)
+                    if not state['answered']:
+                        state['error'] = str(answer.get('error') or 'invalid or missing reply')
+                except (selftest.CDPError, selftest.Unreachable, OSError) as error:
+                    state.update(answered=False, error=str(error))
+            result['message'] = 'live backend probes complete'
+        except (selftest.CDPError, selftest.Unreachable, OSError) as error:
+            result['message'] = 'live status unavailable: %s' % error
+        finally:
+            if cdp:
+                cdp.close()
+    else:
+        result['message'] = 'Steam is closed; live backend health is unavailable'
+    # Re-read after probing: the first RPC can establish attachment.
+    again = read_json_file(bridge_heartbeat_path())
+    heartbeat = again if isinstance(again, dict) and again else heartbeat
+    alive = bool(heartbeat.get('pid') and pid_alive(heartbeat['pid']))
+    attached = (bool(heartbeat.get('attachedAt')) if int(heartbeat.get('format') or 0) >= 2
+                else bool(heartbeat.get('time')))
+    level, lines = bridge_status()
+    result['bridge'] = {'marker_present': MARKER in (boot_file().read_text(errors='replace')
+                                                        if boot_file().is_file() else ''),
+                        'attached': bool(alive and attached) if host == 'lumen' else None,
+                        'addon_count': len(heartbeat.get('addons') or []) if alive and host == 'lumen' else None,
+                        'level': level, 'details': lines}
+    return result
+
+
+def live_addon_summary(state):
+    """Return a severity and plain-language summary of known health fields."""
+    if not state.get('installed'):
+        return 'warn', 'not installed'
+    if state.get('answered') is None and state.get('skipped'):
+        return 'warn', 'not probed (%s)' % state['skipped']
+    if state.get('answered') is None:
+        return 'warn', 'backend health unavailable'
+    if not state['answered']:
+        error = ' '.join(str(state.get('error') or 'unknown error').split())
+        return 'PROBLEM', 'backend did not answer (%s)' % error
+    health = state.get('health') or {}
+    runtime = health.get('runtime') or {}
+    discord = health.get('discord') or {}
+    tool = health.get('tool') or {}
+    facts = ['backend answered']
+    severity = 'ok'
+    if health.get('success') is False or health.get('ok') is False:
+        severity = 'PROBLEM'
+        facts.append('backend reports failure%s' %
+                     (': ' + ' '.join(str(health['error']).split()) if health.get('error') else ''))
+    elif health.get('error'):
+        severity = 'warn'
+        facts.append('backend error: ' + ' '.join(str(health['error']).split()))
+    if runtime.get('healthy') is True:
+        facts.append('runtime healthy')
+    elif runtime.get('healthy') is False:
+        severity = 'PROBLEM'
+        facts.append('runtime unhealthy')
+    if runtime.get('error'):
+        severity = 'PROBLEM'
+        facts.append('runtime error: ' + ' '.join(str(runtime['error']).split()))
+    if runtime.get('accountMismatch'):
+        severity = 'PROBLEM'
+        facts.append('account mismatch')
+    if runtime.get('helpersPaused') or runtime.get('helperPauseReason'):
+        if severity == 'ok':
+            severity = 'warn'
+        reason = runtime.get('helperPauseReason')
+        facts.append('helpers paused%s' % (' (' + ' '.join(str(reason).split()) + ')' if reason else ''))
+    if health.get('prefsDamaged') is True:
+        if severity == 'ok':
+            severity = 'warn'
+        facts.append('luna.json unreadable (left as is; opening the Luna panel restores it)')
+    if health.get('recovered') or health.get('recoveredReason'):
+        reason = health.get('recoveredReason')
+        facts.append('recovered%s' % (' (' + ' '.join(str(reason).split()) + ')' if reason else ''))
+    if discord.get('publishing') is True:
+        facts.append('Discord publishing')
+    elif discord.get('publishing') is False:
+        if severity == 'ok':
+            severity = 'warn'
+        reason = str(discord.get('reason') or '').replace('-', ' ')
+        facts.append('Discord not publishing%s' % (' (' + ' '.join(reason.split()) + ')' if reason else ''))
+    if tool.get('found') is True:
+        facts.append('compressor tool found')
+    elif tool.get('found') is False:
+        severity = 'PROBLEM'
+        facts.append('compressor tool not found')
+    return severity, '; '.join(facts)
+
+
+def live_verdict(live):
+    summaries = {name: live_addon_summary(state) for name, state in live['addons'].items()}
+    problems = [name for name, (severity, _) in summaries.items() if severity == 'PROBLEM']
+    warnings = [name for name, (severity, _) in summaries.items() if severity == 'warn']
+    states = live['addons'].values()
+    answering = sum(state.get('answered') is True for state in states)
+    installed = sum(bool(state.get('installed')) for state in live['addons'].values())
+    if problems:
+        headline = 'look at ' + ', '.join(problems)
+    elif warnings:
+        headline = '%d of %d installed add-ons answering; check %s' % (answering, installed, ', '.join(warnings))
+    else:
+        headline = 'all %d add-ons answering' % answering
+    stale = live['sidecar'].get('stale')
+    reload = ('restart luna-host (systemctl --user restart %s)' % HOST_UNIT
+              if live.get('host') == 'luna' else 'restart Steam')
+    restart = ('%s to load the installed files' % reload if stale is True else
+               'restart not needed' if stale is False else 'restart need unknown')
+    return summaries, '%s; %s' % (headline, restart), bool(problems or stale is True)
+
+
 def cmd_status(options):
+    if getattr(options, 'live', False) or getattr(options, 'json', False):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = cmd_status(argparse.Namespace(only=options.only,
+                                                  strict=getattr(options, 'strict', False)))
+        live = live_status(selected_addons(options)) if getattr(options, 'live', False) else None
+        if live is not None:
+            summaries, verdict, failed = live_verdict(live)
+            if failed:
+                code = EXIT_CORRUPT
+        if getattr(options, 'json', False):
+            print(json.dumps({'status': output.getvalue().splitlines(), 'live': live,
+                              'exit_code': code}, sort_keys=True))
+        else:
+            print(output.getvalue(), end='')
+            print('live       : %s' % live['message'])
+            print('sidecar    : %s' % live['sidecar']['message'])
+            print('live bridge: marker=%s attached=%s add-ons=%s'
+                  % (live['bridge']['marker_present'], live['bridge']['attached'],
+                     live['bridge']['addon_count']))
+            for name, state in live['addons'].items():
+                severity, detail = summaries[name]
+                print('live %-10s: %s - %s' % (name, severity, detail))
+            print('live verdict: %s' % verdict)
+        return code
     targets = selected_addons(options)
     manifest = load_manifest()
     installed = installed_addons()
@@ -8347,6 +8596,8 @@ def build_parser():
         child.add_argument('--only', action='append', default=[],
                            help='restrict to one add-on (repeatable): %s' % ', '.join(ADDONS))
         if name == 'status':
+            child.add_argument('--live', action='store_true', help='probe running backends read-only')
+            child.add_argument('--json', action='store_true', help='print status as JSON')
             child.add_argument('--strict', action='store_true',
                                help='exit 1 instead of 6 when a payload differs (CI gate)')
         if name == 'selftest':

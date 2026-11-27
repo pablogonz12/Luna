@@ -60,8 +60,10 @@ MAX_JOURNAL_LINES = 50
 # refresh, check, channels set, terminal, Auto/Apply/Set/Save) is absent on
 # purpose; a name that is not listed here is reported as skipped, never called.
 READONLY_RPCS = (
-    ('SlsLunaInfo', {}),
-    ('SlsLunaHealth', {}),
+    ('SlsLunaInfo', {'raw': '{"observe": true}'}),
+    # SlsLunaHealth is deliberately absent: building it can finalize a repair
+    # job, refresh the HLTB count sidecar and recover a damaged store, so it is
+    # not a read. The page walk opens the Health page as a user would.
     ('SlsLunaHost', {}),
     ('SlsLunaLuaTools', {}),
     ('SlsLunaGradient', {}),
@@ -72,7 +74,7 @@ READONLY_RPCS = (
     ('SlsLunaRefresh', {'raw': '{"action": "status"}'}),
     ('SlsPlaytimeGet', {}),
     ('SlsPresenceGet', {}),
-    ('SlsCompressorGet', {'raw': '{"light": true}'}),
+    ('SlsCompressorGet', {'raw': '{"light": true, "observe": true}'}),
     ('SlsHltbGet', {}),
     ('SlsHltbGames', {}),
     ('SlsSgdbGet', {}),
@@ -895,7 +897,7 @@ def _wait_idle(report, cdp):
     deadline = time.time() + WARMUP_BUDGET_S
     while True:
         try:
-            answer = _rpc_call(cdp, 'SlsLunaInfo', {})
+            answer = _rpc_call(cdp, 'SlsLunaInfo', dict(READONLY_RPCS)['SlsLunaInfo'])
         except (CDPError, Unreachable) as error:
             report.info('warm-up', 'no answer, timing as it is: %s' % error)
             return False
