@@ -9,7 +9,9 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
+      # Full history: pins are compared commit-by-commit against the branch head.
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - run: python3 scripts/luna.py verify --upstream
