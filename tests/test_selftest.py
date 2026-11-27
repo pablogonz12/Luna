@@ -817,6 +817,24 @@ class LiveStatusTest(SelftestBase):
         self.assertIn('Steam is closed', result['message'])
         self.assertIsNone(result['addons']['playtime']['answered'])
 
+    def test_a_stale_host_is_not_sent_the_compressor_probe(self):
+        steam = FakeSteam()
+        server = FakeServer(steam)
+        port = server.start()
+        self.addCleanup(server.stop)
+        with mock.patch.object(luna, 'installed_addons', return_value=('playtime', 'compressor')), \
+             mock.patch.object(luna, 'sidecar_freshness', return_value={'stale': True, 'message': 'stale'}), \
+             mock.patch.object(luna, 'steam_running', return_value=True), \
+             mock.patch.object(luna_selftest, 'cef_port', return_value=port):
+            result = luna.live_status(('playtime', 'compressor'))
+        self.assertNotIn('SlsCompressorGet', steam.rpc_names())
+        self.assertIn('SlsPlaytimeGet', steam.rpc_names())
+        self.assertEqual(luna.live_addon_summary(result['addons']['compressor']),
+                         ('warn', 'not probed (host predates installed files)'))
+
+    def test_the_selftest_never_sends_the_health_rpc(self):
+        self.assertNotIn('SlsLunaHealth', luna_selftest.READONLY_NAMES)
+
     def test_plain_language_health(self):
         cases = [
             ({'installed': True, 'answered': False, 'error': 'timeout after 5 s'},

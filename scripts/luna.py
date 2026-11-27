@@ -1340,6 +1340,11 @@ def live_status(targets):
                 if not state['installed']:
                     continue
                 rpc = rpc_names[name]
+                if name == 'compressor' and result['sidecar'].get('stale') is True:
+                    # A stale host runs the backend loaded before the installed
+                    # files, which may predate observe-only Gets and start a scan.
+                    state.update(answered=None, skipped='host predates installed files')
+                    continue
                 args = allowed_rpcs[rpc]
                 allowed, reason = selftest._is_readonly_call(rpc, args)
                 if not allowed:
@@ -1381,6 +1386,8 @@ def live_addon_summary(state):
     """Return a severity and plain-language summary of known health fields."""
     if not state.get('installed'):
         return 'warn', 'not installed'
+    if state.get('answered') is None and state.get('skipped'):
+        return 'warn', 'not probed (%s)' % state['skipped']
     if state.get('answered') is None:
         return 'warn', 'backend health unavailable'
     if not state['answered']:

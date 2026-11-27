@@ -61,7 +61,9 @@ MAX_JOURNAL_LINES = 50
 # purpose; a name that is not listed here is reported as skipped, never called.
 READONLY_RPCS = (
     ('SlsLunaInfo', {'raw': '{"observe": true}'}),
-    ('SlsLunaHealth', {}),
+    # SlsLunaHealth is deliberately absent: building it can finalize a repair
+    # job, refresh the HLTB count sidecar and recover a damaged store, so it is
+    # not a read. The page walk opens the Health page as a user would.
     ('SlsLunaHost', {}),
     ('SlsLunaLuaTools', {}),
     ('SlsLunaGradient', {}),
