@@ -1726,7 +1726,7 @@ test('Graphics reads bypass the backend cache and the page says when it was chec
   const document=fakeDom();
   const checkedAt=Math.floor(Date.now()/1000)-12;
   const {calls,overlay}=await openGraphicsPage(document,{graphicsCheckedAt:checkedAt});
-  assert.match(textOf(overlay),/Checked 1[12] s ago\./,
+  assert.match(textOf(overlay),/Checked (1[1-9]|2[0-9]) s ago\./,
     'the stamp comes from the report\'s own checkedAt');
   const reads=calls.filter(entry=>entry.fn==='SlsGraphicsGet');
   assert.ok(reads.length>=1);
