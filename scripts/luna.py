@@ -8410,9 +8410,15 @@ def cmd_vendor(options):
         return commit
 
     # Resolve every source before anything on disk changes, so one broken
-    # checkout cannot leave an earlier payload replaced but unrecorded.
-    for source in sources.values():
-        head(source)
+    # checkout cannot leave an earlier payload replaced but unrecorded. Every
+    # later read uses these commits: a HEAD that moves mid-run cannot make the
+    # payload and the manifest disagree.
+    resolved = {str(source): head(source) for source in sources.values()}
+    resolve = head
+
+    def head(source):
+        key = str(source)
+        return resolved[key] if key in resolved else resolve(source)
 
     def show(source, commit, path):
         result = subprocess.run(['git', '-C', str(source), 'show', '%s:%s' % (commit, path)],

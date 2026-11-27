@@ -2584,6 +2584,34 @@ class VendorTestCase(unittest.TestCase):
         self.assertEqual(payload.read_bytes(), payload_before)
 
 
+    def test_each_source_head_is_resolved_once(self):
+        # A git shim logs every HEAD lookup: the preflight's commit is the one
+        # every later read uses, so a HEAD moving mid-run cannot split them.
+        manifest = json.loads((self.repo / 'vendor/MANIFEST.json').read_text())
+        parent = Path(self.temp.name) / 'sources'
+        origin = parent / 'slsteam-playtime'
+        for meta in manifest['addons']['playtime']['files'].values():
+            dest = origin / meta['source_path']
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.repo / 'addons/playtime' / meta['source_path'], dest)
+        for args in (('init', '-q', '-b', 'main'), ('add', '-A'),
+                     ('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'src')):
+            subprocess.run(['git', '-C', str(origin), *args], check=True, capture_output=True)
+        shim = Path(self.temp.name) / 'shim'
+        shim.mkdir()
+        log = Path(self.temp.name) / 'git.log'
+        real = shutil.which('git')
+        (shim / 'git').write_text('#!/bin/sh\necho "$*" >> %s\nexec %s "$@"\n' % (log, real))
+        (shim / 'git').chmod(0o755)
+        env = dict(self.env, PATH='%s:%s' % (shim, os.environ.get('PATH', '')))
+        result = subprocess.run([sys.executable, str(self.repo / 'scripts/luna.py'), 'vendor', '--only', 'playtime',
+                                 '--source-dir', str(parent)], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        lookups = [line for line in log.read_text().splitlines()
+                   if str(origin) in line and 'rev-parse' in line and 'HEAD' in line]
+        self.assertEqual(len(lookups), 1, lookups)
+
+
 BRIDGE_STATUS_SCRIPT = '''
 import importlib.util, json
 spec = importlib.util.spec_from_file_location('luna_beat', %r)
