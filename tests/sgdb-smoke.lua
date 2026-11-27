@@ -409,6 +409,89 @@ assert(file_text(grid_dir .. '/620_hero.png') == nil)
 local reset_again = call('SlsSgdbReset', { raw = json.encode({ appid = 620, kind = 'hero' }) })
 assert(reset_again.success == true and reset_again.removed == false)
 
+-- Reset is undoable: the removed artwork (possibly the user's own, set
+-- outside Luna) goes onto the undo stack first.
+do
+  local own = io.open(grid_dir .. '/402p.png', 'wb'); own:write('USERART'); own:close()
+  local r = call('SlsSgdbReset', { raw = json.encode({ appid = 402, kind = 'grid' }) })
+  assert(r.success == true and r.removed == true and r.history == 1, 'reset must stash the art it removes')
+  assert(file_text(grid_dir .. '/402p.png') == nil)
+  local u = call('SlsSgdbUndo', { raw = json.encode({ appid = 402, kind = 'grid' }) })
+  assert(u.success == true and file_text(grid_dir .. '/402p.png') == 'USERART',
+    'undo after reset must bring the user art back')
+end
+
+-- Apply never replaces artwork it could not stash first.
+do
+  local own = io.open(grid_dir .. '/403p.png', 'wb'); own:write('KEEPME'); own:close()
+  os.execute("mkdir -p '" .. grid_dir .. "/.sls-luna-history'")
+  local blocker = io.open(grid_dir .. '/.sls-luna-history/403p', 'w'); blocker:write('x'); blocker:close()
+  local r = call('SlsSgdbApply', { raw = json.encode({ appid = 403, kind = 'grid',
+    url = 'https://cdn.example/grid2.jpg', mime = 'image/jpeg' }) })
+  assert(r.success == false and r.code == 'io', 'apply must refuse when the current art cannot be stashed')
+  assert(file_text(grid_dir .. '/403p.png') == 'KEEPME', 'the current art must be untouched')
+  assert(file_text(grid_dir .. '/403p.jpg') == nil, 'the new art must not land')
+  local rr = call('SlsSgdbReset', { raw = json.encode({ appid = 403, kind = 'grid' }) })
+  assert(rr.success == false and file_text(grid_dir .. '/403p.png') == 'KEEPME',
+    'reset must refuse rather than delete art it cannot stash')
+  os.remove(grid_dir .. '/.sls-luna-history/403p')
+end
+
+-- The oldest backup naming (no image extension) is imported into history,
+-- typed by its magic bytes, instead of being deleted unseen.
+do
+  local legacy = io.open(grid_dir .. '/404p.sls-luna.bak', 'wb'); legacy:write('\255\216\255LEGACYJPG'); legacy:close()
+  local cur = io.open(grid_dir .. '/404p.png', 'wb'); cur:write('CURRENT'); cur:close()
+  local r = call('SlsSgdbApply', { raw = json.encode({ appid = 404, kind = 'grid',
+    url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
+  assert(r.success == true, tostring(r.error))
+  local depth = call('SlsSgdbHistory', { raw = json.encode({ appid = 404 }) }).history.grid
+  assert(depth == 2, 'current art and the legacy backup must both be stashed, got ' .. tostring(depth))
+  assert(file_text(grid_dir .. '/404p.sls-luna.bak') == nil, 'the legacy file is removed only once stashed')
+  local u1 = call('SlsSgdbUndo', { raw = json.encode({ appid = 404, kind = 'grid' }) })
+  assert(u1.success == true and file_text(grid_dir .. '/404p.png') == 'CURRENT',
+    'the first undo restores the art that was there just before the apply')
+  local u2 = call('SlsSgdbUndo', { raw = json.encode({ appid = 404, kind = 'grid' }) })
+  assert(u2.success == true and file_text(grid_dir .. '/404p.jpg') == '\255\216\255LEGACYJPG',
+    'the older legacy backup comes back next, as a JPEG')
+end
+
+-- A failed write leaves the active art exactly as it was; an imported legacy
+-- backup stays in history and is never written over the current art.
+do
+  local legacy = io.open(grid_dir .. '/405p.sls-luna.bak', 'wb'); legacy:write('LEGACYPNG'); legacy:close()
+  local cur = io.open(grid_dir .. '/405p.png', 'wb'); cur:write('CURRENTPNG'); cur:close()
+  os.execute("mkdir -p '" .. grid_dir .. "/405p.jpg.tmp'") -- the JPEG write cannot land
+  local r = call('SlsSgdbApply', { raw = json.encode({ appid = 405, kind = 'grid',
+    url = 'https://cdn.example/grid2.jpg', mime = 'image/jpeg' }) })
+  os.execute("rmdir '" .. grid_dir .. "/405p.jpg.tmp'")
+  assert(r.success == false and r.code == 'io', 'a failed write must be reported')
+  assert(file_text(grid_dir .. '/405p.png') == 'CURRENTPNG', 'the active art must stay as it was, not the legacy backup')
+  assert(file_text(grid_dir .. '/405p.jpg') == nil)
+  local depth = call('SlsSgdbHistory', { raw = json.encode({ appid = 405 }) }).history.grid
+  assert(depth == 1, 'only the imported legacy entry stays in history, got ' .. tostring(depth))
+  local u = call('SlsSgdbUndo', { raw = json.encode({ appid = 405, kind = 'grid' }) })
+  assert(u.success == true and file_text(grid_dir .. '/405p.png') == 'LEGACYPNG',
+    'the legacy backup is still reachable through Undo')
+end
+
+-- A clock that moved backwards must not let pruning delete the copy that
+-- authorises a Reset: history stamps never go below the newest entry.
+do
+  local future = os.time() + 100000
+  local hist = grid_dir .. '/.sls-luna-history/406p'
+  os.execute("mkdir -p '" .. hist .. "'")
+  for k = 1, 5 do
+    local f = io.open(hist .. '/' .. future .. '-00000' .. k .. '.png', 'wb'); f:write('FUTURE' .. k); f:close()
+  end
+  local cur = io.open(grid_dir .. '/406p.png', 'wb'); cur:write('ACTIVE'); cur:close()
+  local r = call('SlsSgdbReset', { raw = json.encode({ appid = 406, kind = 'grid' }) })
+  assert(r.success == true and r.removed == true, tostring(r.error))
+  local u = call('SlsSgdbUndo', { raw = json.encode({ appid = 406, kind = 'grid' }) })
+  assert(u.success == true and file_text(grid_dir .. '/406p.png') == 'ACTIVE',
+    'undo after a reset must restore the active art even with future-stamped history')
+end
+
 -- ---------------------------------------------------------------- refusals
 
 local bad_mime = call('SlsSgdbApply', { raw = json.encode({ appid = 1145360, kind = 'grid',
