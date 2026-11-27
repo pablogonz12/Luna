@@ -656,6 +656,19 @@ for _, case in ipairs(refusals) do
   end
 end
 
+-- A refusal after a completed game retains its measurement and reason.
+write_file(dir .. '/queue.list', 'A\t/games/A\t10\nB\t/games/B\t10\n')
+write_file(dir .. '/queue.state', 'start\t1\t2\t10\tA\t/games/A\n'
+  .. 'done\t1\t2\t0\tCOMPACT|done|A|COMPACTED|123|1\n'
+  .. 'start\t2\t2\t10\tB\t/games/B\n' .. 'done\t2\t2\t5\t\n')
+write_file(dir .. '/run.log', 'RUN\t1700000000\nREFUSED|snapshots|/mnt/lib|snapshot detail\n')
+local partial = call(reg, 'SlsCompressorGet', json.encode({ refresh = true })).queue
+assert(partial.outcome.kind == 'stopped' and partial.done == 1
+  and partial.savings.measuredMib == 123 and partial.games[2].status == 'pending')
+assert(partial.outcome.reason == 'snapshots' and partial.outcome.path == '/mnt/lib'
+  and partial.outcome.detail == 'snapshot detail' and partial.outcome.nextStep
+  and partial.outcome.reasonText)
+
 -- A rolling ETA from two polls of the engine's PROGRESS lines.
 scanned('twogames')
 mode('slow')
@@ -783,6 +796,11 @@ local off = call(reg, 'SlsCompressorGet', json.encode({ refresh = true }))
 assert(off.snapshots and off.snapshots.choice.enabled == false
   and off.snapshots.choice.button == 'Allow compression (writes the setting for you)',
   'the banner did not return to the not-allowed state')
+write_file(accept_file, 'true\n') -- External change after the last scan.
+local stale = call(reg, 'SlsCompressorAcceptSnapshots', json.encode({ enabled = false }))
+assert(stale.success and not stale.already and read(accept_file) == 'false\n',
+  'a stale scan must not suppress the requested write')
+wait_for(reg, function(state) return state.job and not state.job.running end, 15)
 
 -- The accept payload is explicit only: an empty object or a typo must never
 -- enable a safety override.
@@ -821,6 +839,15 @@ local override = plugin.build_snapshots(
 assert(override and override.choice and override.choice.enabled == true
   and override.choice.button == 'Turn the override off',
   'an override left on must remain visible and reversible')
+for _, other in ipairs({ 'configured', 'unknown', 'missing' }) do
+  local mixed = plugin.build_snapshots({
+    { path = '/a', snapshots = 'unknown', reason = 'snapshots-unknown', snapshotTool = 'none' },
+    { path = '/b', snapshots = 'unknown', reason = 'snapshots-unknown',
+      snapshotTool = other ~= 'missing' and other or nil },
+  }, false)
+  assert(mixed.choice.tool ~= 'none' and not mixed.choice.text:find('usually safe', 1, true)
+    and #mixed.choice.paths == 2, 'mixed libraries need the strongest warning')
+end
 local known_snap = plugin.build_snapshots({ { path = '/lib', snapshots = 'yes' } }, false)
 assert(known_snap and known_snap.detected and known_snap.choice == nil,
   'a known snapshot state must warn without snapshotTool')

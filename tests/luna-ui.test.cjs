@@ -964,7 +964,7 @@ test('the status tab shows the game-by-game queue with bars',async()=>{
   const fixture=compressorFixture();
   fixture.job={action:'run',pid:42,running:true,startedAt:Date.now()/1000-90,finishedAt:0,elapsed:90,log:''};
   // queue.saved is MiB in the backend's own contract, not bytes.
-  fixture.queue={active:true,total:3,index:2,done:1,failed:0,skipped:0,saved:118,finished:false,
+  fixture.queue={active:true,total:3,index:2,done:1,failed:0,skipped:0,saved:118*1048576,finished:false,
     current:{name:'Cronos: The New Dawn',path:'/games/Cronos',size:100,totalBytes:100,doneBytes:42,
       phase:'compress',scannedBytes:0},
     next:[{name:'Hades',size:50}],
@@ -4986,9 +4986,9 @@ test('compressor sizes use one unit-aware formatter, bytes or MiB',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
   const withBytes=compressorFixture({queue:Object.assign({},queueBase,{
-    saved:13209.6,
+    saved:gib,
     savings:{measuredMib:13209.6,measuredGames:1,unmeasuredGames:0,estimateMib:0,
-      estimateGames:0,text:'',measuredBytes:gib,estimateBytes:0}})});
+      estimateGames:0,text:'',unit:'MiB',measuredBytes:gib,estimateBytes:0}})});
   const {w}=fakeWindow(document,{compressor:withBytes});
   mount(w);
   const overlay=await openCompressor(document);
@@ -4997,23 +4997,27 @@ test('compressor sizes use one unit-aware formatter, bytes or MiB',async()=>{
 
   const mibDom=fakeDom();
   menubarFixture(mibDom,true);
-  const mibOnly=compressorFixture({queue:Object.assign({},queueBase,{saved:13209.6})});
+  const mibOnly=compressorFixture({queue:Object.assign({},queueBase,{saved:gib,
+    games:[{name:'A',status:'done',saved:gib}]})});
   const second=fakeWindow(mibDom,{compressor:mibOnly});
   mount(second.w);
   const mibOverlay=await openCompressor(mibDom);
-  assert.match(textOf(mibOverlay),/saved 12\.9 GiB/,'queue.saved is MiB and is treated as MiB');
+  assert.match(textOf(mibOverlay),/saved 12\.9 GiB/,'queue.saved and game saved are bytes');
+  assert.doesNotMatch(textOf(mibOverlay),/TiB/);
 
   const statsDom=fakeDom();
   menubarFixture(statsDom,true);
   const statsFixture=compressorFixture({stats:{
     compression:{records:1,measured:1,original_bytes:2*gib,disk_bytes:0,saved_bytes:gib,games:[]},
     dedupe:{passes:0,directories:0,saved_bytes:0,entries:[]},
-    luna:{measured:1,saved_bytes:13209.6,games:[]},
+    luna:{measured:1,saved_bytes:gib,games:[{name:'Luna game',saved_bytes:gib}]},
     library:{games:1,bytes:2*gib}}});
   const third=fakeWindow(statsDom,{compressor:statsFixture});
   mount(third.w);
   const statsOverlay=await openCompressor(statsDom,'Stats');
-  assert.match(textOf(statsOverlay),/12\.9 GiB/,'stats.luna.saved_bytes is MiB, printed as such');
+  assert.match(textOf(statsOverlay),/Luna passes.*12\.9 GiB|12\.9 GiB.*Luna passes/);
+  assert.match(textOf(statsOverlay),/Luna game.*12\.9 GiB/);
+  assert.doesNotMatch(textOf(statsOverlay),/TiB/);
   assert.doesNotMatch(textOf(statsOverlay),/Luna passes\s*12\.9 KiB|Luna passes.*12 MB/,
     'a MiB stat is never read as bytes');
 });

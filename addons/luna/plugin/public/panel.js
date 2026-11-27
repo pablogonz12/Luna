@@ -137,9 +137,7 @@
     while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
     return (size >= 100 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
   };
-  /* One size formatter with an explicit unit. The compressor backend reports
-     queue.saved and stats.luna.saved_bytes in MiB while everything else is
-     bytes; reading a MiB number as bytes printed 12.9 GiB as "12 MB". */
+  /* Size fields are bytes unless explicitly named as MiB. */
   const sizeToBytes = (value, unit) => {
     const number = Number(value) || 0;
     const name = String(unit || 'bytes').toLowerCase();
@@ -2177,13 +2175,13 @@
       return { doneBytes, totalBytes };
     }
 
-    // The queue's savings contract: the explicit byte fields (with the
-    // backend's own unit) win; only when they are absent do the legacy MiB
+    // The queue's savings contract: explicit byte fields win; only when
+    // they are absent do the legacy MiB
     // counters get used, and then they are labelled MiB, never bytes.
     function savingsSize(savings, key) {
       if (!savings || typeof savings !== 'object') return '';
       if (savings[key + 'Bytes'] !== undefined && savings[key + 'Bytes'] !== null) {
-        return formatSize(savings[key + 'Bytes'], savings.unit || 'bytes');
+        return formatSize(savings[key + 'Bytes'], 'bytes');
       }
       if (savings[key + 'Mib'] !== undefined && savings[key + 'Mib'] !== null) {
         return formatSize(savings[key + 'Mib'], 'mib');
@@ -2203,7 +2201,7 @@
       const measuredText = savingsSize(savings, 'measured');
       const estimateText = savingsSize(savings, 'estimate');
       const savedText = measuredText
-        || (Number(queue.saved) > 0 ? formatSize(queue.saved, 'mib') : '')
+        || (Number(queue.saved) > 0 ? formatSize(queue.saved, 'bytes') : '')
         || (estimateText ? 'about ' + estimateText + ' (estimate)' : '');
       const outcome = queue.outcome && typeof queue.outcome === 'object' ? queue.outcome : null;
       const outcomeKind = outcome ? String(outcome.kind || '') : '';
@@ -2465,7 +2463,7 @@
       [['Measured saved', formatSize(measuredSaved, 'bytes'), 'ZSTD + deduplication'],
        ['Library on disk', formatSize(library.bytes, 'bytes'), (Number(library.games) || 0) + ' games in the last scan'],
        ['Compacted', (Number(summary.compacted) || 0) + ' / ' + (Number(summary.game_count) || 0), 'games done'],
-       ['Luna passes', formatSize(luna.saved_bytes, 'mib'), (Number(luna.measured) || 0) + ' games with savings']]
+       ['Luna passes', formatSize(luna.saved_bytes, 'bytes'), (Number(luna.measured) || 0) + ' games with savings']]
         .forEach(pair => {
           const cell = document.createElement('div');
           const value = document.createElement('b');
@@ -2491,8 +2489,8 @@
 
       const lunaGames = listOf(luna.games).slice(0, 8);
       compressorChart(body, 'Savings recorded by Luna passes',
-        lunaGames.map(game => ({ label: game.name, value: sizeToBytes(game.saved_bytes, 'mib'),
-          display: formatSize(game.saved_bytes, 'mib') })),
+        lunaGames.map(game => ({ label: game.name, value: sizeToBytes(game.saved_bytes, 'bytes'),
+          display: formatSize(game.saved_bytes, 'bytes') })),
         { empty: 'No per-game savings were recorded yet \u2014 a pass that reclaims nothing records zero.' });
 
       const dedupeEntries = listOf(dedupe.entries).slice(0, 8);
@@ -2742,7 +2740,7 @@
           chip = document.createElement('span');
           chip.className = 'sls-luna-chip ' + state;
           chip.textContent = state === 'done' && Number(queueEntry.saved) > 0
-            ? 'done \u00b7 saved ' + formatSize(queueEntry.saved, 'mib') : state;
+            ? 'done \u00b7 saved ' + formatSize(queueEntry.saved, 'bytes') : state;
         }
         const excludedNow = excluded.has(game.name);
         const box = document.createElement('div');

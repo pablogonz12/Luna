@@ -946,12 +946,11 @@ local function read_queue(limit)
   -- formatter, measuredMib is the engine's own unit.
   savings.unit = 'MiB'
   queue.savings = savings
-  -- Pass-level outcome. A library refusal (exit 5/6) means nothing was
-  -- attempted: that is "not started", with the engine's own next step, and the
-  -- games that were never reached stay pending instead of reading as failures.
+  -- A refusal leaves the current and unreached games pending. Earlier games
+  -- may already have completed, in which case the pass stopped early.
   local outcome
   if refusalSeen then
-    outcome = { kind = 'not-started', reason = refusalSeen.reason,
+    outcome = { kind = queue.done == 0 and 'not-started' or 'stopped', reason = refusalSeen.reason,
       reasonText = refusalSeen.text, detail = refusalSeen.detail,
       nextStep = refusalSeen.next_step, path = refusalSeen.path }
   elseif queue.interrupted > 0 then
@@ -1083,13 +1082,21 @@ local function build_snapshots(libraries, accept)
   if type(accept) == 'boolean' then enabled = accept end
   local tool, paths = nil, {}
   local detected = nil
+  local has_tool_field = false
+  for _, lib in ipairs(libraries) do
+    if lib.snapshotTool ~= nil then has_tool_field = true; break end
+  end
   for _, lib in ipairs(libraries) do
     -- `snapshotTool` and `reason_detail` are per-library engine fields; absent
     -- keys mean an older engine, and then nothing beyond today's view is shown.
     local unreadable = lib.snapshots == 'unknown' or lib.reason == 'snapshots-unknown'
-    if lib.snapshotTool ~= nil and unreadable
+    if has_tool_field and unreadable
       and (lib.reason == 'snapshots-unknown' or enabled == true) then
-      tool = tool or lib.snapshotTool
+      local current = lib.snapshotTool
+      if current ~= 'none' and current ~= 'configured' then current = 'unknown' end
+      if not tool or current == 'unknown' or (current == 'configured' and tool == 'none') then
+        tool = current
+      end
       paths[#paths + 1] = lib.path
     end
     if lib.reason == 'snapshots' or lib.snapshots == 'yes' then
@@ -1480,8 +1487,8 @@ function M.register(registry)
       return response({success = false, code = 'run-live',
         error = 'A compression run is in progress; stop it before changing the snapshot setting.'})
     end
-    local status = scan_state()
-    local already = type(status) == 'table' and status.accept_snapshots_unknown == want
+    local current = read_text(SNAPSHOT_FILE)
+    local already = current == (want and 'true\n' or 'false\n')
     if not already and not write_accept_snapshots(want) then
       return response({success = false, error = 'Could not write the snapshot setting'})
     end
