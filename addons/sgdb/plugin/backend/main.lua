@@ -305,7 +305,18 @@ local function history_entries(directory, appid, kind)
   for _, name in ipairs(list_dir(slot_history_dir(directory, appid, kind))) do
     if name:match('^%d+%-%d+%.[%w]+$') then out[#out + 1] = name end
   end
-  table.sort(out)
+  -- Numeric (stamp, sequence) order: oldest first, newest last.
+  local function key(name)
+    local s, n = name:match('^(%d+)%-(%d+)%.')
+    return tonumber(s), tonumber(n)
+  end
+  table.sort(out, function(a, b)
+    local sa, na = key(a)
+    local sb, nb = key(b)
+    if sa ~= sb then return sa < sb end
+    if na ~= nb then return na < nb end
+    return a < b
+  end)
   return out
 end
 
@@ -362,11 +373,20 @@ local function push_history(directory, appid, kind, author)
   fs.create_directories(dir)
   local stamp = os.time()
   local stored = 0
+  -- Entries sort by name, so the sequence continues after any entry already
+  -- stamped this second: two changes within one second never collide (which
+  -- overwrote the older step) and the newer one always sorts last.
+  local seq = 0
+  for _, name in ipairs(history_entries(directory, slot, kind)) do
+    local s, n = name:match('^(%d+)%-(%d+)%.')
+    if tonumber(s) == stamp and tonumber(n) > seq then seq = tonumber(n) end
+  end
   local function stash(path)
     local body = read_bytes(path)
     if not body then return end
     local ext = path:match('%.([%w]+)$') or 'png'
-    local name = string.format('%d-%d.%s', stamp, stored + 1, ext)
+    seq = seq + 1
+    local name = string.format('%d-%06d.%s', stamp, seq, ext)
     if write_file_atomic(dir .. '/' .. name, body) then stored = stored + 1 end
   end
   for _, path in ipairs(current) do stash(path) end
@@ -380,6 +400,36 @@ local function push_history(directory, appid, kind, author)
       author = tostring(author or ''), files = stored })
   end
   return stored
+end
+
+-- Files removed by Undo go to <slot history>/undone/ (same naming, newest
+-- last, pruned like the history) so an Undo never destroys artwork outright.
+local function keep_undone(directory, appid, kind, paths)
+  local dir = slot_history_dir(directory, math.floor(appid), kind) .. '/undone'
+  fs.create_directories(dir)
+  local stamp = os.time()
+  local names = {}
+  for _, name in ipairs(list_dir(dir)) do
+    if name:match('^%d+%-%d+%.[%w]+$') then names[#names + 1] = name end
+  end
+  local seq = 0
+  for _, name in ipairs(names) do
+    local st, n = name:match('^(%d+)%-(%d+)%.')
+    if tonumber(st) == stamp and tonumber(n) > seq then seq = tonumber(n) end
+  end
+  for _, path in ipairs(paths) do
+    local body = read_bytes(path)
+    if body then
+      seq = seq + 1
+      local name = string.format('%d-%06d.%s', stamp, seq, path:match('%.([%w]+)$') or 'png')
+      if write_file_atomic(dir .. '/' .. name, body) then names[#names + 1] = name end
+    end
+  end
+  table.sort(names)
+  while #names > HISTORY_KEEP do
+    os.remove(dir .. '/' .. names[1])
+    table.remove(names, 1)
+  end
 end
 
 local function history_depth(directory, appid, kind)
@@ -1050,12 +1100,18 @@ function M.register(registry)
       return reply({ success = false, code = 'empty', error = 'Nothing to undo for this slot.' })
     end
     local base = directory .. '/' .. tostring(appid) .. KINDS[kind]
-    if #current > 0 then push_history(directory, appid, kind, nil) end
-    for _, path in ipairs(current) do os.remove(path) end
+    -- Take the previous step first: stashing the current file before popping
+    -- made the current file the newest entry, so Undo put it straight back
+    -- whenever a second or more separated the change and the undo.
     local popped = pop_entries(directory, appid, kind, 1)
     if #popped == 0 then
       return reply({ success = false, code = 'io', error = 'Could not read the undo entry.' })
     end
+    -- The file being undone is kept, but outside the undo stack: pushing it
+    -- onto the stack made a second Undo bring it straight back (a redo), so
+    -- Undo could never walk more than one step back.
+    if #current > 0 then keep_undone(directory, appid, kind, current) end
+    for _, path in ipairs(current) do os.remove(path) end
     local target = base .. '.' .. popped[1].ext
     local saved, save_why = write_file_atomic(target, popped[1].body)
     if not saved then return reply({ success = false, code = 'io', error = tostring(save_why) }) end

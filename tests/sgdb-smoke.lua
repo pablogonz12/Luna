@@ -306,6 +306,45 @@ assert(file_text(grid_dir .. '/1145360p.jpg') == nil)
 local empty = call('SlsSgdbUndo', { raw = json.encode({ appid = 1145360, kind = 'wide' }) })
 assert(empty.success == false and empty.code == 'empty', 'undo with no history must fail closed')
 
+-- Regression: Undo must restore the previous step even when a second or more
+-- separates the change and the undo (it used to stash the current file first
+-- and then pop that same file back), and two changes inside one second must
+-- not overwrite each other's history entry.
+do
+  local real_time = os.time
+  local clock = real_time()
+  os.time = function(t) if t then return real_time(t) end return clock end
+  local function apply(url, mime)
+    local r = call('SlsSgdbApply', { raw = json.encode({ appid = 400, kind = 'grid', url = url, mime = mime }) })
+    assert(r.success == true, tostring(r.error))
+  end
+  apply('https://cdn.example/grid1.png', 'image/png')   -- step 1: PNG1DATA
+  apply('https://cdn.example/wide1.png', 'image/png')   -- step 2: WIDEDATA, same second, same ext
+  apply('https://cdn.example/grid2.jpg', 'image/jpeg')  -- step 3: JPG2DATA, same second
+  local depth = call('SlsSgdbHistory', { raw = json.encode({ appid = 400 }) })
+  assert(depth.history.grid == 2, 'two changes in one second must keep two undo steps, got '
+    .. tostring(depth.history.grid))
+  clock = clock + 5
+  local first = call('SlsSgdbUndo', { raw = json.encode({ appid = 400, kind = 'grid' }) })
+  assert(first.success == true, tostring(first.error))
+  assert(file_text(grid_dir .. '/400p.png') == 'WIDEDATA',
+    'undo after the clock moved must restore the previous step, not the current file')
+  assert(file_text(grid_dir .. '/400p.jpg') == nil)
+  clock = clock + 5
+  local second = call('SlsSgdbUndo', { raw = json.encode({ appid = 400, kind = 'grid' }) })
+  assert(second.success == true, tostring(second.error))
+  assert(file_text(grid_dir .. '/400p.png') == 'PNG1DATA',
+    'a second undo must go one step further back (the same-second entry must not be overwritten)')
+  local kept = 0
+  local pipe = io.popen("ls -1 '" .. grid_dir .. "/.sls-luna-history/400p/undone' 2>/dev/null")
+  for _ in pipe:lines() do kept = kept + 1 end
+  pipe:close()
+  assert(kept == 2, 'both undone files must be kept outside the undo stack, found ' .. kept)
+  local after = call('SlsSgdbHistory', { raw = json.encode({ appid = 400 }) })
+  assert(after.history.grid == 0, 'two undos must use up both steps, not count the undone files')
+  os.time = real_time
+end
+
 -- Reset removes the custom file so Steam shows its own art; history survives.
 call('SlsSgdbApply', { raw = json.encode({ appid = 620, kind = 'hero',
   url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
