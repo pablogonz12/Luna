@@ -1776,6 +1776,36 @@
         + 'Requires SLSsteam-Moon and at least one numeric manifest.';
       body.appendChild(note);
 
+      // Both the presence state and its backup were unreadable: the backend
+      // quarantined them and refuses ownership writes until the user starts
+      // fresh. Every other control on this page is inert until then.
+      const locked = !!(presence && presence.corruptionRequiresAcknowledgement === true);
+      if (locked) {
+        const notice = document.createElement('p');
+        notice.className = 'sls-luna-note';
+        notice.id = 'sls-luna-presence-corruption';
+        notice.style.cssText = 'color:#ffbe70;white-space:pre-wrap;overflow-wrap:anywhere;';
+        const paths = Array.isArray(presence.quarantinePaths)
+          ? presence.quarantinePaths.filter(p => typeof p === 'string') : [];
+        notice.textContent = 'The presence state and its backup could not be read. Presence ownership changes are paused. '
+          + 'Damaged copies were quarantined in ' + String(presence.quarantineDirectory || '(directory unavailable)') + '.'
+          + (paths.length ? '\n' + paths.join('\n') : '\nQuarantine paths are unavailable; copies may not have been moved.')
+          + '\nStart fresh accepts an empty ownership ledger; existing placeholder shortcuts may need manual attention.';
+        body.appendChild(notice);
+        const fresh = document.createElement('button');
+        fresh.className = 'sls-luna-btn';
+        fresh.id = 'sls-luna-presence-start-fresh';
+        fresh.textContent = 'Start fresh';
+        fresh.onclick = async () => {
+          fresh.disabled = true;
+          try {
+            await rpc(w, 'SlsPresenceAcknowledgeCorruption', { raw: JSON.stringify({ acknowledge: true }) });
+            await refresh();
+          } catch (error) { showError(body, error); } finally { fresh.disabled = false; }
+        };
+        body.appendChild(fresh);
+      }
+
       const toggle = document.createElement('div');
       toggle.className = 'sls-luna-row';
       const text = document.createElement('div');
@@ -1790,7 +1820,9 @@
       const switchBox = document.createElement('div');
       switchBox.className = 'sls-luna-switch' + (state.enabled ? ' on' : '');
       switchBox.appendChild(document.createElement('span'));
+      if (locked) switchBox.style.opacity = '0.5';
       switchBox.onclick = async () => {
+        if (locked) return;
         try {
           await rpc(w, 'SlsPresenceSetEnabled', { enabled: !state.enabled });
           await refresh();
@@ -1942,7 +1974,9 @@
       const cleanup = document.createElement('button');
       cleanup.className = 'sls-luna-btn';
       cleanup.textContent = cleanupArmed ? 'Confirm removal' : 'Disable and remove placeholders';
+      cleanup.disabled = locked;
       cleanup.onclick = async () => {
+        if (locked) return;
         // Two-step in the page: a native confirm() would freeze the shell.
         if (!cleanupArmed) { cleanupArmed = true; paint(); return; }
         cleanupArmed = false;
@@ -1957,7 +1991,9 @@
       const ack = document.createElement('button');
       ack.className = 'sls-luna-btn secondary';
       ack.textContent = 'Acknowledge cleanup';
+      ack.disabled = locked;
       ack.onclick = async () => {
+        if (locked) return;
         try { await rpc(w, 'SlsPresenceAcknowledgeCleanup'); await refresh(); } catch (error) { showError(body, error); }
       };
       actions.append(cleanup, ack);

@@ -397,6 +397,7 @@ function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPen
       }
       if(fn==='SlsPlaytimeEdit')return JSON.stringify({success:true});
       if(fn==='SlsPresenceSetEnabled')return JSON.stringify({success:true,enabled:payload.enabled});
+      if(fn==='SlsPresenceAcknowledgeCorruption')return JSON.stringify({success:true});
       if(fn==='SlsCompressorGet'){
         // Mirror the backend: the light shape drops the per-game list and the
         // statistics, so a tab that needs either must ask for the full one.
@@ -793,6 +794,39 @@ test('the presence switch calls the real RPC with the inverted value',async()=>{
   const call=calls.filter(c=>c.fn==='SlsPresenceSetEnabled').pop();
   assert.ok(call,'disabling presence must call SlsPresenceSetEnabled');
   assert.equal(call.payload.enabled,false,'the switch must send the inverted value');
+});
+
+test('a corrupt presence state shows the notice, pauses the controls and starts fresh',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const {w,calls}=fakeWindow(document,{
+    presence:{success:true,corrupt:true,corruptionRequiresAcknowledgement:true,
+      quarantineDirectory:'/data/<img src=x onerror=alert(1)>',quarantinePaths:['/data/presence.json.corrupt-1',7],
+      state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}}});
+  mount(w);
+  document.getElementById('sls-luna-btn').click();
+  await new Promise(resolve=>setTimeout(resolve,30));
+  const presenceTab=findNode(document.getElementById('sls-luna-overlay'),
+    node=>node.className==='sls-luna-tab' && node.textContent==='Presence');
+  presenceTab.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  const overlay=document.getElementById('sls-luna-overlay');
+  const notice=findNode(overlay,node=>node.id==='sls-luna-presence-corruption');
+  assert.ok(notice,'the corruption notice is missing');
+  assert.match(notice.textContent,/could not be read/);
+  assert.match(notice.textContent,/presence\.json\.corrupt-1/);
+  assert.ok(notice.textContent.includes('<img src=x onerror=alert(1)>'),'the directory must be shown as text');
+  assert.ok(!(notice.innerHTML||'').includes('<img'),'backend text must never become markup');
+  const toggle=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-switch'));
+  toggle.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.ok(!calls.some(c=>c.fn==='SlsPresenceSetEnabled'),'the switch must be inert while the ledger is locked');
+  const fresh=findNode(overlay,node=>node.id==='sls-luna-presence-start-fresh');
+  assert.ok(fresh,'the Start fresh button is missing');
+  await fresh.onclick();
+  const call=calls.filter(c=>c.fn==='SlsPresenceAcknowledgeCorruption').pop();
+  assert.ok(call,'Start fresh must call SlsPresenceAcknowledgeCorruption');
+  assert.deepEqual(call.payload,{acknowledge:true},"Start fresh must send the serialized acknowledgement");
 });
 
 test('the session-time switch defaults on and toggles through the real RPC',async()=>{
