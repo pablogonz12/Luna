@@ -74,6 +74,7 @@ READONLY_RPCS = (
     ('SlsPresenceGet', {}),
     ('SlsCompressorGet', {'raw': '{"light": true}'}),
     ('SlsHltbGet', {}),
+    ('SlsHltbGames', {}),
     ('SlsSgdbGet', {}),
     ('SlsGraphicsGet', {}),
 )
@@ -912,38 +913,39 @@ def _wait_idle(report, cdp):
         time.sleep(0.25)
 
 
-def _check_hltb_rev(report, cdp, reply):
-    """Poll SlsHltbGet the way the panel does: with the rev it already holds."""
+def _check_hltb_rev(report, cdp, reply, name='SlsHltbGet'):
+    """Poll an HLTB read the way the panel/agent do: with the rev it already holds."""
+    label = 'rpc %s rev' % name
     rev = reply.get('rev')
     if not isinstance(rev, str) or not rev:
-        report.skipped('rpc SlsHltbGet rev', 'the first reply carries no rev to poll with')
+        report.skipped(label, 'the first reply carries no rev to poll with')
         return
-    allowed, reason = _is_readonly_call('SlsHltbGet', {'rev': rev})
+    allowed, reason = _is_readonly_call(name, {'rev': rev})
     if not allowed:
-        report.failed('rpc SlsHltbGet rev', 'refused: %s' % reason)
+        report.failed(label, 'refused: %s' % reason)
         return
     first_size = len(json.dumps(reply, sort_keys=True))
     try:
-        answer = _rpc_call(cdp, 'SlsHltbGet', {'rev': rev})
+        answer = _rpc_call(cdp, name, {'rev': rev})
     except (CDPError, Unreachable) as error:
-        report.failed('rpc SlsHltbGet rev', 'no answer: %s' % error)
+        report.failed(label, 'no answer: %s' % error)
         return
     again = answer.get('reply') if isinstance(answer.get('reply'), dict) else {}
     sizes = '%d -> %d bytes' % (first_size, len(json.dumps(again, sort_keys=True)))
     if not answer.get('ok'):
-        report.failed('rpc SlsHltbGet rev', '%s, but the rev call failed: %s'
+        report.failed(label, '%s, but the rev call failed: %s'
                       % (sizes, answer.get('error') or 'no reason'))
     elif again.get('unchanged') is not True:
-        report.failed('rpc SlsHltbGet rev', '%s, but the reply is not unchanged:true (%r)'
+        report.failed(label, '%s, but the reply is not unchanged:true (%r)'
                       % (sizes, str(again)[:120]))
     else:
-        report.passed('rpc SlsHltbGet rev', '%s, unchanged: true' % sizes)
+        report.passed(label, '%s, unchanged: true' % sizes)
 
 
 def _check_rpcs(report, cdp, backend_names=()):
     """Read-only status RPCs only: no write word is ever sent."""
     _wait_idle(report, cdp)
-    hltb_reply = None
+    hltb_replies = {}
     for name, args in READONLY_RPCS:
         allowed, reason = _is_readonly_call(name, args)
         if not allowed:
@@ -993,10 +995,10 @@ def _check_rpcs(report, cdp, backend_names=()):
         if reply.get('success') is False:
             note = ' (backend says: %s)' % str(reply.get('error') or 'no reason')[:120]
         report.passed('rpc %s' % name, '%d key(s), %s%s' % (keys, timing, note))
-        if name == 'SlsHltbGet':
-            hltb_reply = reply
-    if hltb_reply is not None:
-        _check_hltb_rev(report, cdp, hltb_reply)
+        if name in ('SlsHltbGet', 'SlsHltbGames') and reply.get('error') is None:
+            hltb_replies[name] = reply
+    for name, first in sorted(hltb_replies.items()):
+        _check_hltb_rev(report, cdp, first, name)
     skipped = sorted(set(backend_names) - READONLY_NAMES)
     if skipped:
         report.skipped('refused/writing RPCs', 'not called: ' + ', '.join(skipped))
