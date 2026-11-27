@@ -1340,9 +1340,11 @@ def live_status(targets):
                 if not state['installed']:
                     continue
                 rpc = rpc_names[name]
-                if name == 'compressor' and result['sidecar'].get('stale') is True:
+                if name in ('luna', 'compressor') and result['sidecar'].get('stale') is True:
                     # A stale host runs the backend loaded before the installed
-                    # files, which may predate observe-only Gets and start a scan.
+                    # files, which may predate observe and ignore it: the old
+                    # SlsLunaInfo recovers a damaged luna.json, the old
+                    # SlsCompressorGet can start a scan.
                     state.update(answered=None, skipped='host predates installed files')
                     continue
                 args = allowed_rpcs[rpc]

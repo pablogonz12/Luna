@@ -822,12 +822,14 @@ class LiveStatusTest(SelftestBase):
         server = FakeServer(steam)
         port = server.start()
         self.addCleanup(server.stop)
-        with mock.patch.object(luna, 'installed_addons', return_value=('playtime', 'compressor')), \
+        with mock.patch.object(luna, 'installed_addons', return_value=('playtime', 'compressor', 'luna')), \
              mock.patch.object(luna, 'sidecar_freshness', return_value={'stale': True, 'message': 'stale'}), \
              mock.patch.object(luna, 'steam_running', return_value=True), \
              mock.patch.object(luna_selftest, 'cef_port', return_value=port):
-            result = luna.live_status(('playtime', 'compressor'))
+            result = luna.live_status(('playtime', 'compressor', 'luna'))
         self.assertNotIn('SlsCompressorGet', steam.rpc_names())
+        self.assertNotIn('SlsLunaInfo', steam.rpc_names())
+        self.assertEqual(result['addons']['luna'].get('skipped'), 'host predates installed files')
         self.assertIn('SlsPlaytimeGet', steam.rpc_names())
         self.assertEqual(luna.live_addon_summary(result['addons']['compressor']),
                          ('warn', 'not probed (host predates installed files)'))
