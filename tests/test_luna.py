@@ -1972,6 +1972,25 @@ class LumenUpdateTestCase(unittest.TestCase):
         self.assertIn(('start', '--no-block', 'luna-apply.service'), self.systemctl_calls)
         self.assertIn(('stop', 'luna-apply.service'), self.systemctl_calls)
 
+    def test_stopping_the_apply_waiter_is_a_clean_cancel(self):
+        # Cancel stops luna-apply.service while it waits for Steam: that must
+        # not leave the unit 'failed'. The unit counts a raw SIGTERM as success
+        # and a SIGTERM during the wait returns 0, while other exits propagate.
+        import argparse, signal as sig
+        self.m.write_apply_unit()
+        unit = self.m.apply_unit_paths()[1].read_text()
+        self.assertIn('SuccessExitStatus=SIGTERM', unit)
+        def stopped(**_kwargs):
+            raise SystemExit(128 + sig.SIGTERM)
+        self.m.wait_for_steam_closed = stopped
+        options = argparse.Namespace(wait_steam=True, verbose=False)
+        self.assertEqual(self.m.cmd_autoupdate(options), self.m.EXIT_OK)
+        def broken(**_kwargs):
+            raise SystemExit(3)
+        self.m.wait_for_steam_closed = broken
+        with self.assertRaises(SystemExit):
+            self.m.cmd_autoupdate(options)
+
     def test_queued_update_waits_for_steam_then_runs(self):
         self.m.write_json_file(self.m.lumen_pending_path(), {'action': 'update'})
         self.steam_running = True

@@ -2480,6 +2480,10 @@ def write_apply_unit():
         # SIGTERM goes to luna.py only, so its `finally` blocks (steam lock,
         # rollback) run; the installer is killed by luna itself, then by systemd.
         'KillMode=mixed\n'
+        # Cancel stops this unit. A SIGTERM before luna.py installs its handler
+        # (nothing has run yet) is a clean cancel, not a failure; once the
+        # handler is in place an interrupted install still exits 143 = failed.
+        'SuccessExitStatus=SIGTERM\n'
         'TimeoutStopSec=300\n'
         'ExecStart=%s %s autoupdate --wait-steam\n' % (sys.executable, luna_tools_dir() / 'luna.py'))
     systemctl_user('daemon-reload')
@@ -3104,7 +3108,14 @@ def cmd_autoupdate(options):
     if getattr(options, 'wait_steam', False):
         # luna-apply.service entry point: a queued job starts seconds after
         # Steam exits, not on the next 30-minute tick. Steam stays untouched.
-        wait = wait_for_steam_closed(probe=lambda: bool(steam_running() or _update_lock_held_by_other()))
+        try:
+            wait = wait_for_steam_closed(probe=lambda: bool(steam_running() or _update_lock_held_by_other()))
+        except SystemExit as stop:
+            # Stopped while waiting (Cancel stops luna-apply.service): nothing
+            # was applied, so this is a clean cancel rather than a failure.
+            if stop.code in (128 + signal.SIGTERM, 128 + signal.SIGHUP):
+                return EXIT_OK
+            raise
         if wait == 'timeout':
             message = 'waited %d hours for Steam to stay closed; the update is still queued' % (
                 APPLY_WAIT_LIMIT // 3600)
