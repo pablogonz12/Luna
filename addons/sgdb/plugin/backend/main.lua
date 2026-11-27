@@ -404,9 +404,11 @@ end
 
 -- Files removed by Undo go to <slot history>/undone/ (same naming, newest
 -- last, pruned like the history) so an Undo never destroys artwork outright.
+-- Returns true, or false and why; the caller must not delete on false.
 local function keep_undone(directory, appid, kind, paths)
   local dir = slot_history_dir(directory, math.floor(appid), kind) .. '/undone'
-  fs.create_directories(dir)
+  local made, made_why = pcall(fs.create_directories, dir)
+  if not made then return false, tostring(made_why) end
   local stamp = os.time()
   local names = {}
   for _, name in ipairs(list_dir(dir)) do
@@ -419,17 +421,19 @@ local function keep_undone(directory, appid, kind, paths)
   end
   for _, path in ipairs(paths) do
     local body = read_bytes(path)
-    if body then
-      seq = seq + 1
-      local name = string.format('%d-%06d.%s', stamp, seq, path:match('%.([%w]+)$') or 'png')
-      if write_file_atomic(dir .. '/' .. name, body) then names[#names + 1] = name end
-    end
+    if not body then return false, 'cannot read ' .. path end
+    seq = seq + 1
+    local name = string.format('%d-%06d.%s', stamp, seq, path:match('%.([%w]+)$') or 'png')
+    local ok, why = write_file_atomic(dir .. '/' .. name, body)
+    if not ok then return false, why or ('cannot write ' .. dir .. '/' .. name) end
+    names[#names + 1] = name
   end
   table.sort(names)
   while #names > HISTORY_KEEP do
     os.remove(dir .. '/' .. names[1])
     table.remove(names, 1)
   end
+  return true
 end
 
 local function history_depth(directory, appid, kind)
@@ -1100,21 +1104,38 @@ function M.register(registry)
       return reply({ success = false, code = 'empty', error = 'Nothing to undo for this slot.' })
     end
     local base = directory .. '/' .. tostring(appid) .. KINDS[kind]
-    -- Take the previous step first: stashing the current file before popping
-    -- made the current file the newest entry, so Undo put it straight back
-    -- whenever a second or more separated the change and the undo.
-    local popped = pop_entries(directory, appid, kind, 1)
-    if #popped == 0 then
+    -- Transactional, so a failed write never loses artwork:
+    --   1. read the previous step without consuming it;
+    --   2. archive the current file(s) to undone/ (outside the undo stack:
+    --      stashing them on the stack made a second Undo act as a redo);
+    --   3. write the restored artwork;
+    --   4. only then remove the replaced file(s) and consume the history entry.
+    -- Any failure before step 4 leaves the current artwork and the history
+    -- entry in place for a retry.
+    local entries = history_entries(directory, appid, kind)
+    local name = entries[#entries]
+    local history_dir = slot_history_dir(directory, math.floor(appid), kind)
+    local body = name and read_bytes(history_dir .. '/' .. name)
+    if not body then
       return reply({ success = false, code = 'io', error = 'Could not read the undo entry.' })
     end
-    -- The file being undone is kept, but outside the undo stack: pushing it
-    -- onto the stack made a second Undo bring it straight back (a redo), so
-    -- Undo could never walk more than one step back.
-    if #current > 0 then keep_undone(directory, appid, kind, current) end
-    for _, path in ipairs(current) do os.remove(path) end
-    local target = base .. '.' .. popped[1].ext
-    local saved, save_why = write_file_atomic(target, popped[1].body)
-    if not saved then return reply({ success = false, code = 'io', error = tostring(save_why) }) end
+    if #current > 0 then
+      local archived, archive_why = keep_undone(directory, appid, kind, current)
+      if not archived then
+        return reply({ success = false, code = 'io',
+          error = 'Could not keep a copy of the current artwork; nothing was changed: ' .. tostring(archive_why) })
+      end
+    end
+    local target = base .. '.' .. (name:match('%.([%w]+)$') or 'png')
+    local saved, save_why = write_file_atomic(target, body)
+    if not saved then
+      return reply({ success = false, code = 'io',
+        error = 'Could not restore the previous artwork; nothing was changed: ' .. tostring(save_why) })
+    end
+    for _, path in ipairs(current) do
+      if path ~= target then os.remove(path) end
+    end
+    os.remove(history_dir .. '/' .. name)
     return reply({ success = true, undone = true, path = target,
       history = history_depth(directory, appid, kind) })
   end

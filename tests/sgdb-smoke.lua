@@ -345,6 +345,39 @@ do
   os.time = real_time
 end
 
+-- Undo is transactional: if the current artwork cannot be archived, or the
+-- previous artwork cannot be written back, nothing is deleted and the step
+-- stays available for a retry.
+do
+  local function apply(url, mime)
+    local r = call('SlsSgdbApply', { raw = json.encode({ appid = 401, kind = 'grid', url = url, mime = mime }) })
+    assert(r.success == true, tostring(r.error))
+  end
+  apply('https://cdn.example/grid1.png', 'image/png')
+  apply('https://cdn.example/grid2.jpg', 'image/jpeg')
+  local slot_hist = grid_dir .. '/.sls-luna-history/401p'
+  -- 1. archive fails: undone/ is a plain file, so nothing can be written in it.
+  local blocker = io.open(slot_hist .. '/undone', 'w'); blocker:write('x'); blocker:close()
+  local r1 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
+  assert(r1.success == false and r1.code == "io", "a failed archive must refuse the undo: " .. json.encode(r1))
+  assert(file_text(grid_dir .. '/401p.jpg') == 'JPG2DATA', 'a failed archive must keep the current artwork')
+  assert(call('SlsSgdbHistory', { raw = json.encode({ appid = 401 }) }).history.grid == 1,
+    'a failed archive must keep the history step')
+  os.remove(slot_hist .. '/undone')
+  -- 2. restore fails: the grid folder is read-only, so the restored file cannot land.
+  os.execute("chmod 555 '" .. grid_dir .. "'")
+  local r2 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
+  os.execute("chmod 755 '" .. grid_dir .. "'")
+  assert(r2.success == false and r2.code == 'io', 'a failed restore must refuse the undo')
+  assert(file_text(grid_dir .. '/401p.jpg') == 'JPG2DATA', 'a failed restore must keep the current artwork')
+  assert(call('SlsSgdbHistory', { raw = json.encode({ appid = 401 }) }).history.grid == 1,
+    'a failed restore must keep the history step for a retry')
+  -- 3. the retry then works.
+  local r3 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
+  assert(r3.success == true, tostring(r3.error))
+  assert(file_text(grid_dir .. '/401p.png') == 'PNG1DATA' and file_text(grid_dir .. '/401p.jpg') == nil)
+end
+
 -- Reset removes the custom file so Steam shows its own art; history survives.
 call('SlsSgdbApply', { raw = json.encode({ appid = 620, kind = 'hero',
   url = 'https://cdn.example/grid1.png', mime = 'image/png' }) })
