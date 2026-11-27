@@ -264,6 +264,7 @@ end
 -- `text` is the exact wire string, so a hit costs one table lookup and no
 -- decode or encode at all.
 local hltb_cache = { rev = '', text = nil, expires = 0 }
+local hltb_games_cache = { rev = '', text = nil, expires = 0 }
 local health_cache = { rev = '', text = nil, expires = 0 }
 
 local function cache_drop(cache)
@@ -494,6 +495,7 @@ local function persist_store(data)
   local ok, err = atomic_write(store_path, json.encode(data), FILE_CAPS.store)
   if not ok then return false, tostring(err) end
   cache_drop(hltb_cache)
+  cache_drop(hltb_games_cache)
   cache_drop(wire_cache)
   local rev = store_stamp()
   if rev then store_memo.rev, store_memo.data = rev, data end
@@ -518,6 +520,7 @@ local function persist_library(data)
   local ok, err = atomic_write(library_path, json.encode(data), FILE_CAPS.library)
   if not ok then return false, tostring(err) end
   cache_drop(hltb_cache)
+  cache_drop(hltb_games_cache)
   return true
 end
 
@@ -1035,6 +1038,20 @@ end
 
 local function installed()
   local names = {}
+  -- The host's fs.list may spawn a directory listing process. Health calls
+  -- this even on a cache hit, so use the in-process stat provider when present.
+  if lfs and type(lfs.dir) == 'function' then
+    local ok, err = pcall(function()
+      for name in lfs.dir(base) do
+        if name:sub(1, 1) ~= '.' and lfs.attributes(base .. name, 'mode') == 'directory' then
+          local probe = io.open(base .. name .. '/backend/main.lua', 'r')
+          if probe then probe:close(); names[#names + 1] = name end
+        end
+      end
+    end)
+    if ok then table.sort(names); return names end
+    names = {}
+  end
   local ok, items = pcall(fs.list, base)
   if ok and type(items) == 'table' then
     for _, item in ipairs(items) do
@@ -1905,7 +1922,11 @@ function M.register(registry)
     return paths
   end
   registry.SlsLunaHealth = function(raw)
-    local refresh = type(raw) == 'table' and raw.refresh == true
+    if type(raw) == 'string' then
+      local ok, decoded = pcall(json.decode, raw)
+      if ok then raw = decoded end
+    end
+    local refresh = raw == true or (type(raw) == 'table' and raw.refresh == true)
     local rev = stamps_rev(health_inputs())
     local now = os.time()
     if not refresh and rev and health_cache.text and health_cache.rev == rev
@@ -2576,7 +2597,7 @@ function M.register(registry)
   -- stamps of both files: a poll with the `rev` it got last time answers
   -- `{unchanged = true}` in a few bytes instead of the whole megabyte, and a
   -- poll without one (the current panel, a fresh window) gets the full shape.
-  registry.SlsHltbGet = function(raw)
+  local function hltb_get(raw, games_only)
     local asked = nil
     if type(raw) == 'string' then asked = raw
     elseif type(raw) == 'table' and type(raw.rev) == 'string' then asked = raw.rev end
@@ -2593,6 +2614,24 @@ function M.register(registry)
     end
     local rev = stamps_rev({ store_path, library_path })
     local now = os.time()
+    -- Opt-in: the Steam agent only consumes games, not the inventory. Legacy
+    -- callers (and the panel) continue receiving the original full shape.
+    if games_only or (type(raw) == 'table' and raw.gamesOnly == true) then
+      if asked and asked ~= '' and mtime_known and asked == rev then
+        return reply({ success = true, unchanged = true, rev = rev })
+      end
+      if rev and hltb_games_cache.rev == rev and hltb_games_cache.text
+        and now < hltb_games_cache.expires then return hltb_games_cache.text end
+      local store = load_store()
+      local text = reply({ success = true, rev = rev, games = wire_games(store.games),
+        count = count_keys(store.games), needsReview = review_count(store),
+        scorer = SCORER_VERSION })
+      if rev then
+        hltb_games_cache.rev, hltb_games_cache.text, hltb_games_cache.expires =
+          rev, text, now + CACHE_TTL
+      end
+      return text
+    end
     local cached = rev ~= nil and hltb_cache.text and hltb_cache.rev == rev
       and now < hltb_cache.expires
     if not cached then
@@ -2625,6 +2664,8 @@ function M.register(registry)
     end
     return hltb_cache.text
   end
+  registry.SlsHltbGet = function(raw) return hltb_get(raw, false) end
+  registry.SlsHltbGames = function(raw) return hltb_get(raw, true) end
 
   -- Re-run the title check over the whole store on demand. Idempotent: a store
   -- already reviewed by this scorer is answered with applied = false and the

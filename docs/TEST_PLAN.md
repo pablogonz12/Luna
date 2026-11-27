@@ -19,6 +19,9 @@
 The installer suite runs against a disposable `HOME` with a minimal Lumen fixture
 and a stubbed `pgrep`, so it never depends on the developer's own Steam being
 open or closed.
+Standalone installer tests also cover enabling the managed host and creating
+Steam's CEF debugging flag, preserving pre-existing settings on uninstall,
+and reporting host liveness without relying on Lumen's bridge heartbeat.
 
 ## On-device gates
 

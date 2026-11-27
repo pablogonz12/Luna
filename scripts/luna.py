@@ -1181,6 +1181,11 @@ def bridge_status():
     as before (an alive pid means attached), so the two versions never break each
     other. Level is 'ok', 'warn' or 'info'.
     """
+    if active_host() == 'luna':
+        if luna_host_running():
+            return 'ok', ['Luna host is running; it loads add-ons directly (no Lumen bridge heartbeat).',
+                          'Run luna selftest to check Steam attachment and add-on RPCs.']
+        return 'info', ['Luna host is not running; it loads add-ons directly (no Lumen bridge heartbeat).']
     data = read_json_file(bridge_heartbeat_path())
     data = data if isinstance(data, dict) else {}
     now = int(time.time())
@@ -1376,6 +1381,68 @@ def _manifest_problems(manifest, root):
     return problems
 
 
+# Every regular file a bundle carries, with its sha256. The add-on manifest only
+# pins payloads; this also covers luna.py, the host binary and the bridge, so a
+# bundle whose sidecar was recomputed after corruption still cannot install.
+BUNDLE_FILES = 'BUNDLE-FILES.json'
+
+
+def _bundle_file_hashes(entries):
+    files = {}
+    for arcname, path in entries:
+        if path.is_symlink() or not path.exists():
+            continue
+        if path.is_file():
+            files[arcname] = sha256(path)
+            continue
+        for parent, dirs, names in os.walk(path):
+            dirs.sort()
+            for entry in sorted(names):
+                full = Path(parent) / entry
+                if full.is_file() and not full.is_symlink():
+                    rel = PurePosixPath(arcname, full.relative_to(path).as_posix())
+                    files[str(rel)] = sha256(full)
+    return files
+
+
+def _bundle_file_problems(root):
+    """None when the bundle predates the file list; else a list of problems."""
+    listing = root / BUNDLE_FILES
+    if not listing.is_file():
+        return None
+    try:
+        files = json.loads(listing.read_text()).get('files')
+    except (ValueError, AttributeError):
+        return ['%s is not valid JSON' % BUNDLE_FILES]
+    if not isinstance(files, dict):
+        return ['%s has no file list' % BUNDLE_FILES]
+    problems = []
+    seen = set()
+    for parent, _dirs, names in os.walk(root):
+        for entry in names:
+            full = Path(parent) / entry
+            rel = full.relative_to(root).as_posix()
+            if rel == BUNDLE_FILES or full.is_symlink() or not full.is_file():
+                continue
+            seen.add(rel)
+            if rel not in files:
+                problems.append('unlisted file %s' % rel)
+            elif sha256(full) != files[rel]:
+                problems.append('%s does not match the bundle file list' % rel)
+    for rel in sorted(set(files) - seen):
+        problems.append('missing file %s' % rel)
+    return sorted(problems)
+
+
+def _check_gzip_stream(bundle):
+    """Read the whole compressed stream so its CRC is checked; tar alone stops
+    at the end-of-archive marker and can miss a corrupt tail."""
+    import gzip
+    with gzip.open(bundle, 'rb') as handle:
+        while handle.read(1 << 20):
+            pass
+
+
 def cmd_release(options):
     """Build a bundle another machine can install with `luna update`."""
     manifest = load_manifest()  # fail early when the pins are missing
@@ -1417,9 +1484,14 @@ def cmd_release(options):
     changelog = ROOT / 'CHANGELOG.md'
     if changelog.is_file():
         entries.append(('CHANGELOG.md', changelog))
+    files = _bundle_file_hashes(entries)
+    listing = (json.dumps({'version': 1, 'files': files}, indent=2, sort_keys=True) + '\n').encode()
     with tarfile.open(bundle, 'w:gz') as tar:
         for arcname, path in entries:
             tar.add(path, arcname='%s/%s' % (name, arcname), recursive=path.is_dir())
+        info = tarfile.TarInfo('%s/%s' % (name, BUNDLE_FILES))
+        info.size, info.mtime, info.mode = len(listing), int(time.time()), 0o644
+        tar.addfile(info, io.BytesIO(listing))
     digest = sha256(bundle)
     checksum = out_dir / (bundle.name + '.sha256')
     checksum.write_text('%s  %s\n' % (digest, bundle.name))
@@ -1601,8 +1673,12 @@ def install_bundle(bundle, only=None, dry_run=False):
         extract_dir = Path(work) / 'unpacked'
         extract_dir.mkdir()
         try:
+            with bundle.open('rb') as stream:
+                is_gzip = stream.read(2) == b'\x1f\x8b'
+            if is_gzip:
+                _check_gzip_stream(bundle)
             _safe_extract(bundle, extract_dir)
-        except (tarfile.TarError, ValueError, OSError) as error:
+        except (tarfile.TarError, ValueError, OSError, EOFError, zlib.error) as error:
             print('REFUSING: cannot safely unpack the bundle: %s' % error, file=sys.stderr)
             return 1
         roots = [entry for entry in extract_dir.iterdir() if entry.is_dir()]
@@ -1623,6 +1699,15 @@ def install_bundle(bundle, only=None, dry_run=False):
         except ValueError:
             print('REFUSING: the bundled manifest is not valid JSON', file=sys.stderr)
             return 1
+        listed = _bundle_file_problems(root)
+        if listed:
+            print('REFUSING: the bundle contents do not match its file list:')
+            for problem in listed[:20]:
+                print('  - %s' % problem, file=sys.stderr)
+            return 1
+        if listed is None:
+            print('note   : bundle predates %s; only the pinned payloads are verified'
+                  % BUNDLE_FILES)
         problems = _manifest_problems(manifest, root)
         if problems:
             print('REFUSING: the bundle contents do not match its own manifest:')
@@ -1870,6 +1955,17 @@ exit 1
 
 # The pre-runtime launcher Luna wrote itself (v3): still ours, upgraded in place on install.
 LEGACY_CLI_LAUNCHERS = ('''#!/bin/sh
+# Managed by SLS Luna CLI v1
+# Recovery remains available even if a base update replaces Lumen's tooling.
+if [ "${1:-}" = hook ] && [ -f "$HOME/.local/share/slssteam-luna/lumen-hook.py" ]; then
+    shift
+    action="${1:-status}"
+    case "$action" in on) action=enable;; off) action=disable;; esac
+    [ "$#" -eq 0 ] || shift
+    exec python3 "$HOME/.local/share/slssteam-luna/lumen-hook.py" "$action" "$@"
+fi
+exec python3 "$HOME/.local/share/Lumen/sls-luna/luna.py" "$@"
+''', '''#!/bin/sh
 # Managed by SLS Luna CLI v2
 # Runs the copy of luna.py kept by the active plugin host (see: luna host status).
 LUNA_HOME="${LUNA_HOME:-$HOME/.local/share/Luna}"
@@ -2109,8 +2205,7 @@ def apply_unit_paths():
 def systemd_available():
     """True when a user manager can start the waiter unit."""
     try:
-        result = subprocess.run(['systemctl', '--user', 'is-system-running'],
-                                capture_output=True, text=True, timeout=10)
+        result = systemctl_user('is-system-running', timeout=10)
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0 or result.stdout.strip() in ('running', 'degraded', 'starting')
@@ -2138,7 +2233,7 @@ def write_apply_unit():
         'KillMode=mixed\n'
         'TimeoutStopSec=300\n'
         'ExecStart=%s %s autoupdate --wait-steam\n' % (sys.executable, luna_tools_dir() / 'luna.py'))
-    subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+    systemctl_user('daemon-reload')
     return service
 
 
@@ -2149,15 +2244,14 @@ def start_apply_service():
     unit_dir, service = apply_unit_paths()
     if not service.is_file():
         write_apply_unit()
-    result = subprocess.run(['systemctl', '--user', 'start', '--no-block', APPLY_UNIT],
-                            capture_output=True, text=True)
+    result = systemctl_user('start', '--no-block', APPLY_UNIT)
     return 'service' if result.returncode == 0 else 'timer'
 
 
 def stop_apply_service():
     unit_dir, service = apply_unit_paths()
     if service.is_file():
-        subprocess.run(['systemctl', '--user', 'stop', APPLY_UNIT], capture_output=True)
+        systemctl_user('stop', APPLY_UNIT)
 
 
 def cmd_check(options):
@@ -2184,10 +2278,8 @@ def cmd_timer(options):
     """Enable, disable or report the unattended-update timer."""
     unit_dir, service, timer = unit_paths()
     if options.action == 'status':
-        enabled = subprocess.run(['systemctl', '--user', 'is-enabled', 'luna-autoupdate.timer'],
-                                 capture_output=True, text=True)
-        active = subprocess.run(['systemctl', '--user', 'is-active', 'luna-autoupdate.timer'],
-                                capture_output=True, text=True)
+        enabled = systemctl_user('is-enabled', 'luna-autoupdate.timer')
+        active = systemctl_user('is-active', 'luna-autoupdate.timer')
         print(json.dumps({'enabled': enabled.stdout.strip() or 'unknown',
                           'active': active.stdout.strip() or 'unknown',
                           'units': str(unit_dir)}, sort_keys=True))
@@ -2213,21 +2305,19 @@ def cmd_timer(options):
             'RandomizedDelaySec=120\n\n'
             '[Install]\n'
             'WantedBy=timers.target\n')
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
-        result = subprocess.run(['systemctl', '--user', 'enable', '--now', 'luna-autoupdate.timer'],
-                                capture_output=True, text=True)
+        systemctl_user('daemon-reload')
+        result = systemctl_user('enable', '--now', 'luna-autoupdate.timer')
         if result.returncode != 0:
             print('FAILED: %s' % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
             return 1
         print('unattended updates: on (%s)' % timer)
         return EXIT_OK
     if options.action == 'off':
-        subprocess.run(['systemctl', '--user', 'disable', '--now', 'luna-autoupdate.timer'],
-                       capture_output=True)
+        systemctl_user('disable', '--now', 'luna-autoupdate.timer')
         for path in (timer, service):
             if path.exists():
                 path.unlink()
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        systemctl_user('daemon-reload')
         print('unattended updates: off')
         return EXIT_OK
     print('unknown timer action: %s' % options.action, file=sys.stderr)
@@ -2246,8 +2336,7 @@ def retire_lumen_hook():
     names = ['luna-lumen-hook.' + kind for kind in ('path', 'timer', 'service')]
     found = [unit_dir / name for name in names if (unit_dir / name).is_file()]
     if found:
-        subprocess.run(['systemctl', '--user', 'disable', '--now', names[0], names[1]],
-                       capture_output=True)
+        systemctl_user('disable', '--now', names[0], names[1])
         for path in found:
             try:
                 if mark in path.read_text():
@@ -2256,7 +2345,7 @@ def retire_lumen_hook():
                     print('note: %s is not Luna-managed; left in place' % path, file=sys.stderr)
             except OSError:
                 pass
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        systemctl_user('daemon-reload')
         print('hook      : retired the automatic Lumen recovery units')
     store_dir = home() / '.local/share/slssteam-luna'
     for stale in ('lumen-hook.py',):
@@ -2291,11 +2380,15 @@ def host_unit_path():
     return home() / '.config/systemd/user' / HOST_UNIT
 
 
-def systemctl_user(*args):
+def systemctl_user(*args, timeout=None):
+    """The one way Luna talks to the user's systemd manager (tests replace it)."""
     try:
-        return subprocess.run(['systemctl', '--user'] + list(args), capture_output=True, text=True)
+        return subprocess.run(['systemctl', '--user'] + list(args), capture_output=True, text=True,
+                              timeout=timeout)
     except FileNotFoundError:
         return subprocess.CompletedProcess(args, 127, '', 'systemctl not found')
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 124, '', 'systemctl timed out')
 
 
 def unit_state(unit):
@@ -2375,6 +2468,100 @@ def write_legacy_plugins():
     target.write_text(json.dumps([str(luatools)], indent=2) + '\n')
 
 
+def standalone_setup():
+    """Enable the managed host and remember only settings this install created."""
+    unit = host_unit_path()
+    if unit.is_symlink() or not unit.is_file() or HOST_UNIT_MARK not in unit.read_text(errors='replace'):
+        print('host      : WARNING: no managed host unit; not enabling it', file=sys.stderr)
+        return
+    ownership = luna_home() / 'state/standalone-setup.json'
+    state = read_json_file(ownership) or {}
+    root = steam_home()
+    try:
+        if not root.is_dir():
+            print('host      : WARNING: Steam root not found; skipping debugging flag', file=sys.stderr)
+        else:
+            flag = root / '.cef-enable-remote-debugging'
+            try:
+                fd = os.open(flag, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            except FileExistsError:
+                pass
+            else:
+                st = os.fstat(fd)
+                os.close(fd)
+                flags = _owned_flags(state)
+                flags[str(flag)] = [st.st_dev, st.st_ino]
+                state.pop('flag', None)
+                state.pop('flag_path', None)
+                state['flags'] = flags
+                write_json_file(ownership, state)
+        enabled = unit_state(HOST_UNIT)['enabled'] in ('enabled', 'enabled-runtime', 'linked', 'linked-runtime')
+        if not enabled:
+            result = systemctl_user('enable', HOST_UNIT)
+            if result.returncode:
+                print('host      : WARNING: could not enable %s: %s' % (HOST_UNIT, result.stderr.strip()),
+                      file=sys.stderr)
+                return
+            state['enabled'] = True
+            write_json_file(ownership, state)
+        result = systemctl_user('start', HOST_UNIT)
+        if result.returncode:
+            print('host      : WARNING: could not start %s: %s' % (HOST_UNIT, result.stderr.strip()),
+                  file=sys.stderr)
+    except OSError as error:
+        print('host      : WARNING: standalone setup failed: %s' % error, file=sys.stderr)
+
+
+def _owned_flags(state):
+    """{flag path: [dev, ino]} for every debugging flag this install created.
+    Reads the older single-flag record too, so an upgrade keeps its ownership."""
+    flags = dict(state.get('flags') or {}) if isinstance(state.get('flags'), dict) else {}
+    if isinstance(state.get('flag'), list):
+        legacy = state.get('flag_path') or str(steam_home() / '.cef-enable-remote-debugging')
+        flags.setdefault(legacy, state['flag'])
+    return flags
+
+
+def undo_standalone_setup():
+    """Undo only what standalone_setup created. Anything that fails to undo stays
+    recorded, so a later rollback or uninstall can retry it."""
+    ownership = luna_home() / 'state/standalone-setup.json'
+    state = read_json_file(ownership) or {}
+    remaining = {}
+    if state.get('enabled'):
+        result = systemctl_user('disable', '--now', HOST_UNIT)
+        if result.returncode:
+            print('host      : WARNING: could not disable %s (kept for a retry): %s'
+                  % (HOST_UNIT, result.stderr.strip()), file=sys.stderr)
+            remaining['enabled'] = True
+    kept = {}
+    for path, identity in _owned_flags(state).items():
+        flag = Path(path)
+        try:
+            st = flag.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            print('host      : WARNING: cannot check %s (kept for a retry): %s' % (flag, error),
+                  file=sys.stderr)
+            kept[path] = identity
+            continue
+        if identity != [st.st_dev, st.st_ino] or flag.is_symlink() or not flag.is_file():
+            continue  # replaced by someone else since: not ours any more
+        try:
+            flag.unlink()
+        except OSError as error:
+            print('host      : WARNING: cannot remove %s (kept for a retry): %s' % (flag, error),
+                  file=sys.stderr)
+            kept[path] = identity
+    if kept:
+        remaining['flags'] = kept
+    if remaining:
+        write_json_file(ownership, remaining)
+    elif ownership.is_file():
+        ownership.unlink()
+
+
 def install_luna_host(dry_run=False):
     """Deploy luna-host into LUNA_HOME next to Lumen. Never enables the unit
     unless the cutover already happened. Failures warn; add-on install goes on."""
@@ -2417,6 +2604,7 @@ def install_luna_host(dry_run=False):
     print('host      : luna-host installed in %s (active host: %s)' % (luna_home(), active_host()))
     if active_host() == 'luna':
         patch_wrapper()
+        standalone_setup()
         print('host      : restart %s to load this version' % HOST_UNIT)
 
 
@@ -2619,6 +2807,7 @@ def cmd_host(options):
             return 1
         _carry_state(luna_home() / 'state', lumen_tools_dir())
         _write_host_state('lumen', 'luna')
+        undo_standalone_setup()
         unpatch_wrapper()
         _refresh_tooling_after_switch()
         print('host      : rolled back; Lumen is the active plugin host (restart Steam to attach)')
@@ -7729,6 +7918,8 @@ def cmd_uninstall(options):
                   % (result.stderr.strip() or result.stdout.strip()), file=sys.stderr)
             return EXIT_PATCH
         print(result.stdout.strip())
+    else:
+        undo_standalone_setup()
     for name in targets:
         shutil.rmtree(addons_dir() / name, ignore_errors=True)
         print('removed %s' % name)
@@ -7744,8 +7935,7 @@ def cmd_uninstall(options):
     # reinstall after the user asked for removal.
     try:
         unit_dir, service, timer = unit_paths()
-        subprocess.run(['systemctl', '--user', 'disable', '--now', 'luna-autoupdate.timer'],
-                       capture_output=True)
+        systemctl_user('disable', '--now', 'luna-autoupdate.timer')
         stop_apply_service()
         for path in (timer, service, apply_unit_paths()[1]):
             try:
@@ -7753,7 +7943,7 @@ def cmd_uninstall(options):
                     path.unlink()
             except OSError:
                 pass
-        subprocess.run(['systemctl', '--user', 'daemon-reload'], capture_output=True)
+        systemctl_user('daemon-reload')
         pending = luna_tools_dir() / 'pending.json'
         try:
             if pending.exists():

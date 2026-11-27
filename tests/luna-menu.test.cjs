@@ -916,7 +916,7 @@ test('the HLTB read sends its revision and keeps the payload when unchanged',asy
   setHltbRecords({});
   const payloads=[];
   let reply={success:true,rev:'r1',games:{'1':{main:3600}}};
-  const w={Millennium:{callServerMethod:(addon,fn,payload)=>{payloads.push(payload||{});
+  const w={Millennium:{callServerMethod:(addon,fn,payload)=>{assert.equal(fn,'SlsHltbGames');payloads.push(payload||{});
     return Promise.resolve(reply);}}};
   assert.equal(await refreshHltbData(w),true);
   assert.equal(hltbMinutesFor(1),60,'the full reply becomes the records');
@@ -945,4 +945,18 @@ test('a write or an error drops the cached HLTB revision',async()=>{
   fail=false;
   await refreshHltbData(w);
   assert.deepEqual(calls[calls.length-1].payload,{},'an error clears the revision too');
+});
+
+test('old backend unknown method falls back once and preserves revision polls',async()=>{
+  const calls=[];
+  const w={Millennium:{callServerMethod:async (_addon,fn,payload)=>{
+    calls.push({fn,payload});
+    if(fn==='SlsHltbGames')return JSON.stringify({success:false,error:'unknown function: SlsHltbGames'});
+    return JSON.stringify(payload.rev ? {unchanged:true,rev:'old'} : {success:true,rev:'old',games:{}});
+  }}};
+  setHltbRecords({});
+  assert.equal(await refreshHltbData(w),true);
+  assert.equal(await refreshHltbData(w),true);
+  assert.deepEqual(calls.map(c=>c.fn),['SlsHltbGames','SlsHltbGet','SlsHltbGet']);
+  assert.deepEqual(calls[2].payload,{rev:'old'});
 });
