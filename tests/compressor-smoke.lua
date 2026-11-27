@@ -243,10 +243,10 @@ local function call(registry, name, arg)
   return json.decode(registry[name](arg))
 end
 
-local function wait_for(registry, predicate, seconds)
+local function wait_for(registry, predicate, seconds, arg)
   local deadline = os.time() + (seconds or 5)
   while os.time() <= deadline do
-    local state = call(registry, 'SlsCompressorGet')
+    local state = call(registry, 'SlsCompressorGet', arg)
     if predicate(state) then return state end
     os.execute('sleep 0.15')
   end
@@ -288,6 +288,16 @@ do
     'a carriage-return redraw was not collapsed to its last frame')
 end
 
+-- An observe-only Get (status --live, the selftest) never starts the scan.
+local data_dir = home .. '/.local/share/slssteam-integrations/compressor'
+local function exists(path) local f = io.open(path, 'rb'); if f then f:close() end; return f ~= nil end
+local OBSERVE = json.encode({ light = true, observe = true })
+local looked = call(reg, 'SlsCompressorGet', OBSERVE)
+assert(looked.success and looked.tool.found, 'observe must still report the tool')
+assert(looked.autoStarted == false and looked.job == nil, 'an observe-only Get started a scan')
+assert(not exists(data_dir .. '/attempt.at') and not exists(data_dir .. '/job.json'),
+  'an observe-only Get wrote scan state')
+
 -- First open: the tool is found and the read-only scan starts on its own.
 local first = call(reg, 'SlsCompressorGet')
 assert(first.success, 'Get failed')
@@ -295,6 +305,10 @@ assert(first.tool.found and first.tool.path == tool, 'the installed tool was not
 assert(first.autoStarted == true and first.job and first.job.running and first.job.action == 'scan',
   'the first Get must start the read-only scan')
 
+-- Observing the finished scan neither stamps it done nor adopts its report;
+-- the next ordinary Get does both.
+local seen = wait_for(reg, function(state) return state.job and not state.job.running end, nil, OBSERVE)
+assert(seen.status == nil and not exists(data_dir .. '/job.done'), 'an observe-only Get adopted the report')
 local done = wait_for(reg, function(state) return state.job and not state.job.running end)
 assert(done.status and done.status.summary.pending == 1, 'the scan output was not adopted')
 assert(done.status.games[1].name == 'A' and done.tool.version == '9.9.9', 'the report was not decoded')
@@ -881,6 +895,40 @@ assert(bare_off.success and bare_off.value == 'false' and read(accept_file) == '
   'a bare boolean false must be accepted')
 wait_for(reg, function(state) return state.job and not state.job.running end, 15)
 
+-- An observer cannot consume a durable reservation, even after its owner has
+-- died. Include a stale state lock: observing must not reap that either.
+mode('scanlong')
+assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
+os.execute('sleep 0.3')
+local observe_old = json.decode(read(job_file))
+assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":true}').success)
+os.execute('/bin/kill -KILL -' .. observe_old.pgid)
+local observe_pending = wait_for(reg, function(s)
+  return s.job and not s.job.running and s.rescan ~= nil
+end, 15, OBSERVE)
+assert(observe_pending.rescan.enabled == true and not observe_pending.autoStarted)
+write_file(dir .. '/job.lock', '99999999 1 ' .. read('/proc/sys/kernel/random/boot_id'))
+local function snapshot_compressor_dir()
+  local command = 'LC_ALL=C find ' .. string.format('%q', dir)
+    .. " -printf '%P\\t%s\\t%T@\\n' | LC_ALL=C sort"
+  local pipe = assert(io.popen(command, 'r'))
+  local result = pipe:read('*a')
+  assert(pipe:close())
+  return result
+end
+local before_observe = snapshot_compressor_dir()
+local observing = call(reg, 'SlsCompressorGet', OBSERVE)
+local after_observe = snapshot_compressor_dir()
+assert(observing.rescan and observing.rescan.enabled and not observing.job.running)
+assert(before_observe == after_observe, 'observe changed compressor directory names, sizes or mtimes')
+assert(read(dir .. '/job.lock'), 'observe reaped the stale job lock')
+os.remove(dir .. '/job.lock')
+mode('snapnone')
+local observed_recovery = wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
+assert(observed_recovery.status.accept_snapshots_unknown == true)
+assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":false}').success)
+wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
+
 -- A scan that captured the old setting cannot publish after an explicit
 -- setting change. The reservation survives a backend reload and blocks runs.
 mode('scanlong')
@@ -947,6 +995,8 @@ end
 local failed = call(restarted, 'SlsCompressorAcceptSnapshots', '{"enabled":true}')
 os.execute = execute
 assert(failed.success and failed.rescan and failed.rescan.failed)
+assert(call(restarted, 'SlsCompressorGet', OBSERVE).rescan.failed,
+  'observe did not report the failed reservation')
 local reloaded = {}
 assert(loadfile(repo .. '/addons/compressor/plugin/backend/main.lua'))().register(reloaded)
 assert(call(reloaded, 'SlsCompressorGet', '{"refresh":true}').rescan.failed)
@@ -1044,6 +1094,9 @@ local escaped_count = scans()
 local escaped_state = call(reg, 'SlsCompressorGet', '{"refresh":true}')
 assert(escaped_state.job.running and scans() == escaped_count,
   'an escaped descendant allowed a second scan')
+local observe_stuck = call(reg, 'SlsCompressorGet', OBSERVE)
+assert(observe_stuck.job and observe_stuck.job.stuck and observe_stuck.rescan,
+  'observe did not report the visible stuck holder and reservation')
 assert(escaped_state.job.stuck and escaped_state.job.stuck.message:find(tostring(escaped_pid), 1, true),
   'the escaped holder is not identified with recovery guidance')
 local saw_pid = false

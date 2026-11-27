@@ -797,7 +797,7 @@ end
 -- Everything the panel needs about the queue: per-game outcomes from the
 -- engine's own lines, a pass-level outcome that distinguishes "not started"
 -- from "failed", the current phase and byte counts, and a rolling ETA.
-local function read_queue(limit, job)
+local function read_queue(limit, job, observe)
   local raw = read_text(QUEUE_LIST)
   if not raw then return nil end
   local games, byIndex, byName = {}, {}, {}
@@ -954,14 +954,14 @@ local function read_queue(limit, job)
   local eta = nil
   local sampleKey = passId and queue.current and (passId .. ':' .. tostring(queue.index)
     .. ':' .. queue.current.path) or nil
-  if progress_samples.key ~= sampleKey then progress_samples = { key = sampleKey } end
+  if not observe and progress_samples.key ~= sampleKey then progress_samples = { key = sampleKey } end
   if sampleKey and queue.phase == 'compress' and queue.totalBytes > 0 and queue.current then
     local cur = { at = os.time(), doneBytes = queue.doneBytes, totalBytes = queue.totalBytes }
     local prev = progress_samples[sampleKey]
     eta = eta_from(prev, cur)
-    if not prev or cur.doneBytes ~= prev.doneBytes then
+    if not observe and (not prev or cur.doneBytes ~= prev.doneBytes) then
       progress_samples[sampleKey] = cur
-    else
+    elseif not observe then
       progress_samples[sampleKey] = { at = prev.at, doneBytes = prev.doneBytes,
         totalBytes = cur.totalBytes }
     end
@@ -1282,6 +1282,31 @@ local function workload_locked()
   return false
 end
 
+-- Observe must not even acquire the lifetime flock. Inspect kernel lock state
+-- instead; inode collisions across filesystems conservatively read as busy.
+local function workload_observed()
+  if not HAS_FLOCK or not fs.exists(WORK_LOCK) then return false end
+  local inode
+  if lfs then
+    local ok, attr = pcall(lfs.attributes, WORK_LOCK)
+    if ok and type(attr) == 'table' then inode = tonumber(attr.ino) end
+  end
+  if not inode then
+    local pipe = io.popen('stat -Lc %i ' .. shq(WORK_LOCK) .. ' 2>/dev/null', 'r')
+    if pipe then
+      inode = tonumber(pipe:read('*l') or '')
+      pipe:close()
+    end
+  end
+  local locks = read_text('/proc/locks')
+  if not inode or not locks then return true end
+  for line in locks:gmatch('[^\n]+') do
+    local lockInode = line:match('FLOCK%s+%S+%s+%S+%s+%d+%s+[%x]+:[%x]+:(%d+)')
+    if tonumber(lockInode) == inode then return true end
+  end
+  return false
+end
+
 -- The leader may die before its child. A matching session/group and inherited
 -- token keep the job busy until every non-zombie member has gone.
 local function group_alive(job)
@@ -1567,17 +1592,30 @@ local function adopt_status(job, pending)
   return true
 end
 
-local function job_state()
+-- observe: report the job as it is, without recording its completion or
+-- adopting its report (status --live and the selftest must not write).
+local function job_state(observe)
   local job = read_job()
   if not job then return nil end
-  local locked = workload_locked()
+  local locked = observe and workload_observed() or (not observe and workload_locked())
   local groupRunning = group_alive(job)
   local running = locked or groupRunning
   local stuck = locked and not groupRunning and stuck_holder() or nil
   local finishedAt = tonumber(read_text(JOB_DONE) or '') or 0
   local failure = read_text(JOB_ERROR)
   local blocked = false
-  if not running and finishedAt == 0 then
+  if not running and finishedAt == 0 and observe then
+    finishedAt = os.time()
+    if job.action == 'scan' then
+      local path = report_file(job.generation, job.reportId)
+      local exitCode = tonumber(read_text(path .. '.exit') or '')
+      if fs.exists(path .. '.state-error') or (job.reportId and not job.closed and exitCode ~= nil) then
+        failure = failure or 'Could not save the final scan state. Retry the library scan.'
+      elseif exitCode and exitCode ~= 0 then
+        failure = failure or ('The scan failed (exit ' .. exitCode .. ').')
+      end
+    end
+  elseif not running and finishedAt == 0 then
     finishedAt = os.time()
     local pending = read_rescan()
     if job.action == 'scan' then
@@ -1720,11 +1758,14 @@ function M.register(registry)
     -- the per-game list left out so a one-second poll stays tiny.
     local light = false
     local refresh = false
+    -- observe: a strictly read-only look (no auto-scan, no report adoption).
+    local observe = false
     if type(raw) == 'string' and #raw <= 200 then
       local ok, obj = pcall(json.decode, raw)
       if ok and type(obj) == 'table' then
         light = obj.light == true
         refresh = obj.refresh == true
+        observe = obj.observe == true
       end
     end
     -- Every file the reply is built from, so the memo below cannot outlive a
@@ -1739,27 +1780,27 @@ function M.register(registry)
       -- same second): the job pid keeps a new scan from answering from the
       -- previous one's memo.
       local pid = (read_text(JOB_FILE) or ''):match('"pid"%s*:%s*(%d+)') or ''
-      return rev .. '|' .. pid .. '|' .. (light and '1' or '0')
+      return rev .. '|' .. pid .. '|' .. (light and '1' or '0') .. (observe and 'o' or '')
     end
     local now = os.time()
     local cacheKey = key()
     -- `refresh` is the explicit escape hatch: a caller that just changed a
     -- setting or finished a pass can skip the memo instead of waiting the TTL.
-    if not read_rescan() and not refresh and cacheKey and get_cache.text and get_cache.rev == cacheKey
+    if not observe and not read_rescan() and not refresh and cacheKey and get_cache.text and get_cache.rev == cacheKey
       and now < get_cache.expires then
       return get_cache.text
     end
     -- job_state() first: observing a finished scan adopts its report, which is
     -- what this same response must already include.
-    local job = job_state()
-    local rescan
-    job, rescan = service_rescan(job)
+    local job = job_state(observe)
+    local rescan = read_rescan()
+    if not observe then job, rescan = service_rescan(job) end
     local status = scan_state()
     local statusAt = tonumber(read_text(STATUS_AT) or '') or 0
     -- The first open starts the read-only scan itself; a recent failed attempt
     -- is not retried in a loop, and a running job is always left alone.
     local autoStarted = false
-    if tool and not rescan and not (job and job.running) and status == nil then
+    if tool and not observe and not rescan and not (job and job.running) and status == nil then
       local attempt = tonumber(read_text(ATTEMPT_AT) or '') or 0
       if os.time() - attempt > 600 then
         local pid = spawn(tool, 'scan', ACTIONS.scan.args)
@@ -1770,7 +1811,7 @@ function M.register(registry)
       end
     end
     local plan = build_plan(status, settings)
-    local queue = read_queue(light and 262144 or 524288, job)
+    local queue = read_queue(light and 262144 or 524288, job, observe)
     if queue then
       queue.active = job ~= nil and job.running and job.action == 'run' and not queue.finished
       queue.next = json.array(queue.next or {})
@@ -1819,7 +1860,7 @@ function M.register(registry)
     -- A running pass (or a scan this call just started) rewrites its log and
     -- state while the client polls, and the next call should see that at once,
     -- so only a settled backend is memoised.
-    if not rescan and not refresh and cacheKey and not autoStarted and not (job and job.running) then
+    if not observe and not rescan and not refresh and cacheKey and not autoStarted and not (job and job.running) then
       get_cache.text = out
       get_cache.rev = key()
       get_cache.rekey = key
@@ -2093,6 +2134,13 @@ function M.register(registry)
     'SlsCompressorRun', 'SlsCompressorCancel'}) do
     local handler = registry[name]
     registry[name] = function(raw)
+      if name == 'SlsCompressorGet' and type(raw) == 'string' and #raw <= 200 then
+        local ok, obj = pcall(json.decode, raw)
+        if ok and type(obj) == 'table' and obj.observe == true then
+          -- No job lock, stale-lock reaper, cache mutation or reservation claim.
+          return handler(raw)
+        end
+      end
       if name == 'SlsCompressorGet' and get_cache.fast then
         local cached = get_cache.fast(raw)
         if cached then return cached end
