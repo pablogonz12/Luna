@@ -947,5 +947,28 @@ assert(registry.SlsLunaHealth() == health_once, 'Health must stay memoised after
 assert(call('SlsLunaHygiene', { raw = json.encode({ action = 'nonsense' }) }).success == false,
   'an unknown hygiene action must be refused')
 
+-- Regression: two same-size writes inside one second must still change the
+-- rev (size + whole-second mtime could not tell them apart, so a poll with the
+-- first rev was answered `unchanged` forever).
+do
+  local function put(main)
+    local r = call('SlsHltbPut', { raw = json.encode({ appid = 777001, name = 'Same Size', main = main }) })
+    assert(r.success == true, tostring(r.error))
+  end
+  local function rev_of(name)
+    local r = call(name, {})
+    assert(type(r.rev) == 'string' and r.rev ~= '', name .. ' must carry a rev')
+    return r.rev
+  end
+  put(11)
+  local first_get, first_games = rev_of('SlsHltbGet'), rev_of('SlsHltbGames')
+  put(22) -- same digit count, so the store's size does not change
+  local again = call('SlsHltbGet', { rev = first_get })
+  assert(again.unchanged ~= true, 'a same-size write in the same second must change the SlsHltbGet rev')
+  local again_games = call('SlsHltbGames', { rev = first_games })
+  assert(again_games.unchanged ~= true, 'a same-size write in the same second must change the SlsHltbGames rev')
+  assert(type(again_games.games) == 'table', 'the changed reply must carry the games')
+end
+
 print('Luna HLTB robustness OK: ' .. tostring(case_matched + case_refused) .. ' matching pairs, revalidation, '
   .. '.bak recovery, corrupt retention, atomic write, sync-conflict status/clean, health caps')
