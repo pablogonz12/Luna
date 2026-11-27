@@ -3,7 +3,7 @@
     "compressor": {
       "files": {
         "backend/main.lua": {
-          "sha256": "4abad75a7115d7a4bd24bdc5686ee122169bc148f09b164ef0e680eb22c61d6d",
+          "sha256": "659524207eedc4900e4920746f6b63277c79881edf705249777c7beb07361299",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
@@ -11,12 +11,12 @@
           "source_path": "plugin/plugin.json"
         },
         "public/panel.js": {
-          "sha256": "b295b50f8c446a3e85ffc6e9d95e99d803c3f1816929c9a68e7c7bd7849eee10",
+          "sha256": "25b507c6aa00339f334dbb4687d20c3040fcbe1b8a34646ab3d0907734ff8b4e",
           "source_path": "plugin/public/panel.js"
         }
       },
       "plugin_version": "0.3.1",
-      "source_commit": "d3fd95821ae0b76d5afa72a24bad9f48f5c64b88",
+      "source_commit": "88b4390f7684c8a13ca359b6a0d44f0b8a2a5ecd",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "graphics": {
@@ -49,12 +49,12 @@
           "source_path": "plugin/public/agent.js"
         },
         "public/panel.js": {
-          "sha256": "021cb508d10740ec8a15ff5299be5d54b97bcd630d902aeda8fe031824a9f081",
+          "sha256": "4f14bd9b9e4666fc97bd044c6ffdce86cbaa60008ecdccaea1235cdbb5c55cf2",
           "source_path": "plugin/public/panel.js"
         }
       },
       "plugin_version": "0.14.19",
-      "source_commit": "d1421248c7abc1c4e72e2551bed242098bbab874",
+      "source_commit": "88b4390f7684c8a13ca359b6a0d44f0b8a2a5ecd",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -119,7 +119,7 @@
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-11-27T19:29:09+0100",
+  "generated": "2026-11-27T20:12:49+0100",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "aeced944f64c5dc779c24ecf912bee2570760e7d5e35f90b26f9aa1042cccb2c",
