@@ -227,19 +227,13 @@ backend.register(registry)
 -- the rest of the scenarios.
 backend.min_fetch_interval = 0
 
--- Lumen's dispatch turns an args object into positional arguments ordered by
--- sorted key, exactly like Millennium used to; RPCs are written for that.
+-- Match ~/.local/share/Lumen/lua/rpc.lua and host/lua/luna/rpc.lua.
+package.path = repo .. '/host/lua/?.lua;' .. repo .. '/host/lua/?/init.lua;' .. package.path
+local positional = require('luna.rpc').args_to_positional
 local function call(name, arg)
   assert(type(registry[name]) == 'function', 'missing RPC: ' .. name)
-  if type(arg) ~= 'table' then return json.decode(registry[name](arg)) end
-  local keys = {}
-  for key in pairs(arg) do
-    if type(key) == 'string' then keys[#keys + 1] = key end
-  end
-  table.sort(keys)
-  local vals = {}
-  for index, key in ipairs(keys) do vals[index] = arg[key] end
-  return json.decode(registry[name](table.unpack(vals, 1, #keys)))
+  local vals = positional(arg)
+  return json.decode(registry[name](table.unpack(vals, 1, vals.n)))
 end
 
 local function read_store()
@@ -765,6 +759,13 @@ local unchanged = json.decode(registry.SlsHltbGet(first_rev))
 assert(unchanged.success == true and unchanged.unchanged == true, 'the rev must be recognised')
 assert(unchanged.games == nil and unchanged.library == nil, 'an unchanged reply must carry no data')
 assert(#registry.SlsHltbGet(first_rev) < 200, 'the unchanged reply must be tiny')
+local games_only = call('SlsHltbGames', {})
+assert(games_only.library == nil and games_only.count == first_count,
+  'the opt-in games-only reply omits inventory without changing games')
+assert(call('SlsHltbGames', {rev = first_rev}).unchanged == true,
+  'games-only polling keeps the unchanged contract')
+assert(json.decode(registry.SlsHltbGet()).library ~= nil,
+  'legacy callers continue to receive the inventory')
 -- A change written by something else (not this backend) is seen at once.
 do
   local f = io.open(store_path, 'rb')
@@ -776,6 +777,8 @@ end
 touch(store_path)
 local grown = json.decode(registry.SlsHltbGet())
 assert(grown.count == first_count + 1 and grown.games['999'], 'a changed source must invalidate the cache')
+assert(call('SlsHltbGames', {rev = first_rev}).games['999'],
+  'a changed source invalidates the games-only cache')
 assert(registry.SlsHltbGet(first_rev).unchanged == nil, 'a stale rev must never answer unchanged')
 local new_rev = grown.rev
 assert(new_rev ~= first_rev, 'the revision must move with the file')
@@ -786,12 +789,17 @@ assert(call('SlsHltbGet').games['4242'] ~= nil, 'a local write must be visible i
 -- Health is memoised the same way and the escape hatch bypasses it.
 local health_text = registry.SlsLunaHealth()
 assert(registry.SlsLunaHealth() == health_text, 'health must be memoised')
-local refreshed = json.decode(registry.SlsLunaHealth(json.encode({refresh = true})))
+local refreshed = call('SlsLunaHealth', {raw = json.encode({refresh = true})})
 assert(refreshed.success == true and refreshed.health.version ~= nil, 'refresh must rebuild the payload')
 local cfg = io.open(home .. '/.local/share/Steam/steam.cfg', 'wb')
 cfg:write('BootStrapperInhibitAll\n'); cfg:close()
 assert(json.decode(registry.SlsLunaHealth()).health.steam.client.updatesBlocked == true,
   'a changed input must invalidate the health memo')
+cfg = io.open(home .. '/.local/share/Steam/steam.cfg', 'wb')
+cfg:write('BootStrapperInhibitOff\n'); cfg:close() -- same size and stamp
+assert(call('SlsLunaHealth').health.steam.client.updatesBlocked == true, 'same stamp stays cached')
+assert(call('SlsLunaHealth', {raw = json.encode({refresh = true})}).health.steam.client.updatesBlocked == false,
+  'serialized refresh must bypass the health cache through positional dispatch')
 
 print('Luna HLTB backend OK: matching, token refresh, rate limits, manual overrides, persistence, prefs, health')
 
