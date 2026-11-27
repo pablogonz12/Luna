@@ -917,7 +917,10 @@ class LunaTestCase(unittest.TestCase):
         work = self.temp / ('repack-%d' % len(list(self.temp.glob('repack-*'))))
         work.mkdir()
         with tarfile.open(bundle) as tar:
-            tar.extractall(work, filter='data')
+            try:
+                tar.extractall(work, filter='data')
+            except TypeError:
+                tar.extractall(work)
         root = next(work.iterdir())
         mutate(root)
         with tarfile.open(bundle, 'w:gz') as tar:
@@ -940,6 +943,18 @@ class LunaTestCase(unittest.TestCase):
             result = self.luna('update', '--bundle', str(bundle))
             self.assertNotEqual(result.returncode, 0, 'byte at %.2f: a corrupt bundle installed' % fraction)
             self.assertFalse(self.addons.exists(), 'byte at %.2f: a corrupt bundle installed' % fraction)
+
+    def test_update_checks_gzip_trailer_without_gzip_suffix(self):
+        out = self.temp / 'dist-magic'
+        self.assertEqual(self.luna('release', '--out', str(out)).returncode, 0)
+        bundle = next(out.glob('luna-*.tar.gz'))
+        renamed = self.temp / 'update.bundle'
+        raw = bytearray(bundle.read_bytes())
+        raw[-8] ^= 1
+        renamed.write_bytes(raw)
+        result = self.luna('update', '--bundle', str(renamed))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('cannot safely unpack', result.stderr)
 
     def test_update_refuses_a_rebuilt_bundle_with_tampered_tooling(self):
         out = self.temp / 'dist-tool'
@@ -1449,6 +1464,7 @@ class LunaTestCase(unittest.TestCase):
 
     def test_default_install_is_standalone_and_health_checks_pass(self):
         shutil.rmtree(self.home / '.local/share/Lumen', ignore_errors=True)
+        (self.home / '.local/share/Steam').mkdir(parents=True)
         result = self.luna('install')
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn('host      : luna (standalone)', result.stdout)
@@ -1458,7 +1474,7 @@ class LunaTestCase(unittest.TestCase):
         self.assertTrue((self.luna_home / 'addons/playtime/backend/main.lua').is_file())
         self.assertTrue((self.home / '.local/bin/luna').is_file())
         self.assertTrue((self.home / '.config/systemd/user/luna-host.service').is_file())
-        self.assertIn('--user enable --now luna-host.service', self.systemctl_log())
+        self.assertIn('--user start luna-host.service', self.systemctl_log())
         self.assertTrue((self.home / '.local/share/Steam/.cef-enable-remote-debugging').is_file())
         self.assertFalse((self.home / '.local/share/SLSsteam/path/steam').exists(),
                          'no wrapper may be patched')
@@ -1477,6 +1493,7 @@ class LunaTestCase(unittest.TestCase):
     def test_standalone_setup_is_reversible_and_preserves_existing_flag(self):
         shutil.rmtree(self.home / '.local/share/Lumen')
         flag = self.home / '.local/share/Steam/.cef-enable-remote-debugging'
+        flag.parent.mkdir(parents=True)
         result = self.luna('install', '--dry-run')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(flag.exists())
@@ -1490,6 +1507,49 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(self.luna('install').returncode, 0)
         self.assertEqual(self.luna('uninstall').returncode, 0)
         self.assertEqual(flag.read_text(), 'user')
+
+    def test_standalone_uses_alternate_steam_root_and_remembers_it(self):
+        shutil.rmtree(self.home / '.local/share/Lumen')
+        alternate = self.home / '.steam/steam'
+        alternate.mkdir(parents=True)
+        native = self.home / '.local/share/Steam'
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        flag = alternate / '.cef-enable-remote-debugging'
+        self.assertTrue(flag.is_file())
+        self.assertFalse(native.exists())
+        native.mkdir()
+        self.assertEqual(self.luna('uninstall').returncode, 0)
+        self.assertFalse(flag.exists())
+
+    def test_standalone_skips_missing_steam_root(self):
+        shutil.rmtree(self.home / '.local/share/Lumen')
+        result = self.luna('install')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Steam root not found', result.stderr)
+        self.assertFalse((self.home / '.local/share/Steam').exists())
+        self.assertEqual(self.luna('uninstall').returncode, 0)
+
+    def test_standalone_preserves_runtime_enablement(self):
+        shutil.rmtree(self.home / '.local/share/Lumen')
+        env = dict(self.env, LUNA_TEST_UNIT_STATE='enabled-runtime')
+        result = self.luna('install', env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('--user start luna-host.service', self.systemctl_log())
+        self.assertNotIn('--user enable luna-host.service', self.systemctl_log())
+        self.assertEqual(self.luna('uninstall', env=env).returncode, 0)
+        self.assertNotIn('--user disable --now luna-host.service', self.systemctl_log())
+
+    def test_standalone_records_enablement_before_failed_start(self):
+        shutil.rmtree(self.home / '.local/share/Lumen')
+        env = dict(self.env, LUNA_TEST_UNIT_STATE='disabled',
+                   LUNA_TEST_SYSTEMCTL_FAIL='start luna-host.service')
+        result = self.luna('install', env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('could not start', result.stderr)
+        self.assertTrue(json.loads((self.luna_home / 'state/standalone-setup.json').read_text())['enabled'])
+        self.assertEqual(self.luna('uninstall', env=env).returncode, 0)
+        self.assertIn('--user disable --now luna-host.service', self.systemctl_log())
 
     def test_standalone_doctor_does_not_expect_lumen_bridge(self):
         shutil.rmtree(self.home / '.local/share/Lumen')

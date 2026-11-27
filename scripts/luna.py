@@ -1673,7 +1673,9 @@ def install_bundle(bundle, only=None, dry_run=False):
         extract_dir = Path(work) / 'unpacked'
         extract_dir.mkdir()
         try:
-            if str(bundle).endswith(('.gz', '.tgz')):
+            with bundle.open('rb') as stream:
+                is_gzip = stream.read(2) == b'\x1f\x8b'
+            if is_gzip:
                 _check_gzip_stream(bundle)
             _safe_extract(bundle, extract_dir)
         except (tarfile.TarError, ValueError, OSError, EOFError, zlib.error) as error:
@@ -2477,26 +2479,35 @@ def standalone_setup():
         return
     ownership = luna_home() / 'state/standalone-setup.json'
     state = read_json_file(ownership) or {}
-    flag = home() / '.local/share/Steam/.cef-enable-remote-debugging'
+    root = steam_home()
     try:
-        flag.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            fd = os.open(flag, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-        except FileExistsError:
-            pass
+        if not root.is_dir():
+            print('host      : WARNING: Steam root not found; skipping debugging flag', file=sys.stderr)
         else:
-            st = os.fstat(fd)
-            os.close(fd)
-            state['flag'] = [st.st_dev, st.st_ino]
-            write_json_file(ownership, state)
+            flag = root / '.cef-enable-remote-debugging'
+            try:
+                fd = os.open(flag, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            except FileExistsError:
+                pass
+            else:
+                st = os.fstat(fd)
+                os.close(fd)
+                state['flag'] = [st.st_dev, st.st_ino]
+                state['flag_path'] = str(flag)
+                write_json_file(ownership, state)
         enabled = unit_state(HOST_UNIT)['enabled'] in ('enabled', 'enabled-runtime', 'linked', 'linked-runtime')
-        result = systemctl_user('enable', '--now', HOST_UNIT)
-        if result.returncode:
-            print('host      : WARNING: could not enable %s: %s' % (HOST_UNIT, result.stderr.strip()),
-                  file=sys.stderr)
-        elif not enabled:
+        if not enabled:
+            result = systemctl_user('enable', HOST_UNIT)
+            if result.returncode:
+                print('host      : WARNING: could not enable %s: %s' % (HOST_UNIT, result.stderr.strip()),
+                      file=sys.stderr)
+                return
             state['enabled'] = True
             write_json_file(ownership, state)
+        result = systemctl_user('start', HOST_UNIT)
+        if result.returncode:
+            print('host      : WARNING: could not start %s: %s' % (HOST_UNIT, result.stderr.strip()),
+                  file=sys.stderr)
     except OSError as error:
         print('host      : WARNING: standalone setup failed: %s' % error, file=sys.stderr)
 
@@ -2506,7 +2517,7 @@ def undo_standalone_setup():
     state = read_json_file(ownership) or {}
     if state.get('enabled'):
         systemctl_user('disable', '--now', HOST_UNIT)
-    flag = home() / '.local/share/Steam/.cef-enable-remote-debugging'
+    flag = Path(state.get('flag_path') or (steam_home() / '.cef-enable-remote-debugging'))
     try:
         st = flag.lstat()
         if state.get('flag') == [st.st_dev, st.st_ino] and flag.is_file() and not flag.is_symlink():
