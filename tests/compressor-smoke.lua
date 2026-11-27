@@ -150,7 +150,9 @@ package.preload['lfs'] = function()
 end
 local function touch(path) stamps[path] = (stamps[path] or 0) + 1 end
 
--- The standard install location is the discovery path under test.
+-- The standard install location is the discovery path under test. A mode file
+-- in HOME switches the fake engine's behaviour, so every exit code and reason of
+-- the machine contract can be exercised in the same process.
 local tool = home .. '/.local/bin/btrfs-game-compressor'
 do
   assert(os.execute('mkdir -p ' .. string.format('%q', home .. '/.local/bin')))
@@ -158,10 +160,66 @@ do
   f:write([==[
 #!/usr/bin/env bash
 echo "ARGS: $*" >&2
+mode=ok
+[ -f "$HOME/.compressor-mode" ] && mode=$(cat "$HOME/.compressor-mode")
+games_one='[{"name":"A","path":"/games/A","status":"UNCOMPRESSED","size_bytes":10,"size_display":"10B","dedupe_pending":true},{"name":"B","path":"/games/B","status":"COMPACTED","size_bytes":5,"size_display":"5B","dedupe_pending":false}]'
+games_two='[{"name":"A","path":"/games/A","status":"UNCOMPRESSED","size_bytes":10,"size_display":"10B","dedupe_pending":true},{"name":"B","path":"/games/B","status":"UNCOMPRESSED","size_bytes":5,"size_display":"5B","dedupe_pending":true}]'
+summary_one='{"game_count":2,"pending":1,"compacted":1,"compressed":0,"compressed_only":0,"low_yield":0,"running":0,"skipped_empty":0}'
+summary_two='{"game_count":2,"pending":2,"compacted":0,"compressed":0,"compressed_only":0,"low_yield":0,"running":0,"skipped_empty":0}'
+libs_plain='[{"path":"/lib","mount":"/mnt/lib","fstype":"btrfs","options":"rw,compress=zstd:1","compress":"zstd","level":1,"readOnly":false,"snapshots":"no","freeMib":9000,"freePercent":30,"metadataPercent":20,"eligible":true,"reason":null},{"path":"/data/common","mount":"/data","fstype":"ext4","options":"rw","compress":null,"level":0,"readOnly":false,"snapshots":"unknown","freeMib":100,"freePercent":5,"eligible":false,"reason":"not-btrfs"}]'
+libs_snap='[{"path":"/lib","mount":"/mnt/lib","fstype":"btrfs","options":"rw","compress":"zstd","level":1,"readOnly":false,"snapshots":"unknown","freeMib":9000,"freePercent":30,"eligible":false,"reason":"snapshots-unknown","reason_detail":"snapper did not answer","snapshotTool":"none"}]'
+libs_configured='[{"path":"/lib","mount":"/mnt/lib","fstype":"btrfs","options":"rw","compress":"zstd","level":1,"readOnly":false,"snapshots":"unknown","freeMib":9000,"freePercent":30,"eligible":false,"reason":"snapshots-unknown","reason_detail":"snapper did not answer","snapshotTool":"configured"}]'
+libs_unknown='[{"path":"/lib","mount":"/mnt/lib","fstype":"btrfs","options":"rw","compress":"zstd","level":1,"readOnly":false,"snapshots":"unknown","freeMib":9000,"freePercent":30,"eligible":false,"reason":"snapshots-unknown","reason_detail":"no snapshot tool answered","snapshotTool":"unknown"}]'
+libs_snapyes='[{"path":"/lib","mount":"/mnt/lib","fstype":"btrfs","options":"rw","compress":"zstd","level":1,"readOnly":false,"snapshots":"yes","freeMib":9000,"freePercent":30,"eligible":false,"reason":"snapshots","reason_detail":"snapper config on /mnt/lib","snapshotTool":"configured"}]'
+libs_nofield='[{"path":"/lib","mount":"/mnt/lib","fstype":"btrfs","options":"rw","compress":"zstd","level":1,"readOnly":false,"snapshots":"unknown","freeMib":9000,"freePercent":30,"eligible":false,"reason":"snapshots-unknown"}]'
+libs_allowed='[{"path":"/lib","mount":"/mnt/lib","fstype":"btrfs","options":"rw","compress":"zstd","level":1,"readOnly":false,"snapshots":"unknown","freeMib":9000,"freePercent":30,"eligible":true,"reason":null,"detail":"","snapshotTool":"none","reason_detail":""}]'
+acc=false
+accfile="$HOME/.config/btrfs-game-compressor/accept_snapshots_unknown"
+[ -f "$accfile" ] && read -r accval < "$accfile"
+[ "${accval:-}" = true ] && acc=true
+case "$mode" in
+  snapnone) libs="$libs_snap"; games="$games_one"; summary="$summary_one" ;;
+  snapconfigured) libs="$libs_configured"; games="$games_one"; summary="$summary_one" ;;
+  snapunknown) libs="$libs_unknown"; games="$games_one"; summary="$summary_one" ;;
+  snapyes) libs="$libs_snapyes"; games="$games_one"; summary="$summary_one" ;;
+  nofield) libs="$libs_nofield"; games="$games_one"; summary="$summary_one" ;;
+  nolib) libs=''; games="$games_one"; summary="$summary_one" ;;
+  twogames) libs="$libs_plain"; games="$games_two"; summary="$summary_two" ;;
+  *) libs="$libs_plain"; games="$games_one"; summary="$summary_one" ;;
+esac
+if [ "$acc" = true ] && [ -n "$libs" ]; then
+  case "$mode" in
+    snapnone|snapconfigured|snapunknown) libs="$libs_allowed" ;;
+  esac
+fi
 case "$1" in
-  --status) sleep 0.3; printf '%s\n' '{"version":"9.9.9","libraries":["/lib"],"games":[{"name":"A","path":"/games/A","status":"UNCOMPRESSED","size_bytes":10,"size_display":"10B","dedupe_pending":true},{"name":"B","path":"/games/B","status":"COMPACTED","size_bytes":5,"size_display":"5B","dedupe_pending":false}],"summary":{"game_count":2,"pending":1,"compacted":1,"compressed":0,"compressed_only":0,"low_yield":0,"running":0,"skipped_empty":0}}' ;;
+  --status)
+    sleep 0.3
+    if [ -n "$libs" ]; then
+      printf '{"version":"9.9.9","schema":2,"accept_snapshots_unknown":%s,"libraries":["/lib"],"libraries_detail":%s,"games":%s,"summary":%s}\n' "$acc" "$libs" "$games" "$summary"
+    else
+      printf '{"version":"9.9.9","schema":2,"accept_snapshots_unknown":%s,"libraries":["/lib"],"games":%s,"summary":%s}\n' "$acc" "$games" "$summary"
+    fi ;;
   --dry-run) echo 'dry run: nothing changed'; sleep 0.4 ;;
-  --compact) printf 'COMPACT|begin|A|%s|10\n' "$2"; echo 'PROGRESS|compress|64|128'; sleep 1.2; echo 'PROGRESS|compress|128|128'; echo 'COMPACT|phase|dedupe'; echo 'PROGRESS|dedupe|64|0'; sleep 1.2; printf 'COMPACT|done|A|COMPACTED|12345678|1\n' ;;
+  --compact)
+    case "$mode" in
+      ok) printf 'COMPACT|begin|A|%s|10\n' "$2"; echo 'PROGRESS|compress|64|128'; sleep 1.2; echo 'PROGRESS|compress|128|128'; echo 'COMPACT|phase|dedupe'; echo 'PROGRESS|dedupe|64|0'; sleep 1.2; printf 'COMPACT|done|A|COMPACTED|12345678|1\n' ;;
+      unmeasured) printf 'COMPACT|done|A|COMPACTED|unmeasured|1\n' ;;
+      zero) printf 'COMPACT|done|A|COMPACTED|0|1\n' ;;
+      estimate) printf 'COMPACT|estimate|A|900|unprivileged\n'; printf 'COMPACT|done|A|COMPACTED|unmeasured|1\n' ;;
+      skip) printf 'COMPACT|skip|A|running|%s\n' "$2"; exit 3 ;;
+      nodatacow) printf 'COMPACT|skip|A|nodatacow|%s\n' "$2"; exit 3 ;;
+      locked) echo 'REFUSED|locked|/mnt/lib|pid 4242 cmd --compact'; exit 6 ;;
+      snapshots) echo 'REFUSED|snapshots|/mnt/lib|20 GiB would be rewritten'; exit 5 ;;
+      snapunknown) echo 'REFUSED|snapshots-unknown|/mnt/lib|snapper did not answer'; exit 5 ;;
+      lowspace) echo 'REFUSED|low-space|/mnt/lib|100 MiB free, need 2048'; exit 5 ;;
+      spaceunknown) echo 'REFUSED|space-unknown|/mnt/lib|stat -f failed'; exit 5 ;;
+      notbtrfs) echo 'REFUSED|not-btrfs|/mnt/lib|ext4'; exit 5 ;;
+      readonly) echo 'REFUSED|read-only|/mnt/lib|mounted ro'; exit 5 ;;
+      interrupt) printf 'COMPACT|fail|A|interrupted\n'; exit 143 ;;
+      slow) printf 'COMPACT|begin|A|%s|1000000\n' "$2"; echo 'PROGRESS|compress|0|1000000'; sleep 1.0; echo 'PROGRESS|compress|500000|1000000'; sleep 1.4; echo 'PROGRESS|compress|750000|1000000'; sleep 1.4; echo 'PROGRESS|compress|1000000|1000000'; sleep 1.5; printf 'COMPACT|done|A|COMPACTED|500|1\n' ;;
+      *) exit 2 ;;
+    esac ;;
   --run) echo 'batch running'; sleep 2.5 ;;
   --dedupe) echo 'dedupe pass'; sleep 0.5 ;;
   --recheck) echo 'rechecking measurements'; sleep 0.5 ;;
@@ -299,12 +357,13 @@ local started = call(reg, 'SlsCompressorRun', json.encode({action = 'run'}))
 assert(started.success and started.job.queue == 1, 'the queue run did not start')
 local queued = wait_for(reg, function(state) return state.queue and state.queue.finished end, 20)
 assert(queued.queue.total == 1 and queued.queue.done == 1, 'the driver did not finish the queue')
-assert(queued.queue.saved == 12345678, 'the per-game savings were not carried')
+assert(queued.queue.saved == 12345678 * 1048576, 'the per-game savings were not carried, in bytes')
 assert(queued.queue.phase == 'dedupe', 'the last phase was not observed')
 local full_queue = call(reg, 'SlsCompressorGet')
 assert(full_queue.queue and full_queue.queue.games and full_queue.queue.games[1].status == 'done',
   'the per-game state is missing')
-assert(full_queue.queue.games[1].name == 'A' and full_queue.queue.games[1].saved == 12345678,
+assert(full_queue.queue.games[1].name == 'A'
+  and full_queue.queue.games[1].saved == 12345678 * 1048576,
   'the per-game entry is wrong')
 local light_queue = call(reg, 'SlsCompressorGet', json.encode({light = true}))
 assert(light_queue.queue and light_queue.queue.games == nil, 'the light queue must drop the game list')
@@ -454,9 +513,11 @@ assert(stats.compression.games[1].name == 'Alpha' and stats.compression.games[1]
   'the compression chart must sort by savings')
 assert(stats.dedupe.passes == 3 and stats.dedupe.saved_bytes == 104857600 + 524288, 'dedupe totals are wrong')
 assert(stats.dedupe.newest == 1700000400, 'the newest dedupe stamp is wrong')
-assert(stats.luna.saved_bytes >= 12345678 and stats.luna.saved_bytes % 12345678 == 0,
+assert(stats.luna.saved_bytes >= 12345678 * 1048576
+  and stats.luna.saved_bytes % (12345678 * 1048576) == 0,
   'Luna per-game savings were not joined')
-assert(stats.luna.games[1].name == 'A' and stats.luna.games[1].saved_bytes == 12345678,
+assert(stats.luna.games[1].name == 'A'
+  and stats.luna.games[1].saved_bytes == 12345678 * 1048576,
   'the Luna chart must list the compacted game')
 assert(stats.library.games == 2 and stats.library.bytes == 15, 'library totals must come from the scan')
 assert(call(reg, 'SlsCompressorGet', json.encode({light = true})).stats == nil,
@@ -487,4 +548,336 @@ touch(settings_file)
 assert(call(reg, 'SlsCompressorGet').settings.runOrder == 'library',
   'a changed settings file must invalidate the memo')
 
-print('Luna compressor backend OK: discovery, jobs, settings, mirroring, composition, guards, cancel, stats')
+-- ------------------------------------------------------- machine contract
+-- Every exit code and reason of the engine's contract lands on the right word,
+-- a library refusal is never counted as failed games, and savings are never a
+-- total that quietly includes an unmeasured game.
+local dir = home .. '/.local/share/slssteam-integrations/compressor'
+local cfg = home .. '/.config/btrfs-game-compressor'
+local accept_file = cfg .. '/accept_snapshots_unknown'
+local function mode(name) write_file(home .. '/.compressor-mode', name .. '\n') end
+local function stat_size(path)
+  local f = io.open(path, 'rb')
+  if not f then return 0 end
+  local n = f:seek('end'); f:close()
+  return n
+end
+local function scanned(name)
+  idle(reg)
+  mode(name)
+  os.remove(dir .. '/status.json')
+  os.remove(dir .. '/status.at')
+  assert(call(reg, 'SlsCompressorRun', json.encode({ action = 'scan' })).success, 'fixture scan refused')
+  wait_for(reg, function(state) return state.job and not state.job.running end, 15)
+  return call(reg, 'SlsCompressorGet', json.encode({ refresh = true }))
+end
+local function queue_run(name)
+  mode(name)
+  assert(call(reg, 'SlsCompressorRun', json.encode({ action = 'run' })).success,
+    'the queue run was refused for ' .. name)
+  return wait_for(reg, function(state)
+    local queue = state.queue
+    return queue and (queue.finished
+      or (queue.outcome and queue.outcome.kind == 'not-started'))
+  end, 30)
+end
+
+-- Per-game skips carry the engine's reason in plain words.
+scanned('skip')
+local skipped = queue_run('skip')
+local skipped_game = skipped.queue.games[1]
+assert(skipped_game.status == 'skipped' and skipped_game.reason == 'running',
+  'a skip reason was lost: ' .. tostring(skipped_game.reason))
+assert(skipped_game.reasonText:find('running', 1, true), 'the skip reason is not in plain words')
+assert(skipped.queue.failed == 0 and skipped.queue.skipped == 1, 'a skip was counted as a failure')
+
+scanned('nodatacow')
+local nodatacow = queue_run('nodatacow')
+assert(nodatacow.queue.games[1].reason == 'nodatacow'
+  and nodatacow.queue.games[1].reasonText:find('NODATACOW', 1, true), 'nodatacow was not explained')
+
+-- unmeasured, measured zero and an estimate are three different things.
+scanned('unmeasured')
+local unmeasured = queue_run('unmeasured').queue
+assert(unmeasured.games[1].status == 'done' and unmeasured.games[1].unmeasured == true,
+  'an unmeasured pass must never read as a measured zero')
+assert(unmeasured.savings.measuredGames == 0 and unmeasured.savings.unmeasuredGames == 1
+  and unmeasured.savings.measuredMib == 0, 'unmeasured games leaked into the measured sum')
+assert(unmeasured.savings.text:find('not measured', 1, true), 'the savings line hides unmeasured games')
+
+scanned('zero')
+local zero = queue_run('zero').queue
+assert(zero.games[1].unmeasured == false and zero.savings.measuredGames == 1
+  and zero.savings.measuredMib == 0, 'a measured zero must count as a measurement')
+
+scanned('estimate')
+local estimate = queue_run('estimate').queue
+assert(estimate.games[1].estimate == true and estimate.games[1].estimateMib == 900,
+  'the unprivileged estimate was not read')
+assert(estimate.savings.estimateGames == 1 and estimate.savings.estimateMib == 900
+  and estimate.savings.measuredGames == 0, 'the estimate was mixed into the measurement')
+assert(estimate.savings.text:find('estimate', 1, true), 'the estimate is not labelled')
+
+scanned('interrupt')
+local interrupted = queue_run('interrupt').queue
+assert(interrupted.games[1].status == 'interrupted', 'exit 143 was not an interrupt')
+assert(interrupted.failed == 0, 'an interrupted game was counted as failed')
+assert(interrupted.outcome.kind == 'interrupted' and interrupted.outcome.game == 'A',
+  'the page cannot say where the run was interrupted')
+
+-- A library refusal (exit 5/6) means nothing was attempted: "not started", the
+-- engine's next step, and the untouched games still pending.
+local refusals = {
+  { mode = 'locked', reason = 'locked' },
+  { mode = 'snapshots', reason = 'snapshots' },
+  { mode = 'snapunknown', reason = 'snapshots-unknown' },
+  { mode = 'lowspace', reason = 'low-space' },
+  { mode = 'spaceunknown', reason = 'space-unknown' },
+  { mode = 'notbtrfs', reason = 'not-btrfs' },
+  { mode = 'readonly', reason = 'read-only' },
+}
+for _, case in ipairs(refusals) do
+  scanned('twogames')
+  local queue = queue_run(case.mode).queue
+  assert(queue.outcome and queue.outcome.kind == 'not-started',
+    case.mode .. ' must report a run that never started')
+  assert(queue.finished == false, case.mode .. ' must not read as a finished pass')
+  assert(queue.outcome.reason == case.reason,
+    case.mode .. ' mapped to ' .. tostring(queue.outcome.reason))
+  assert(queue.failed == 0 and queue.done == 0,
+    case.mode .. ' counted ' .. tostring(queue.failed) .. ' failed games')
+  for _, game in ipairs(queue.games) do
+    assert(game.status == 'pending', case.mode .. ' left ' .. game.name .. ' as ' .. tostring(game.status))
+  end
+  assert(queue.outcome.nextStep and #queue.outcome.nextStep > 0,
+    case.mode .. ' has no concrete next step')
+  if case.mode == 'locked' then
+    assert(queue.outcome.nextStep:find('4242', 1, true), 'the lock holder pid is not named')
+  end
+end
+
+-- A refusal after a completed game retains its measurement and reason.
+write_file(dir .. '/queue.list', 'A\t/games/A\t10\nB\t/games/B\t10\n')
+write_file(dir .. '/queue.state', 'start\t1\t2\t10\tA\t/games/A\n'
+  .. 'done\t1\t2\t0\tCOMPACT|done|A|COMPACTED|123|1\n'
+  .. 'start\t2\t2\t10\tB\t/games/B\n' .. 'done\t2\t2\t5\t\n')
+write_file(dir .. '/run.log', 'RUN\t1700000000\nREFUSED|snapshots|/mnt/lib|snapshot detail\n')
+local partial = call(reg, 'SlsCompressorGet', json.encode({ refresh = true })).queue
+assert(partial.outcome.kind == 'stopped' and partial.done == 1
+  and partial.savings.measuredMib == 123 and partial.games[2].status == 'pending')
+assert(partial.outcome.reason == 'snapshots' and partial.outcome.path == '/mnt/lib'
+  and partial.outcome.detail == 'snapshot detail' and partial.outcome.nextStep
+  and partial.outcome.reasonText)
+
+-- A rolling ETA from two polls of the engine's PROGRESS lines.
+scanned('twogames')
+mode('slow')
+assert(call(reg, 'SlsCompressorRun', json.encode({ action = 'run' })).success, 'the slow run was refused')
+local eta_state = wait_for(reg, function(state)
+  return state.queue and state.queue.eta and state.queue.eta.seconds
+end, 15)
+assert(eta_state.queue.eta.game == 'A', 'the ETA is not attached to the current game')
+assert(eta_state.queue.eta.rateBytes > 0, 'the ETA has no rolling rate')
+call(reg, 'SlsCompressorCancel')
+wait_for(reg, function(state) return not (state.queue and state.queue.active) end, 15)
+
+-- Per-library capabilities, and a detected snapshot state with no toggle.
+local plain = scanned('plain')
+assert(plain.libraries and #plain.libraries == 2, 'libraries_detail was not surfaced')
+assert(plain.libraries[1].notes[1]:find('free', 1, true), 'free space is not in plain words')
+assert(plain.libraries[2].notes[1] == 'ignored: ext4', 'a non-btrfs library must read "ignored: ext4"')
+assert(plain.libraries[2].reason == 'not-btrfs' and plain.libraries[2].eligible == false,
+  'the ext4 library facts are wrong: ' .. tostring(plain.libraries[2].reason) .. '/'
+  .. tostring(plain.libraries[2].eligible))
+assert(plain.snapshots == nil, 'a snapshots=no library must not raise a banner')
+
+local none = scanned('snapnone')
+assert(none.snapshots and none.snapshots.choice, 'snapshots-unknown raised no banner')
+assert(none.snapshots.choice.tool == 'none', 'snapshotTool=none was not read')
+assert(none.snapshots.choice.title ==
+  'Luna cannot see whether this library has snapshots without root.')
+assert(none.snapshots.choice.text:find('No snapshot tool', 1, true), 'the safe case is not explained')
+assert(none.snapshots.choice.button == 'Allow compression (writes the setting for you)')
+assert(none.snapshots.choice.enabled == false, 'the setting must not read as enabled by default')
+assert(none.snapshots.choice.paths[1] == '/lib')
+
+local configured = scanned('snapconfigured')
+assert(configured.snapshots.choice.tool == 'configured')
+assert(configured.snapshots.choice.text:find('keeps the old copies', 1, true))
+assert(configured.snapshots.choice.button == 'Compress anyway (keeps snapshots)')
+assert(not configured.snapshots.choice.text:find('Check for snapshots yourself', 1, true))
+
+local unknown_tool = scanned('snapunknown')
+assert(unknown_tool.snapshots.choice.tool == 'unknown')
+assert(unknown_tool.snapshots.choice.text:find('Check for snapshots yourself', 1, true))
+
+local detected = scanned('snapyes')
+assert(detected.snapshots and detected.snapshots.detected,
+  'a positively detected snapshot state is not shown')
+assert(detected.snapshots.detected.text:find('keep the old copies', 1, true))
+assert(detected.snapshots.choice == nil, 'a detected snapshot state must not offer a toggle')
+
+local nofield = scanned('nofield')
+assert(nofield.libraries and nofield.libraries[1].snapshotTool == nil)
+assert(nofield.snapshots == nil, 'an engine without snapshotTool must show today\'s view')
+
+local nolib = scanned('nolib')
+assert(nolib.libraries == nil and nolib.snapshots == nil, 'no libraries_detail must stay absent')
+
+-- The light poll carries the library table and the banner too.
+scanned('snapnone')
+local light_lib = call(reg, 'SlsCompressorGet', json.encode({ light = true }))
+assert(light_lib.libraries and light_lib.status.libraries_detail,
+  'the light response must keep the library table')
+assert(light_lib.snapshots and light_lib.snapshots.choice,
+  'the light response must keep the snapshot banner')
+
+-- The durable per-game record in queue.state is the source of truth. The log
+-- tail may have scrolled past a game (a long queue), or the log may be gone; a
+-- missing measurement is unmeasured, never a measured zero.
+local function state_only(with_record)
+  os.execute('mkdir -p ' .. string.format('%q', dir))
+  local filler = string.rep('PROGRESS|compress|1|1000\n', 30000)
+  write_file(dir .. '/run.log', 'RUN\t1700000000\n' .. filler)
+  write_file(dir .. '/queue.list', 'A\t/games/A\t10\n')
+  local state = 'start\t1\t1\t10\tA\t/games/A\n'
+  state = state .. (with_record
+    and 'done\t1\t1\t0\tCOMPACT|done|A|COMPACTED|12345|1\n'
+    or 'done\t1\t1\t0\t\n')
+  write_file(dir .. '/queue.state', state .. 'finish\t1\t1\n')
+  return call(reg, 'SlsCompressorGet', json.encode({ refresh = true }))
+end
+
+local recorded = state_only(true)
+assert(recorded.queue.games[1].savedMib == 12345
+  and recorded.queue.games[1].saved == 12345 * 1048576,
+  'the state record was ignored and the savings came from the log tail')
+assert(recorded.queue.savings.measuredGames == 1 and recorded.queue.savings.measuredMib == 12345
+  and recorded.queue.savings.measuredBytes == 12345 * 1048576
+  and recorded.queue.savings.unmeasuredGames == 0,
+  'a recorded measurement outside the log tail was lost')
+assert(recorded.queue.savings.unit == 'MiB', 'the savings carry no unit')
+assert(recorded.queue.saved == 12345 * 1048576, 'queue.saved must be bytes')
+
+local lost = state_only(false)
+assert(lost.queue.games[1].status == 'done' and lost.queue.games[1].unmeasured == true,
+  'a done game without a recorded measurement must be unmeasured')
+assert(lost.queue.savings.measuredGames == 0 and lost.queue.savings.unmeasuredGames == 1
+  and lost.queue.savings.measuredMib == 0 and lost.queue.saved == 0,
+  'a lost measurement turned into a measured zero')
+
+-- Nothing is written without the explicit click, and the click writes only the
+-- one key: the other config files survive untouched.
+write_file(cfg .. '/compress_level', 'zstd:3\n')
+write_file(cfg .. '/min_gain_pct', '7\n')
+assert(read(accept_file) == nil, 'the snapshot setting was written without a click')
+local accepted = call(reg, 'SlsCompressorAcceptSnapshots', json.encode({ enabled = true }))
+assert(accepted.success and accepted.value == 'true', 'the snapshot setting was not written')
+assert(read(accept_file) == 'true\n', 'the file must contain exactly true')
+assert(read(cfg .. '/compress_level') == 'zstd:3\n', 'an unrelated config key was clobbered')
+assert(read(cfg .. '/min_gain_pct') == '7\n', 'an unrelated config key was clobbered')
+assert(accepted.scanning == true, 'the status was not re-read after the write')
+wait_for(reg, function(state) return state.job and not state.job.running end, 15)
+local enabled = call(reg, 'SlsCompressorGet', json.encode({ refresh = true }))
+assert(enabled.snapshots and enabled.snapshots.choice.enabled == true,
+  'the banner does not reflect the engine\'s top-level setting')
+assert(enabled.snapshots.choice.button == 'Turn the override off',
+  'the allowed state must offer a revert')
+assert(enabled.snapshots.choice.text:find('override is on', 1, true))
+assert(call(reg, 'SlsCompressorAcceptSnapshots', json.encode({ enabled = true })).already == true,
+  'a second press must not rewrite the setting')
+
+local reverted = call(reg, 'SlsCompressorAcceptSnapshots', json.encode({ enabled = false }))
+assert(reverted.success and reverted.value == 'false', 'the override could not be turned off')
+assert(read(accept_file) == 'false\n', 'the file must contain exactly false')
+assert(read(cfg .. '/compress_level') == 'zstd:3\n', 'the revert clobbered another config key')
+wait_for(reg, function(state) return state.job and not state.job.running end, 15)
+local off = call(reg, 'SlsCompressorGet', json.encode({ refresh = true }))
+assert(off.snapshots and off.snapshots.choice.enabled == false
+  and off.snapshots.choice.button == 'Allow compression (writes the setting for you)',
+  'the banner did not return to the not-allowed state')
+write_file(accept_file, 'true\n') -- External change after the last scan.
+local stale = call(reg, 'SlsCompressorAcceptSnapshots', json.encode({ enabled = false }))
+assert(stale.success and not stale.already and read(accept_file) == 'false\n',
+  'a stale scan must not suppress the requested write')
+wait_for(reg, function(state) return state.job and not state.job.running end, 15)
+
+-- The accept payload is explicit only: an empty object or a typo must never
+-- enable a safety override.
+for _, bad in ipairs({ '{}', '{"enable":false}', '{"enabled":"no"}', '{"enabled":1}',
+  'null', '', '[]' }) do
+  local refused_payload = call(reg, 'SlsCompressorAcceptSnapshots', bad)
+  assert(refused_payload.success == false and refused_payload.code == 'invalid-payload',
+    'a malformed payload was accepted: ' .. bad)
+end
+assert(read(accept_file) == 'false\n', 'a malformed payload wrote the setting')
+local bare_on = call(reg, 'SlsCompressorAcceptSnapshots', 'true')
+assert(bare_on.success and bare_on.value == 'true' and read(accept_file) == 'true\n',
+  'a bare boolean true must be accepted')
+wait_for(reg, function(state) return state.job and not state.job.running end, 15)
+local bare_off = call(reg, 'SlsCompressorAcceptSnapshots', 'false')
+assert(bare_off.success and bare_off.value == 'false' and read(accept_file) == 'false\n',
+  'a bare boolean false must be accepted')
+wait_for(reg, function(state) return state.job and not state.job.running end, 15)
+
+-- A live queue rereads the setting per game, so it is refused mid-run.
+scanned('twogames')
+mode('slow')
+assert(call(reg, 'SlsCompressorRun', json.encode({ action = 'run' })).success, 'the live run was refused')
+wait_for(reg, function(state) return state.queue and state.queue.active end, 10)
+local live_accept = call(reg, 'SlsCompressorAcceptSnapshots', json.encode({ enabled = true }))
+assert(live_accept.success == false and live_accept.code == 'run-live',
+  'the snapshot setting could be changed during a run')
+assert(read(accept_file) == 'false\n', 'a refused mid-run press wrote the setting')
+call(reg, 'SlsCompressorCancel')
+wait_for(reg, function(state) return not (state.queue and state.queue.active) end, 15)
+
+-- An override left on stays visible and reversible with no unknown library,
+-- and a known snapshot state warns without needing snapshotTool.
+local override = plugin.build_snapshots(
+  { { path = '/lib', snapshots = 'no', snapshotTool = 'none' } }, true)
+assert(override and override.choice and override.choice.enabled == true
+  and override.choice.button == 'Turn the override off',
+  'an override left on must remain visible and reversible')
+for _, other in ipairs({ 'configured', 'unknown', 'missing' }) do
+  local mixed = plugin.build_snapshots({
+    { path = '/a', snapshots = 'unknown', reason = 'snapshots-unknown', snapshotTool = 'none' },
+    { path = '/b', snapshots = 'unknown', reason = 'snapshots-unknown',
+      snapshotTool = other ~= 'missing' and other or nil },
+  }, false)
+  assert(mixed.choice.tool ~= 'none' and not mixed.choice.text:find('usually safe', 1, true)
+    and #mixed.choice.paths == 2, 'mixed libraries need the strongest warning')
+end
+local known_snap = plugin.build_snapshots({ { path = '/lib', snapshots = 'yes' } }, false)
+assert(known_snap and known_snap.detected and known_snap.choice == nil,
+  'a known snapshot state must warn without snapshotTool')
+
+-- Log rotation: the grown pass log is kept whole as run.log.1, never truncated,
+-- and a live run is never rotated out from under itself.
+scanned('plain')
+local qlog = dir .. '/run.log'
+local qprev = qlog .. '.1'
+os.remove(qprev)
+assert(os.execute('dd if=/dev/zero of=' .. string.format('%q', qlog) .. ' bs=1048576 count=9 status=none'))
+local grown = stat_size(qlog)
+assert(grown >= 9 * 1048576, 'the grown fixture log is wrong')
+mode('ok')
+assert(call(reg, 'SlsCompressorRun', json.encode({ action = 'run' })).success, 'the rotation run was refused')
+wait_for(reg, function(state) return state.queue and state.queue.finished end, 30)
+assert(stat_size(qprev) == grown, 'the previous pass log was not kept whole')
+assert(stat_size(qlog) < grown, 'the current log was not rotated')
+local health = call(reg, 'SlsCompressorGet', json.encode({ refresh = true })).health
+assert(health and health.logBytes == stat_size(qlog), 'Health reports the wrong log size')
+assert(health.logLimitBytes == 8 * 1048576 and health.logKept == true, 'the log cap is not reported')
+
+mode('slow')
+assert(call(reg, 'SlsCompressorRun', json.encode({ action = 'run' })).success, 'the live run was refused')
+wait_for(reg, function(state) return state.queue and state.queue.active end, 10)
+local kept = stat_size(qprev)
+local rotated, _, why = plugin.rotate_log(0)
+assert(rotated == false and why == 'live', 'a live pass must never be rotated')
+assert(stat_size(qprev) == kept, 'a live pass was rotated')
+call(reg, 'SlsCompressorCancel')
+wait_for(reg, function(state) return not (state.queue and state.queue.active) end, 15)
+
+print('Luna compressor backend OK: discovery, jobs, settings, mirroring, composition, guards, cancel, stats, machine contract, snapshots, rotation')

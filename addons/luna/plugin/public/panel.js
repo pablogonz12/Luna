@@ -137,6 +137,15 @@
     while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
     return (size >= 100 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
   };
+  /* Size fields are bytes unless explicitly named as MiB. */
+  const sizeToBytes = (value, unit) => {
+    const number = Number(value) || 0;
+    const name = String(unit || 'bytes').toLowerCase();
+    const factor = name === 'mib' || name === 'mb' ? 1024 * 1024
+      : name === 'gib' ? 1024 * 1024 * 1024 : 1;
+    return Math.max(0, number * factor);
+  };
+  const formatSize = (value, unit) => formatBytes(sizeToBytes(value, unit));
   const pctText = value => String(Math.max(0, Math.min(100, Math.round(Number(value) || 0))));
   // Game names, paths and backend messages come from disk or the network: any
   // of them placed in innerHTML goes through here, so it stays text.
@@ -2166,6 +2175,20 @@
       return { doneBytes, totalBytes };
     }
 
+    // The queue's savings contract: explicit byte fields win; only when
+    // they are absent do the legacy MiB
+    // counters get used, and then they are labelled MiB, never bytes.
+    function savingsSize(savings, key) {
+      if (!savings || typeof savings !== 'object') return '';
+      if (savings[key + 'Bytes'] !== undefined && savings[key + 'Bytes'] !== null) {
+        return formatSize(savings[key + 'Bytes'], 'bytes');
+      }
+      if (savings[key + 'Mib'] !== undefined && savings[key + 'Mib'] !== null) {
+        return formatSize(savings[key + 'Mib'], 'mib');
+      }
+      return '';
+    }
+
     function compressorQueueBody(body) {
       const queue = (compressor && compressor.queue) || {};
       const current = queue.current;
@@ -2174,7 +2197,14 @@
       const done = Number(queue.done) || 0;
       const failed = Number(queue.failed) || 0;
       const skipped = Number(queue.skipped) || 0;
-      const saved = Number(queue.saved) || 0;
+      const savings = queue.savings && typeof queue.savings === 'object' ? queue.savings : null;
+      const measuredText = savingsSize(savings, 'measured');
+      const estimateText = savingsSize(savings, 'estimate');
+      const savedText = measuredText
+        || (Number(queue.saved) > 0 ? formatSize(queue.saved, 'bytes') : '')
+        || (estimateText ? 'about ' + estimateText + ' (estimate)' : '');
+      const outcome = queue.outcome && typeof queue.outcome === 'object' ? queue.outcome : null;
+      const outcomeKind = outcome ? String(outcome.kind || '') : '';
       const overall = queueOverall();
       // The overall bar is the queue's own unit: games finished. The current
       // game's fraction is included so the bar moves within a game instead of
@@ -2191,15 +2221,30 @@
       const barPct = total > 0 ? Math.min(100, ((done + currentFraction()) / total) * 100) : 0;
       const head = document.createElement('p');
       head.className = 'sls-luna-note';
+      // A library refusal is not a finished run: nothing was attempted, so the
+      // page says so (and why) instead of "Last run finished".
       head.innerHTML = '<strong>' + (active ? 'Run in progress'
+        : outcomeKind === 'not-started' ? 'Last run did not start'
         : queue.finished ? 'Last run finished' : 'Last run stopped') + '</strong> \u00b7 '
         + done + ' of ' + total + ' games done'
         + (overall ? ' \u00b7 ' + formatBytes(overall.doneBytes) + ' of ' + formatBytes(overall.totalBytes) : '')
         + (failed ? ' \u00b7 failed ' + failed : '')
         + (skipped ? ' \u00b7 skipped ' + skipped : '')
-        + (saved > 0 ? ' \u00b7 saved ' + formatBytes(saved) : '');
+        + (savedText ? ' \u00b7 saved ' + savedText : '');
       body.appendChild(head);
       body.appendChild(progressBar(barPct, false));
+
+      if (!active && outcomeKind === 'not-started') {
+        const reason = String(outcome.reasonText || outcome.reason || '').trim();
+        const nextStep = String(outcome.nextStep || '').trim();
+        const why = document.createElement('p');
+        why.className = 'sls-luna-note sls-luna-queue-outcome';
+        why.textContent = 'The library refused the pass'
+          + (reason ? ': ' + reason : '')
+          + (outcome.path ? ' (' + outcome.path + ')' : '') + '.'
+          + (nextStep ? ' Next: ' + nextStep + (/[.!?]$/.test(nextStep) ? '' : '.') : '');
+        body.appendChild(why);
+      }
 
       if (current) {
         const pct = current.phase === 'dedupe'
@@ -2219,7 +2264,7 @@
         body.appendChild(progressBar(pct, false));
       }
 
-      if (!active && !queue.finished && total > 0) {
+      if (!active && !queue.finished && total > 0 && outcomeKind !== 'not-started') {
         const stopped = document.createElement('p');
         stopped.className = 'sls-luna-note';
         stopped.textContent = 'The queue stopped before it finished; the game in progress is picked up again by the next run.';
@@ -2415,10 +2460,10 @@
 
       const cards = document.createElement('div');
       cards.className = 'sls-luna-stat';
-      [['Measured saved', formatBytes(measuredSaved), 'ZSTD + deduplication'],
-       ['Library on disk', formatBytes(library.bytes), (Number(library.games) || 0) + ' games in the last scan'],
+      [['Measured saved', formatSize(measuredSaved, 'bytes'), 'ZSTD + deduplication'],
+       ['Library on disk', formatSize(library.bytes, 'bytes'), (Number(library.games) || 0) + ' games in the last scan'],
        ['Compacted', (Number(summary.compacted) || 0) + ' / ' + (Number(summary.game_count) || 0), 'games done'],
-       ['Luna passes', formatBytes(luna.saved_bytes), (Number(luna.measured) || 0) + ' games with savings']]
+       ['Luna passes', formatSize(luna.saved_bytes, 'bytes'), (Number(luna.measured) || 0) + ' games with savings']]
         .forEach(pair => {
           const cell = document.createElement('div');
           const value = document.createElement('b');
@@ -2434,8 +2479,8 @@
       compressorChart(body, 'ZSTD savings per game',
         compressionGames.map(game => ({
           label: game.name, title: game.path || '',
-          value: game.saved_bytes,
-          display: formatBytes(game.saved_bytes) + ' \u00b7 '
+          value: sizeToBytes(game.saved_bytes, 'bytes'),
+          display: formatSize(game.saved_bytes, 'bytes') + ' \u00b7 '
             + pctText(game.original_bytes ? game.saved_bytes * 100 / game.original_bytes : 0) + '%',
         })),
         { empty: Number(compression.measured)
@@ -2444,16 +2489,16 @@
 
       const lunaGames = listOf(luna.games).slice(0, 8);
       compressorChart(body, 'Savings recorded by Luna passes',
-        lunaGames.map(game => ({ label: game.name, value: game.saved_bytes,
-          display: formatBytes(game.saved_bytes) })),
+        lunaGames.map(game => ({ label: game.name, value: sizeToBytes(game.saved_bytes, 'bytes'),
+          display: formatSize(game.saved_bytes, 'bytes') })),
         { empty: 'No per-game savings were recorded yet \u2014 a pass that reclaims nothing records zero.' });
 
       const dedupeEntries = listOf(dedupe.entries).slice(0, 8);
       compressorChart(body, 'Deduplication per directory',
         dedupeEntries.map(entry => ({
           label: String(entry.path || '').split('/').pop() || String(entry.path || ''),
-          title: entry.path || '', value: entry.saved_bytes,
-          display: formatBytes(entry.saved_bytes),
+          title: entry.path || '', value: sizeToBytes(entry.saved_bytes, 'bytes'),
+          display: formatSize(entry.saved_bytes, 'bytes'),
         })),
         { empty: 'No deduplication passes recorded yet.', alt: true });
 
@@ -2695,7 +2740,7 @@
           chip = document.createElement('span');
           chip.className = 'sls-luna-chip ' + state;
           chip.textContent = state === 'done' && Number(queueEntry.saved) > 0
-            ? 'done \u00b7 saved ' + formatBytes(queueEntry.saved) : state;
+            ? 'done \u00b7 saved ' + formatSize(queueEntry.saved, 'bytes') : state;
         }
         const excludedNow = excluded.has(game.name);
         const box = document.createElement('div');

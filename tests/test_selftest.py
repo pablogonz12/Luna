@@ -87,9 +87,15 @@ class FakeSteam:
         self.exception_on = exception_on
         self.close_answer = close or {'overlays': 0, 'launchers': 1,
                                       'browserVisible': True, 'hiddenView': False}
-        self.embed_answer = embed or {'embedded': True, 'inside': True, 'lumenVisible': True,
-                                      'lumenAbove': True, 'sidebarClickable': True,
-                                      'rect': [255, 442, 700, 555], 'rowHeight': 40.0}
+        # The owner's live shape: sidebar on the left, Lumen to its right with
+        # pointer-events: none, so elementFromPoint still returns the row.
+        self.embed_answer = {
+            'embedded': True, 'inside': True, 'lumenVisible': True, 'lumenAbove': True,
+            'sidebarClickable': True, 'rect': [1019, 464, 700, 555], 'rowHeight': 40.0,
+            'sidebarRect': [819, 399, 200, 620], 'sidebarRows': 9, 'sidebarCandidates': 9,
+            'sidebarRow': {'label': 'Lumen', 'active': True}, 'probePoint': [919, 420],
+            'hit': 'div.sls-luna-tab.active', 'lumenPointerEvents': 'none', 'lumenZ': '100000'}
+        self.embed_answer.update(embed or {})
         self.probe_override = probe or {}
         # name -> [ms, ...]: each call takes the next value, the last one repeats.
         self.rpc_ms = dict(rpc_ms or {})
@@ -501,6 +507,58 @@ class SelftestTests(SelftestBase):
         self.assertEqual(code, 0, text)
         self.assertIn('SKIP  Lumen embedding: state().embedding is false', text)
         self.assertIn('drawn as one of Luna', text)
+
+    def test_embedded_lumen_to_the_right_with_pointer_events_none_passes(self):
+        steam = FakeSteam(tabs=TABS_WITH_LUMEN, probe={'embedding': True},
+                          select={'lumen': _embedded_lumen()})
+        self.serve(steam)
+        code, report, text = self.run_selftest(host='lumen')
+        self.assertEqual(code, 0, text)
+        self.assertIn('PASS  Lumen embedding', text)
+        self.assertIn('sidebar clickable at (919,420) (pointer-events: none)', text)
+
+    def test_lumen_covering_the_sidebar_fails_naming_the_element(self):
+        steam = FakeSteam(tabs=TABS_WITH_LUMEN, probe={'embedding': True},
+                          select={'lumen': _embedded_lumen()},
+                          embed={'sidebarClickable': False,
+                                 'hit': 'div#lumen-settings-overlay.lumen-shell.open',
+                                 'lumenPointerEvents': 'auto'})
+        self.serve(steam)
+        code, report, _text = self.run_selftest(host='lumen')
+        self.assertEqual(code, 1)
+        failed = self.fail_text(report)
+        self.assertIn('Lumen embedding', failed)
+        self.assertIn('not hittable at (919,420)', failed)
+        self.assertIn('div#lumen-settings-overlay.lumen-shell.open', failed)
+        self.assertIn('sidebar rect [819,399,200,620]', failed)
+        self.assertIn('Lumen rect [1019,464,700,555]', failed)
+        self.assertIn('pointer-events auto', failed)
+        self.assertIn('z-index 100000', failed)
+
+    def test_sidebar_rows_out_of_view_are_skipped_not_failed(self):
+        # Every row is zero-height or scrolled away: nothing can be hit, and that
+        # is a skip with the reason, never a failure.
+        steam = FakeSteam(tabs=TABS_WITH_LUMEN, probe={'embedding': True},
+                          select={'lumen': _embedded_lumen()},
+                          embed={'sidebarClickable': False, 'sidebarCandidates': 0,
+                                 'sidebarRows': 3, 'probePoint': None, 'hit': None,
+                                 'sidebarRow': None})
+        self.serve(steam)
+        code, report, text = self.run_selftest(host='lumen')
+        self.assertEqual(code, 0, text)
+        self.assertIn('SKIP  Lumen embedding', text)
+        self.assertIn('all zero-height or scrolled out of view', text)
+        self.assertNotIn('FAIL  Lumen embedding', text)
+
+    def test_zero_height_sidebar_rows_are_ignored(self):
+        # Two rows skipped for height/scroll, one real candidate hit correctly.
+        steam = FakeSteam(tabs=TABS_WITH_LUMEN, probe={'embedding': True},
+                          select={'lumen': _embedded_lumen()},
+                          embed={'sidebarRows': 3, 'sidebarCandidates': 1})
+        self.serve(steam)
+        code, report, text = self.run_selftest(host='lumen')
+        self.assertEqual(code, 0, text)
+        self.assertIn('PASS  Lumen embedding', text)
 
     def test_rpc_timing_waits_for_the_backend_queue(self):
         steam = FakeSteam(rpc_ms={'SlsLunaInfo': [2900, 5, 6]})

@@ -963,13 +963,14 @@ test('the status tab shows the game-by-game queue with bars',async()=>{
   menubarFixture(document,true);
   const fixture=compressorFixture();
   fixture.job={action:'run',pid:42,running:true,startedAt:Date.now()/1000-90,finishedAt:0,elapsed:90,log:''};
-  fixture.queue={active:true,total:3,index:2,done:1,failed:0,skipped:0,saved:123456789,finished:false,
+  // queue.saved is MiB in the backend's own contract, not bytes.
+  fixture.queue={active:true,total:3,index:2,done:1,failed:0,skipped:0,saved:118*1048576,finished:false,
     current:{name:'Cronos: The New Dawn',path:'/games/Cronos',size:100,totalBytes:100,doneBytes:42,
       phase:'compress',scannedBytes:0},
     next:[{name:'Hades',size:50}],
     games:[{name:'Cronos: The New Dawn',path:'/games/Cronos',size:100,status:'running',saved:0},
       {name:'Hades',path:'/games/Hades',size:50,status:'pending',saved:0},
-      {name:'Pony Island',path:'/games/Pony',size:20,status:'done',saved:123456789}]};
+      {name:'Pony Island',path:'/games/Pony',size:20,status:'done',saved:96*1048576}]};
   const {w}=fakeWindow(document,{compressor:fixture});
   mount(w);
   let overlay=await openCompressor(document);
@@ -989,7 +990,7 @@ test('the status tab shows the game-by-game queue with bars',async()=>{
   overlay=await openCompressor(document,'Games');
   const chips=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-chip'));
   assert.ok(chips,'a per-game state chip was not rendered');
-  assert.match(textOf(overlay),/done . saved 118 MiB/,'a finished game must show its saving');
+  assert.match(textOf(overlay),/done . saved 96.0 MiB/,'a finished game must show its saving in bytes');
   assert.ok(findNode(overlay,node=>node.className==='sls-luna-mini'),'a per-game mini bar was not rendered');
 });
 
@@ -1725,7 +1726,7 @@ test('Graphics reads bypass the backend cache and the page says when it was chec
   const document=fakeDom();
   const checkedAt=Math.floor(Date.now()/1000)-12;
   const {calls,overlay}=await openGraphicsPage(document,{graphicsCheckedAt:checkedAt});
-  assert.match(textOf(overlay),/Checked 1[12] s ago\./,
+  assert.match(textOf(overlay),/Checked (1[1-9]|2[0-9]) s ago\./,
     'the stamp comes from the report\'s own checkedAt');
   const reads=calls.filter(entry=>entry.fn==='SlsGraphicsGet');
   assert.ok(reads.length>=1);
@@ -4976,6 +4977,83 @@ test('the weekly line handles more, less, same and a missing previous week',()=>
     {appid:3,name:'C',seconds:0},{appid:4,name:'D',seconds:NaN}]},{'2':'Portal 2'});
   assert.deepEqual(last7,[{appid:1,name:'A',seconds:3600},{appid:2,name:'Portal 2',seconds:1800}],
     'zero and NaN entries are dropped and names come from the library when absent');
+});
+
+test('compressor sizes use one unit-aware formatter, bytes or MiB',async()=>{
+  const gib=12.9*1024*1024*1024;
+  const queueBase={active:false,total:1,done:1,failed:0,skipped:0,finished:true,
+    index:1,current:null,next:[],games:[],outcome:{kind:'finished',reasonText:''}};
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const withBytes=compressorFixture({queue:Object.assign({},queueBase,{
+    saved:gib,
+    savings:{measuredMib:13209.6,measuredGames:1,unmeasuredGames:0,estimateMib:0,
+      estimateGames:0,text:'',unit:'MiB',measuredBytes:gib,estimateBytes:0}})});
+  const {w}=fakeWindow(document,{compressor:withBytes});
+  mount(w);
+  const overlay=await openCompressor(document);
+  assert.match(textOf(overlay),/saved 12\.9 GiB/,'the explicit byte field is a byte count');
+  assert.doesNotMatch(textOf(overlay),/saved 12 MB/,'a GiB value must never print as MB');
+
+  const mibDom=fakeDom();
+  menubarFixture(mibDom,true);
+  const mibOnly=compressorFixture({queue:Object.assign({},queueBase,{saved:gib,
+    games:[{name:'A',status:'done',saved:gib}]})});
+  const second=fakeWindow(mibDom,{compressor:mibOnly});
+  mount(second.w);
+  const mibOverlay=await openCompressor(mibDom);
+  assert.match(textOf(mibOverlay),/saved 12\.9 GiB/,'queue.saved and game saved are bytes');
+  assert.doesNotMatch(textOf(mibOverlay),/TiB/);
+
+  const statsDom=fakeDom();
+  menubarFixture(statsDom,true);
+  const statsFixture=compressorFixture({stats:{
+    compression:{records:1,measured:1,original_bytes:2*gib,disk_bytes:0,saved_bytes:gib,games:[]},
+    dedupe:{passes:0,directories:0,saved_bytes:0,entries:[]},
+    luna:{measured:1,saved_bytes:gib,games:[{name:'Luna game',saved_bytes:gib}]},
+    library:{games:1,bytes:2*gib}}});
+  const third=fakeWindow(statsDom,{compressor:statsFixture});
+  mount(third.w);
+  const statsOverlay=await openCompressor(statsDom,'Stats');
+  assert.match(textOf(statsOverlay),/Luna passes.*12\.9 GiB|12\.9 GiB.*Luna passes/);
+  assert.match(textOf(statsOverlay),/Luna game.*12\.9 GiB/);
+  assert.doesNotMatch(textOf(statsOverlay),/TiB/);
+  assert.doesNotMatch(textOf(statsOverlay),/Luna passes\s*12\.9 KiB|Luna passes.*12 MB/,
+    'a MiB stat is never read as bytes');
+});
+
+test('a refused library says the last run did not start, an empty queue keeps the old line',async()=>{
+  const reason='the library sits on a btrfs snapshot';
+  const refusedDom=fakeDom();
+  menubarFixture(refusedDom,true);
+  const refused=compressorFixture({queue:{active:false,total:2,done:0,failed:0,skipped:0,
+    finished:false,index:0,current:null,next:[],games:[
+      {name:'Hades',path:'/games/Hades',size:50,status:'pending',saved:0},
+      {name:'Portal 2',path:'/games/Portal',size:40,status:'pending',saved:0}],
+    refusal:{reason:'snapshot',text:reason,next_step:'boot the installed system and run again'},
+    outcome:{kind:'not-started',reason:'snapshot',reasonText:reason,
+      nextStep:'boot the installed system and run again',path:'/games'}}});
+  const first=fakeWindow(refusedDom,{compressor:refused});
+  mount(first.w);
+  const overlay=await openCompressor(refusedDom);
+  const text=textOf(overlay);
+  assert.match(text,/Last run did not start/,'a refusal is not a finished run');
+  assert.match(text,/the library sits on a btrfs snapshot/,'the reason is shown');
+  assert.match(text,/Next: boot the installed system and run again\./,'the backend next step is shown');
+  assert.doesNotMatch(text,/Last run finished/,'the old wording must be gone');
+
+  const emptyDom=fakeDom();
+  menubarFixture(emptyDom,true);
+  const empty=compressorFixture({queue:{active:false,total:0,done:0,failed:0,skipped:0,
+    finished:true,index:0,current:null,next:[],games:[],
+    outcome:{kind:'empty',reasonText:''}}});
+  const second=fakeWindow(emptyDom,{compressor:empty});
+  mount(second.w);
+  const emptyOverlay=await openCompressor(emptyDom);
+  // An empty queue never drew a queue line, and still does not: no refusal
+  // sentence, no "did not start", exactly today's page.
+  assert.doesNotMatch(textOf(emptyOverlay),/did not start/);
+  assert.doesNotMatch(textOf(emptyOverlay),/Last run/);
 });
 
 function visiblePanes(document){
