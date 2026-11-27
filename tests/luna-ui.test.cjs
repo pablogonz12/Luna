@@ -194,6 +194,49 @@ test('standalone snapshot RPC failure re-enables the replacement toggle without 
   assert.match(textOf(pane),/write failed/);
 });
 
+test('standalone compressor shows pending and failed snapshot refresh with retry guidance',async()=>{
+  const document=fakeDom();
+  document.createElement=((original)=>tag=>{
+    const element=original(tag);
+    element.contains=other=>!!findNode(element,node=>node===other);
+    return element;
+  })(document.createElement);
+  let poll;
+  let result={success:true,tool:{found:true},status:{accept_snapshots_unknown:false},
+    rescan:{generation:3},job:{action:'scan',running:true}};
+  const window={document,setInterval:fn=>{poll=fn;},setTimeout,
+    Millennium:{callServerMethod:async()=>result}};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../addons/compressor/plugin/public/panel.js'),'utf8'),
+    {window,document,console});
+  document.getElementById('sls-compressor-panel-button').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const pane=document.getElementById('sls-compressor-panel');
+  assert.match(textOf(pane),/Snapshot refresh pending/);
+  result={...result,rescan:{generation:3,failed:'Use Check now to retry.'},job:{running:false}};
+  poll(); await new Promise(resolve=>setImmediate(resolve));
+  assert.match(textOf(pane),/Snapshot refresh failed: Use Check now to retry/);
+  assert.ok(findNode(pane,node=>node.tagName==='BUTTON' && node.textContent==='Check now'));
+});
+
+test('standalone compressor identifies a stuck lock holder',async()=>{
+  const document=fakeDom();
+  document.createElement=((original)=>tag=>{
+    const element=original(tag);
+    element.contains=other=>!!findNode(element,node=>node===other);
+    return element;
+  })(document.createElement);
+  const result={success:true,tool:{found:true},status:{},
+    job:{action:'scan',running:true,stuck:{holders:[4321],
+      message:'Compressor is stuck. Lock-holding PID(s): 4321. Inspect and stop it manually.'}}};
+  const window={document,setInterval:()=>{},setTimeout,
+    Millennium:{callServerMethod:async()=>result}};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../addons/compressor/plugin/public/panel.js'),'utf8'),
+    {window,document,console});
+  document.getElementById('sls-compressor-panel-button').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(textOf(document.getElementById('sls-compressor-panel')),/stuck.*4321.*stop it manually/);
+});
+
 function textOf(node){
   if(!node)return '';
   const own=node.children.length===0?(node.textContent||''):'';
