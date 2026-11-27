@@ -1804,7 +1804,10 @@
             // the acknowledgement: let it finish, then read presence afresh.
             await refresh();
             await loads.presence();
-            paint();
+            // The cached Presence pane predates the acknowledgement: rebuild it
+            // (and only repaint when the menu is still open).
+            shellDataRev += 1;
+            repaintIfOpen();
           } catch (error) { showError(body, error); } finally { fresh.disabled = false; }
         };
         body.appendChild(fresh);

@@ -870,6 +870,50 @@ test('Start fresh reads presence again even when a refresh was already in flight
     'the stale locked state was rendered after Start fresh');
 });
 
+test('Start fresh neither reopens a closed Luna nor leaves a stale cached Presence pane',async()=>{
+  for(const scenario of ['close','leave']){
+    const document=fakeDom();
+    menubarFixture(document,true);
+    const presence={success:true,corrupt:true,corruptionRequiresAcknowledgement:true,quarantineDirectory:'/q',
+      quarantinePaths:[],state:{enabled:true,owned:{},running:{},cleanup:0},runtime:{healthy:true,error:''}};
+    let release=null;
+    const {w}=fakeWindow(document,{presence,gate:(fn)=>{
+      if(fn!=='SlsPresenceAcknowledgeCorruption')return null;
+      return new Promise(resolve=>{release=()=>{presence.corruptionRequiresAcknowledgement=false;resolve(JSON.stringify({success:true}));};});
+    }});
+    mount(w);
+    document.getElementById('sls-luna-btn').click();
+    await new Promise(resolve=>setTimeout(resolve,30));
+    let overlay=document.getElementById('sls-luna-overlay');
+    const tabNamed=name=>findNode(document.getElementById('sls-luna-overlay'),
+      node=>node.className==='sls-luna-tab' && node.textContent===name);
+    tabNamed('Presence').onclick();
+    await new Promise(resolve=>setTimeout(resolve,20));
+    overlay=document.getElementById('sls-luna-overlay');
+    const clicked=findNode(overlay,node=>node.id==='sls-luna-presence-start-fresh').onclick();
+    await new Promise(resolve=>setTimeout(resolve,10));
+    if(scenario==='close'){
+      findNode(overlay,node=>node.className==='sls-luna-x').onclick();
+      await new Promise(resolve=>setTimeout(resolve,10));
+      assert.equal(document.getElementById('sls-luna-overlay'),null,'closing Luna did not close it');
+    }else{
+      tabNamed('Playtime').onclick();
+      await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    release();
+    await clicked;
+    await new Promise(resolve=>setTimeout(resolve,30));
+    if(scenario==='close'){
+      assert.equal(document.getElementById('sls-luna-overlay'),null,'Start fresh reopened a closed Luna');
+    }else{
+      tabNamed('Presence').onclick();
+      await new Promise(resolve=>setTimeout(resolve,30));
+      assert.equal(findNode(document.getElementById('sls-luna-overlay'),node=>node.id==='sls-luna-presence-corruption'),null,
+        'the cached Presence pane still shows the lock after Start fresh');
+    }
+  }
+});
+
 test('the session-time switch defaults on and toggles through the real RPC',async()=>{
   const document=fakeDom();
   menubarFixture(document,true);
