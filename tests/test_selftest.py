@@ -794,6 +794,29 @@ class LiveStatusTest(SelftestBase):
                 self.assertTrue(result['stale'])
                 self.assertIn('restart needed', result['message'])
 
+    def test_a_replaced_host_executable_alone_makes_the_sidecar_stale(self):
+        # Only the binary changed: the payload files keep their old mtimes.
+        os.utime(self.boot, (1, 1))
+        executable = self.temp / 'host-exe'
+        executable.write_text('new build')
+        lumen = self.temp / 'lumen-root'
+        lumen.mkdir()
+        (lumen / 'lumen').write_text('new build')
+        with mock.patch.object(luna, 'process_pids', return_value=[42]), \
+             mock.patch.object(luna, '_proc_start', return_value=1), \
+             mock.patch.object(luna, 'plan', return_value=[]), \
+             mock.patch.object(luna, 'host_binary', return_value=executable), \
+             mock.patch.object(luna, 'lumen_root', return_value=lumen):
+            for host in ('lumen', 'luna'):
+                self.assertTrue(self.freshness(host, ('playtime',))['stale'], host)
+
+    def test_a_non_object_heartbeat_does_not_crash(self):
+        with mock.patch.object(luna, 'read_json_file', return_value=['old']), \
+             mock.patch.object(luna, 'steam_running', return_value=False):
+            result = luna.live_status(('playtime',))
+        self.assertIn('Steam is closed', result['message'])
+        self.assertIsNone(result['addons']['playtime']['answered'])
+
     def test_plain_language_health(self):
         cases = [
             ({'installed': True, 'answered': False, 'error': 'timeout after 5 s'},
@@ -817,8 +840,8 @@ class LiveStatusTest(SelftestBase):
             self.assertNotIn('DO NOT PRINT', detail)
 
     def test_live_cli_exit_and_json(self):
-        def run(state, stale, json_output=False, disk_code=0):
-            live = {'addons': {'playtime': state}, 'sidecar': {'stale': stale, 'message': 'sidecar'},
+        def run(state, stale, json_output=False, disk_code=0, host='lumen'):
+            live = {'host': host, 'addons': {'playtime': state}, 'sidecar': {'stale': stale, 'message': 'sidecar'},
                     'message': 'probed', 'bridge': {'marker_present': True, 'attached': True, 'addon_count': 1}}
             command = luna.cmd_status
             options = argparse.Namespace(only=[], live=True, json=json_output, strict=False)
@@ -845,6 +868,10 @@ class LiveStatusTest(SelftestBase):
         code, text = run(healthy, True)
         self.assertEqual(code, 1)
         self.assertIn('restart Steam to load the installed files', text)
+        code, text = run(healthy, True, host='luna')
+        self.assertEqual(code, 1)
+        self.assertIn('restart luna-host (systemctl --user restart %s) to load the installed files' % luna.HOST_UNIT,
+                      text)
         self.assertEqual(run(healthy, False, disk_code=6)[0], 6)
 
 

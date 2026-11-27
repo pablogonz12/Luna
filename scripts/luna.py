@@ -1267,7 +1267,10 @@ def sidecar_freshness(host, installed):
         starts = [_proc_start(pid) for pid in pids]
         if not starts or not all(starts):
             return result
-        paths = [boot_file()] + [row[3] for row in plan(installed)]
+        # The host executable too: an update can replace only the binary, and
+        # the running process would still be the old one.
+        executable = host_binary() if host == 'luna' else lumen_root() / 'lumen'
+        paths = [boot_file(), executable] + [row[3] for row in plan(installed)]
         mtimes = [path.stat().st_mtime for path in paths if path.is_file()]
         if not mtimes:
             result['message'] = 'installed payload timestamps unavailable'
@@ -1301,7 +1304,8 @@ def live_status(targets):
     """Observe the host and call only the selftest's allowlisted status RPCs."""
     host = active_host()
     installed = installed_addons()
-    heartbeat = read_json_file(bridge_heartbeat_path()) or {}
+    heartbeat = read_json_file(bridge_heartbeat_path())
+    heartbeat = heartbeat if isinstance(heartbeat, dict) else {}
     result = {'host': host, 'steam_running': steam_running(),
               'sidecar': sidecar_freshness(host, installed),
               'bridge': {}, 'addons': {}, 'message': ''}
@@ -1354,7 +1358,8 @@ def live_status(targets):
     else:
         result['message'] = 'Steam is closed; live backend health is unavailable'
     # Re-read after probing: the first RPC can establish attachment.
-    heartbeat = read_json_file(bridge_heartbeat_path()) or heartbeat
+    again = read_json_file(bridge_heartbeat_path())
+    heartbeat = again if isinstance(again, dict) and again else heartbeat
     alive = bool(heartbeat.get('pid') and pid_alive(heartbeat['pid']))
     attached = (bool(heartbeat.get('attachedAt')) if int(heartbeat.get('format') or 0) >= 2
                 else bool(heartbeat.get('time')))
@@ -1437,7 +1442,9 @@ def live_verdict(live):
     else:
         headline = 'all %d add-ons answering' % answering
     stale = live['sidecar'].get('stale')
-    restart = ('restart Steam to load the installed files' if stale is True else
+    reload = ('restart luna-host (systemctl --user restart %s)' % HOST_UNIT
+              if live.get('host') == 'luna' else 'restart Steam')
+    restart = ('%s to load the installed files' % reload if stale is True else
                'restart not needed' if stale is False else 'restart need unknown')
     return summaries, '%s; %s' % (headline, restart), bool(problems or stale is True)
 
