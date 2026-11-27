@@ -37,7 +37,7 @@ Commands:
                                         same update in a terminal window, teed to
                                         ~/.local/share/Luna/state/update-<timestamp>.log
     luna uninstall [--only NAME]
-    luna verify [--sources]             manifest, payload and drift checks
+    luna verify [--sources] [--upstream] manifest, payload and optional drift checks
     luna selftest [--json] [--keep-open]
                                         drive the real menu in the running Steam over CDP:
                                         every sidebar page, the read-only status RPCs, the
@@ -7980,6 +7980,54 @@ def warn_untraceable(manifest, stream=sys.stdout):
               'revision: %s. Commit the source and re-run vendor.' % ', '.join(found), file=stream)
 
 
+def check_upstream(manifest):
+    """Fetch branch heads into disposable repositories; never alter the checkout."""
+    problems = []
+    env = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/bin/false')
+    def git(*args, cwd=None):
+        return subprocess.run(['git', *args], cwd=cwd, env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=60, check=True)
+    with tempfile.TemporaryDirectory(prefix='luna-upstream-') as tmp:
+        for name, entry in manifest.get('addons', {}).items():
+            pin = entry.get('source_commit', '')
+            if not re.fullmatch(r'[0-9a-f]{40}', pin):
+                problems.append('%s: invalid source commit' % name)
+                continue
+            try:
+                url = (git('remote', 'get-url', 'origin', cwd=ROOT).stdout.decode().strip()
+                       if name in FIRST_PARTY else entry['source_repo'])
+                repo = Path(tmp) / name
+                git('init', '--bare', str(repo))
+                git('fetch', '--quiet', '--', url,
+                    'refs/heads/main' if name in FIRST_PARTY else 'HEAD', cwd=repo)
+                head = git('rev-parse', 'FETCH_HEAD', cwd=repo).stdout.decode().strip()
+                try:
+                    git('cat-file', '-e', pin + '^{commit}', cwd=repo)
+                except subprocess.CalledProcessError:
+                    git('fetch', '--quiet', '--', url, pin, cwd=repo)
+                ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', pin, head],
+                                          cwd=repo, env=env, timeout=60)
+                if ancestor.returncode:
+                    problems.append('%s: pinned commit is not an ancestor of upstream head' % name)
+                    continue
+                count = int(git('rev-list', '--count', pin + '..' + head, cwd=repo).stdout)
+                files = git('diff', '--name-only', '-z', pin, head, cwd=repo).stdout.decode(
+                    'utf-8', errors='replace').split('\0')
+                if count:
+                    print('  %s: behind by %d commit(s); changed files:' % (name, count))
+                    for path in files:
+                        if path:
+                            print('    %s' % path)
+                    problems.append('%s: stale upstream pin' % name)
+                else:
+                    print('  %s: up to date' % name)
+            except (OSError, subprocess.SubprocessError, KeyError) as exc:
+                print('  %s: unreachable (upstream comparison unavailable: %s)' % (name, exc))
+    if problems:
+        print('Refresh: bash scripts/vendor-update.sh && python3 scripts/luna.py verify && install')
+    return problems
+
+
 def cmd_verify(options):
     print('host       : %s' % host_label())
     manifest = load_manifest()
@@ -8030,18 +8078,23 @@ def cmd_verify(options):
                 continue
             base = Path(options.source_dir) if options.source_dir else (home() / 'Documents/Scripts')
             source = base / ('slsteam-' + name)
-            # A plain copy is fine; a git checkout is not required to compare bytes.
             if not source.is_dir():
                 print('  skip %s: no source checkout at %s' % (name, source))
                 continue
             for rel, meta in entry.get('files', {}).items():
-                origin = source / meta['source_path']
-                if not origin.is_file():
-                    problems.append('%s: source file missing: %s' % (name, origin))
-                elif sha256(origin) != meta['sha256']:
-                    problems.append('%s: %s differs from the source checkout (re-run vendor)'
+                try:
+                    data = subprocess.run(['git', 'show', entry['source_commit'] + ':' + meta['source_path']],
+                                          cwd=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                          check=True).stdout
+                    if hashlib.sha256(data).hexdigest() != meta['sha256']:
+                        problems.append('%s: %s differs from the pinned source commit (re-run vendor)'
+                                        % (name, meta['source_path']))
+                except (OSError, subprocess.CalledProcessError, KeyError):
+                    problems.append('%s: cannot read %s at pinned source commit'
                                     % (name, meta['source_path']))
-            print('  %-9s compared against %s' % (name, source))
+            print('  %-9s compared against %s at %s' % (name, source, entry.get('source_commit', '?')))
+    if getattr(options, 'upstream', False):
+        problems.extend(check_upstream(manifest))
     if problems:
         print('\nPROBLEMS:')
         for problem in problems:
@@ -8437,6 +8490,9 @@ def build_parser():
             child.add_argument('--sources', action='store_true',
                                help='also compare against local source checkouts')
             child.add_argument('--source-dir', help='parent directory holding slsteam-playtime / slsteam-presence')
+        if name == 'verify':
+            child.add_argument('--upstream', action='store_true',
+                               help='fetch source branch heads and fail on stale pins (network required)')
     return parser
 
 

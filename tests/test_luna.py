@@ -542,27 +542,72 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_verify_compares_against_local_sources_when_asked(self):
+        import contextlib
+        import importlib.util
+        import io
         sources = self.home / 'Documents/Scripts'
         sources.mkdir(parents=True)
         manifest = json.loads((HERE / 'vendor/MANIFEST.json').read_text())
         for name in ('playtime', 'presence'):
+            repo = sources / ('slsteam-' + name)
             for meta in manifest['addons'][name]['files'].values():
                 relative = Path(meta['source_path'])
-                dest = sources / ('slsteam-' + name) / relative
+                dest = repo / relative
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(HERE / 'addons' / name / relative, dest)
-        env = dict(self.env, LUNA_TEST_SOURCES='1')
-        result = subprocess.run([sys.executable, str(LUNA), 'verify', '--sources',
-                                 '--source-dir', str(sources)],
-                                capture_output=True, text=True, env=env)
-        self.assertIn('compared against', result.stdout)
-        self.assertEqual(result.returncode, 0, result.stdout)
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            subprocess.run(['git', '-C', str(repo), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Test',
+                            '-c', 'user.email=test@example.com', 'commit', '-qm', 'pin'], check=True)
+            manifest['addons'][name]['source_commit'] = subprocess.check_output(
+                ['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
         dest.write_bytes(dest.read_bytes() + b'\nchanged')
-        result = subprocess.run([sys.executable, str(LUNA), 'verify', '--sources',
-                                 '--source-dir', str(sources)],
-                                capture_output=True, text=True, env=env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('differs from the source checkout', result.stdout)
+        spec = importlib.util.spec_from_file_location('luna_verify_test', LUNA)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = io.StringIO()
+        with mock.patch.object(module, 'load_manifest', return_value=manifest), contextlib.redirect_stdout(output):
+            self.assertEqual(module.cmd_verify(argparse.Namespace(sources=True, source_dir=str(sources))), 0)
+        self.assertIn('compared against', output.getvalue())
+        manifest['addons']['presence']['files']['plugin.json']['sha256'] = '0' * 64
+        with mock.patch.object(module, 'load_manifest', return_value=manifest), contextlib.redirect_stdout(output):
+            self.assertEqual(module.cmd_verify(argparse.Namespace(sources=True, source_dir=str(sources))), 1)
+        self.assertIn('differs from the pinned source commit', output.getvalue())
+
+    def test_upstream_local_repos(self):
+        import contextlib
+        import importlib.util
+        import io
+        repo = self.home / 'upstream-work'
+        bare = self.home / 'upstream.git'
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(repo)], check=True)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+        (repo / 'X').write_text('one')
+        git('add', '.')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'first')
+        pin = git('rev-parse', 'HEAD')
+        for text in ('two', 'three'):
+            (repo / 'X').write_text(text)
+            git('add', '.')
+            git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', text)
+        head = git('rev-parse', 'HEAD')
+        subprocess.run(['git', 'clone', '-q', '--bare', str(repo), str(bare)], check=True)
+        manifest = {'addons': {
+            'old': {'source_repo': str(bare), 'source_commit': pin},
+            'current': {'source_repo': str(bare), 'source_commit': head},
+            'missing': {'source_repo': str(self.home / 'absent.git'), 'source_commit': pin}}}
+        spec = importlib.util.spec_from_file_location('luna_upstream_test', LUNA)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            problems = module.check_upstream(manifest)
+        self.assertEqual(problems, ['old: stale upstream pin'])
+        self.assertIn('old: behind by 2 commit(s)', output.getvalue())
+        self.assertIn('    X', output.getvalue())
+        self.assertIn('current: up to date', output.getvalue())
+        self.assertIn('missing: unreachable', output.getvalue())
 
     # -- release / update / snapshot -------------------------------------
     def bundle_version(self):
