@@ -364,14 +364,28 @@ do
   assert(call('SlsSgdbHistory', { raw = json.encode({ appid = 401 }) }).history.grid == 1,
     'a failed archive must keep the history step')
   os.remove(slot_hist .. '/undone')
+  local function undone_count()
+    local n, pipe = 0, io.popen("ls -1 '" .. slot_hist .. "/undone' 2>/dev/null")
+    for _ in pipe:lines() do n = n + 1 end
+    pipe:close()
+    return n
+  end
+  assert(undone_count() == 0, 'a refused undo must not leave archive copies behind')
   -- 2. restore fails: the grid folder is read-only, so the restored file cannot land.
-  os.execute("chmod 555 '" .. grid_dir .. "'")
-  local r2 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
-  os.execute("chmod 755 '" .. grid_dir .. "'")
-  assert(r2.success == false and r2.code == 'io', 'a failed restore must refuse the undo')
-  assert(file_text(grid_dir .. '/401p.jpg') == 'JPG2DATA', 'a failed restore must keep the current artwork')
-  assert(call('SlsSgdbHistory', { raw = json.encode({ appid = 401 }) }).history.grid == 1,
-    'a failed restore must keep the history step for a retry')
+  -- A read-only directory does not stop root, so this case only runs unprivileged.
+  local id = io.popen('id -u'); local uid = tonumber(id:read('*l')); id:close()
+  if uid == 0 then
+    io.stderr:write('SKIP sgdb restore-failure case: running as root, chmod cannot force the failure\n')
+  else
+    os.execute("chmod 555 '" .. grid_dir .. "'")
+    local r2 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
+    os.execute("chmod 755 '" .. grid_dir .. "'")
+    assert(r2.success == false and r2.code == 'io', 'a failed restore must refuse the undo')
+    assert(file_text(grid_dir .. '/401p.jpg') == 'JPG2DATA', 'a failed restore must keep the current artwork')
+    assert(call('SlsSgdbHistory', { raw = json.encode({ appid = 401 }) }).history.grid == 1,
+      'a failed restore must keep the history step for a retry')
+    assert(undone_count() == 0, 'a failed restore must remove the archive copy it made')
+  end
   -- 3. the retry then works.
   local r3 = call('SlsSgdbUndo', { raw = json.encode({ appid = 401, kind = 'grid' }) })
   assert(r3.success == true, tostring(r3.error))
