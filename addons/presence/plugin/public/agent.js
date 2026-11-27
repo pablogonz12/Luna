@@ -430,11 +430,14 @@
       return true;
     }
     async awaitOverview(appid) {
+      let failed = false;
       for (let i = 0; i < 25; i++) {
-        try { if (this.overview(appid)) return true; } catch (_) { /* Steam store not ready */ }
+        try { if (this.overview(appid)) return true; } catch (_) { failed = true; }
         await this.delay(100);
       }
-      throw new Error('Steam shortcut is not registered in the app store: ' + appid);
+      const error = new Error('Steam shortcut ' + (failed ? 'lookup failed: ' : 'is not registered: ') + appid);
+      error.lookupFailed = failed;
+      throw error;
     }
     async onLifetime(notification) {
       const appid = validId(notification?.unAppID);
@@ -516,8 +519,10 @@
       // Publish the pending launch so a concurrent stop cannot run before RunGame.
       const pending = this._begin(appid);
       this.pendingStarts.set(appid, pending);
-      try { await pending; }
+      let lookupFailed;
+      try { lookupFailed = await pending; }
       finally { if (this.pendingStarts.get(appid) === pending) this.pendingStarts.delete(appid); }
+      if (lookupFailed) return;
       // Creation can finish after a stop/disable or fail before RunGame. The
       // allocation is journalled already, so retire it instead of leaving it
       // hidden (or visible in Recent Games) for an unrelated future session.
@@ -542,7 +547,8 @@
           // fresh placeholder is created; if it does, it is repaired in
           // configure() rather than replaced, so no orphan is ever left behind.
           try { await this.awaitOverview(id); }
-          catch (_) {
+          catch (err) {
+            if (err.lookupFailed) throw err;
             // The previous shortcut no longer exists (e.g. deleted manually).
             delete this.state.owned[appid];
             this.persist();
@@ -608,6 +614,7 @@
         }
       } catch (err) {
         this.error = String(err?.message || err);
+        if (err?.lookupFailed && !newId) return true;
         // begin() retires failed allocations after pendingStarts is released.
         // Never discard ownership merely because rollback itself can fail.
       } finally {
@@ -890,11 +897,17 @@
     const hiding = makeHidingStrategy(w);
     const selection = makeGameSelectionRestorer(w);
     const identity = readAccountIdentity(w);
+    let corruptPaused = false, corruptionReported = false;
     const rpc = async (method, params = {}) => {
       if (!w.Millennium?.callServerMethod) throw new Error('Lumen RPC unavailable in SharedJSContext');
       const raw = await w.Millennium.callServerMethod('lumen', method, params);
       const parsed = parseRpc(raw);
-      if (parsed?.success === false) throw new Error(parsed.error || method + ' failed');
+      if (parsed?.success === false) {
+        const error = new Error(parsed.error || method + ' failed');
+        error.code = parsed.code;
+        if (error.code === 'state-corrupt') corruptPaused = true;
+        throw error;
+      }
       return parsed;
     };
     const steam = w.SteamClient;
@@ -905,6 +918,16 @@
     let controller, lastReport = 0, lastSignature = '';
     const titles = new Map();
     let pending = Promise.resolve(), writeError = null, probing = null;
+    const reportCorruption = async () => {
+      if (corruptionReported) return;
+      corruptionReported = true;
+      try {
+        await rpc('SlsPresenceReport', {raw: JSON.stringify({
+          active: controller?.active?.size || 0, healthy: false,
+          error: 'Presence ownership changes are paused: corrupt state needs acknowledgement.'
+        })});
+      } catch (_) { /* The panel still receives the backend warning. */ }
+    };
     // Process snapshot from the backend: the only way to learn what is still
     // running after a context recreation (Steam exposes no snapshot API).
     const probeProcesses = async () => {
@@ -1001,6 +1024,19 @@
     async function syncOnce() {
       try {
         const status = await rpc('SlsPresenceGet');
+        if (status.corruptionRequiresAcknowledgement === true || status.corrupt === true) {
+          corruptPaused = true;
+          await reportCorruption();
+          return;
+        }
+        if (corruptPaused) {
+          corruptPaused = false;
+          corruptionReported = false;
+          writeError = null;
+          pending = Promise.resolve();
+          controller = null; // reload the acknowledged ledger, never replay stale ownership
+          lastSignature = '';
+        }
         // A transient disk/RPC failure must recover even if no game event ever
         // causes another persist. Retry only the latest serialized ledger.
         if (writeError) storage.setItem(KEY, storage.raw);
@@ -1088,6 +1124,11 @@
           lastSignature = signature;
         }
       } catch (e) {
+        if (corruptPaused || e?.code === 'state-corrupt') {
+          corruptPaused = true;
+          await reportCorruption();
+          return;
+        }
         lastSignature = ''; // ensure recovery is reported even within a heartbeat
         console.warn('[SLS Presence] sync failed:', e);
         try {
@@ -1103,13 +1144,16 @@
     // promise is handed back so a caller (and tests) can await one full
     // start/stop cycle instead of polling.
     const sub = steam.GameSessions.RegisterForAppLifetimeNotifications(n => {
-      if (!controller) return Promise.resolve();
+      if (!controller || corruptPaused) return Promise.resolve();
       // The event is the state change itself: apply it, retime the poll to the
       // new cadence and report at once, so a start or stop is visible within
       // the same second instead of waiting for the next idle poll.
       return Promise.resolve(controller.onLifetime(n))
         .then(() => { armSync(); return reportNow(); })
-        .catch(e => console.error('[SLS Presence]', e));
+        .catch(e => {
+          if (corruptPaused || e?.code === 'state-corrupt') return reportCorruption();
+          console.error('[SLS Presence]', e);
+        });
     });
     if (!sub) console.warn('[SLS Presence] App lifetime subscription unavailable');
     sync();
@@ -1117,7 +1161,7 @@
     // Session-time enrichment runs on its own slower cadence so a rename never
     // waits on (or blocks) the status sync.
     w.setInterval(() => {
-      if (controller) controller.refreshNames().catch(e => console.warn('[SLS Presence] name refresh failed', e));
+      if (controller && !corruptPaused) controller.refreshNames().catch(e => console.warn('[SLS Presence] name refresh failed', e));
     }, 60000);
   }
   return {

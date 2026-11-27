@@ -8,6 +8,8 @@ local HOME = os.getenv('HOME') or ''
 local DIR = HOME .. '/.local/share/slssteam-integrations'
 local FILE = DIR .. '/presence.json'
 local BAK = FILE .. '.bak'
+local LOCK = FILE .. '.corrupt'
+local corruption_locked = false
 local MAX = 4294967295
 local function valid_id(v)
   local n = tonumber(v)
@@ -33,12 +35,17 @@ local function read_all(path)
   f:close()
   return s
 end
+local function exists(path)
+  local ok,found=pcall(fs.exists,path)
+  return ok and found == true
+end
 -- A torn or hand-edited file must never cost the `owned` ledger: the last good
 -- copy is kept as presence.json.bak and restored from there.
 local function parse_state(s)
   if type(s) ~= 'string' then return nil end
   local ok,value=pcall(json.decode,s)
   if not ok or type(value)~='table' then return nil end
+  if type(value.owned)~='table' or (value.running~=nil and type(value.running)~='table') then return nil end
   local data=blank()
   data.enabled=value.enabled==true
   data.cleanup=tonumber(value.cleanup) or 0
@@ -73,13 +80,14 @@ local function read_file()
   local raw = read_all(FILE)
   local data = parse_state(raw)
   if data then return data, {recovered=false} end
-  local restored = parse_state(read_all(BAK))
+  local backup = read_all(BAK)
+  local restored = parse_state(backup)
   if restored then
     -- Heal the live file from the backup on the next read so a torn write does
     -- not keep costing the ledger on every call.
     return restored, {recovered=true, reason='invalid'}
   end
-  return blank(), {recovered=false, reason = raw and 'invalid' or 'missing'}
+  return blank(), {recovered=false, reason = (raw or backup or exists(FILE) or exists(BAK)) and 'invalid' or 'missing'}
 end
 local function write_atomic(path, body)
   local tmp=path..'.tmp'
@@ -92,7 +100,32 @@ local function write_atomic(path, body)
   if not done then os.remove(tmp);return false,why end
   return true
 end
+local function quarantine_corruption()
+  corruption_locked=true
+  fs.create_directories(DIR)
+  if not read_all(LOCK) then write_atomic(LOCK,'Ownership ledger requires acknowledgement\n') end
+  local function quote(s) return "'"..s:gsub("'", "'\\''").."'" end
+  for _,path in ipairs(read_all(LOCK) and {FILE,BAK} or {}) do
+    local raw=read_all(path)
+    if (raw and not parse_state(raw)) or (not raw and exists(path)) then
+      for i=1,10000 do
+        local dest=path..'.quarantine.'..os.time()..'.'..i
+        if not read_all(dest) and not exists(dest) then
+          local ok=os.execute('ln -- '..quote(path)..' '..quote(dest)..' 2>/dev/null')
+          if ok==true or ok==0 then os.remove(path) end
+          break
+        end
+      end
+    end
+  end
+end
 local function save_file(state)
+  if corruption_locked or read_all(LOCK) then return false,'Corrupt ownership ledger requires acknowledgement' end
+  local _, status=read_file()
+  if status.reason=='invalid' and not status.recovered then
+    quarantine_corruption()
+    return false,'Corrupt ownership ledger requires acknowledgement'
+  end
   fs.create_directories(DIR)
   local ok,body=pcall(json.encode,state)
   if not ok then return false,body end
@@ -102,7 +135,25 @@ local function save_file(state)
   if previous and parse_state(previous) then write_atomic(BAK,previous) end
   return write_atomic(FILE,body)
 end
-local function response(o) return json.encode(o) end
+local function response(o)
+  if o.error=='Corrupt ownership ledger requires acknowledgement' then o.code='state-corrupt' end
+  return json.encode(o)
+end
+local function quarantine_paths()
+  local paths={}
+  local ok,entries=pcall(fs.list,DIR)
+  if ok and type(entries)=='table' then
+    for _,entry in ipairs(entries) do
+      local name=type(entry)=='table' and entry.name or entry
+      if type(name)=='string' and (name:match('^presence%.json%.quarantine%.%d+%.%d+$')
+        or name:match('^presence%.json%.bak%.quarantine%.%d+%.%d+$')) then
+        paths[#paths+1]=DIR..'/'..name
+      end
+    end
+  end
+  table.sort(paths)
+  return paths
+end
 -- A `running` entry must not outlive its game. The agent records the entry when
 -- it launches a placeholder and the backend heartbeats it while the game's
 -- process is alive; an entry the process table no longer shows is retired after
@@ -386,7 +437,7 @@ local function new_discord_session(deps)
     local c = S.conn
     c:settimeout(timeout)
     local h, err = c:receive(8)
-    if not h then return nil, err end
+    if not h or #h < 8 then return nil, err or 'short frame' end
     local op, len = string.unpack('<I4I4', h)
     if len > 65536 then return nil, 'oversized' end
     local body = ''
@@ -428,6 +479,32 @@ local function new_discord_session(deps)
       elseif op == 2 then close() end
     end
   end
+  local function seconds()
+    local ok, socket = pcall(require, 'socket')
+    if ok and type(socket) == 'table' and type(socket.gettime) == 'function' then return socket.gettime() end
+    return os.time()
+  end
+  -- Wait for the SET_ACTIVITY reply with this nonce. Control frames may come
+  -- first (PING is answered like pump() does), and so may unrelated dispatches;
+  -- only a matching ERROR, CLOSE, a read failure or the deadline give up.
+  local function await_ack(nonce, budget)
+    local deadline = seconds() + budget
+    for _ = 1, 16 do
+      local remaining = deadline - seconds()
+      if remaining <= 0 then return false end
+      local op, body = read_frame(remaining)
+      if not op then return false end
+      if op == 3 then send(discord_frame(4, body))
+      elseif op == 2 then return false
+      elseif op == 1 then
+        local okj, msg = pcall(json.decode, body or '')
+        if okj and type(msg) == 'table' and msg.cmd == 'SET_ACTIVITY' and tostring(msg.nonce) == tostring(nonce) then
+          return msg.evt ~= 'ERROR'
+        end
+      end
+    end
+    return false
+  end
   local function clear()
     if S.conn and S.sent then
       S.nonce = S.nonce + 1
@@ -460,8 +537,13 @@ local function new_discord_session(deps)
       if S.sent ~= game.appid then
         S.nonce = S.nonce + 1
         if send(discord_set_activity(deps.pid(), game.name, S.started, S.nonce)) then
-          S.sent = game.appid
-          pcall(read_frame, 0.5) -- consume the SET_ACTIVITY reply
+          if await_ack(S.nonce, 0.5) then
+            S.sent = game.appid
+          else
+            close(); S.next_try = now + RETRY_SECONDS
+          end
+        else
+          S.next_try = now + RETRY_SECONDS
         end
       end
       S.status = S.conn and S.sent and 'connected' or 'no_discord'
@@ -603,6 +685,12 @@ function M.register(registry)
   -- file still calls running is reconciled with the processes that exist now,
   -- so an entry whose game (and agent) is long gone cannot survive a restart.
   local state,loaded=read_file()
+  corruption_locked = read_all(LOCK) ~= nil or (loaded.reason=='invalid' and not loaded.recovered)
+  if corruption_locked then
+    -- Persist the lock before moving anything. A hard link atomically reserves
+    -- each quarantine name without ever replacing an earlier quarantine.
+    quarantine_corruption()
+  end
   if loaded.recovered then save_file(state) end
   do
     local alive,complete=nil,false
@@ -625,8 +713,31 @@ function M.register(registry)
     return response({success=true, state=state, apps=apps, libraryError=manifest_cache.error,
       runtime=runtime, recovered=loaded.recovered==true,
       recoveredReason=loaded.reason or '',
+      corrupt=corruption_locked, corruptionRequiresAcknowledgement=corruption_locked,
+      quarantineDirectory=DIR, quarantinePaths=quarantine_paths(),
       discord=M.discord_status(state,live.session and live.session.status,M.socket_available()),
       titles=titles, identity=identity(), session=helper_policy()})
+  end
+  registry.SlsPresenceAcknowledgeCorruption=function(raw)
+    local ok,obj=pcall(json.decode,raw or '')
+    if not ok or type(obj)~='table' or obj.acknowledge~=true then
+      return response({success=false,error='Explicit acknowledgement required'})
+    end
+    if not corruption_locked then return response({success=true}) end
+    quarantine_corruption()
+    for _,path in ipairs({FILE,BAK}) do
+      local content=read_all(path)
+      if (content and not parse_state(content)) or (not content and exists(path)) then
+        return response({success=false,error='Quarantine failed; damaged files remain'})
+      end
+    end
+    if read_all(LOCK) then
+      local removed,err=os.remove(LOCK)
+      if not removed then return response({success=false,error=err}) end
+    end
+    state=read_file()
+    corruption_locked=false
+    return response({success=true})
   end
   -- Read-only contract probe: proves the wire shape Lumen actually delivers
   -- (alphabetical-key positional args, one serialized string) without changing

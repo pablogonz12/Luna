@@ -54,8 +54,7 @@ local DAY=86400
 local CONTRIB=3
 local MAX_SESSIONS=MAX_EVENTS
 local STATE_DIR=(os.getenv('XDG_STATE_HOME') or (HOME..'/.local/state'))..'/slssteam-integrations'
--- File stamps for the poll cache and rev. Optional: without lfs the size is
--- still used, so a same-size rewrite is the only blind spot.
+-- File stamps for the poll cache and rev. LFS is optional.
 local LFS=nil
 do
   local ok,mod=pcall(require,'lfs')
@@ -951,7 +950,11 @@ local function quarantine(path)
   local dir=DIR..'/corrupt'
   fs.create_directories(dir)
   local target=dir..'/'..(path:match('[^/]+$') or 'ledger')..'-'..os.date('%Y%m%d-%H%M%S')
-  if fs.exists(target) then target=target..'-'..tostring(os.time()%1000) end
+  local base,n=target,0
+  while fs.exists(target) do
+    n=n+1
+    target=base..'-'..n
+  end
   local ok=os.rename(path,target)
   return ok and target or nil
 end
@@ -1616,7 +1619,9 @@ function M.register(registry)
       if (official[key] or 0)>0 and math.abs(record.adjustmentSeconds or 0)>1 then
         retired=retired+1
         if scoped then
-          mine.edits[key]={at=0,host='',adjustmentSeconds=0}
+          if not mine.edits[key] then
+            mine.edits[key]={at=0,host='',adjustmentSeconds=0}
+          end
         else
           record.adjustmentSeconds=0
         end
@@ -1639,9 +1644,10 @@ function M.register(registry)
     end
   end
   -- Every read of the merged view goes through here. Peer files are parsed
-  -- once and then cached by (name, size, mtime), so the 1 s poll does not
-  -- re-decode megabytes; renames and rewrites still change the signature.
+  -- once and then cached by content, so the 1 s poll does not re-decode
+  -- megabytes and same-size rewrites cannot hide behind coarse timestamps.
   local peer_cache={}
+  local fingerprints={}
   local peerNotes,nameMismatch={},{}
   local duplicateHost=false
   local peerSignature=''
@@ -1654,21 +1660,19 @@ function M.register(registry)
       local ok,attr=pcall(LFS.attributes,path)
       if ok and type(attr)=='table' then mtime=tonumber(attr.modification) or 0 end
     end
-    local digest=''
-    if mtime==0 and size>0 then
-      -- No stat module: a size alone would miss a same-length rewrite (an
-      -- edit or a counter that changed digits), so fingerprint the bytes.
-      f:seek('set',0)
-      local raw=f:read(size) or ''
-      local h1,h2=7,13
-      for i=1,#raw,3 do
-        h1=(h1*131+(raw:byte(i) or 0)+1)%16777216
-        h2=(h2*65599+(raw:byte(i+1) or 0)+1)%16777216
-      end
-      digest=('%06x%06x'):format(h1,h2)
-    end
+    f:seek('set',0)
+    -- Bounded like read_file: an oversized file is rejected there anyway, so
+    -- its bytes are never read in full or retained here.
+    local raw=f:read(MAX_BYTES+1) or ''
     f:close()
-    return tostring(size)..':'..tostring(mtime)..':'..digest
+    if #raw>MAX_BYTES then raw=false end
+    local old=fingerprints[path]
+    local version=old and old.version or 0
+    if not old or old.raw~=raw then version=version+1 end
+    fingerprints[path]={raw=raw,version=version}
+    -- The bytes are returned too, so the caller parses exactly what was
+    -- fingerprinted (a second read could see a newer write).
+    return tostring(size)..':'..tostring(mtime)..':'..version, raw
   end
   -- A newer backup import supersedes every machine's earlier contribution (it
   -- is a replace-all by design; the RPC already refuses to run during a live
@@ -1691,12 +1695,13 @@ function M.register(registry)
     end
   end
   local function reload_peers()
-    local list,index={},{}
+    local list,index,seen={},{},{}
     peerNotes,nameMismatch={},{}
     duplicateHost=false
     if scoped then
       for _,file in ipairs(contribution_files(account)) do
-        local state=file_state(file.path)
+        seen[file.path]=true
+        local state,content=file_state(file.path)
         index[#index+1]=file.name..'='..state
         if file.path~=own_path then
           local cached=peer_cache[file.path]
@@ -1707,7 +1712,7 @@ function M.register(registry)
             if cached.mismatch then nameMismatch[#nameMismatch+1]=cached.mismatch end
           else
             local problem=nil
-            local raw=read_file(file.path)
+            local raw=type(content)=='string' and #content>0 and content or nil
             if raw then
               local ok,obj=pcall(json.decode,raw)
               if ok then peer=sanitize_own(obj,account) end
@@ -1742,6 +1747,10 @@ function M.register(registry)
         end
       end
     end
+    -- Forget files that are gone, so deleted peers release their bytes and a
+    -- recreated path never reuses a stale entry.
+    for path in pairs(fingerprints) do if not seen[path] then fingerprints[path]=nil end end
+    for path in pairs(peer_cache) do if not seen[path] then peer_cache[path]=nil end end
     table.sort(index)
     peerSignature=table.concat(index,';')
     peers=list

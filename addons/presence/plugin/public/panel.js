@@ -46,11 +46,19 @@
     const warning = document.createElement('p');
     warning.style.cssText = 'font-size:11px;color:#f0b26b';
     warning.textContent = 'Experimental: friend visibility is NOT validated. A shortcut can appear briefly before being hidden.';
+    const corruption = document.createElement('p');
+    corruption.id = 'sls-presence-corruption';
+    corruption.style.cssText = 'font-size:12px;color:#ffbe70;white-space:pre-wrap;overflow-wrap:anywhere';
+    corruption.hidden = true;
+    const startFresh = document.createElement('button');
+    startFresh.id = 'sls-presence-start-fresh';
+    startFresh.textContent = 'Start fresh';
+    startFresh.hidden = true;
     const enable = document.createElement('button');
     const clear = document.createElement('button');
     clear.textContent = 'Remove managed shortcuts';
-    for (const b of [enable, clear]) b.style.cssText = 'padding:7px;margin:4px;background:#315a75;color:white;border:0;border-radius:5px;cursor:pointer';
-    pane.append(header, status, detail, warning, enable, clear);
+    for (const b of [enable, clear, startFresh]) b.style.cssText = 'padding:7px;margin:4px;background:#315a75;color:white;border:0;border-radius:5px;cursor:pointer';
+    pane.append(header, status, detail, warning, corruption, startFresh, enable, clear);
     document.body.append(btn, pane);
 
     function report(health, contracts, extras) {
@@ -86,6 +94,18 @@
         if (Object.keys(names).length) await rpc('SlsPresenceSetTitles', {raw: JSON.stringify(names)});
         if (pane.hidden) return;
         const s = result.state;
+        const locked = result.corruptionRequiresAcknowledgement === true;
+        corruption.hidden = !locked;
+        startFresh.hidden = !locked;
+        enable.disabled = locked;
+        clear.disabled = locked;
+        if (locked) {
+          const paths = Array.isArray(result.quarantinePaths) ? result.quarantinePaths.filter(p => typeof p === 'string') : [];
+          corruption.textContent = 'The presence state and its backup could not be read. Presence ownership changes are paused. '
+            + 'Damaged copies were quarantined in ' + String(result.quarantineDirectory || '(directory unavailable)') + '.'
+            + (paths.length ? '\n' + paths.join('\n') : '\nQuarantine paths are unavailable; copies may not have been moved.')
+            + '\nStart fresh accepts an empty ownership ledger; existing shortcuts may need manual attention.';
+        }
         enable.textContent = s.enabled ? 'Disable experimental bridge' : 'Enable experimental bridge';
         const health = result.runtime;
         const age = Number(health.reportedAt || 0);
@@ -102,6 +122,14 @@
       } catch (e) { atend(status, detail, e); }
     }
     btn.onclick = () => { pane.hidden = !pane.hidden; if (!pane.hidden) refresh(); };
+    startFresh.onclick = async () => {
+      startFresh.disabled = true;
+      try {
+        await rpc('SlsPresenceAcknowledgeCorruption', {raw: JSON.stringify({acknowledge: true})});
+        await refresh();
+      } catch (e) { atend(status, detail, e); }
+      finally { startFresh.disabled = false; }
+    };
     enable.onclick = async () => {
       try {
         const s = (await rpc('SlsPresenceGet')).state;

@@ -238,6 +238,11 @@ if os.getenv('SLS_KIND')=='presence' then
         local body=json.decode(data:sub(9,8+len))
         sent_ops[#sent_ops+1]={op=op,body=body}
         if op==0 then self.queue[#self.queue+1]=readyframe end
+        -- Discord answers SET_ACTIVITY with the same nonce; presence only
+        -- reports connected once it has that acknowledgement.
+        if op==1 and type(body)=='table' and body.cmd=='SET_ACTIVITY' and not self.silent then
+          self.queue[#self.queue+1]=frame(1,{cmd='SET_ACTIVITY',nonce=body.nonce,data={}})
+        end
         return #data
       end
       function c:receive(n)
