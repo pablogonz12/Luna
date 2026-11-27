@@ -7994,8 +7994,15 @@ def check_upstream(manifest):
                 problems.append('%s: invalid source commit' % name)
                 continue
             try:
-                url = (git('remote', 'get-url', 'origin', cwd=ROOT).stdout.decode().strip()
-                       if name in FIRST_PARTY else entry['source_repo'])
+                url = entry.get('source_repo', '')
+                if name in FIRST_PARTY:
+                    # A checkout knows its own origin (forks, renames); an
+                    # installed copy or an unpacked release has no git, so it
+                    # falls back to the repository the manifest names.
+                    try:
+                        url = git('remote', 'get-url', 'origin', cwd=ROOT).stdout.decode().strip() or url
+                    except (OSError, subprocess.SubprocessError):
+                        pass
                 repo = Path(tmp) / name
                 git('init', '--bare', str(repo))
                 git('fetch', '--quiet', '--', url,
@@ -8037,7 +8044,8 @@ def check_upstream(manifest):
             except (OSError, subprocess.SubprocessError, KeyError) as exc:
                 print('  %s: unreachable (upstream comparison unavailable: %s)' % (name, exc))
     if problems:
-        print('Refresh: bash scripts/vendor-update.sh && python3 scripts/luna.py verify && install')
+        print('Refresh: bash scripts/vendor-update.sh && python3 scripts/luna.py verify '
+              '&& python3 scripts/luna.py install')
     return problems
 
 

@@ -15,7 +15,7 @@ especially when private repositories cannot be accessed without credentials.
 The weekly workflow runs the same check without secrets.
 
 To refresh, review the changes and run
-`bash scripts/vendor-update.sh && python3 scripts/luna.py verify && install`.
+`bash scripts/vendor-update.sh && python3 scripts/luna.py verify && python3 scripts/luna.py install`.
 `verify --sources` checks local source Git objects at the pinned commits, not
 working-tree changes; missing source checkouts are skipped.
 

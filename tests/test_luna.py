@@ -656,6 +656,35 @@ class LunaTestCase(unittest.TestCase):
         self.assertIn('graphics: behind by 1 commit(s)', output.getvalue())
         self.assertIn('    addons/graphics/plugin/file', output.getvalue())
 
+    def test_upstream_installed_copy_falls_back_to_the_manifest_repo(self):
+        # An installed luna runs from a runtime directory with no git: first-party
+        # pins must still be checked against the manifest's source_repo.
+        import contextlib
+        import importlib.util
+        import io
+        repo = self.home / 'first-party-src'
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(repo)], check=True)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+        payload = repo / 'addons/graphics/plugin/file'
+        payload.parent.mkdir(parents=True)
+        payload.write_text('pinned')
+        git('add', '.')
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'pin')
+        pin = git('rev-parse', 'HEAD')
+        runtime = self.home / 'runtime-no-git'
+        runtime.mkdir()
+        manifest = {'addons': {'graphics': {'source_commit': pin, 'source_repo': str(repo), 'files': {
+            'file': {'source_path': 'plugin/file'}}}}}
+        spec = importlib.util.spec_from_file_location('luna_installed_copy_test', LUNA)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = io.StringIO()
+        with mock.patch.object(module, 'ROOT', runtime), contextlib.redirect_stdout(output):
+            self.assertEqual(module.check_upstream(manifest), [])
+        self.assertIn('graphics: ok (pinned files unchanged)', output.getvalue())
+        self.assertNotIn('unreachable', output.getvalue())
+
     # -- release / update / snapshot -------------------------------------
     def bundle_version(self):
         return json.loads((HERE / 'addons/luna/plugin/plugin.json').read_text())['version']
