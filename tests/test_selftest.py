@@ -6,6 +6,9 @@ speaking /json + one websocket), so the tests never touch the developer's
 running Steam, never send a write RPC and need no browser.
 """
 import json
+import argparse
+import contextlib
+import io
 import os
 import re
 import socket
@@ -18,6 +21,7 @@ import threading
 import time
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -25,6 +29,7 @@ SCRIPTS = HERE / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 
 import luna_selftest  # noqa: E402
+import luna  # noqa: E402
 
 
 class EmbedProbeTest(unittest.TestCase):
@@ -721,6 +726,181 @@ class DoctorTests(SelftestBase):
         self.assertIn('tab updates: the page is empty', text)
         self.assertNotIn(steamid, text)
         self.assertIn('<steamid>', text)
+
+
+class LiveStatusTest(SelftestBase):
+    def setUp(self):
+        super().setUp()
+        self.freshness = luna.sidecar_freshness
+        self.boot = self.temp / 'boot.lua'
+        self.boot.write_text(luna.MARKER)
+        for name, value in [('active_host', 'lumen'), ('installed_addons', ('playtime', 'presence')),
+                            ('bridge_status', ('ok', ['attached']))]:
+            patcher = mock.patch.object(luna, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name, value in [('boot_file', self.boot), ('sidecar_freshness', {'stale': False}),
+                            ('read_json_file', {'pid': 42, 'format': 2, 'attachedAt': 1,
+                                                'addons': ['playtime', 'presence']}),
+                            ('pid_alive', True)]:
+            patcher = mock.patch.object(luna, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(luna, '_selftest_module', return_value=luna_selftest)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_steam_closed(self):
+        with mock.patch.object(luna, 'steam_running', return_value=False):
+            result = luna.live_status(('playtime',))
+        self.assertIn('Steam is closed', result['message'])
+        self.assertIsNone(result['addons']['playtime']['answered'])
+        self.assertTrue(result['bridge']['attached'])
+        self.assertEqual(result['bridge']['addon_count'], 2)
+
+    def test_missing_port(self):
+        with mock.patch.object(luna, 'steam_running', return_value=True), \
+             mock.patch.object(luna_selftest, 'cef_port', side_effect=luna_selftest.Unreachable('port missing')):
+            result = luna.live_status(('playtime',))
+        self.assertIn('port missing', result['message'])
+        self.assertIsNone(result['addons']['playtime']['answered'])
+
+    def test_backend_failure_and_allowlist(self):
+        steam = FakeSteam()
+        original = steam.answer
+        def answer(expression):
+            if 'const name = "SlsPresenceGet";' in expression:
+                return {'ok': False, 'error': 'backend unavailable'}, None
+            return original(expression)
+        steam.answer = answer
+        server = FakeServer(steam)
+        port = server.start()
+        self.addCleanup(server.stop)
+        with mock.patch.object(luna, 'steam_running', return_value=True), \
+             mock.patch.object(luna_selftest, 'cef_port', return_value=port):
+            result = luna.live_status(('playtime', 'presence'))
+        self.assertTrue(result['addons']['playtime']['answered'])
+        self.assertFalse(result['addons']['presence']['answered'])
+        self.assertEqual(result['addons']['presence']['error'], 'backend unavailable')
+        self.assertEqual(set(steam.rpc_names()), {'SlsPlaytimeGet', 'SlsPresenceGet'})
+        self.assertTrue(all(luna_selftest._is_readonly_call(name, {})[0] for name in steam.rpc_names()))
+
+    def test_stale_sidecar(self):
+        with mock.patch.object(luna, 'process_pids', return_value=[42]), \
+             mock.patch.object(luna, '_proc_start', return_value=1), \
+             mock.patch.object(luna, 'plan', return_value=[]):
+            for host in ('lumen', 'luna'):
+                result = self.freshness(host, ('playtime',))
+                self.assertTrue(result['stale'])
+                self.assertIn('restart needed', result['message'])
+
+    def test_a_replaced_host_executable_alone_makes_the_sidecar_stale(self):
+        # Only the binary changed: the payload files keep their old mtimes.
+        os.utime(self.boot, (1, 1))
+        executable = self.temp / 'host-exe'
+        executable.write_text('new build')
+        lumen = self.temp / 'lumen-root'
+        lumen.mkdir()
+        (lumen / 'lumen').write_text('new build')
+        with mock.patch.object(luna, 'process_pids', return_value=[42]), \
+             mock.patch.object(luna, '_proc_start', return_value=1), \
+             mock.patch.object(luna, 'plan', return_value=[]), \
+             mock.patch.object(luna, 'host_binary', return_value=executable), \
+             mock.patch.object(luna, 'lumen_root', return_value=lumen):
+            for host in ('lumen', 'luna'):
+                self.assertTrue(self.freshness(host, ('playtime',))['stale'], host)
+
+    def test_a_non_object_heartbeat_does_not_crash(self):
+        with mock.patch.object(luna, 'read_json_file', return_value=['old']), \
+             mock.patch.object(luna, 'steam_running', return_value=False):
+            result = luna.live_status(('playtime',))
+        self.assertIn('Steam is closed', result['message'])
+        self.assertIsNone(result['addons']['playtime']['answered'])
+
+    def test_a_stale_host_is_not_sent_the_compressor_probe(self):
+        steam = FakeSteam()
+        server = FakeServer(steam)
+        port = server.start()
+        self.addCleanup(server.stop)
+        with mock.patch.object(luna, 'installed_addons', return_value=('playtime', 'compressor', 'luna')), \
+             mock.patch.object(luna, 'sidecar_freshness', return_value={'stale': True, 'message': 'stale'}), \
+             mock.patch.object(luna, 'steam_running', return_value=True), \
+             mock.patch.object(luna_selftest, 'cef_port', return_value=port):
+            result = luna.live_status(('playtime', 'compressor', 'luna'))
+        self.assertNotIn('SlsCompressorGet', steam.rpc_names())
+        self.assertNotIn('SlsLunaInfo', steam.rpc_names())
+        self.assertEqual(result['addons']['luna'].get('skipped'), 'host predates installed files')
+        with mock.patch.object(luna, 'installed_addons', return_value=('playtime', 'compressor', 'luna')), \
+             mock.patch.object(luna, 'sidecar_freshness', return_value={'stale': None, 'message': 'unknown'}), \
+             mock.patch.object(luna, 'steam_running', return_value=True), \
+             mock.patch.object(luna_selftest, 'cef_port', return_value=port):
+            before = len(steam.rpc_names())
+            unknown = luna.live_status(('playtime', 'compressor', 'luna'))
+        self.assertFalse({'SlsLunaInfo', 'SlsCompressorGet'} & set(steam.rpc_names()[before:]))
+        self.assertEqual(unknown['addons']['luna'].get('skipped'), 'host freshness unknown')
+        self.assertIn('SlsPlaytimeGet', steam.rpc_names())
+        self.assertEqual(luna.live_addon_summary(result['addons']['compressor']),
+                         ('warn', 'not probed (host predates installed files)'))
+
+    def test_the_selftest_never_sends_the_health_rpc(self):
+        self.assertNotIn('SlsLunaHealth', luna_selftest.READONLY_NAMES)
+
+    def test_plain_language_health(self):
+        cases = [
+            ({'installed': True, 'answered': False, 'error': 'timeout after 5 s'},
+             'PROBLEM', 'backend did not answer (timeout after 5 s)'),
+            ({'installed': True, 'answered': True, 'health': {'success': False, 'error': 'broken'}},
+             'PROBLEM', 'backend reports failure: broken'),
+            ({'installed': True, 'answered': True, 'health': {'recovered': True, 'recoveredReason': '.bak'}},
+             'ok', 'recovered (.bak)'),
+            ({'installed': True, 'answered': True, 'health': {
+                'runtime': {'healthy': False, 'error': 'bad', 'accountMismatch': True,
+                            'helpersPaused': True, 'helperPauseReason': 'waiting'},
+                'discord': {'publishing': False, 'reason': 'no-app-id'},
+                'tool': {'found': False}, 'unknown': 'DO NOT PRINT'}},
+             'PROBLEM', 'runtime unhealthy; runtime error: bad; account mismatch; helpers paused (waiting); '
+                        'Discord not publishing (no app id); compressor tool not found'),
+        ]
+        for state, severity, text in cases:
+            actual, detail = luna.live_addon_summary(state)
+            self.assertEqual(actual, severity)
+            self.assertIn(text, detail)
+            self.assertNotIn('DO NOT PRINT', detail)
+
+    def test_live_cli_exit_and_json(self):
+        def run(state, stale, json_output=False, disk_code=0, host='lumen'):
+            live = {'host': host, 'addons': {'playtime': state}, 'sidecar': {'stale': stale, 'message': 'sidecar'},
+                    'message': 'probed', 'bridge': {'marker_present': True, 'attached': True, 'addon_count': 1}}
+            command = luna.cmd_status
+            options = argparse.Namespace(only=[], live=True, json=json_output, strict=False)
+            output = io.StringIO()
+            with mock.patch.object(luna, 'cmd_status', return_value=disk_code), \
+                 mock.patch.object(luna, 'live_status', return_value=live), \
+                 contextlib.redirect_stdout(output):
+                code = command(options)
+            return code, output.getvalue()
+        healthy = {'installed': True, 'answered': True, 'health': {'runtime': {'healthy': True}}}
+        code, text = run(healthy, False)
+        self.assertEqual(code, 0)
+        self.assertIn('ok - backend answered; runtime healthy', text)
+        self.assertIn('all 1 add-ons answering; restart not needed', text)
+        self.assertNotIn('"answered"', text)
+        code, text = run({'installed': True, 'answered': False, 'error': 'timeout'}, False)
+        self.assertEqual(code, 1)
+        self.assertIn('look at playtime', text)
+        code, text = run(healthy, True, json_output=True)
+        self.assertEqual(code, 1)
+        data = json.loads(text)
+        self.assertEqual(data['exit_code'], 1)
+        self.assertEqual(data['live']['addons']['playtime']['health']['runtime']['healthy'], True)
+        code, text = run(healthy, True)
+        self.assertEqual(code, 1)
+        self.assertIn('restart Steam to load the installed files', text)
+        code, text = run(healthy, True, host='luna')
+        self.assertEqual(code, 1)
+        self.assertIn('restart luna-host (systemctl --user restart %s) to load the installed files' % luna.HOST_UNIT,
+                      text)
+        self.assertEqual(run(healthy, False, disk_code=6)[0], 6)
 
 
 if __name__ == '__main__':

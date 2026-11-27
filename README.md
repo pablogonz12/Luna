@@ -136,6 +136,7 @@ tool from a checkout.
 | --- | --- |
 | `luna preflight` | Read-only environment report, including the active host |
 | `luna status` | What is installed and whether it matches the pinned payloads |
+| `luna status --live [--json]` | Read-only backend health, bridge attachment and whether the running host predates installed files |
 | `luna doctor` | Health report: host, Steam paths, update block, bridge, launch options |
 | `luna install [--dry-run] [--force]` | Install or repair the add-ons on the active host |
 | `luna uninstall [--only NAME]` | Remove Luna, or one add-on |

@@ -1261,12 +1261,16 @@ local function adopt_status()
   if write_text(STATUS, trimmed) then write_text(STATUS_AT, tostring(os.time())) end
 end
 
-local function job_state()
+-- observe: report the job as it is, without recording its completion or
+-- adopting its report (status --live and the selftest must not write).
+local function job_state(observe)
   local job = read_job()
   if not job then return nil end
   local running = alive(job.pid)
   local finishedAt = tonumber(read_text(JOB_DONE) or '') or 0
-  if not running and finishedAt == 0 then
+  if not running and finishedAt == 0 and observe then
+    finishedAt = os.time()
+  elseif not running and finishedAt == 0 then
     finishedAt = os.time()
     write_text(JOB_DONE, tostring(finishedAt))
     if job.action == 'scan' then adopt_status() end
@@ -1333,11 +1337,14 @@ function M.register(registry)
     -- the per-game list left out so a one-second poll stays tiny.
     local light = false
     local refresh = false
+    -- observe: a strictly read-only look (no auto-scan, no report adoption).
+    local observe = false
     if type(raw) == 'string' and #raw <= 200 then
       local ok, obj = pcall(json.decode, raw)
       if ok and type(obj) == 'table' then
         light = obj.light == true
         refresh = obj.refresh == true
+        observe = obj.observe == true
       end
     end
     -- Every file the reply is built from, so the memo below cannot outlive a
@@ -1352,7 +1359,7 @@ function M.register(registry)
       -- same second): the job pid keeps a new scan from answering from the
       -- previous one's memo.
       local pid = (read_text(JOB_FILE) or ''):match('"pid"%s*:%s*(%d+)') or ''
-      return rev .. '|' .. pid .. '|' .. (light and '1' or '0')
+      return rev .. '|' .. pid .. '|' .. (light and '1' or '0') .. (observe and 'o' or '')
     end
     local now = os.time()
     local cacheKey = key()
@@ -1364,13 +1371,13 @@ function M.register(registry)
     end
     -- job_state() first: observing a finished scan adopts its report, which is
     -- what this same response must already include.
-    local job = job_state()
+    local job = job_state(observe)
     local status = scan_state()
     local statusAt = tonumber(read_text(STATUS_AT) or '') or 0
     -- The first open starts the read-only scan itself; a recent failed attempt
     -- is not retried in a loop, and a running job is always left alone.
     local autoStarted = false
-    if tool and not (job and job.running) and status == nil then
+    if tool and not observe and not (job and job.running) and status == nil then
       local attempt = tonumber(read_text(ATTEMPT_AT) or '') or 0
       if os.time() - attempt > 600 then
         local pid = spawn(tool, 'scan', ACTIONS.scan.args)

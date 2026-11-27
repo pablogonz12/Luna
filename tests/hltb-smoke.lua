@@ -542,6 +542,20 @@ out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'hltb_order', value = 
 assert(out.success == false, 'an unknown order value was accepted')
 out = call('SlsLunaInfo')
 assert(out.prefs.beta == true and out.prefs.hltb_order == 'long', 'the client settings did not persist')
+-- The observe-only look reads the same prefs, and a damaged luna.json is
+-- reported without being renamed or restored.
+out = call('SlsLunaInfo', { raw = json.encode({ observe = true }) })
+assert(out.success and out.prefs.beta == true and out.prefsDamaged == false, 'observe must read the prefs')
+do
+  local prefs_file = os.getenv('HOME') .. '/.local/share/slssteam-integrations/luna.json'
+  local f = assert(io.open(prefs_file, 'rb')); local good = f:read('*a'); f:close()
+  f = assert(io.open(prefs_file, 'wb')); f:write('{damaged'); f:close()
+  out = call('SlsLunaInfo', { raw = json.encode({ observe = true }) })
+  assert(out.success and out.prefsDamaged == true and out.prefs.beta == nil, 'damaged prefs were not reported')
+  f = assert(io.open(prefs_file, 'rb')); local after = f:read('*a'); f:close()
+  assert(after == '{damaged', 'an observe-only look repaired or replaced luna.json')
+  f = assert(io.open(prefs_file, 'wb')); f:write(good); f:close()
+end
 out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'beta', value = 'yes' }) })
 assert(out.success == false, 'a wrongly typed beta value was accepted')
 out = call('SlsLunaPrefsSet', { raw = json.encode({ key = 'lang', value = 'es' }) })

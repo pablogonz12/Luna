@@ -1884,7 +1884,33 @@ local function build_health()
 end
 
 function M.register(registry)
-  registry.SlsLunaInfo = function()
+  registry.SlsLunaInfo = function(raw)
+    local observe = false
+    if type(raw) == 'string' and #raw <= 200 then
+      local ok, obj = pcall(json.decode, raw)
+      observe = ok and type(obj) == 'table' and obj.observe == true
+    end
+    if observe then
+      -- Read-only look for status --live and the selftest: a damaged luna.json
+      -- is reported, never renamed or restored from its backup.
+      local prefs, damaged = default_prefs(), false
+      local text = read_file(prefs_path)
+      if text then
+        local ok, parsed = pcall(json.decode, text)
+        if ok and type(parsed) == 'table' then
+          for key, kind in pairs(PREF_KEYS) do
+            local value = parsed[key]
+            if kind == 'boolean' and type(value) == 'boolean' then prefs[key] = value
+            elseif kind == 'string' and type(value) == 'string' and PREF_VALUES[key]
+              and PREF_VALUES[key][value] then prefs[key] = value end
+          end
+        else
+          damaged = true
+        end
+      end
+      return reply({ success = true, version = VERSION, addons = installed(), data = data_dir,
+        prefs = prefs, prefsDamaged = damaged })
+    end
     return reply({ success = true, version = VERSION, addons = installed(), data = data_dir,
       prefs = load_prefs() })
   end
