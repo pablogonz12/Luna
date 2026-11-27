@@ -24,8 +24,9 @@ Steam's CEF debugging flag, preserving pre-existing settings on uninstall,
 and reporting host liveness without relying on Lumen's bridge heartbeat.
 Live status tests use a fake CDP endpoint and process timestamps: Steam closed,
 missing port, a failed backend and a stale sidecar. `status --live --json`
-returns disk status lines, live observations and the existing disk-status exit
-code; unavailable live observations do not change that exit code. The standalone
+returns disk status lines, live observations and the combined exit code. A failed
+backend, unhealthy runtime, or stale sidecar exits 1; unavailable live
+observations alone do not change the disk-status exit code. The standalone
 host does not expose Lumen's bridge heartbeat, so attachment and count are unknown.
 
 ## On-device gates

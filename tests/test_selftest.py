@@ -6,6 +6,9 @@ speaking /json + one websocket), so the tests never touch the developer's
 running Steam, never send a write RPC and need no browser.
 """
 import json
+import argparse
+import contextlib
+import io
 import os
 import re
 import socket
@@ -790,6 +793,59 @@ class LiveStatusTest(SelftestBase):
                 result = self.freshness(host, ('playtime',))
                 self.assertTrue(result['stale'])
                 self.assertIn('restart needed', result['message'])
+
+    def test_plain_language_health(self):
+        cases = [
+            ({'installed': True, 'answered': False, 'error': 'timeout after 5 s'},
+             'PROBLEM', 'backend did not answer (timeout after 5 s)'),
+            ({'installed': True, 'answered': True, 'health': {'success': False, 'error': 'broken'}},
+             'PROBLEM', 'backend reports failure: broken'),
+            ({'installed': True, 'answered': True, 'health': {'recovered': True, 'recoveredReason': '.bak'}},
+             'ok', 'recovered (.bak)'),
+            ({'installed': True, 'answered': True, 'health': {
+                'runtime': {'healthy': False, 'error': 'bad', 'accountMismatch': True,
+                            'helpersPaused': True, 'helperPauseReason': 'waiting'},
+                'discord': {'publishing': False, 'reason': 'no-app-id'},
+                'tool': {'found': False}, 'unknown': 'DO NOT PRINT'}},
+             'PROBLEM', 'runtime unhealthy; runtime error: bad; account mismatch; helpers paused (waiting); '
+                        'Discord not publishing (no app id); compressor tool not found'),
+        ]
+        for state, severity, text in cases:
+            actual, detail = luna.live_addon_summary(state)
+            self.assertEqual(actual, severity)
+            self.assertIn(text, detail)
+            self.assertNotIn('DO NOT PRINT', detail)
+
+    def test_live_cli_exit_and_json(self):
+        def run(state, stale, json_output=False, disk_code=0):
+            live = {'addons': {'playtime': state}, 'sidecar': {'stale': stale, 'message': 'sidecar'},
+                    'message': 'probed', 'bridge': {'marker_present': True, 'attached': True, 'addon_count': 1}}
+            command = luna.cmd_status
+            options = argparse.Namespace(only=[], live=True, json=json_output, strict=False)
+            output = io.StringIO()
+            with mock.patch.object(luna, 'cmd_status', return_value=disk_code), \
+                 mock.patch.object(luna, 'live_status', return_value=live), \
+                 contextlib.redirect_stdout(output):
+                code = command(options)
+            return code, output.getvalue()
+        healthy = {'installed': True, 'answered': True, 'health': {'runtime': {'healthy': True}}}
+        code, text = run(healthy, False)
+        self.assertEqual(code, 0)
+        self.assertIn('ok - backend answered; runtime healthy', text)
+        self.assertIn('all 1 add-ons answering; restart not needed', text)
+        self.assertNotIn('"answered"', text)
+        code, text = run({'installed': True, 'answered': False, 'error': 'timeout'}, False)
+        self.assertEqual(code, 1)
+        self.assertIn('look at playtime', text)
+        code, text = run(healthy, True, json_output=True)
+        self.assertEqual(code, 1)
+        data = json.loads(text)
+        self.assertEqual(data['exit_code'], 1)
+        self.assertEqual(data['live']['addons']['playtime']['health']['runtime']['healthy'], True)
+        code, text = run(healthy, True)
+        self.assertEqual(code, 1)
+        self.assertIn('restart Steam to load the installed files', text)
+        self.assertEqual(run(healthy, False, disk_code=6)[0], 6)
 
 
 if __name__ == '__main__':

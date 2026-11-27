@@ -1367,6 +1367,81 @@ def live_status(targets):
     return result
 
 
+def live_addon_summary(state):
+    """Return a severity and plain-language summary of known health fields."""
+    if not state.get('installed'):
+        return 'warn', 'not installed'
+    if state.get('answered') is None:
+        return 'warn', 'backend health unavailable'
+    if not state['answered']:
+        error = ' '.join(str(state.get('error') or 'unknown error').split())
+        return 'PROBLEM', 'backend did not answer (%s)' % error
+    health = state.get('health') or {}
+    runtime = health.get('runtime') or {}
+    discord = health.get('discord') or {}
+    tool = health.get('tool') or {}
+    facts = ['backend answered']
+    severity = 'ok'
+    if health.get('success') is False or health.get('ok') is False:
+        severity = 'PROBLEM'
+        facts.append('backend reports failure%s' %
+                     (': ' + ' '.join(str(health['error']).split()) if health.get('error') else ''))
+    elif health.get('error'):
+        severity = 'warn'
+        facts.append('backend error: ' + ' '.join(str(health['error']).split()))
+    if runtime.get('healthy') is True:
+        facts.append('runtime healthy')
+    elif runtime.get('healthy') is False:
+        severity = 'PROBLEM'
+        facts.append('runtime unhealthy')
+    if runtime.get('error'):
+        severity = 'PROBLEM'
+        facts.append('runtime error: ' + ' '.join(str(runtime['error']).split()))
+    if runtime.get('accountMismatch'):
+        severity = 'PROBLEM'
+        facts.append('account mismatch')
+    if runtime.get('helpersPaused') or runtime.get('helperPauseReason'):
+        if severity == 'ok':
+            severity = 'warn'
+        reason = runtime.get('helperPauseReason')
+        facts.append('helpers paused%s' % (' (' + ' '.join(str(reason).split()) + ')' if reason else ''))
+    if health.get('recovered') or health.get('recoveredReason'):
+        reason = health.get('recoveredReason')
+        facts.append('recovered%s' % (' (' + ' '.join(str(reason).split()) + ')' if reason else ''))
+    if discord.get('publishing') is True:
+        facts.append('Discord publishing')
+    elif discord.get('publishing') is False:
+        if severity == 'ok':
+            severity = 'warn'
+        reason = str(discord.get('reason') or '').replace('-', ' ')
+        facts.append('Discord not publishing%s' % (' (' + ' '.join(reason.split()) + ')' if reason else ''))
+    if tool.get('found') is True:
+        facts.append('compressor tool found')
+    elif tool.get('found') is False:
+        severity = 'PROBLEM'
+        facts.append('compressor tool not found')
+    return severity, '; '.join(facts)
+
+
+def live_verdict(live):
+    summaries = {name: live_addon_summary(state) for name, state in live['addons'].items()}
+    problems = [name for name, (severity, _) in summaries.items() if severity == 'PROBLEM']
+    warnings = [name for name, (severity, _) in summaries.items() if severity == 'warn']
+    states = live['addons'].values()
+    answering = sum(state.get('answered') is True for state in states)
+    installed = sum(bool(state.get('installed')) for state in live['addons'].values())
+    if problems:
+        headline = 'look at ' + ', '.join(problems)
+    elif warnings:
+        headline = '%d of %d installed add-ons answering; check %s' % (answering, installed, ', '.join(warnings))
+    else:
+        headline = 'all %d add-ons answering' % answering
+    stale = live['sidecar'].get('stale')
+    restart = ('restart Steam to load the installed files' if stale is True else
+               'restart not needed' if stale is False else 'restart need unknown')
+    return summaries, '%s; %s' % (headline, restart), bool(problems or stale is True)
+
+
 def cmd_status(options):
     if getattr(options, 'live', False) or getattr(options, 'json', False):
         output = io.StringIO()
@@ -1374,6 +1449,10 @@ def cmd_status(options):
             code = cmd_status(argparse.Namespace(only=options.only,
                                                   strict=getattr(options, 'strict', False)))
         live = live_status(selected_addons(options)) if getattr(options, 'live', False) else None
+        if live is not None:
+            summaries, verdict, failed = live_verdict(live)
+            if failed:
+                code = EXIT_CORRUPT
         if getattr(options, 'json', False):
             print(json.dumps({'status': output.getvalue().splitlines(), 'live': live,
                               'exit_code': code}, sort_keys=True))
@@ -1385,7 +1464,9 @@ def cmd_status(options):
                   % (live['bridge']['marker_present'], live['bridge']['attached'],
                      live['bridge']['addon_count']))
             for name, state in live['addons'].items():
-                print('live %-10s: %s' % (name, json.dumps(state, sort_keys=True)))
+                severity, detail = summaries[name]
+                print('live %-10s: %s - %s' % (name, severity, detail))
+            print('live verdict: %s' % verdict)
         return code
     targets = selected_addons(options)
     manifest = load_manifest()
