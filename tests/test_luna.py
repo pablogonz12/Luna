@@ -2544,6 +2544,29 @@ class VendorTestCase(unittest.TestCase):
         self.assertEqual(manifest_path.read_bytes(), before)
 
 
+    def test_source_dir_is_the_parent_and_a_worktree_checkout_works(self):
+        # --source-dir names the parent holding slsteam-<name> (as --help says),
+        # and the checkout may be a git worktree, whose .git is a file.
+        manifest = json.loads((self.repo / 'vendor/MANIFEST.json').read_text())
+        origin = Path(self.temp.name) / 'playtime-origin'
+        for meta in manifest['addons']['playtime']['files'].values():
+            dest = origin / meta['source_path']
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.repo / 'addons/playtime' / meta['source_path'], dest)
+        def g(*args, cwd=origin):
+            subprocess.run(['git', '-C', str(cwd), *args], check=True, capture_output=True)
+        g('init', '-q', '-b', 'main')
+        g('add', '-A')
+        g('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'src')
+        parent = Path(self.temp.name) / 'sources'
+        parent.mkdir()
+        g('worktree', 'add', '-q', '--detach', str(parent / 'slsteam-playtime'), 'HEAD')
+        self.assertTrue((parent / 'slsteam-playtime/.git').is_file(), 'the fixture must be a worktree')
+        result = self.vendor('--only', 'playtime', '--source-dir', str(parent))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('pinned addons/playtime', result.stdout)
+
+
 BRIDGE_STATUS_SCRIPT = '''
 import importlib.util, json
 spec = importlib.util.spec_from_file_location('luna_beat', %r)

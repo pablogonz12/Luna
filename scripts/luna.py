@@ -8138,8 +8138,14 @@ def cmd_vendor(options):
     for name in SOURCED:
         if only is not None and name not in only:
             continue
-        source = Path(options.source_dir or (home() / 'Documents/Scripts' / ('slsteam-' + name)))
-        if not (source / '.git').is_dir():
+        # --source-dir is the parent holding slsteam-<name> (as its help says);
+        # a path that is itself the checkout is accepted too. `.git` may be a
+        # file: a git worktree is a valid source.
+        parent = Path(options.source_dir).expanduser() if options.source_dir else home() / 'Documents/Scripts'
+        source = parent / ('slsteam-' + name)
+        if options.source_dir and not (source / '.git').exists() and (parent / '.git').exists():
+            source = parent
+        if not (source / '.git').exists():
             print('FAIL: no git checkout for %s at %s (pass --source-dir)' % (name, source), file=sys.stderr)
             return 1
         sources[name] = source
