@@ -154,6 +154,46 @@ test('standalone snapshot toggle stays pending and polling preserves focus',asyn
   assert.equal(document.activeElement,off,'focus returns after pending renders');
 });
 
+test('standalone snapshot RPC failure re-enables the replacement toggle without another poll',async()=>{
+  const document=fakeDom();
+  let active=null, poll, rejectWrite, getCalls=0;
+  document.createElement=((original)=>tag=>{
+    const element=original(tag);
+    element.focus=()=>{
+      if(!element.disabled && findNode(document.body,node=>node===element)) active=element;
+    };
+    element.contains=other=>!!findNode(element,node=>node===other);
+    return element;
+  })(document.createElement);
+  Object.defineProperty(document,'activeElement',{get:()=>
+    active && findNode(document.body,node=>node===active) ? active : document.body});
+  const result={success:true,tool:{found:true},status:{accept_snapshots_unknown:false},
+    snapshots:{choice:{enabled:false,enabledKnown:true,button:'Allow',title:'Choice',text:'text'}}};
+  const window={document,setInterval:fn=>{poll=fn;},setTimeout,
+    Millennium:{callServerMethod:(_,method)=>{
+      if(method==='SlsCompressorGet'){getCalls++; return Promise.resolve(result);}
+      return new Promise((_,reject)=>{rejectWrite=reject;});
+    }}};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../addons/compressor/plugin/public/panel.js'),'utf8'),
+    {window,document,console});
+  document.getElementById('sls-compressor-panel-button').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const pane=document.getElementById('sls-compressor-panel');
+  const button=()=>findNode(pane,node=>node.tagName==='BUTTON' && node.textContent==='Allow');
+  const original=button();
+  original.focus();
+  const pending=original.onclick();
+  poll(); await new Promise(resolve=>setImmediate(resolve));
+  assert.notEqual(button(),original);
+  assert.equal(button().disabled,true);
+  rejectWrite(new Error('write failed'));
+  await pending;
+  assert.equal(getCalls,2,'failure must not depend on a successful refresh');
+  assert.equal(button().disabled,false);
+  assert.equal(document.activeElement,button());
+  assert.match(textOf(pane),/write failed/);
+});
+
 function textOf(node){
   if(!node)return '';
   const own=node.children.length===0?(node.textContent||''):'';

@@ -97,7 +97,9 @@
     let snapshotPending = null;
     let snapshotAcknowledged = false;
     let restoreSnapshotFocus = false;
+    let snapshotButton = null;
     function paintSnapshots(result) {
+      snapshotButton = null;
       const snapshots = result.snapshots || null;
       if (!snapshots) return;
       if (snapshots.detected) info.appendChild(line(snapshots.detected.text));
@@ -134,13 +136,22 @@
           } catch (e) {
             snapshotPending = null;
             snapshotAcknowledged = false;
-            allow.disabled = false;
+            if (snapshotButton) {
+              snapshotButton.disabled = false;
+              if (restoreSnapshotFocus && (document.activeElement === document.body
+                || document.activeElement === document.documentElement
+                || document.activeElement === snapshotButton)) {
+                snapshotButton.focus();
+                restoreSnapshotFocus = false;
+              }
+            }
             atend(status, detail, e);
           }
         };
         box.appendChild(allow);
       }
       info.appendChild(box);
+      snapshotButton = allow;
       if (restoreSnapshotFocus && allow && !allow.disabled) {
         allow.focus();
         restoreSnapshotFocus = false;
