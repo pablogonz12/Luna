@@ -765,6 +765,13 @@ local unchanged = json.decode(registry.SlsHltbGet(first_rev))
 assert(unchanged.success == true and unchanged.unchanged == true, 'the rev must be recognised')
 assert(unchanged.games == nil and unchanged.library == nil, 'an unchanged reply must carry no data')
 assert(#registry.SlsHltbGet(first_rev) < 200, 'the unchanged reply must be tiny')
+local games_only = json.decode(registry.SlsHltbGet({gamesOnly = true}))
+assert(games_only.library == nil and games_only.count == first_count,
+  'the opt-in games-only reply omits inventory without changing games')
+assert(json.decode(registry.SlsHltbGet({gamesOnly = true, rev = first_rev})).unchanged == true,
+  'games-only polling keeps the unchanged contract')
+assert(json.decode(registry.SlsHltbGet()).library ~= nil,
+  'legacy callers continue to receive the inventory')
 -- A change written by something else (not this backend) is seen at once.
 do
   local f = io.open(store_path, 'rb')
@@ -776,6 +783,8 @@ end
 touch(store_path)
 local grown = json.decode(registry.SlsHltbGet())
 assert(grown.count == first_count + 1 and grown.games['999'], 'a changed source must invalidate the cache')
+assert(json.decode(registry.SlsHltbGet({gamesOnly = true, rev = first_rev})).games['999'],
+  'a changed source invalidates the games-only cache')
 assert(registry.SlsHltbGet(first_rev).unchanged == nil, 'a stale rev must never answer unchanged')
 local new_rev = grown.rev
 assert(new_rev ~= first_rev, 'the revision must move with the file')

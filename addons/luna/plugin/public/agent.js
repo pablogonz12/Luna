@@ -789,7 +789,8 @@
      answers {unchanged:true, rev} (59 B) instead of ~1 MB; the records stay.
      An error forgets the rev, because the next call must be a full read. */
   function refreshHltbData(w) {
-    const payload = hltbGetRev === null ? {} : { rev: hltbGetRev };
+    // Older backends ignore gamesOnly and still return the full payload.
+    const payload = hltbGetRev === null ? { gamesOnly: true } : { rev: hltbGetRev, gamesOnly: true };
     return rpc(w, 'SlsHltbGet', payload).then(out => {
       if (out && out.unchanged === true) {
         if (out.rev !== undefined) hltbGetRev = out.rev;

@@ -446,6 +446,24 @@ SELECT_JS = r'''/*luna-selftest:select*/ (async () => {
   if (!rows[index]) return { ok: false, error: 'no sidebar row for ' + id };
   const started = performance.now();
   rows[index].click();
+  const switchMs = Math.round((performance.now() - started) * 10) / 10;
+  // Hidden CEF windows do not produce animation frames. Measure readiness
+  // independently of the rendering fallback below.
+  let readyMs = null;
+  for (let i = 0; i < 20; i++) {
+    const panes = Array.from(document.querySelectorAll('#sls-luna-overlay .sls-luna-pane'));
+    const ready = panes.some(pane => pane.style.display !== 'none'
+      && pane.getClientRects().length > 0 && pane.getBoundingClientRect().height > 0
+      && (String(pane.textContent || '').trim()
+        || pane.querySelector('.sls-luna-note, .sls-luna-empty, .sls-luna-error')));
+    const lumen = document.getElementById('lumen-settings-overlay');
+    if (ready || (id === 'lumen' && lumen && lumen.getClientRects().length > 0
+        && getComputedStyle(lumen).display !== 'none')) {
+      readyMs = Math.round((performance.now() - started) * 10) / 10;
+      break;
+    }
+    await wait(10);
+  }
   await frame();
   const elapsedMs = Math.round((performance.now() - started) * 10) / 10;
   const panes = Array.from(document.querySelectorAll('#sls-luna-overlay .sls-luna-pane'));
@@ -484,7 +502,7 @@ SELECT_JS = r'''/*luna-selftest:select*/ (async () => {
   return {
     ok: true, id, panes: panes.length, visible: visible.length, text, emptyState,
     heading: head ? String(head.textContent || '').trim() : '',
-    elapsedMs, heights, tab: String((state && state.tab) || ''),
+    elapsedMs, switchMs, readyMs, heights, tab: String((state && state.tab) || ''),
     embedding: Boolean(state && state.embedding),
     lumenPresent: Boolean(lumenOverlay),
     lumenVisible: shown(lumenOverlay),
@@ -831,7 +849,10 @@ def _check_tabs(report, cdp, probe):
                             % (short[0].get('label'), short[0].get('height'), ROW_MIN_HEIGHT))
         if problems:
             failures.append(problems[0])
-        elapsed = float(answer.get('elapsedMs') or 0)
+        elapsed = float(answer.get('readyMs') if answer.get('readyMs') is not None
+                        else answer.get('elapsedMs') or 0)
+        timing = 'ready %.0f ms, synchronous %.1f ms' % (
+            elapsed, float(answer.get('switchMs') or 0))
         if elapsed >= SWITCH_BUDGET_MS:
             failures.append('the switch took %.0f ms (budget %d ms)' % (elapsed, SWITCH_BUDGET_MS))
         if ident == 'lumen' and embedding and not text_length:
@@ -846,12 +867,12 @@ def _check_tabs(report, cdp, probe):
         elif embedded_mode:
             report.passed('tab %s' % ident,
                           'embedded Lumen: overlay inside Luna\u2019s content, 1 of %s tab panel(s) '
-                          'shown, Luna panes hidden, %.0f ms'
-                          % (int(answer.get('lumenPanelCount') or 1), elapsed))
+                          'shown, Luna panes hidden, %s'
+                          % (int(answer.get('lumenPanelCount') or 1), timing))
         else:
             report.passed('tab %s' % ident,
-                          '1 pane, %d chars, heading %r, rows >= %dpx, %.0f ms'
-                          % (text_length, str(answer.get('heading') or ''), ROW_MIN_HEIGHT, elapsed))
+                          '1 pane, %d chars, heading %r, rows >= %dpx, %s'
+                          % (text_length, str(answer.get('heading') or ''), ROW_MIN_HEIGHT, timing))
     return lumen_embedded
 
 
