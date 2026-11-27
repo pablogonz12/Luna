@@ -788,10 +788,20 @@
   /* Sends the revision of the payload we already hold, so an unchanged cache
      answers {unchanged:true, rev} (59 B) instead of ~1 MB; the records stay.
      An error forgets the rev, because the next call must be a full read. */
+  let hltbLegacyBackend = false;
   function refreshHltbData(w) {
-    // Older backends ignore gamesOnly and still return the full payload.
-    const payload = hltbGetRev === null ? { gamesOnly: true } : { rev: hltbGetRev, gamesOnly: true };
-    return rpc(w, 'SlsHltbGet', payload).then(out => {
+    const payload = hltbGetRev === null ? {} : { rev: hltbGetRev };
+    const unknown = e => /unknown (?:method|function)(?:\b|:)/i.test(String(e && (e.error || e.message) || e));
+    const read = hltbLegacyBackend ? rpc(w, 'SlsHltbGet', payload) :
+      rpc(w, 'SlsHltbGames', payload).then(out => {
+        if (out && unknown(out)) throw out;
+        return out;
+      }).catch(error => {
+        if (!unknown(error)) throw error;
+        hltbLegacyBackend = true;
+        return rpc(w, 'SlsHltbGet', payload);
+      });
+    return read.then(out => {
       if (out && out.unchanged === true) {
         if (out.rev !== undefined) hltbGetRev = out.rev;
         return true;

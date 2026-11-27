@@ -1922,7 +1922,11 @@ function M.register(registry)
     return paths
   end
   registry.SlsLunaHealth = function(raw)
-    local refresh = type(raw) == 'table' and raw.refresh == true
+    if type(raw) == 'string' then
+      local ok, decoded = pcall(json.decode, raw)
+      if ok then raw = decoded end
+    end
+    local refresh = raw == true or (type(raw) == 'table' and raw.refresh == true)
     local rev = stamps_rev(health_inputs())
     local now = os.time()
     if not refresh and rev and health_cache.text and health_cache.rev == rev
@@ -2593,7 +2597,7 @@ function M.register(registry)
   -- stamps of both files: a poll with the `rev` it got last time answers
   -- `{unchanged = true}` in a few bytes instead of the whole megabyte, and a
   -- poll without one (the current panel, a fresh window) gets the full shape.
-  registry.SlsHltbGet = function(raw)
+  local function hltb_get(raw, games_only)
     local asked = nil
     if type(raw) == 'string' then asked = raw
     elseif type(raw) == 'table' and type(raw.rev) == 'string' then asked = raw.rev end
@@ -2612,7 +2616,7 @@ function M.register(registry)
     local now = os.time()
     -- Opt-in: the Steam agent only consumes games, not the inventory. Legacy
     -- callers (and the panel) continue receiving the original full shape.
-    if type(raw) == 'table' and raw.gamesOnly == true then
+    if games_only or (type(raw) == 'table' and raw.gamesOnly == true) then
       if asked and asked ~= '' and mtime_known and asked == rev then
         return reply({ success = true, unchanged = true, rev = rev })
       end
@@ -2660,6 +2664,8 @@ function M.register(registry)
     end
     return hltb_cache.text
   end
+  registry.SlsHltbGet = function(raw) return hltb_get(raw, false) end
+  registry.SlsHltbGames = function(raw) return hltb_get(raw, true) end
 
   -- Re-run the title check over the whole store on demand. Idempotent: a store
   -- already reviewed by this scorer is answered with applied = false and the
