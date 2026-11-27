@@ -970,7 +970,7 @@ test('the status tab shows the game-by-game queue with bars',async()=>{
     next:[{name:'Hades',size:50}],
     games:[{name:'Cronos: The New Dawn',path:'/games/Cronos',size:100,status:'running',saved:0},
       {name:'Hades',path:'/games/Hades',size:50,status:'pending',saved:0},
-      {name:'Pony Island',path:'/games/Pony',size:20,status:'done',saved:96}]};
+      {name:'Pony Island',path:'/games/Pony',size:20,status:'done',saved:96*1048576}]};
   const {w}=fakeWindow(document,{compressor:fixture});
   mount(w);
   let overlay=await openCompressor(document);
@@ -990,7 +990,7 @@ test('the status tab shows the game-by-game queue with bars',async()=>{
   overlay=await openCompressor(document,'Games');
   const chips=findNode(overlay,node=>(node.className||'').startsWith('sls-luna-chip'));
   assert.ok(chips,'a per-game state chip was not rendered');
-  assert.match(textOf(overlay),/done . saved 96.0 MiB/,'a finished game must show its saving (MiB, as sent)');
+  assert.match(textOf(overlay),/done . saved 96.0 MiB/,'a finished game must show its saving in bytes');
   assert.ok(findNode(overlay,node=>node.className==='sls-luna-mini'),'a per-game mini bar was not rendered');
 });
 
