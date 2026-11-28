@@ -3,7 +3,7 @@
     "compressor": {
       "files": {
         "backend/main.lua": {
-          "sha256": "db38952afaf1c72f502035c6a1239bc899266ecd103cc37c277b72dd74105e61",
+          "sha256": "6be6c2169376c2c88f4a58df1470f772412d4c91d48f8f4a10ad798d1b087c62",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
@@ -16,7 +16,7 @@
         }
       },
       "plugin_version": "0.3.1",
-      "source_commit": "eed61efe838eb567bc16a4e17c966315e003c13e",
+      "source_commit": "30c786a45068d01901c69147a58851f74638e6f8",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "graphics": {
@@ -119,7 +119,7 @@
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-11-28T02:15:18+0100",
+  "generated": "2026-11-28T03:31:11+0100",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "aeced944f64c5dc779c24ecf912bee2570760e7d5e35f90b26f9aa1042cccb2c",
