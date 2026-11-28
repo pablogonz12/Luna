@@ -1340,6 +1340,26 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertNotIn('"owned"', (self.data / 'presence.json').read_text())
 
+    def test_restore_checks_the_gzip_trailer(self):
+        # A corrupt CRC in the gzip trailer: tar never reads that far, so only a
+        # full read of the compressed stream catches it.
+        (self.data / 'presence.json').write_text('{"version":1}')
+        out = self.temp / 'backups-crc'
+        self.assertEqual(self.luna('backup', '--out', str(out)).returncode, 0)
+        archive = next(out.glob('luna-backup-*.tar.gz'))
+        mutated = bytearray(archive.read_bytes())
+        mutated[-8] ^= 0xff
+        (self.data / 'presence.json').write_text('{"version":2}')
+        # A bad CRC, and a stream cut short: both refused cleanly, nothing changed.
+        for broken in (bytes(mutated), bytes(mutated[:-12])):
+            archive.write_bytes(broken)
+            result = self.luna('restore', str(archive))
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('REFUSING', result.stdout + result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertEqual((self.data / 'presence.json').read_text(), '{"version":2}',
+                             'a corrupt archive must change nothing')
+
     def test_restore_refuses_a_tampered_archive(self):
         (self.data / 'presence.json').write_text('{"version":1}')
         out = self.temp / 'backups-tamper'

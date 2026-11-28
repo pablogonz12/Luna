@@ -3361,8 +3361,13 @@ def cmd_restore(options):
         extract_dir = Path(work) / 'unpacked'
         extract_dir.mkdir()
         try:
+            # tar stops at its end-of-archive marker, so the gzip CRC would
+            # never be read: a flipped bit in the unread tail went unnoticed.
+            with Path(archive).open('rb') as stream:
+                if stream.read(2) == b'\x1f\x8b':
+                    _check_gzip_stream(archive)
             _safe_extract(archive, extract_dir)
-        except (tarfile.TarError, ValueError, OSError) as error:
+        except (tarfile.TarError, ValueError, OSError, EOFError, zlib.error) as error:
             print('REFUSING: cannot safely unpack the archive: %s' % error, file=sys.stderr)
             return 1
         roots = [entry for entry in extract_dir.iterdir() if entry.is_dir()]
