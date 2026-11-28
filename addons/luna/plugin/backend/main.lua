@@ -1309,12 +1309,59 @@ end
 
 -- The job runs in its own session, so its pid is the process-group id: a
 -- negative signal reaches the installer and everything it started.
-local function stop_group(pid)
+local function stop_group(pid, job)
   pid = math.floor(tonumber(pid) or 0)
-  if pid <= 0 then return false end
-  os.execute('kill -TERM -' .. tostring(pid) .. ' 2>/dev/null; sleep 0.3; '
-    .. 'kill -KILL -' .. tostring(pid) .. ' 2>/dev/null')
-  return true
+  if not job.starttime or job.starttime == '' or not job.bootId or job.bootId == '' then
+    return false, 'its identity is stale; no signals were sent'
+  end
+  -- 'same': the recorded leader, alive. 'zombie': the recorded leader, exited
+  -- but unreaped. 'gone': no such pid. 'other': unreadable, another boot, or a
+  -- different process now holds the pid.
+  local function leader()
+    if pid <= 0 then return 'other' end
+    local boot = read_file('/proc/sys/kernel/random/boot_id')
+    if not boot or boot:match('^%s*(.-)%s*$') ~= job.bootId then return 'other' end
+    local stat = read_file('/proc/' .. tostring(pid) .. '/stat')
+    if not stat then return path_exists('/proc/' .. tostring(pid)) and 'other' or 'gone' end
+    local rest = stat:match('^.*%)(.*)$')
+    if not rest then return 'other' end
+    local fields = {}
+    for field in rest:gmatch('%S+') do fields[#fields + 1] = field end
+    if not (fields[20] and fields[20]:match('^%d+$') and fields[20] == tostring(job.starttime)) then
+      return 'other'
+    end
+    if fields[1] == 'Z' or fields[1] == 'X' then return 'zombie' end
+    return 'same'
+  end
+  -- A pgid is never handed out again while any process still belongs to that
+  -- group, so once the leader was verified, surviving members are ours.
+  -- 'alive', 'empty', or 'unknown' when pgrep itself failed (it exits 1 for
+  -- no match and 2+ for errors; a missing pgrep is 127 from the shell).
+  local function group_state()
+    local ok, how, code = os.execute('pgrep -g ' .. tostring(pid) .. ' >/dev/null 2>&1')
+    if ok == true or ok == 0 then return 'alive' end
+    if how == 'exit' and code == 1 then return 'empty' end
+    return 'unknown'
+  end
+  if leader() ~= 'same' then return false, 'its identity was unreadable or changed; no signals were sent' end
+  -- `-s SIG -- -PGID`: the one form procps-ng kill (Ubuntu's /bin/kill),
+  -- util-linux kill and the shells' builtins all read as a group signal;
+  -- procps misreads `-TERM -PGID` and can hit unrelated groups or -1.
+  os.execute('kill -s TERM -- -' .. tostring(pid) .. ' 2>/dev/null')
+  os.execute('sleep 0.3')
+  local after = leader()
+  if after == 'other' then
+    return false, 'TERM was sent, but its identity changed or became unreadable before KILL'
+  end
+  local group = after == 'same' and 'alive' or group_state()
+  if group == 'alive' then
+    os.execute('kill -s KILL -- -' .. tostring(pid) .. ' 2>/dev/null')
+    return true, 'its process group was signalled'
+  end
+  if group == 'unknown' then
+    return false, 'TERM was sent, but whether its process group fully stopped could not be confirmed (pgrep failed); check for leftover processes'
+  end
+  return true, 'its process group stopped after TERM'
 end
 
 local function job_message(name, result)
@@ -1349,10 +1396,10 @@ local function job_state(name)
     pid = math.floor(tonumber(job.pid) or 0)
     age = math.max(0, os.time() - started)
     if age > limit then
-      if process_alive(pid) then stop_group(pid) end
+      local _, stop_message = stop_group(pid, job)
       state = 'timeout'
       result = { state = 'timeout', at = os.time(),
-        message = 'did not finish in ' .. tostring(limit) .. ' s; its process group was stopped'
+        message = 'did not finish in ' .. tostring(limit) .. ' s; ' .. stop_message
           .. (last_line(file_tail(log_path)) ~= '' and (' - ' .. last_line(file_tail(log_path))) or '') }
       write_json(result_path, result)
       os.remove(state_path)
@@ -1417,8 +1464,13 @@ local function start_job(name, args)
   -- timeout signals), runs the bounded command, records the outcome, and
   -- removes the marker. Everything is constants plus shq(); no request text.
   local command = tostring(args or spec.args)
-  local inner = "printf '{\"id\":\"%s\",\"pid\":%s,\"startedAt\":%s,\"phase\":\"running\","
-    .. "\"state\":\"running\",\"limit\":%s}\\n' " .. shq(id) .. " \"$$\" \"$(date +%s)\" "
+  local inner = 'stat=$(cat /proc/$$/stat 2>/dev/null); stat=${stat##*)}; '
+    .. 'set -- $stat; n=0; while [ "$n" -lt 19 ] && [ "$#" -gt 0 ]; do shift; n=$((n+1)); done; '
+    .. 'starttime=$1; boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); '
+    .. 'case "$starttime" in *[!0-9]*|"") starttime="" ;; esac; '
+    .. 'case "$boot" in *[!0-9a-fA-F-]*|"") boot="" ;; esac; '
+    .. "printf '{\"id\":\"%s\",\"pid\":%s,\"startedAt\":%s,\"starttime\":\"%s\",\"bootId\":\"%s\",\"phase\":\"running\","
+    .. "\"state\":\"running\",\"limit\":%s}\\n' " .. shq(id) .. " \"$$\" \"$(date +%s)\" \"$starttime\" \"$boot\" "
     .. "'" .. tostring(spec.seconds) .. "' > " .. shq(state_path .. '.tmp')
     .. ' && mv -f ' .. shq(state_path .. '.tmp') .. ' ' .. shq(state_path)
     .. '; ' .. bounded(spec.seconds) .. shq(python_bin()) .. ' ' .. shq(updater_path())
