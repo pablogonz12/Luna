@@ -1335,20 +1335,31 @@ local function stop_group(pid, job)
   end
   -- A pgid is never handed out again while any process still belongs to that
   -- group, so once the leader was verified, surviving members are ours.
-  local function group_alive()
-    local ok = os.execute('pgrep -g ' .. tostring(pid) .. ' >/dev/null 2>&1')
-    return ok == true or ok == 0
+  -- 'alive', 'empty', or 'unknown' when pgrep itself failed (it exits 1 for
+  -- no match and 2+ for errors; a missing pgrep is 127 from the shell).
+  local function group_state()
+    local ok, how, code = os.execute('pgrep -g ' .. tostring(pid) .. ' >/dev/null 2>&1')
+    if ok == true or ok == 0 then return 'alive' end
+    if how == 'exit' and code == 1 then return 'empty' end
+    return 'unknown'
   end
   if leader() ~= 'same' then return false, 'its identity was unreadable or changed; no signals were sent' end
-  os.execute('kill -TERM -' .. tostring(pid) .. ' 2>/dev/null')
+  -- `-s SIG -- -PGID`: the one form procps-ng kill (Ubuntu's /bin/kill),
+  -- util-linux kill and the shells' builtins all read as a group signal;
+  -- procps misreads `-TERM -PGID` and can hit unrelated groups or -1.
+  os.execute('kill -s TERM -- -' .. tostring(pid) .. ' 2>/dev/null')
   os.execute('sleep 0.3')
   local after = leader()
-  if after == 'same' or ((after == 'gone' or after == 'zombie') and group_alive()) then
-    os.execute('kill -KILL -' .. tostring(pid) .. ' 2>/dev/null')
-    return true, 'its process group was signalled'
-  end
   if after == 'other' then
     return false, 'TERM was sent, but its identity changed or became unreadable before KILL'
+  end
+  local group = after == 'same' and 'alive' or group_state()
+  if group == 'alive' then
+    os.execute('kill -s KILL -- -' .. tostring(pid) .. ' 2>/dev/null')
+    return true, 'its process group was signalled'
+  end
+  if group == 'unknown' then
+    return false, 'TERM was sent, but whether its process group fully stopped could not be confirmed (pgrep failed); check for leftover processes'
   end
   return true, 'its process group stopped after TERM'
 end

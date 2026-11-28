@@ -681,12 +681,16 @@ do
     if command:match('^kill %-') then
       signals[#signals + 1] = command
       if change_after_term then stat = fake_stat('999') end
-      if leader_exits and command:match('^kill %-TERM') then
+      if leader_exits and command:match('^kill %-s TERM %-%- %-') then
         stat = leader_exits == 'zombie' and fake_stat('123', 'Z') or false
       end
       return true
     end
-    if command:match('^pgrep %-g 12345') then return survivors and true or nil end
+    if command:match('^pgrep %-g 12345') then
+      if survivors == 'error' then return nil, 'exit', 2 end
+      if survivors then return true, 'exit', 0 end
+      return nil, 'exit', 1
+    end
     if command == 'sleep 0.3' then return true end
     return real_execute(command)
   end
@@ -713,6 +717,14 @@ do
   check({ '123', 'boot-id' }, 2, 'process group was signalled', nil, nil, nil, 'zombie', true)
   -- The whole group stopped on TERM: no KILL is needed.
   check({ '123', 'boot-id' }, 1, 'stopped after TERM', nil, nil, nil, 'gone', false)
+  -- pgrep itself failed: no KILL, and the result says cleanup is unconfirmed.
+  check({ '123', 'boot-id' }, 1, 'could not be confirmed', nil, nil, nil, 'gone', 'error')
+  -- Every signal uses the `-s SIG -- -PGID` form (procps-ng misreads `-SIG -PGID`).
+  stat, boot, signals = fake_stat('123'), 'boot-id\n', {}
+  check({ '123', 'boot-id' }, 2, 'process group was signalled')
+  for _, sent in ipairs(signals) do
+    assert(sent:match('^kill %-s %u+ %-%- %-12345 '), 'unsafe kill form: ' .. sent)
+  end
   io.open, os.execute = real_open, real_execute
 end
 
