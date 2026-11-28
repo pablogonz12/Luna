@@ -15,8 +15,15 @@ for _ = 1, 50 do
   core.sleep(0.1)
 end
 local function stop()
-  local pid = fs.read(pidf)
-  if pid then os.execute("kill " .. pid:gsub("%s", "")) end
+  local pid = tonumber(fs.read(pidf))
+  if pid and pid > 1 and pid ~= core.getpid() and pid == math.floor(pid) then
+    local f = io.open("/proc/" .. pid .. "/cmdline", "rb")
+    local command = f and f:read("*a") or ""
+    if f then f:close() end
+    if command:find("http.server", 1, true) and command:find(root, 1, true) then
+      os.execute("kill " .. pid)
+    end
+  end
   fs.remove_all(root)
 end
 local ok, err = pcall(function()

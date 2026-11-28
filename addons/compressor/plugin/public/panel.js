@@ -194,12 +194,18 @@
         else if (document.activeElement && document.activeElement !== document.body
           && document.activeElement !== document.documentElement) restoreSnapshotFocus = false;
         if (snapshotPending !== null && snapshotAcknowledged
-          && !(job.running && job.action === 'scan')
-          && result.status && result.status.accept_snapshots_unknown === snapshotPending) {
+          && (result.rescan?.failed || (!result.rescan
+            && !(job.running && job.action === 'scan')
+            && result.status && result.status.accept_snapshots_unknown === snapshotPending))) {
           snapshotPending = null;
           snapshotAcknowledged = false;
         }
         info.textContent = '';
+        if (result.rescan) {
+          info.appendChild(line(result.rescan.failed
+            ? 'Snapshot refresh failed: ' + result.rescan.failed
+            : 'Snapshot refresh pending; library results may be out of date.'));
+        }
         paintLibraries(result);
         paintSnapshots(result);
         paintQueue(result);
@@ -209,6 +215,8 @@
           : 'btrfs-game-compressor was not found.';
         detail.textContent = [
           job.running ? `Running ${job.action}.` : (job.action ? `Last job: ${job.action}.` : 'No job yet.'),
+          job.stuck?.message || '',
+          job.error || '',
           job.log ? job.log.split('\n').slice(-6).join('\n') : '',
         ].filter(Boolean).join('\n');
       } catch (e) { atend(status, detail, e); }

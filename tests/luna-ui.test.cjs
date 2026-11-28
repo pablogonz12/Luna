@@ -194,6 +194,49 @@ test('standalone snapshot RPC failure re-enables the replacement toggle without 
   assert.match(textOf(pane),/write failed/);
 });
 
+test('standalone compressor shows pending and failed snapshot refresh with retry guidance',async()=>{
+  const document=fakeDom();
+  document.createElement=((original)=>tag=>{
+    const element=original(tag);
+    element.contains=other=>!!findNode(element,node=>node===other);
+    return element;
+  })(document.createElement);
+  let poll;
+  let result={success:true,tool:{found:true},status:{accept_snapshots_unknown:false},
+    rescan:{generation:3},job:{action:'scan',running:true}};
+  const window={document,setInterval:fn=>{poll=fn;},setTimeout,
+    Millennium:{callServerMethod:async()=>result}};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../addons/compressor/plugin/public/panel.js'),'utf8'),
+    {window,document,console});
+  document.getElementById('sls-compressor-panel-button').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const pane=document.getElementById('sls-compressor-panel');
+  assert.match(textOf(pane),/Snapshot refresh pending/);
+  result={...result,rescan:{generation:3,failed:'Use Check now to retry.'},job:{running:false}};
+  poll(); await new Promise(resolve=>setImmediate(resolve));
+  assert.match(textOf(pane),/Snapshot refresh failed: Use Check now to retry/);
+  assert.ok(findNode(pane,node=>node.tagName==='BUTTON' && node.textContent==='Check now'));
+});
+
+test('standalone compressor identifies a stuck lock holder',async()=>{
+  const document=fakeDom();
+  document.createElement=((original)=>tag=>{
+    const element=original(tag);
+    element.contains=other=>!!findNode(element,node=>node===other);
+    return element;
+  })(document.createElement);
+  const result={success:true,tool:{found:true},status:{},
+    job:{action:'scan',running:true,stuck:{holders:[4321],
+      message:'Compressor is stuck. Lock-holding PID(s): 4321. Inspect and stop it manually.'}}};
+  const window={document,setInterval:()=>{},setTimeout,
+    Millennium:{callServerMethod:async()=>result}};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../addons/compressor/plugin/public/panel.js'),'utf8'),
+    {window,document,console});
+  document.getElementById('sls-compressor-panel-button').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(textOf(document.getElementById('sls-compressor-panel')),/stuck.*4321.*stop it manually/);
+});
+
 function textOf(node){
   if(!node)return '';
   const own=node.children.length===0?(node.textContent||''):'';
@@ -1140,6 +1183,29 @@ test('Run now is gated by the enabled operations and sends the composed run',asy
   await new Promise(resolve=>setTimeout(resolve,20));
   const called=calls.filter(c=>c.fn==='SlsCompressorRun').pop();
   assert.equal(called.payload.action,'run','the drawer must start the composed run');
+});
+
+test('an open run confirmation cannot start while a snapshot refresh is pending',async()=>{
+  const document=fakeDom();
+  menubarFixture(document,true);
+  const fixture=compressorFixture();
+  const {w,calls}=fakeWindow(document,{compressor:fixture});
+  mount(w);
+  let overlay=await openCompressor(document);
+  findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Run now').onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  fixture.rescan={generation:5,failed:'Refresh failed; retry.'};
+  await clickRefresh(document);
+  overlay=document.getElementById('sls-luna-overlay');
+  const start=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Start the pass');
+  assert.ok(start && start.disabled,'the confirmation must be disabled during refresh');
+  start.onclick();
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls.filter(c=>c.fn==='SlsCompressorRun').length,0);
+  delete fixture.rescan;
+  await clickRefresh(document);
+  const ready=findNode(overlay,node=>node.tagName==='BUTTON' && node.textContent==='Start the pass');
+  assert.ok(ready && !ready.disabled,'the confirmation must unlock after refresh');
 });
 
 test('the status tab shows live progress while a run is in flight',async()=>{

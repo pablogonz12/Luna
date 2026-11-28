@@ -2077,6 +2077,7 @@
       const button = document.createElement('button');
       button.className = 'sls-luna-btn' + (cancelArmed ? '' : ' secondary');
       button.textContent = cancelArmed ? 'Confirm cancel' : 'Cancel job';
+      button.disabled = Boolean(compressor && compressor.job && compressor.job.stuck);
       button.onclick = async () => {
         const job = compressor && compressor.job;
         if (!job || !job.running) return;
@@ -2149,7 +2150,11 @@
       const start = document.createElement('button');
       start.className = 'sls-luna-btn';
       start.textContent = 'Start the pass';
-      start.onclick = () => startJob(body, 'run');
+      start.disabled = Boolean(compressor && (compressor.rescan || (compressor.job && compressor.job.running)));
+      start.onclick = () => {
+        if (!compressor || compressor.rescan || (compressor.job && compressor.job.running)) return;
+        startJob(body, 'run');
+      };
       const back = document.createElement('button');
       back.className = 'sls-luna-btn secondary';
       back.textContent = 'Back';
@@ -2372,6 +2377,26 @@
       scanLine.textContent = 'Tool: ' + (tool.path || '?') + (tool.version ? ' v' + tool.version : '') + '. '
         + (when ? 'Scanned ' + age(when) + ' ago.' : 'No scan yet \u2014 one starts by itself on first open.');
       body.appendChild(scanLine);
+      if (job && job.error) {
+        const errorLine = document.createElement('p');
+        errorLine.className = 'sls-luna-note';
+        errorLine.textContent = job.error;
+        body.appendChild(errorLine);
+      }
+      if (job && job.stuck) {
+        const stuckLine = document.createElement('p');
+        stuckLine.className = 'sls-luna-note';
+        stuckLine.textContent = job.stuck.message;
+        body.appendChild(stuckLine);
+      }
+      if (compressor.rescan) {
+        const refreshLine = document.createElement('p');
+        refreshLine.className = 'sls-luna-note';
+        refreshLine.textContent = compressor.rescan.failed
+          ? 'Snapshot refresh failed: ' + compressor.rescan.failed
+          : 'Snapshot refresh pending; library results may be out of date.';
+        body.appendChild(refreshLine);
+      }
 
       body.appendChild(compressorBusyLine());
       if (compressor && compressor.queue && (Number(compressor.queue.total) > 0 || compressor.queue.active)) {
@@ -2393,12 +2418,12 @@
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 8px;';
       actions.appendChild(jobButton(body, 'Scan library', 'scan', true, running));
-      actions.appendChild(jobButton(body, 'Preview (dry-run)', 'preview', true, running));
+      actions.appendChild(jobButton(body, 'Preview (dry-run)', 'preview', true, running || Boolean(compressor.rescan)));
       if (confirmAction !== 'run') {
         const runButton = document.createElement('button');
         runButton.className = 'sls-luna-btn';
         runButton.textContent = 'Run now';
-        runButton.disabled = running || !runs;
+        runButton.disabled = running || !runs || Boolean(compressor.rescan);
         runButton.onclick = () => { confirmAction = 'run'; paint(); };
         actions.appendChild(runButton);
       }

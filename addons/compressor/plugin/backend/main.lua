@@ -16,8 +16,13 @@ local STATUS_TMP = DIR .. '/status.tmp'
 local STATUS_AT = DIR .. '/status.at'
 local ATTEMPT_AT = DIR .. '/attempt.at'
 local JOB_FILE = DIR .. '/job.json'
+local RESCAN_FILE = DIR .. '/rescan.json'
+local GENERATION_FILE = DIR .. '/generation'
+local JOB_LOCK = DIR .. '/job.lock'
+local WORK_LOCK = DIR .. '/work.lock'
 local JOB_DONE = DIR .. '/job.done'
 local JOB_LOG = DIR .. '/last.log'
+local JOB_ERROR = DIR .. '/job.error'
 local SETTINGS = DIR .. '/settings.json'
 -- One-game-at-a-time queue: the backend writes a list and a driver script, the
 -- driver runs `--compact` per game and appends state, and the UI reads both.
@@ -147,6 +152,8 @@ local function dirname(path)
 end
 
 -- Writes through a temp file so a reader never sees a half-written report.
+-- This runtime offers no fsync binding: rename protects against torn reads and
+-- process crashes, but ordering and persistence across power loss are not assured.
 local function write_text(path, text)
   fs.create_directories(dirname(path))
   local tmp = path .. '.tmp'
@@ -222,6 +229,72 @@ local function process_group(pid)
   local fields = {}
   for field in rest:gmatch('%S+') do fields[#fields + 1] = field end
   return tonumber(fields[3]) -- state, ppid, pgrp
+end
+
+local BOOT_ID = (read_text('/proc/sys/kernel/random/boot_id') or ''):match('^[%x%-]+')
+local flock_check = os.execute('command -v flock >/dev/null 2>&1')
+local HAS_FLOCK = flock_check == true or flock_check == 0
+
+local function process_identity(pid)
+  local raw = read_text('/proc/' .. tostring(pid) .. '/stat')
+  local rest = raw and raw:match('%)%s*(.+)$')
+  if not rest then return nil end
+  local fields = {}
+  for field in rest:gmatch('%S+') do fields[#fields + 1] = field end
+  return {state = fields[1], pgid = tonumber(fields[3]), session = tonumber(fields[4]),
+    start = fields[20]}
+end
+
+-- A hard link claims the lock and publishes its owner in the same operation.
+-- flock serializes claim, release and stale-owner cleanup, not the job itself.
+local reap_lock = 'read owner started boot nonce 2>/dev/null < ' .. shq(JOB_LOCK) .. ' || :; '
+  .. 'case "$owner" in ""|*[!0-9]*) exit 0;; esac; '
+  .. 'current=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || exit 0; '
+  .. 'printf "%s\\n" "$current" | '
+  .. 'grep -Eiq "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" || exit 0; '
+  .. 'raw=$(cat "/proc/$owner/stat" 2>/dev/null) || { '
+  .. 'err=$(LC_ALL=C stat "/proc/$owner" 2>&1) || '
+  .. 'case "$err" in *"No such file or directory"*) rm -f ' .. shq(JOB_LOCK) .. ';; esac; exit 0; }; '
+  .. 'case "$raw" in *") "*) ;; *) exit 0;; esac; '
+  .. 'stat=$(printf "%s" "$raw" | sed "s/^.*) //"); '
+  .. 'state=$(printf "%s" "$stat" | cut -d " " -f 1); '
+  .. 'actual=$(printf "%s" "$stat" | cut -d " " -f 20); '
+  .. 'case "$state" in R|S|D|Z|T|t|X|x|K|W|P|I) ;; *) exit 0;; esac; '
+  .. 'case "$actual:$started" in *[!0-9:]*|:*|*:) exit 0;; esac; '
+  .. 'printf "%s\\n" "$boot" | '
+  .. 'grep -Eiq "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" || exit 0; '
+  .. 'if [ "$state" = Z ] || [ "$actual" != "$started" ] || [ "$boot" != "$current" ]; '
+  .. 'then rm -f ' .. shq(JOB_LOCK) .. '; fi'
+local reap_command = 'flock -x ' .. shq(JOB_LOCK .. '.reap') .. ' sh -c ' .. shq(reap_lock)
+
+local function lock_job()
+  fs.create_directories(DIR)
+  local stat = read_text('/proc/self/stat') or ''
+  local pid = tonumber(stat:match('^(%d+)'))
+  local identity = pid and process_identity(pid)
+  local nonce = (read_text('/proc/sys/kernel/random/uuid') or ''):match('^[%x%-]+')
+  if not identity or not identity.start or not BOOT_ID or not nonce then return false end
+  local owner = pid .. ' ' .. identity.start .. ' ' .. BOOT_ID .. ' ' .. nonce
+  local ownerFile = JOB_LOCK .. '.owner.' .. pid
+  if not write_text(ownerFile, owner .. '\n') then return false end
+  for attempt = 1, 120 do
+    local ok = os.execute((HAS_FLOCK and ('flock -x ' .. shq(JOB_LOCK .. '.reap') .. ' ') or '') .. 'ln '
+      .. shq(ownerFile) .. ' ' .. shq(JOB_LOCK) .. ' 2>/dev/null')
+    if ok == true or ok == 0 then
+      os.remove(ownerFile)
+      return true, owner
+    end
+    if HAS_FLOCK then os.execute(reap_command) end
+    os.execute('sleep 0.05')
+  end
+  os.remove(ownerFile)
+  return false
+end
+
+local function unlock_job(owner)
+  local release = '[ "$(cat "$1" 2>/dev/null)" != "$2" ] || rm -f "$1"'
+  os.execute((HAS_FLOCK and ('flock -x ' .. shq(JOB_LOCK .. '.reap') .. ' ') or '')
+    .. 'sh -c ' .. shq(release) .. ' owner-release ' .. shq(JOB_LOCK) .. ' ' .. shq(owner))
 end
 
 -- ---------------------------------------------------------------------------
@@ -727,7 +800,7 @@ end
 -- Everything the panel needs about the queue: per-game outcomes from the
 -- engine's own lines, a pass-level outcome that distinguishes "not started"
 -- from "failed", the current phase and byte counts, and a rolling ETA.
-local function read_queue(limit, job)
+local function read_queue(limit, job, observe)
   local raw = read_text(QUEUE_LIST)
   if not raw then return nil end
   local games, byIndex, byName = {}, {}, {}
@@ -884,14 +957,14 @@ local function read_queue(limit, job)
   local eta = nil
   local sampleKey = passId and queue.current and (passId .. ':' .. tostring(queue.index)
     .. ':' .. queue.current.path) or nil
-  if progress_samples.key ~= sampleKey then progress_samples = { key = sampleKey } end
+  if not observe and progress_samples.key ~= sampleKey then progress_samples = { key = sampleKey } end
   if sampleKey and queue.phase == 'compress' and queue.totalBytes > 0 and queue.current then
     local cur = { at = os.time(), doneBytes = queue.doneBytes, totalBytes = queue.totalBytes }
     local prev = progress_samples[sampleKey]
     eta = eta_from(prev, cur)
-    if not prev or cur.doneBytes ~= prev.doneBytes then
+    if not observe and (not prev or cur.doneBytes ~= prev.doneBytes) then
       progress_samples[sampleKey] = cur
-    else
+    elseif not observe then
       progress_samples[sampleKey] = { at = prev.at, doneBytes = prev.doneBytes,
         totalBytes = cur.totalBytes }
     end
@@ -1190,7 +1263,189 @@ local function read_job()
   local pid = tonumber(value.pid)
   local action = type(value.action) == 'string' and value.action or ''
   if not pid or pid < 2 or pid ~= math.floor(pid) or not ACTIONS[action] then return nil end
-  return { action = action, pid = pid, startedAt = tonumber(value.startedAt) or 0 }
+  return { action = action, pid = pid, startedAt = tonumber(value.startedAt) or 0,
+    generation = tonumber(value.generation),
+    reportId = type(value.reportId) == 'string' and value.reportId:match('^[%x%-]+$'),
+    pgid = tonumber(value.pgid), procStart = tostring(value.procStart or ''),
+    boot = type(value.boot) == 'string' and value.boot or '',
+    token = type(value.token) == 'string' and value.token:match('^[%x%-]+$'),
+    closed = value.closed == true }
+end
+
+-- The workload inherits fd 6. The inspected btrfs-game-compressor shell script
+-- does not background/detach work and uses fds 7, 8 and 9 for its own locks.
+-- Its native/sudo subprocesses were not proven to preserve inherited fds:
+-- closing/replacing fd 6 or detaching is an unsupported contract break.
+-- Without flock we assume no detachment and state locks cannot be reaped.
+local function workload_locked()
+  if HAS_FLOCK and fs.exists(WORK_LOCK) then
+    local ok = os.execute('flock -n ' .. shq(WORK_LOCK) .. ' true >/dev/null 2>&1')
+    if ok ~= true and ok ~= 0 then return true end
+  end
+  return false
+end
+
+-- Observe must not even acquire the lifetime flock. Inspect kernel lock state
+-- instead; inode collisions across filesystems conservatively read as busy.
+local function workload_observed()
+  if not HAS_FLOCK or not fs.exists(WORK_LOCK) then return false end
+  local inode
+  if lfs then
+    local ok, attr = pcall(lfs.attributes, WORK_LOCK)
+    if ok and type(attr) == 'table' then inode = tonumber(attr.ino) end
+  end
+  if not inode then
+    local pipe = io.popen('stat -Lc %i ' .. shq(WORK_LOCK) .. ' 2>/dev/null', 'r')
+    if pipe then
+      inode = tonumber(pipe:read('*l') or '')
+      pipe:close()
+    end
+  end
+  local locks = read_text('/proc/locks')
+  if not inode or not locks then return true end
+  for line in locks:gmatch('[^\n]+') do
+    local lockInode = line:match('FLOCK%s+%S+%s+%S+%s+%d+%s+[%x]+:[%x]+:(%d+)')
+    if tonumber(lockInode) == inode then return true end
+  end
+  -- In a PID namespace /proc/locks can omit an inherited flock after the
+  -- original flock(1) owner exits. An open inherited fd is conservatively
+  -- busy, even if it no longer holds the lock; observation must not flock.
+  local command = 'target=$(readlink -f ' .. shq(WORK_LOCK) .. ') || exit 1; '
+    .. 'for fd in /proc/[0-9]*/fd/6; do '
+    .. '[ "$(readlink "$fd" 2>/dev/null)" = "$target" ] && exit 0; done; exit 1'
+  local present = os.execute(command .. ' >/dev/null 2>&1')
+  if present == true or present == 0 then return true end
+  return false
+end
+
+-- The leader may die before its child. A matching session/group and inherited
+-- token keep the job busy until every non-zombie member has gone.
+local function group_alive(job)
+  if not job.pgid or not job.token or job.procStart == '' or job.boot == '' then
+    return not job.closed and alive(job.pid) -- legacy job
+  end
+  if not BOOT_ID or job.boot ~= BOOT_ID or job.pgid ~= job.pid then return false end
+  local leader = process_identity(job.pid)
+  if leader and leader.state ~= 'Z' then
+    return leader.start == job.procStart and leader.pgid == job.pgid
+      and leader.session == job.pgid
+  end
+  local pipe = io.popen('ps -eo pid=,pgid=,sid=,stat= 2>/dev/null', 'r')
+  if not pipe then return true end -- fail closed
+  local found = false
+  for line in pipe:lines() do
+    local pid, group, session, state = line:match('^%s*(%d+)%s+(%d+)%s+(%d+)%s+(%S+)')
+    if tonumber(group) == job.pgid and tonumber(session) == job.pgid
+      and state and state:sub(1, 1) ~= 'Z' then
+      local env = read_text('/proc/' .. pid .. '/environ')
+      local memberToken = env and ('\0' .. env):match('\0LUNA_COMPRESSOR_TOKEN=([^\0]+)')
+      -- A child may have scrubbed its environment; in that case keep the
+      -- group busy rather than risk launching a second pass.
+      if not memberToken or memberToken == job.token then
+        found = true
+        break
+      end
+    end
+  end
+  local ok = pipe:close()
+  return found or not ok
+end
+
+local function job_alive(job)
+  return workload_locked() or group_alive(job)
+end
+
+-- Never signal a recycled PID/group. Re-read boot ID and leader identity at the
+-- point of signalling; a missing leader is deliberately not enough authority.
+local function original_group_valid(job)
+  local boot = (read_text('/proc/sys/kernel/random/boot_id') or ''):match('^([%x%-]+)%s*$')
+  local leader = job and process_identity(job.pid)
+  if not job or not job.pgid or job.pgid ~= job.pid or not boot or #boot ~= 36 or boot ~= job.boot
+    or not leader or leader.state == 'Z' or leader.start ~= job.procStart
+    or leader.pgid ~= job.pgid or leader.session ~= job.pgid then
+    return false
+  end
+  return true
+end
+
+local function group_kill_command(signal, pgid)
+  pgid = math.floor(tonumber(pgid) or 0)
+  assert(pgid > 1 and signal:match('^%u+$'), 'refusing an unsafe kill target')
+  return '/bin/kill -s ' .. signal .. ' -- -' .. pgid
+end
+
+local function signal_original_group(job)
+  if not original_group_valid(job) then
+    return false, 'The original process group cannot be verified; no signal was sent.'
+  end
+  -- `-s TERM -- -PGID` on purpose: procps-ng kill (Ubuntu's /bin/kill) misreads
+  -- `-TERM -PGID` and can signal unrelated groups, even -1 (every process of
+  -- the user). util-linux kill and both shells' builtins accept this form.
+  local ok = os.execute(group_kill_command('TERM', job.pgid))
+  if ok ~= true and ok ~= 0 then return false, 'Could not signal the original process group.' end
+  return true
+end
+
+local function stuck_holder()
+  local holders = {}
+  local pipe = io.popen('fuser ' .. shq(WORK_LOCK) .. ' 2>/dev/null', 'r')
+  if pipe then
+    local output = pipe:read('*a') or ''
+    pipe:close()
+    for pid in output:gmatch('%d+') do holders[#holders + 1] = tonumber(pid) end
+  end
+  if #holders == 0 then
+    local command = 'target=$(readlink -f ' .. shq(WORK_LOCK) .. '); '
+      .. 'for fd in /proc/[0-9]*/fd/6; do '
+      .. '[ "$(readlink "$fd" 2>/dev/null)" = "$target" ] || continue; '
+      .. 'pid=${fd#/proc/}; pid=${pid%%/*}; printf "%s\\n" "$pid"; done'
+    pipe = io.popen(command, 'r')
+    if pipe then
+      for line in pipe:lines() do
+        local pid = tonumber(line)
+        if pid then holders[#holders + 1] = pid end
+      end
+      pipe:close()
+    end
+  end
+  table.sort(holders)
+  local detail
+  if #holders > 0 then
+    local ids = {}
+    for _, pid in ipairs(holders) do ids[#ids + 1] = tostring(pid) end
+    detail = 'Lock-holding PID(s): ' .. table.concat(ids, ', ') .. '. Inspect with ps -fp '
+      .. table.concat(ids, ',') .. '; if confirmed, stop a holder with kill -TERM ' .. ids[1] .. '.'
+  else
+    detail = 'Identify the holder with fuser -v ' .. shq(WORK_LOCK)
+      .. ' or inspect /proc/*/fd/6, then stop a confirmed holder with kill -TERM <PID>.'
+  end
+  return {holders = json.array(holders), message = 'Compressor is stuck: its original process group is gone. '
+    .. detail .. ' Luna will not signal it automatically; recovery remains blocked until the lock is released.'}
+end
+
+local function read_rescan()
+  local raw = read_text(RESCAN_FILE)
+  if not raw then return nil end
+  local ok, value = pcall(json.decode, raw)
+  if not ok or type(value) ~= 'table' or type(value.enabled) ~= 'boolean'
+    or not tonumber(value.generation) then return nil end
+  value.generation = tonumber(value.generation)
+  return value
+end
+
+local function save_rescan(value)
+  return write_text(RESCAN_FILE, json.encode(value))
+end
+
+local function next_generation()
+  local n = (tonumber(read_text(GENERATION_FILE) or '') or 0) + 1
+  if not write_text(GENERATION_FILE, tostring(n)) then return nil end
+  return n
+end
+
+local function report_file(generation, id)
+  return generation and (DIR .. '/status.scan.' .. tostring(math.floor(generation))
+    .. (id and ('.' .. id) or '')) or STATUS_TMP
 end
 
 -- ------------------------------------------------------------ log rotation
@@ -1202,7 +1457,7 @@ end
 local function rotate_log(limit)
   limit = limit or LOG_LIMIT
   local job = read_job()
-  if job and alive(job.pid) then return false, file_bytes(QUEUE_LOG), 'live' end
+  if job and job_alive(job) then return false, file_bytes(QUEUE_LOG), 'live' end
   local size = file_bytes(QUEUE_LOG)
   if size <= limit then return false, size, 'small' end
   local ok = os.rename(QUEUE_LOG, LOG_PREV)
@@ -1216,19 +1471,85 @@ M.log_limit = LOG_LIMIT
 -- command's own shell records $$ in a pid file before exec, which stays correct
 -- even in the rare case where setsid has to fork, and it leads its own process
 -- group so a cancel can take the whole pass down.
-local function spawn_detached(command, action, scan)
+local function spawn_detached(command, action, scan, generation)
   fs.create_directories(DIR)
-  os.remove(JOB_DONE)
+  if scan and not generation then
+    generation = next_generation()
+    if not generation then return nil end
+  end
+  local reportId
+  local token = read_text('/proc/sys/kernel/random/uuid')
+  token = token and token:match('^[%x%-]+')
+  if not token or not BOOT_ID then return nil end
+  if scan then
+    reportId = read_text('/proc/sys/kernel/random/uuid')
+    reportId = reportId and reportId:match('^[%x%-]+')
+    if not reportId then return nil end
+  end
+  if fs.exists(JOB_DONE) and not os.remove(JOB_DONE) then return nil end
+  if fs.exists(JOB_ERROR) and not os.remove(JOB_ERROR) then return nil end
   write_text(JOB_LOG, '')
-  if scan then os.remove(STATUS_TMP) end
-  local pidfile = DIR .. '/job.pid'
-  os.remove(pidfile)
+  local pidfile = DIR .. '/job.pid.' .. token
   local redirect = scan
-    and ('> ' .. shq(STATUS_TMP) .. ' 2>> ' .. shq(JOB_LOG))
+    and ('> ' .. shq(report_file(generation, reportId)) .. ' 2>> ' .. shq(JOB_LOG))
     or ('> ' .. shq(JOB_LOG) .. ' 2>&1')
-  local inner = string.format('echo $$ > %s; exec nohup %s %s < /dev/null',
-    shq(pidfile), command, redirect)
-  local outer = string.format('setsid sh -c %s < /dev/null > /dev/null 2>&1 &', shq(inner))
+  local inner
+  local ready
+  local lifetime = HAS_FLOCK and ('exec 6>>' .. shq(WORK_LOCK) .. '; flock -n 6 || exit 1; ') or ''
+  if scan then
+    ready = DIR .. '/ready.' .. reportId
+    inner = table.concat({
+      lifetime .. 'echo $$ > ' .. shq(pidfile),
+      'n=0; while [ ! -f ' .. shq(ready) .. ' ]; do n=$((n+1)); [ "$n" -gt 100 ] && exit 1; sleep 0.05; done',
+      'rm -f ' .. shq(ready),
+      'generation=' .. tostring(generation),
+      'report_id=' .. shq(reportId),
+      'started=' .. tostring(os.time()),
+      'proc_start=$(sed "s/^.*) //" "/proc/$$/stat" | cut -d " " -f 20)',
+      'boot=' .. shq(BOOT_ID),
+      'token=' .. shq(token),
+      'lock=' .. shq(JOB_LOCK),
+      'job=' .. shq(JOB_FILE),
+      'pending=' .. shq(RESCAN_FILE),
+      'setting=' .. shq(SNAPSHOT_FILE),
+      'dir=' .. shq(DIR),
+      'log=' .. shq(JOB_LOG),
+      'while :; do',
+      '  report="$dir/status.scan.$generation.$report_id"',
+      '  : > "$report.started"',
+      '  nohup ' .. command .. ' > "$report" 2>> "$log" < /dev/null',
+      '  rc=$?; printf "%s" "$rc" > "$report.exit"; [ "$rc" = 0 ] && : > "$report.ok"',
+      '  n=0',
+      '  owner_file="$lock.owner.$$"; nonce=$(cat /proc/sys/kernel/random/uuid); [ -n "$nonce" ] || exit 1',
+      '  owner="$$ $proc_start $boot $nonce"; printf "%s\\n" "$owner" > "$owner_file" || exit 1',
+      [[  release_lock() { ]] .. (HAS_FLOCK and 'flock -x "$lock.reap" ' or '') .. [[sh -c '[ "$(cat "$1" 2>/dev/null)" != "$2" ] || rm -f "$1"' owner-release "$lock" "$owner"; }]],
+      '  while ! ' .. (HAS_FLOCK and 'flock -x "$lock.reap" ' or '') .. 'ln "$owner_file" "$lock" 2>/dev/null; do',
+      '    n=$((n+1)); [ "$n" -gt 120 ] && { rm -f "$owner_file"; exit 1; }',
+      '    ' .. (HAS_FLOCK and reap_command or ':'),
+      '    sleep 0.05',
+      '  done',
+      '  rm -f "$owner_file"',
+      '  request=$(cat "$pending" 2>/dev/null)',
+      [=[  next=$(printf '%s' "$request" | sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')]=],
+      [=[  enabled=$(printf '%s' "$request" | sed -n 's/.*"enabled"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')]=],
+      '  actual=$(cat "$setting" 2>/dev/null)',
+      [=[  if [ -n "$next" ] && [ "$next" != "$generation" ] && [ "$enabled" = "$actual" ] && ! printf '%s' "$request" | grep -q '"failed"[[:space:]]*:'; then]=],
+      '    generation=$next; report_id=$(cat /proc/sys/kernel/random/uuid); started=$(date +%s)',
+      [[    printf '{"action":"scan","pid":%s,"pgid":%s,"procStart":"%s","boot":"%s","token":"%s","startedAt":%s,"generation":%s,"reportId":"%s"}' "$$" "$$" "$proc_start" "$boot" "$token" "$started" "$generation" "$report_id" > "$job.chain.$$" && mv -f "$job.chain.$$" "$job" || { : > "$report.state-error"; release_lock; exit 1; }]],
+      '    rm -f "$report" "$report.ok" "$report.started" "$report.exit"',
+      '    release_lock; continue',
+      '  fi',
+      [[  printf '{"action":"scan","pid":%s,"pgid":%s,"procStart":"%s","boot":"%s","token":"%s","startedAt":%s,"generation":%s,"reportId":"%s","closed":true}' "$$" "$$" "$proc_start" "$boot" "$token" "$started" "$generation" "$report_id" > "$job.chain.$$" && mv -f "$job.chain.$$" "$job" || : > "$report.state-error"]],
+      '  release_lock; exit "$rc"',
+      'done',
+    }, '\n')
+  else
+    ready = DIR .. '/ready.' .. token
+    inner = string.format('%secho $$ > %s; n=0; while [ ! -f %s ]; do n=$((n+1)); [ "$n" -gt 100 ] && exit 1; sleep 0.05; done; rm -f %s; exec nohup %s %s < /dev/null',
+      lifetime, shq(pidfile), shq(ready), shq(ready), command, redirect)
+  end
+  local outer = string.format('setsid env %s sh -c %s < /dev/null > /dev/null 2>&1 &',
+    shq('LUNA_COMPRESSOR_TOKEN=' .. token), shq(inner))
   os.execute(outer)
   local pid
   for _ = 1, 20 do
@@ -1239,26 +1560,63 @@ local function spawn_detached(command, action, scan)
   end
   os.remove(pidfile)
   if not pid then return nil end
-  write_text(JOB_FILE, json.encode({ action = action, pid = pid, startedAt = os.time() }))
+  local identity = process_identity(pid)
+  if not identity or identity.pgid ~= pid or identity.session ~= pid or not identity.start then
+    return nil
+  end
+  local owned = {pid = pid, pgid = pid, procStart = identity.start, boot = BOOT_ID}
+  if not write_text(JOB_FILE, json.encode({ action = action, pid = pid,
+    pgid = pid, procStart = identity.start, boot = BOOT_ID, token = token,
+    startedAt = os.time(), generation = generation, reportId = reportId })) then
+    signal_original_group(owned)
+    return nil
+  end
+  if ready and not write_text(ready, 'ready') then
+    signal_original_group(owned)
+    return nil
+  end
   if scan then write_text(ATTEMPT_AT, tostring(os.time())) end
   return pid
 end
 
-local function spawn(tool, action, args)
+local function spawn(tool, action, args, generation)
   local spec = ACTIONS[action]
-  return spawn_detached(shq(tool) .. ' ' .. (args or spec.args), action, spec.scan == true)
+  return spawn_detached(shq(tool) .. ' ' .. (args or spec.args), action, spec.scan == true, generation)
 end
 
 -- A finished scan only counts once its whole JSON landed; a scan that was
 -- cancelled or crashed leaves nothing to adopt.
-local function adopt_status()
-  if not fs.exists(STATUS_TMP) then return end
-  local raw = read_text(STATUS_TMP)
-  os.remove(STATUS_TMP)
-  if type(raw) ~= 'string' then return end
+local function adopt_status(job, pending)
+  local path = report_file(job.generation, job.reportId)
+  local raw = read_text(path)
+  if type(raw) ~= 'string' then
+    local existing = read_text(STATUS) or ''
+    return pending and tonumber(existing:match('"__luna_generation"%s*:%s*(%d+)'))
+      == pending.generation or false
+  end
+  if job.reportId and not fs.exists(path .. '.ok') then return false end
   local trimmed = raw:gsub('%s+$', '')
-  if #trimmed < 16 or trimmed:sub(1, 1) ~= '{' or trimmed:sub(-1) ~= '}' then return end
-  if write_text(STATUS, trimmed) then write_text(STATUS_AT, tostring(os.time())) end
+  local ok, report = pcall(json.decode, trimmed)
+  if not ok or type(report) ~= 'table' or #trimmed < 16
+    or trimmed:sub(1, 1) ~= '{' or trimmed:sub(-1) ~= '}' then return false end
+  if pending and job.generation ~= pending.generation then return false end
+  local existing = read_text(STATUS)
+  local oldgen = existing and tonumber(existing:match('"__luna_generation"%s*:%s*(%d+)')) or 0
+  local gen = job.generation or 0
+  if gen < oldgen then return false end
+  if pending and report.accept_snapshots_unknown ~= pending.enabled then return false end
+  local tagged = '{"__luna_generation":' .. tostring(gen) .. ',' .. trimmed:sub(2)
+  if not write_text(STATUS, tagged) then return false end
+  if not write_text(STATUS_AT, tostring(os.time())) then return false end
+  return true
+end
+
+local function cleanup_report(job)
+  local path = report_file(job.generation, job.reportId)
+  for _, suffix in ipairs({'', '.ok', '.started', '.exit', '.state-error', '.cancelled'}) do
+    os.remove(path .. suffix)
+  end
+  if job.reportId then os.remove(DIR .. '/ready.' .. job.reportId) end
 end
 
 -- observe: report the job as it is, without recording its completion or
@@ -1266,14 +1624,108 @@ end
 local function job_state(observe)
   local job = read_job()
   if not job then return nil end
-  local running = alive(job.pid)
+  local locked = observe and workload_observed() or (not observe and workload_locked())
+  local groupRunning = group_alive(job)
+  local running = locked or groupRunning
+  local stuck = locked and not groupRunning and stuck_holder() or nil
   local finishedAt = tonumber(read_text(JOB_DONE) or '') or 0
+  local failure = read_text(JOB_ERROR)
+  local blocked = false
   if not running and finishedAt == 0 and observe then
     finishedAt = os.time()
+    if job.action == 'scan' then
+      local path = report_file(job.generation, job.reportId)
+      local exitCode = tonumber(read_text(path .. '.exit') or '')
+      if fs.exists(path .. '.state-error') or (job.reportId and not job.closed and exitCode ~= nil) then
+        failure = failure or 'Could not save the final scan state. Retry the library scan.'
+      elseif exitCode and exitCode ~= 0 then
+        failure = failure or ('The scan failed (exit ' .. exitCode .. ').')
+      end
+    end
   elseif not running and finishedAt == 0 then
     finishedAt = os.time()
-    write_text(JOB_DONE, tostring(finishedAt))
-    if job.action == 'scan' then adopt_status() end
+    local pending = read_rescan()
+    if job.action == 'scan' then
+      local path = report_file(job.generation, job.reportId)
+      local exitCode = tonumber(read_text(path .. '.exit') or '')
+      local cancelled = fs.exists(path .. '.cancelled')
+      local stateError = fs.exists(path .. '.state-error')
+        or (job.reportId and not job.closed and exitCode ~= nil)
+      local matching = pending and job.generation == pending.generation
+      local adopted = false
+      if pending and pending.failed then
+        failure = pending.failed
+      elseif stateError then
+        failure = 'Could not save the final scan state. Retry the library scan.'
+      elseif matching and exitCode == nil and not cancelled then
+        pending.retries = (tonumber(pending.retries) or 0) + 1
+        if pending.retries > 2 then
+          failure = 'The refresh scan was interrupted repeatedly. Retry the library scan.'
+        elseif not save_rescan(pending) then
+          failure, blocked = 'Could not save refresh recovery state.', true
+        end
+      else
+        if not cancelled then adopted = adopt_status(job, pending) end
+        if not adopted and (not pending or matching) then
+          failure = cancelled and 'The scan was cancelled.'
+            or (exitCode and exitCode ~= 0 and ('The scan failed (exit ' .. exitCode .. ').')
+              or 'The scan did not produce a valid report.')
+        end
+      end
+      if failure and matching then
+        pending.failed = pending.failed or (failure .. ' Use Scan library or Check now to retry.')
+        if not save_rescan(pending) then blocked = true end
+      end
+      if failure and not write_text(JOB_ERROR, failure) then
+        failure, blocked = 'Could not save the scan failure state.', true
+      end
+      if blocked then
+        -- Keep the attempt evidence and retry the required state writes on poll.
+      elseif not write_text(JOB_DONE, tostring(finishedAt)) then
+        failure, blocked = 'Could not save the final scan state. Retry the library scan.', true
+        if matching then
+          pending.failed = failure
+          save_rescan(pending)
+        end
+      elseif matching and adopted and not failure then
+        if not os.remove(RESCAN_FILE) then
+          failure, blocked = 'Could not clear the refresh reservation.', true
+          pending.failed = failure
+          save_rescan(pending)
+          write_text(JOB_ERROR, failure)
+        end
+      end
+    else
+      if not write_text(JOB_DONE, tostring(finishedAt)) then
+        failure, blocked = 'Could not save the final job state.', true
+      end
+    end
+  end
+  if not observe and not running and finishedAt > 0 and job.action == 'scan' then
+    local pending = read_rescan()
+    if pending and not pending.failed and pending.generation == job.generation then
+      local path = report_file(job.generation, job.reportId)
+      local report = read_text(path)
+      local status = read_text(STATUS)
+      local trimmed = report and report:match('^%s*(.-)%s*$')
+      local valid, parsed = pcall(json.decode, report or '')
+      local expected = trimmed and trimmed:sub(1, 1) == '{'
+        and ('{"__luna_generation":' .. tostring(job.generation) .. ',' .. trimmed:sub(2))
+      if tonumber(read_text(path .. '.exit') or '') == 0 and fs.exists(path .. '.ok')
+        and not fs.exists(path .. '.cancelled') and not fs.exists(path .. '.state-error')
+        and valid and type(parsed) == 'table' and parsed.accept_snapshots_unknown == pending.enabled
+        and expected and expected == status and tonumber(read_text(STATUS_AT) or '') then
+        if not os.remove(RESCAN_FILE) then
+          blocked, failure = true, 'Could not clear the refresh reservation.'
+        end
+      elseif fs.exists(path .. '.ok') then
+        blocked, failure = true, 'Could not verify the completed refresh; recovery is blocked.'
+      end
+    end
+  end
+  if not observe and not running and finishedAt > 0 and not blocked and fs.exists(JOB_DONE)
+    and job.action == 'scan' then
+    cleanup_report(job)
   end
   if running then finishedAt = 0 end
   local jobLog = tail(JOB_LOG, 40, 65536)
@@ -1286,10 +1738,12 @@ local function job_state(observe)
   end
   return {
     action = job.action, pid = job.pid, running = running,
+    generation = job.generation, pgid = job.pgid,
     startedAt = job.startedAt, finishedAt = finishedAt,
     elapsed = running and (os.time() - job.startedAt) or 0,
     log = jobLog,
     refusal = refused,
+    error = failure, recoveryBlocked = blocked, stuck = stuck,
   }
 end
 
@@ -1318,6 +1772,25 @@ local get_cache = { rev = '', text = nil, expires = 0 }
 function M.register(registry)
   local settings = read_settings()
 
+  -- The detached scan owns the normal handoff. Polling recovers a reservation
+  -- if its owner died before handing it off.
+  local function service_rescan(job)
+    local pending = read_rescan()
+    if not pending or pending.failed or (job and (job.running or job.recoveryBlocked)) then return job, pending end
+    if read_text(SNAPSHOT_FILE) ~= (pending.enabled and 'true\n' or 'false\n') then
+      pending.failed = 'The snapshot setting was not saved or changed elsewhere. Choose it again to retry.'
+      save_rescan(pending)
+      return job, pending
+    end
+    local tool = find_tool()
+    if not tool or not spawn(tool, 'scan', ACTIONS.scan.args, pending.generation) then
+      pending.failed = 'Could not start the refresh scan. Use Scan library or Check now to retry.'
+      save_rescan(pending)
+      return job, pending
+    end
+    return job_state(), pending
+  end
+
   local function scan_state()
     local status = nil
     local raw = read_text(STATUS)
@@ -1328,7 +1801,7 @@ function M.register(registry)
     return status
   end
 
-  registry.SlsCompressorGet = function(raw)
+  registry.SlsCompressorGet = function(raw, readOnly)
     local tool = find_tool()
     -- Settings can change on disk (a hand edit, another surface), so the file
     -- is the source of truth on every read.
@@ -1338,18 +1811,18 @@ function M.register(registry)
     local light = false
     local refresh = false
     -- observe: a strictly read-only look (no auto-scan, no report adoption).
-    local observe = false
+    local observe = readOnly == true
     if type(raw) == 'string' and #raw <= 200 then
       local ok, obj = pcall(json.decode, raw)
       if ok and type(obj) == 'table' then
         light = obj.light == true
         refresh = obj.refresh == true
-        observe = obj.observe == true
+        observe = observe or obj.observe == true
       end
     end
     -- Every file the reply is built from, so the memo below cannot outlive a
     -- scan that landed or a queue that moved.
-    local inputs = { SETTINGS, STATUS, STATUS_AT, ATTEMPT_AT, JOB_FILE, JOB_DONE,
+    local inputs = { SETTINGS, STATUS, STATUS_AT, ATTEMPT_AT, JOB_FILE, JOB_DONE, RESCAN_FILE,
       JOB_LOG, QUEUE_LIST, QUEUE_STATE, QUEUE_LOG, TOOL_STATE_FILE,
       TOOL_DEDUPE_HISTORY, SNAPSHOT_FILE, DIR, TOOL_DIR, tool or '' }
     local key = function()
@@ -1365,19 +1838,22 @@ function M.register(registry)
     local cacheKey = key()
     -- `refresh` is the explicit escape hatch: a caller that just changed a
     -- setting or finished a pass can skip the memo instead of waiting the TTL.
-    if not refresh and cacheKey and get_cache.text and get_cache.rev == cacheKey
+    if not observe and not read_rescan() and not refresh and cacheKey and get_cache.text and get_cache.rev == cacheKey
       and now < get_cache.expires then
       return get_cache.text
     end
     -- job_state() first: observing a finished scan adopts its report, which is
     -- what this same response must already include.
     local job = job_state(observe)
+    local rescan = read_rescan()
+    if not observe then job, rescan = service_rescan(job) end
     local status = scan_state()
     local statusAt = tonumber(read_text(STATUS_AT) or '') or 0
     -- The first open starts the read-only scan itself; a recent failed attempt
     -- is not retried in a loop, and a running job is always left alone.
     local autoStarted = false
-    if tool and not observe and not (job and job.running) and status == nil then
+    if tool and not observe and not rescan and not (job and (job.running or job.recoveryBlocked))
+      and status == nil then
       local attempt = tonumber(read_text(ATTEMPT_AT) or '') or 0
       if os.time() - attempt > 600 then
         local pid = spawn(tool, 'scan', ACTIONS.scan.args)
@@ -1388,7 +1864,7 @@ function M.register(registry)
       end
     end
     local plan = build_plan(status, settings)
-    local queue = read_queue(light and 262144 or 524288, job)
+    local queue = read_queue(light and 262144 or 524288, job, observe)
     if queue then
       queue.active = job ~= nil and job.running and job.action == 'run' and not queue.finished
       queue.next = json.array(queue.next or {})
@@ -1431,15 +1907,31 @@ function M.register(registry)
       queue = queue,
       stats = stats,
       job = job,
+      rescan = rescan,
       autoStarted = autoStarted,
     })
     -- A running pass (or a scan this call just started) rewrites its log and
     -- state while the client polls, and the next call should see that at once,
     -- so only a settled backend is memoised.
-    if not refresh and cacheKey and not autoStarted and not (job and job.running) then
+    if not observe and not rescan and not refresh and cacheKey and not autoStarted
+      and not (job and (job.running or job.recoveryBlocked)) then
       get_cache.text = out
       get_cache.rev = key()
       get_cache.expires = os.time() + GET_CACHE_TTL
+      local cachedLight = light
+      get_cache.fast = function(request)
+        local requestedLight, requestedRefresh = false, false
+        if type(request) == 'string' and #request <= 200 then
+          local ok, obj = pcall(json.decode, request)
+          if ok and type(obj) == 'table' then
+            requestedLight, requestedRefresh = obj.light == true, obj.refresh == true
+          end
+        end
+        if not requestedRefresh and requestedLight == cachedLight and not read_rescan()
+          and os.time() < get_cache.expires and key() == get_cache.rev then
+          return get_cache.text
+        end
+      end
     end
     return out
   end
@@ -1508,32 +2000,31 @@ function M.register(registry)
     end
     local current = read_text(SNAPSHOT_FILE)
     local already = current == (want and 'true\n' or 'false\n')
+    local generation = next_generation()
+    if not generation or not save_rescan({generation = generation, enabled = want}) then
+      return response({success = false, code = 'rescan-reservation',
+        error = 'Could not reserve a refresh scan; retry without changing the setting.'})
+    end
     if not already and not write_accept_snapshots(want) then
+      local pending = read_rescan()
+      if pending then
+        pending.failed = 'The snapshot setting could not be saved. Choose it again to retry.'
+        save_rescan(pending)
+      end
       return response({success = false, error = 'Could not write the snapshot setting'})
     end
-    -- Re-read the engine's view: a detached scan is the only honest way, since
-    -- the eligibility comes from it and not from the setting alone.
-    -- A scan that started before this write would report the old value. Wait
-    -- for it (bounded) so the rescan below really reads the new file.
     local job = job_state()
-    local waited = 0
-    while job and job.running and waited < 20 do
-      os.execute('sleep 0.1')
-      waited = waited + 1
-      job = job_state()
-    end
-    local scanning = false
-    local tool = find_tool()
-    if tool and not (job and job.running) then
-      scanning = spawn(tool, 'scan', ACTIONS.scan.args) ~= nil
-    end
+    local pending
+    job, pending = service_rescan(job)
     return response({
       success = true,
       already = already,
       enabled = want,
       setting = SNAPSHOT_FILE,
       value = want and 'true' or 'false',
-      scanning = scanning,
+      scanning = job ~= nil and job.running and job.action == 'scan'
+        and job.generation == generation,
+      rescan = pending,
       message = want
         and (already and 'Snapshot growth was already allowed for compression.'
           or 'Snapshot growth is now allowed (accept_snapshots_unknown = true).')
@@ -1552,8 +2043,35 @@ function M.register(registry)
       return response({success = false, error = 'Unknown action'})
     end
     local job = job_state()
+    local pending = read_rescan()
+    if pending then
+      if action ~= 'scan' then
+        return response({success = false, error = 'The snapshot refresh is pending; check the library first.'})
+      end
+      if job and job.running then
+        return response({success = false, error = 'A job is already running'})
+      end
+      if job and job.recoveryBlocked then
+        return response({success = false, error = job.error or 'Could not save the previous job state; retry later.'})
+      end
+      if read_text(SNAPSHOT_FILE) ~= (pending.enabled and 'true\n' or 'false\n') then
+        return response({success = false, error = 'Choose the snapshot setting again before retrying.'})
+      end
+      local generation = next_generation()
+      if not generation then return response({success = false, error = 'Could not reserve a refresh scan'}) end
+      pending.generation, pending.failed, pending.retries = generation, nil, nil
+      if not save_rescan(pending) then
+        return response({success = false, error = 'Could not reserve a refresh scan'})
+      end
+      job, pending = service_rescan(job)
+      if pending and pending.failed then return response({success = false, error = pending.failed}) end
+      return response({success = true, job = job})
+    end
     if job and job.running then
       return response({success = false, error = 'A job is already running'})
+    end
+    if job and job.recoveryBlocked then
+      return response({success = false, error = job.error or 'Could not save the previous job state; retry later.'})
     end
     local tool = find_tool()
     if not tool then
@@ -1639,7 +2157,21 @@ function M.register(registry)
     if not job or not job.running then
       return response({success = false, error = 'No job is running'})
     end
+    if job.stuck then
+      return response({success = false, code = 'stuck', error = job.stuck.message})
+    end
+    local record = read_job()
+    if not original_group_valid(record) then
+      return response({success = false, code = 'identity',
+        error = 'The original process group cannot be verified; no signal was sent.'})
+    end
     local pid = math.floor(job.pid)
+    if job.action == 'scan' then
+      if record and record.reportId
+        and not write_text(report_file(record.generation, record.reportId) .. '.cancelled', 'true') then
+        return response({success = false, error = 'Could not record scan cancellation'})
+      end
+    end
     if job.action == 'run' and fs.exists(QUEUE_STATE) then
       -- Before the signal, so a driver that outlives it cannot make the pass
       -- read as finished; the marker also survives the driver's own finish.
@@ -1649,33 +2181,49 @@ function M.register(registry)
         marker:close()
       end
     end
-    local group = process_group(pid)
-    local command
-    -- `-s TERM -- [-]PID`: procps-ng kill (Ubuntu's /bin/kill) misreads
-    -- `-TERM -PGID` and was seen signalling unrelated groups and even -1
-    -- (every process of the user); util-linux kill and the shell builtins read
-    -- this form the same way.
-    if pid <= 1 then
-      return response({success = false, code = 'signal', error = 'Refusing to signal pid ' .. pid})
-    end
-    if group and group == pid then
-      command = '/bin/kill -s TERM -- -' .. pid
-    else
-      command = '/bin/kill -s TERM -- ' .. pid
-    end
-    local ok = os.execute(command)
-    -- os.execute returns true/0 on success depending on the Lua version;
-    -- anything else means the signal was not delivered.
-    local delivered = ok == true or ok == 0
+    local delivered, signalError = signal_original_group(record)
     if not delivered then
       return response({success = false, code = 'signal',
-        error = 'Could not signal the running pass (pid ' .. pid .. ')'})
+        error = signalError})
     end
     return response({success = true, cancelled = true, pid = pid})
+  end
+
+  for _, name in ipairs({'SlsCompressorGet', 'SlsCompressorAcceptSnapshots',
+    'SlsCompressorRun', 'SlsCompressorCancel'}) do
+    local handler = registry[name]
+    registry[name] = function(raw)
+      if name == 'SlsCompressorGet' and type(raw) == 'string' and #raw <= 200 then
+        local ok, obj = pcall(json.decode, raw)
+        if ok and type(obj) == 'table' and obj.observe == true then
+          -- No job lock, stale-lock reaper, cache mutation or reservation claim.
+          return handler(raw)
+        end
+      end
+      if name == 'SlsCompressorGet' and get_cache.fast then
+        local cached = get_cache.fast(raw)
+        if cached then return cached end
+      end
+      if name == 'SlsCompressorGet' and not find_tool() and not read_job() and not read_rescan() then
+        -- The tool may appear before handler() rechecks; this path cannot
+        -- start work or advance recovery without the job lock.
+        return handler(raw, true)
+      end
+      -- With no tool, job or reservation Get cannot start or finish anything.
+      local locked, owner = lock_job()
+      if not locked then
+        return response({success = false, error = 'Compressor job state is busy; retry.'})
+      end
+      local ok, result = pcall(handler, raw)
+      unlock_job(owner)
+      if not ok then error(result) end
+      return result
+    end
   end
 end
 
 M.tail = tail
+M.group_kill_command = group_kill_command
 M.normalize_languages = normalize_languages
 M.binary_candidates = CANDIDATES
 return M
