@@ -263,12 +263,15 @@
   function asIdList(value) {
     return Array.isArray(value) ? value.map(validId).filter(Boolean) : [];
   }
-  function validSnapshot(value) {
+  function validPartialSnapshot(value) {
     const list = v => Array.isArray(v) ? v.every(id => validId(id) !== null)
       : v && typeof v === 'object' && Object.keys(v).length === 0;
-    return !!value && value.success !== false && value.complete !== false && list(value.games) && list(value.helpers);
+    return !!value && value.success !== false && list(value.games) && list(value.helpers);
   }
-  function planReconciliation({games, helpers, injected, owned} = {}) {
+  function validSnapshot(value) {
+    return validPartialSnapshot(value) && value.complete !== false;
+  }
+  function planReconciliation({games, helpers, injected, owned, complete = true} = {}) {
     const liveGames = new Set(asIdList(games));
     const liveHelpers = new Set(asIdList(helpers));
     const injectedSet = new Set(asIdList(injected));
@@ -282,7 +285,7 @@
       // Only a helper we recorded AND that is still alive can be an orphan. A
       // missing marker means the process is gone; Steam already cleaned up.
       if (!game || !placeholder || !liveHelpers.has(placeholder)) continue;
-      if (!liveGames.has(game)) orphaned.push(game);
+      if (complete && !liveGames.has(game)) orphaned.push(game);
     }
     return {activate, orphaned};
   }
@@ -596,6 +599,10 @@
         this.persist();
         try {
           if (this.storage.flush) await this.storage.flush();
+          if (this.state.running[appid] !== id) {
+            this.started.delete(appid); // backend expired this launch intent before RunGame
+            return;
+          }
           if (!this.helpersAllowed || !this.active.has(appid) || !this.state.enabled || !this.guardAccount()) {
             this.started.delete(appid);
             delete this.state.running[appid];
@@ -768,13 +775,15 @@
       await this.stopAll();
     }
     async reconcile(snapshot) {
-      if (!validSnapshot(snapshot)) {
+      if (!validPartialSnapshot(snapshot)) {
         this.missingGames.clear();
         this.snapshotError = 'Complete process snapshot unavailable; automatic cleanup deferred.';
         this.onchange();
         return;
       }
-      this.snapshotError = null;
+      const complete = snapshot.complete !== false;
+      this.snapshotError = complete ? null : 'Complete process snapshot unavailable; automatic cleanup deferred.';
+      if (!complete) this.missingGames.clear();
       if (!this.guardAccount()) return;
       const games = new Set(asIdList(snapshot.games));
       const helpers = new Set(asIdList(snapshot.helpers));
@@ -799,7 +808,7 @@
             this.started.add(original);
             if (this.state.running[original] !== id) { this.state.running[original] = id; this.persist(); }
             await this.hide(id);
-          } else {
+          } else if (complete || !id) {
             this.started.delete(original);
             if (this.state.running[original] !== undefined) {
               delete this.state.running[original];
@@ -808,6 +817,7 @@
             await this.begin(original);
           }
         } else {
+          if (!complete) continue;
           // Start notifications can precede the reaper's /proc entry. Require
           // two negative snapshots for a tracked game; explicit stop is immediate.
           if (!games.has(original) && this.active.has(original) && !this.stopRequested.has(original)) {
@@ -822,13 +832,14 @@
       for (const original of games) {
         if (managed.has(original) || !this.injected.has(original) || this.stopRequested.has(original)) continue;
         this.active.add(original);
-        if (this.state.enabled && this.helpersAllowed) await this.begin(original);
+        if (this.state.enabled && this.helpersAllowed && (complete || !this.placeholderFor(original)))
+          await this.begin(original);
       }
       // A stop marker protects against a stale positive snapshot immediately
       // after a stop event. Once absence is observed it must not block every
       // future session whose start notification happens to be lost.
       for (const original of this.stopRequested) {
-        if (!games.has(original) && !this.pendingStarts.has(original) && !this.pendingStops.has(original))
+        if (complete && !games.has(original) && !this.pendingStarts.has(original) && !this.pendingStops.has(original))
           this.stopRequested.delete(original);
       }
       for (const original of this.missingGames.keys()) {
@@ -933,8 +944,8 @@
     const probeProcesses = async () => {
       try {
         const snapshot = await rpc('SlsPresenceProbeProcesses');
-        if (!snapshot || snapshot.success === false || !validSnapshot(snapshot)) return null;
-        return {games: snapshot.games, helpers: snapshot.helpers, complete: true};
+        if (!validPartialSnapshot(snapshot)) return null;
+        return {games: snapshot.games, helpers: snapshot.helpers, complete: snapshot.complete !== false};
       } catch (_) { return null; }
     };
     const readProcesses = ({fresh = false} = {}) => {
@@ -944,13 +955,17 @@
       if (!probing) probing = probeProcesses().finally(() => { probing = null; });
       return probing;
     };
+    const applyExpired = result => {
+      if (!controller) return;
+      for (const id of asIdList(result?.expired)) delete controller.state.running[id];
+    };
     const storage = {
       raw: null,
       getItem(k) { return this.raw; },
       setItem(k, value) {
         this.raw = value;
         pending = pending.catch(() => {}).then(() => rpc('SlsPresencePut', {raw: value})).then(
-          result => { writeError = null; return result; },
+          result => { writeError = null; applyExpired(result); return result; },
           error => { writeError = error; throw error; });
         // Observe asynchronous failure immediately without swallowing it for
         // flush(): allocation/removal acknowledgements must still reject.
@@ -1024,6 +1039,7 @@
     async function syncOnce() {
       try {
         const status = await rpc('SlsPresenceGet');
+        applyExpired(status);
         if (status.corruptionRequiresAcknowledgement === true || status.corrupt === true) {
           corruptPaused = true;
           await reportCorruption();
@@ -1061,6 +1077,7 @@
             restoreGameSelection: selection.available ? selection.restore : null,
             probeProcesses: readProcesses,
           });
+          applyExpired(status);
           controller.updateInjected(status.apps);
           controller.identityAmbiguous = status.identity?.ambiguous === true;
           controller.sessionTime = status.state?.sessionTime !== false;
@@ -1073,7 +1090,7 @@
           const alive = await readProcesses();
           if (alive) {
             const plan = planReconciliation({
-              games: alive.games, helpers: alive.helpers,
+              games: alive.games, helpers: alive.helpers, complete: alive.complete,
               injected: [...controller.injected], owned: controller.state.owned,
             });
             await controller.reconcile(alive);
@@ -1099,7 +1116,9 @@
           await controller.reconcile(alive);
           if (controller.state.enabled) {
             for (const id of controller.active) {
-              if (!controller.started.has(id)) await controller.begin(id);
+              if (!controller.started.has(id) && alive &&
+                  (alive.complete !== false || (asIdList(alive.games).includes(id) && !controller.placeholderFor(id))))
+                await controller.begin(id);
             }
           }
         }

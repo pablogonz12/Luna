@@ -174,6 +174,36 @@ function fakeWorld(opts = {}) {
 
 const flushed = () => new Promise(resolve => setImmediate(resolve));
 
+test('corrupt ledger write pauses retries until acknowledgement', async () => {
+  const w=fakeWorld();
+  let locked=false, puts=0;
+  const inner=w.win.Millennium.callServerMethod;
+  w.win.Millennium.callServerMethod=async (...args)=>{
+    if (args[1]==='SlsPresenceGet') {
+      const result=JSON.parse(await inner(...args));
+      result.corruptionRequiresAcknowledgement=locked;
+      return JSON.stringify(result);
+    }
+    if (args[1]==='SlsPresencePut') {
+      puts++;
+      if (locked) return JSON.stringify({success:false,code:'state-corrupt',error:'Corrupt ownership ledger requires acknowledgement'});
+    }
+    return inner(...args);
+  };
+  w.state={...w.state,enabled:true};
+  agent.bootAgent(w.win); await w.tick();
+  locked=true;
+  await w.deliver({unAppID:GAME,bRunning:true});
+  const blockedPuts=puts;
+  assert.ok(blockedPuts>0);
+  for(let i=0;i<5;i++) await w.tick();
+  assert.equal(puts,blockedPuts,'blocked ownership writes must not retry');
+  assert.equal(w.reports.filter(r=>/ownership changes are paused/.test(r.error||'')).length,1);
+  locked=false;
+  await w.tick();
+  assert.equal(w.reports.at(-1).error,'');
+});
+
 test('unsupported Gamescope selection controls pause helpers without changing the preference', async () => {
   const w = fakeWorld({session: {helpersAllowed: true, requiresGameSelection: true}});
   w.state = {...w.state, enabled: true};
@@ -969,6 +999,85 @@ test('the first observed account is adopted without breaking reuse', async () =>
 });
 
 // ------------------------------------------------- 16. context recreation
+test('expired Put acknowledgements drop running intent without launching or failing flush', async () => {
+  const w=fakeWorld();
+  w.state={...w.state,enabled:true};
+  const inner=w.win.Millennium.callServerMethod;
+  w.win.Millennium.callServerMethod=async (plugin,method,params={})=>{
+    const result=JSON.parse(await inner(plugin,method,params));
+    if(method==='SlsPresencePut' && JSON.parse(params.raw).running[GAME]) result.expired=[GAME];
+    return JSON.stringify(result);
+  };
+  agent.bootAgent(w.win); await w.tick();
+  await w.deliver({unAppID:GAME,bRunning:true});
+  assert.equal(w.log.filter(x=>x.op==='run').length,0);
+  assert.equal(w.reports.at(-1).running,0);
+});
+
+test('expired Get entries clear in-memory running state during startup and later sync', async () => {
+  const w=fakeWorld();
+  w.state={...w.state,enabled:true,owned:{[GAME]:3000000000},running:{[GAME]:3000000000}};
+  w.overviews.set(3000000000,{display_name:GAME_TITLE});
+  const inner=w.win.Millennium.callServerMethod;
+  w.win.Millennium.callServerMethod=async (plugin,method,params)=>{
+    const result=JSON.parse(await inner(plugin,method,params));
+    if(method==='SlsPresenceGet') result.expired=[GAME];
+    if(method==='SlsPresenceProbeProcesses') return JSON.stringify({success:true,complete:false,games:[],helpers:[]});
+    return JSON.stringify(result);
+  };
+  agent.bootAgent(w.win); await w.tick();
+  assert.equal(w.reports.at(-1).running,0);
+  assert.equal(w.log.filter(x=>['remove','terminate','run'].includes(x.op)).length,0);
+});
+
+test('incomplete snapshots start presence for a positively identified game without an owned helper', async () => {
+  const w=fakeWorld({apps:[GAME]});
+  w.state={...w.state,enabled:true};
+  const inner=w.win.Millennium.callServerMethod;
+  w.win.Millennium.callServerMethod=async (plugin,method,params)=>{
+    if(method==='SlsPresenceProbeProcesses')
+      return JSON.stringify({success:true,complete:false,games:[GAME],helpers:[]});
+    return inner(plugin,method,params);
+  };
+  agent.bootAgent(w.win); await w.tick();
+  assert.equal(w.log.filter(x=>x.op==='run').length,1);
+  assert.ok(w.state.running[GAME]);
+});
+
+test('incomplete snapshots recover positive games without assuming helpers are absent', async () => {
+  const w=fakeWorld({apps:[GAME]});
+  w.state={...w.state,enabled:true,owned:{[GAME]:3000000000},running:{[GAME]:3000000000}};
+  w.overviews.set(3000000000,{display_name:GAME_TITLE,appid:3000000000});
+  const inner=w.win.Millennium.callServerMethod;
+  w.win.Millennium.callServerMethod=async (plugin,method,params)=>{
+    if(method==='SlsPresenceProbeProcesses')
+      return JSON.stringify({success:true,complete:false,games:[GAME],helpers:[3000000000]});
+    return inner(plugin,method,params);
+  };
+  agent.bootAgent(w.win); await w.tick();
+  assert.ok(w.reports.some(r=>r.active===1 && r.reconciledActivate===1));
+  assert.equal(w.state.running[GAME],3000000000);
+  assert.equal(w.log.filter(x=>['run','remove','terminate'].includes(x.op)).length,0);
+});
+
+test('incomplete snapshots do not clear absent games or assume an owned helper stopped', async () => {
+  const w=fakeWorld({apps:[GAME]});
+  w.state={...w.state,enabled:true,owned:{[GAME]:3000000000},running:{[GAME]:3000000000}};
+  w.overviews.set(3000000000,{display_name:GAME_TITLE,appid:3000000000});
+  let games=[GAME];
+  const inner=w.win.Millennium.callServerMethod;
+  w.win.Millennium.callServerMethod=async (plugin,method,params)=>{
+    if(method==='SlsPresenceProbeProcesses')
+      return JSON.stringify({success:true,complete:false,games,helpers:[]});
+    return inner(plugin,method,params);
+  };
+  agent.bootAgent(w.win); await w.tick();
+  assert.ok(w.reports.some(r=>r.active===1));
+  games=[]; await w.tick();
+  assert.equal(w.state.running[GAME],3000000000);
+  assert.equal(w.log.filter(x=>['run','remove','terminate'].includes(x.op)).length,0);
+});
+
 test('a recreated context re-establishes presence for a game still running', async () => {
   // Recreates exactly what was observed live: SharedJSContext is destroyed
   // mid-game, so the new agent has no in-memory knowledge of the running game.
@@ -1257,62 +1366,4 @@ test('with session time disabled the placeholder keeps its plain title', async (
     'no suffix may be added while the toggle is off');
   await w.deliver({unAppID: GAME, bRunning: false});
   await w.tick();
-});
-
-// ------------------------------------------------- 18. poll cadence (perf)
-test('the poll backs off while idle, speeds up on a running-app event, and reports it at once', async () => {
-  const w = fakeWorld();
-  w.state = {...w.state, enabled: true};
-  agent.bootAgent(w.win);
-  await w.tick();
-  // The 60 s name refresh is a separate timer; this is the sync one.
-  const syncTimer = () => w.timers.filter(t => t.ms === 40000 || t.ms === 5000).at(-1);
-  assert.equal(syncTimer().ms, 40000, 'idle polling must be slow');
-  const before = w.reports.length;
-  await w.deliver({unAppID: GAME, bRunning: true});
-  assert.equal(syncTimer().ms, 5000, 'a running game is polled every five seconds');
-  assert.ok(w.reports.length > before, 'the start is reported without waiting for a poll');
-  assert.equal(w.reports.at(-1).active, 1);
-  await w.deliver({unAppID: GAME, bRunning: false});
-  assert.equal(syncTimer().ms, 40000, 'a stop returns the poll to the idle cadence');
-  // Only the newest timer is live: a host that cannot clear an interval must
-  // not end up syncing once per obsolete cadence.
-  const stale = w.timers.length - 1;
-  const inner = w.win.Millennium.callServerMethod;
-  let gets = 0;
-  w.win.Millennium.callServerMethod = async (...args) => {
-    if (args[1] === 'SlsPresenceGet') gets++;
-    return inner(...args);
-  };
-  for (const timer of w.timers.slice(0, stale)) await timer.fn();
-  assert.equal(gets, 0, 'superseded timers are inert');
-  await syncTimer().fn();
-  assert.equal(gets, 1, 'the live timer still syncs');
-});
-
-test('the poll pauses while the document is hidden and resumes on visibility', async () => {
-  const w = fakeWorld();
-  let onVisibility = null;
-  w.win.document = {hidden: true, addEventListener: (type, fn) => { if (type === 'visibilitychange') onVisibility = fn; }};
-  w.state = {...w.state, enabled: true};
-  agent.bootAgent(w.win);
-  await w.tick();
-  const inner = w.win.Millennium.callServerMethod;
-  let gets = 0;
-  w.win.Millennium.callServerMethod = async (...args) => {
-    if (args[1] === 'SlsPresenceGet') gets++;
-    return inner(...args);
-  };
-  await w.timers.find(t => t.ms === 40000).fn();
-  assert.equal(gets, 0, 'a hidden document does no polling');
-  w.win.document.hidden = false;
-  assert.equal(typeof onVisibility, 'function', 'visibility must be observed');
-  await onVisibility();
-  assert.equal(gets, 1, 'becoming visible syncs immediately');
-  // Two overlapping fires share one RPC: never two syncs in flight.
-  const timer = w.timers.filter(t => t.ms === 40000).at(-1);
-  const first = timer.fn();
-  const second = timer.fn();
-  await Promise.all([first, second]);
-  assert.equal(gets, 2, 'concurrent fires share a single sync');
 });

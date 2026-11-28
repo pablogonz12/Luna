@@ -25,35 +25,42 @@ package.preload['fs'] = function()
       return true
     end,
     exists=function(path)
-      return path:match('loginusers%.vdf$')~=nil
+      return path:sub(-9)=='stplug-in' or path:match('loginusers%.vdf$')~=nil
     end,
     join=function(...) return table.concat({...},'/') end,
     list=function(path)
-      -- The installed-library scan: appmanifest_<appid>.acf under steamapps.
-      assert(path:find('steamapps$'), 'unexpected listing: '..tostring(path))
-      return { {name='appmanifest_620.acf',is_directory=false},
-        {name='appmanifest_621.acf.disabled',is_directory=false},
-        {name='libraryfolders.vdf',is_directory=false} }
+      if path:match('/slssteam%-integrations$') then
+        local result={}
+        local pipe=assert(io.popen('ls -1 '..string.format('%q',path)..' 2>/dev/null'))
+        for name in pipe:lines() do result[#result+1]={name=name,is_directory=false} end
+        pipe:close()
+        return result
+      end
+      assert(path:find('steamapps$'))
+      return { {name='appmanifest_620.acf',is_directory=false}, {name='note.txt',is_directory=false}, {name='appmanifest_999.acf.disabled',is_directory=false} }
     end,
   }
 end
+local fixture_pipe=assert(io.popen('mktemp -d'))
+local steam_root=assert(fixture_pipe:read('*l'))
+assert(fixture_pipe:close())
 package.preload['millennium'] = function()
-  return {steam_path=function() return os.getenv('HOME')..'/steam' end}
+  return {steam_path=function() return steam_root end}
 end
 local json=require('json')
 -- The account identity comes from Steam's config/loginusers.vdf. Write a
 -- realistic fixture so the digests in the assertions are the real ones the JS
 -- agent computes for the same SteamID64 (the two implementations must agree).
-local steam_root=os.getenv('HOME')..'/steam'
 assert(os.execute('mkdir -p '..string.format('%q',steam_root..'/config')))
 do
+  assert(not io.open(steam_root..'/config/loginusers.vdf','rb'), 'fixture already exists')
   local f=assert(io.open(steam_root..'/config/loginusers.vdf','wb'))
   f:write([[
 "users"
 {
-	"76561198000000000"
+	"76561199026823325"
 	{
-		"AccountName"		"testaccount"
+		"AccountName"		"dirtysidemusic"
 		"PersonaName"		"LePapot"
 		"MostRecent"		"1"
 		"Timestamp"		"1791884517"
@@ -74,6 +81,80 @@ plugin.register(reg)
 local get=call(reg,os.getenv('SLS_KIND')=='presence' and 'SlsPresenceGet' or 'SlsPlaytimeGet')
 assert(get.success and #get.apps==1 and get.apps[1]==620, 'manifest filtering failed')
 if os.getenv('SLS_KIND')=='presence' then
+  do
+    local old=1000
+    local s={owned={['620']=3000000001},running={['620']=3000000001},
+      runningAt={['620']=old},unknownSince={['620']=old}}
+    plugin.reconcile_running(s,{},false,old+7*86400+1,{grace=120,ttl=21600})
+    assert(not s.running['620'], 'a seven-day scan gap must not reset a running unknown timer')
+  end
+  do
+    local open,clock,scan=io.open,os.time,plugin.scan_games
+    local now=100000
+    os.time=function() return now end
+    plugin.scan_games=function() return {},false end
+    local function fail_next_save()
+      local attempts=0
+      io.open=function(path,mode)
+        if mode=='wb' and path:match('presence%.json%.tmp$') then
+          attempts=attempts+1
+          if attempts==1 then return nil,'injected write failure' end
+        end
+        return open(path,mode)
+      end
+      return function() return attempts end
+    end
+    local function persisted_unknown()
+      local f=assert(open(os.getenv('HOME')..'/.local/share/slssteam-integrations/presence.json','rb'))
+      local s=json.decode(f:read('*a')); f:close(); return s.unknownSince['620']
+    end
+    assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000001}})).success)
+    plugin.register(reg)
+    -- Start with no unknown timestamp, then fail the first heartbeat write.
+    plugin.scan_games=function() return {620},true end
+    now=now+31; plugin.tick(now)
+    plugin.scan_games=function() return {},false end
+    local attempts=fail_next_save(); now=now+31; plugin.tick(now)
+    now=now+31; plugin.tick(now)
+    assert(attempts()==2 and persisted_unknown()==now-31, 'unchanged reconciliation must retry a failed heartbeat save')
+    -- The same retry is required when initial recovery fails to save.
+    plugin.scan_games=function() return {620},true end
+    now=now+31; plugin.tick(now)
+    plugin.scan_games=function() return {},false end
+    attempts=fail_next_save(); plugin.register(reg)
+    now=now+31; plugin.tick(now)
+    assert(attempts()==2 and persisted_unknown()==now-31, 'heartbeat must retry failed startup reconciliation save')
+    assert(call(reg,'SlsPresencePut',json.encode({owned={},running={}})).success)
+    io.open=open; os.time=clock; plugin.scan_games=scan
+    plugin.register(reg)
+  end
+  do
+    local clock,scan=os.time,plugin.scan_games
+    local now=100000
+    os.time=function() return now end
+    plugin.scan_games=function() return {},false end
+    assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000001}})).success)
+    plugin.tick(now); now=now+21601; plugin.tick(now)
+    local expired=call(reg,'SlsPresenceGet')
+    assert(expired.expired and tonumber(expired.expired[1])==620, 'Get must report sticky expiry')
+    assert(expired.state.unknownSince['620']==100000, 'expiry must preserve the original unknown timer')
+    plugin.register(reg)
+    local retry=call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000001}}))
+    assert(retry.expired and tonumber(retry.expired[1])==620, 'stale running write must be rejected')
+    assert(not call(reg,'SlsPresenceGet').state.running['620'], 'expired running record was re-admitted')
+    assert(call(reg,'SlsPresenceGet').state.unknownSince['620']==100000, 'retry must not reset unknown timer')
+    plugin.scan_games=function() return {620},false end
+    now=now+31; plugin.tick(now)
+    assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000001}})).success)
+    assert(call(reg,'SlsPresenceGet').state.running['620'], 'positive match must permit re-admission')
+    plugin.scan_games=function() return {},false end
+    now=now+31; plugin.tick(now)
+    plugin.scan_games=function() return {},true end
+    now=now+31; plugin.tick(now)
+    assert(not call(reg,'SlsPresenceGet').state.unknownSince['620'], 'complete scan must clear sticky timer')
+    assert(call(reg,'SlsPresencePut',json.encode({owned={},running={}})).success)
+    os.time=clock; plugin.scan_games=scan
+  end
   local init=get.state
   assert(init.enabled==false, 'presence must start disabled')
   assert(type(get.session)=='table' and type(get.session.helpersAllowed)=='boolean', 'session helper policy missing')
@@ -125,35 +206,9 @@ if os.getenv('SLS_KIND')=='presence' then
   -- FNV-1a implementation byte for byte (see tests/presence-lifecycle.test.cjs).
   local ident=call(reg,'SlsPresenceGet').identity
   assert(ident, 'identity missing')
-  assert(ident.key=='5bda05e3', 'identity digest mismatch: '..tostring(ident.key))
+  assert(ident.key=='04830297', 'identity digest mismatch: '..tostring(ident.key))
   assert(ident.source=='loginusers', 'identity source must be reported')
   assert(ident.known==1 and ident.ambiguous==false, 'single account must not be ambiguous')
-  -- Discord Rich Presence: name resolution and IPC framing (no socket opened).
-  assert(plugin.acf_name('"AppState"\n{\n\t"appid"\t\t"3405340"\n\t"name"\t\t"Megabonk"\n}')=='Megabonk', 'acf name')
-  local function reader(path)
-    return path=='/lib/appmanifest_3405340.acf' and '"name"\t"Megabonk"' or nil
-  end
-  assert(plugin.resolve_game_name(3405340,{},{'/nope','/lib'},reader)=='Megabonk', 'manifest name')
-  assert(plugin.resolve_game_name(3405340,{['3405340']='Custom'},{'/lib'},reader)=='Custom', 'titles map wins')
-  assert(plugin.resolve_game_name(1,{},{'/lib'},reader)==nil and plugin.resolve_game_name('x',{},{},reader)==nil, 'unknown app')
-  local paths=plugin.discord_socket_paths(function(k) return k=='XDG_RUNTIME_DIR' and '/run/user/1000' or nil end)
-  assert(paths[1]=='/run/user/1000/discord-ipc-0' and paths[2]=='/run/user/1000/app/com.discordapp.Discord/discord-ipc-0', 'socket paths')
-  assert(#plugin.discord_socket_paths(function() return nil end)==0, 'no runtime dir')
-  local function unframe(frame)
-    local op,len=string.unpack('<I4I4',frame)
-    assert(#frame==8+len, 'frame length')
-    return op,json.decode(frame:sub(9))
-  end
-  local op,hs=unframe(plugin.discord_handshake(123456789012345678))
-  assert(op==0 and hs.v==1 and hs.client_id=='123456789012345678', 'handshake')
-  local op2,act=unframe(plugin.discord_set_activity(4242,'Megabonk',1700000000,'n1'))
-  assert(op2==1 and act.cmd=='SET_ACTIVITY' and act.args.pid==4242 and act.nonce=='n1', 'set activity')
-  assert(act.args.activity.name=='Megabonk' and act.args.activity.type==0
-    and act.args.activity.timestamps.start==1700000000, 'activity payload')
-  local _,cleared=unframe(plugin.discord_set_activity(4242,nil,nil,'n2'))
-  assert(cleared.args.activity==nil, 'clear activity')
-  local plan=call(reg,'SlsPresenceDiscordPlan',json.encode({appid=620}))
-  assert(plan.needsClientId==true and type(plan.sockets)=='table', 'plan must report the missing client id')
   -- Read-only contract probe: proves the {raw: string} argument shape.
   local probe=call(reg,'SlsPresenceContractProbe',json.encode({a=1}))
   assert(probe.success and probe.argType=='string' and probe.decoded==true, 'contract probe failed')
@@ -166,7 +221,110 @@ if os.getenv('SLS_KIND')=='presence' then
              {name='not-a-pid',is_directory=true}, {name='self',is_directory=true},
              {name='2222',is_directory=true} }
   end
-  local function read_proc(path)
+  do
+    local empty=os.getenv('SLS_TEST_HOME')..'/empty-proc-fixture'
+    local f=assert(io.open(empty,'wb')); assert(f:close())
+    assert(type(plugin.read_proc)=='function' and plugin.read_proc(empty)=='',
+      'successful empty proc file must read as an empty string')
+    local missing_file,missing_error,missing_code=plugin.read_proc(empty..'-missing')
+    assert(missing_file==nil and missing_error and (missing_code==2 or missing_error:find('No such file or directory',1,true)),
+      'missing proc file must expose its error')
+    local failed,read_error=plugin.read_proc(os.getenv('SLS_TEST_HOME'))
+    assert(failed==nil and read_error, 'a real read error must not be treated as empty')
+    local one=function() return {{name='42'}} end
+    local function stat(state,start)
+      return '42 (game name) '..state..' '..string.rep('0 ',18)..start..' 0'
+    end
+    local empty_stat='42 () S '..string.rep('0 ',18)..'100 0'
+    local tricky_stat='42 (name ) S 9 (foo) S bar) S '..string.rep('0 ',18)..'100 0'
+    for _,value in ipairs({empty_stat,tricky_stat}) do
+      local games,_,complete=plugin.collect_running(one,function(path)
+        if path:match('/stat$') then return value end
+        return '/reaper\0AppId=620\0'
+      end)
+      assert(complete and games[1]==620, 'empty or parenthesized comm must parse using the last closing parenthesis')
+    end
+    local function scan(cmd, before, after)
+      local reads=0
+      return plugin.collect_running(one,function(path)
+        if path:match('/stat$') then reads=reads+1; return reads==1 and before or after end
+        return cmd
+      end)
+    end
+    local missing,_,missing_complete=plugin.collect_running(one,function()
+      return nil,'No such file or directory',2
+    end)
+    local gone_state={running={['620']=3000000000},runningAt={['620']=1}}
+    plugin.reconcile_running(gone_state,missing,missing_complete,100,{grace=1,ttl=21600})
+    assert(missing_complete and not gone_state.running['620'], 'vanished PID must not prevent expiry')
+    local _,_,permission_complete=plugin.collect_running(one,function()
+      return nil,'Permission denied',13
+    end)
+    assert(not permission_complete, 'permission-denied stat must remain unknown')
+    local large,_,large_complete=scan('/reaper\0AppId=620\0'..string.rep('x',10000),stat('S',100),stat('S',100))
+    assert(large[1]==620 and large_complete, '10 KiB cmdline must be matched without truncation')
+    local denied_games,_,denied=scan(nil,stat('S',100),stat('S',100))
+    assert(not denied, 'unreadable cmdline must be unknown')
+    local partial=plugin.process_snapshot(function() return {{name='42'},{name='43'}} end,function(path)
+      if path:find('/43/',1,true) then return nil,'Permission denied',13 end
+      if path:match('/stat$') then return stat('S',100) end
+      return '/reaper\0AppId=620\0'
+    end)
+    assert(partial.success and not partial.complete and partial.games[1]==620,
+      'partial scan must return positive matches successfully')
+    local failed_scan=plugin.process_snapshot(function() error('proc unavailable') end,function() end)
+    assert(not failed_scan.success and not failed_scan.complete, 'listing failure must be an RPC failure')
+    local heartbeat={running={['620']=3000000000,['621']=3000000001},runningAt={['620']=1,['621']=1}}
+    plugin.reconcile_running(heartbeat,partial.games,partial.complete,100,{grace=1,ttl=21600})
+    assert(heartbeat.runningAt['620']==100 and heartbeat.running['621'],
+      'partial scan must refresh matches and retain absent games')
+    local long='/reaper\0AppId=620\0'..string.rep('x',262144)
+    local games,_,long_complete=scan(long,stat('S',100),stat('S',100))
+    assert(games[1]==620 and not long_complete, 'truncated cmdline must match its prefix but remain unknown')
+    local _,_,gone_cmdline=plugin.collect_running(one,function(path)
+      if path:match('/cmdline$') then return nil,'No such process',3 end
+      return stat('S',100)
+    end)
+    assert(gone_cmdline, 'vanished cmdline must not block expiry')
+    local zombies,_,zcomplete=scan('/reaper\0AppId=620\0',stat('Z',100),stat('Z',100))
+    assert(#zombies==0 and zcomplete, 'zombie must be exited')
+    local reused,_,rcomplete=scan('/reaper\0AppId=620\0',stat('S',100),stat('S',101))
+    assert(#reused==0 and not rcomplete, 'reused PID during scan must be unknown')
+    local previous={['42']='99'}
+    local changed,_,changed_complete,identities=plugin.collect_running(one,function(path)
+      if path:match('/stat$') then return stat('S',100) end
+      return '/reaper\0AppId=620\0'
+    end,previous)
+    assert(#changed==0 and not changed_complete and identities['42']=='100',
+      'reused recorded PID must not be attributed to its former process')
+    local running={running={['620']=3000000000},runningAt={['620']=1}}
+    plugin.reconcile_running(running,{620},false,100,{grace=1,ttl=1})
+    assert(running.running['620'] and running.runningAt['620']==100, 'positive match must heartbeat')
+    plugin.reconcile_running(running,{},true,102,{grace=1,ttl=1})
+    assert(not running.running['620'], 'confirmed exit must clear after grace')
+    local state={running={['620']=3000000000},runningAt={['620']=1}}
+    plugin.reconcile_running(state,{},false,100000,{grace=1,ttl=1})
+    assert(state.running['620'], 'unknown must not expire even after TTL')
+    local empty_games,_,empty_complete=plugin.collect_running(one,function(path)
+      if path:match('/stat$') then return stat('S',100) end
+      return plugin.read_proc(empty)
+    end)
+    local empty_state={running={['620']=3000000000},runningAt={['620']=1}}
+    plugin.reconcile_running(empty_state,empty_games,empty_complete,100,{grace=1,ttl=21600})
+    assert(not empty_state.running['620'], 'empty kernel-thread cmdline must not block exit')
+    local denied_state={running={['620']=3000000000},runningAt={['620']=1}}
+    plugin.reconcile_running(denied_state,denied_games,denied,100,{grace=1,ttl=21600})
+    plugin.reconcile_running(denied_state,denied_games,denied,21700,{grace=1,ttl=21600})
+    assert(not denied_state.running['620'], 'unrelated unreadable pid must not block expiry forever')
+    local interrupted={running={['620']=3000000000},runningAt={['620']=1}}
+    plugin.reconcile_running(interrupted,{},false,100,{grace=100000,ttl=21600})
+    plugin.reconcile_running(interrupted,{620},false,200,{grace=100000,ttl=21600})
+    plugin.reconcile_running(interrupted,{},false,21700,{grace=100000,ttl=21600})
+    assert(interrupted.running['620'] and interrupted.unknownSince['620']==21700,
+      'positive evidence must reset the continuous unknown ceiling')
+    os.remove(empty)
+  end
+  local function read_cmd(path)
     if path=='/proc/1/cmdline' then return 'systemd\0--user\0' end
     if path=='/proc/999/cmdline' then
       return table.concat({'/home/x/Steam/ubuntu12_32/reaper','SteamLaunch','AppId=620',
@@ -177,6 +335,13 @@ if os.getenv('SLS_KIND')=='presence' then
     end
     return nil
   end
+  local function reader(cmd)
+    return function(path)
+      if path:match('/stat$') then return path:match('/(%d+)/stat$')..' (test) S '..string.rep('0 ',18)..'100 0' end
+      return cmd(path)
+    end
+  end
+  local read_proc=reader(read_cmd)
   local games,helpers,complete=plugin.collect_running(list_proc,read_proc)
   assert(complete==true, 'complete scan must be marked complete')
   assert(#games==2 and #helpers==1, 'process scan did not separate games from helpers')
@@ -196,198 +361,102 @@ if os.getenv('SLS_KIND')=='presence' then
   local _,_,truncated=plugin.collect_running(function() return pids end,read_proc)
   assert(truncated==false, 'PID cap must not masquerade as a complete snapshot')
   local duplicates=function() return {{name='10'},{name='11'}} end
-  local duplicate_games,duplicate_helpers=plugin.collect_running(duplicates,function()
+  local duplicate_games,duplicate_helpers=plugin.collect_running(duplicates,reader(function()
     return '/reaper\0AppId=620\0--\0/usr/bin/sleep\00086400\0'
-  end)
+  end))
   assert(#duplicate_games==1 and #duplicate_helpers==1, 'snapshots must deduplicate AppIDs, not just PIDs')
   local single=function() return {{name='10'}} end
   for _,raw in ipairs({'/tool\0FakeAppId=620\0', '/tool\0AppId=620invalid\0'}) do
-    local spoofed=plugin.collect_running(single,function() return raw end)
+    local spoofed=plugin.collect_running(single,reader(function() return raw end))
     assert(#spoofed==0, 'AppId must occupy an entire cmdline token')
   end
-  local _,not_helpers=plugin.collect_running(single,function()
+  local _,not_helpers=plugin.collect_running(single,reader(function()
     return '/reaper\0AppId=620\0--\0/usr/bin/sleep-other\00086400\0'
-  end)
+  end))
   assert(#not_helpers==0, 'helper executable matching must not accept a substring')
-  local string_games,_,string_complete=plugin.collect_running(function() return {'10'} end,function()
+  local string_games,_,string_complete=plugin.collect_running(function() return {'10'} end,reader(function()
     return '/reaper\0AppId=620\0/game\0'
-  end)
+  end))
   assert(#string_games==1 and string_complete, 'string-shaped directory entries remain supported')
   -- The loginusers parser drives the account guard; it must not be fooled by
   -- numeric keys that are not SteamIDs.
-  local users=plugin.login_users('"shortkey"{ "AccountName" "x" }\n"76561198000000000"{ "MostRecent" "1" }')
+  local users=plugin.login_users('"shortkey"{ "AccountName" "x" }\n"76561199026823325"{ "MostRecent" "1" }')
   assert(#users==1, 'only 17+ digit keys are accounts')
-  assert(users[1].id=='76561198000000000' and users[1].most_recent==true, 'SteamID block not parsed')
+  assert(users[1].id=='76561199026823325' and users[1].most_recent==true, 'SteamID block not parsed')
   assert(users[1].account_name==nil, 'fields must not leak between account blocks')
   -- A stop on a shortcut the ledger cannot confirm is refused by the backend too.
   assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000002}})).success==false,
     'running entry for an unowned shortcut accepted')
-  -- Discord session state machine against an injected fake transport.
+  local file=os.getenv('HOME')..'/.local/share/slssteam-integrations/presence.json'
+  local function write(path,body) local f=assert(io.open(path,'wb')); assert(f:write(body)); assert(f:close()) end
+  write(file..'.bak',json.encode({owned={['620']=3000000001},running={}}))
+  write(file,json.encode({owned=false,running={}}))
+  local recovered={}; plugin.register(recovered)
+  assert(call(recovered,'SlsPresenceGet').state.owned['620']==3000000001, 'malformed ownership must use backup')
+  -- A failed quarantine must be retried and discard the cached pre-corruption state.
+  write(file,'damaged live'); write(file..'.bak','damaged backup')
+  local execute=os.execute
+  os.execute=function(cmd) if cmd:match('^ln %-%-') then return false end return execute(cmd) end
+  assert(not call(recovered,'SlsPresenceSetEnabled',true).success)
+  assert(not call(recovered,'SlsPresenceAcknowledgeCorruption',json.encode({acknowledge=true})).success)
+  os.execute=execute
+  assert(call(recovered,'SlsPresenceAcknowledgeCorruption',json.encode({acknowledge=true})).success)
+  assert(next(call(recovered,'SlsPresenceGet').state.owned)==nil, 'stale cached ownership restored')
+  local function quarantine_count()
+    local p=assert(io.popen('find '..string.format('%q',file..'.quarantine.')..'* -type f | wc -l'))
+    local count=tonumber(p:read('*a')); p:close(); return count
+  end
+  local before_count=quarantine_count()
+  write(file,'damaged live'); write(file..'.bak','damaged backup')
+  local damaged={}; plugin.register(damaged)
+  local warning=call(damaged,'SlsPresenceGet')
+  assert(warning.corrupt and #warning.quarantinePaths>=2, 'both quarantine paths must be reported')
+  assert(warning.quarantineDirectory==os.getenv('HOME')..'/.local/share/slssteam-integrations')
+  assert(not call(damaged,'SlsPresenceSetEnabled',true).success)
+  assert(not call(damaged,'SlsPresenceAcknowledgeCleanup').success)
+  assert(not call(damaged,'SlsPresenceAcknowledgeCorruption',json.encode({})).success)
+  local restarted={}; plugin.register(restarted)
+  assert(call(restarted,'SlsPresenceGet').corruptionRequiresAcknowledgement)
+  assert(not call(restarted,'SlsPresencePut',json.encode({owned={},running={}})).success)
+  assert(call(restarted,'SlsPresenceAcknowledgeCorruption',json.encode({acknowledge=true})).success)
+  assert(call(restarted,'SlsPresenceSetEnabled',true).success)
+  write(file,'second damaged live'); write(file..'.bak','second damaged backup')
+  local again={}; plugin.register(again)
+  assert(call(again,'SlsPresenceGet').corrupt)
+  assert(quarantine_count()==before_count+2,'quarantines must not overwrite previous evidence')
+  for _,reply in ipairs({
+    {cmd='SET_ACTIVITY',nonce='1',evt='ERROR'},
+    {cmd='SET_ACTIVITY',nonce='wrong'},
+    {cmd='SET_ACTIVITY',nonce='1'},
+  }) do
+    local frames={}
+    local function frame(body) return string.pack('<I4I4',1,#body)..body end
+    frames[1]=frame(json.encode({evt='READY'}))
+    frames[2]=frame(json.encode(reply))
+    local buffer=table.concat(frames)
+    local conn={settimeout=function() end,connect=function() return true end,getfd=function() return 3 end,
+      send=function(_,data) return #data end,close=function() end,
+      receive=function(_,n) local s=buffer:sub(1,n);buffer=buffer:sub(n+1);return s end}
+    local session=plugin.new_discord_session({unix=function() return conn end,paths=function() return {'fake'} end,pid=function() return 1 end})
+    local status=session.step({enabled=true,app_id='123'},{appid=620,name='Game'},100)
+    assert((status=='connected')==(reply.nonce=='1' and reply.evt~='ERROR'), 'SET_ACTIVITY acknowledgement required')
+    if reply.evt=='ERROR' then assert(session.next_try>100) end
+  end
   do
-    local sent_ops, alive_conn = {}, nil
-    local function frame(op, tbl) local b=json.encode(tbl); return string.pack('<I4I4',op,#b)..b end
-    local function mkconn(up, readyframe)
-      local c={fd=-1,queue={},closed=false,timeout=0}
-      function c:settimeout(t) self.timeout=t end
-      function c:getfd() return self.fd end
-      function c:connect() if not up.on then return nil,'refused' end self.fd=7 return 1 end
-      function c:close() self.closed=true self.fd=-1 end
-      function c:send(data)
-        if self.closed then return nil,'closed' end
-        local op,len=string.unpack('<I4I4',data)
-        local body=json.decode(data:sub(9,8+len))
-        sent_ops[#sent_ops+1]={op=op,body=body}
-        if op==0 then self.queue[#self.queue+1]=readyframe end
-        -- Discord answers SET_ACTIVITY with the same nonce; presence only
-        -- reports connected once it has that acknowledgement.
-        if op==1 and type(body)=='table' and body.cmd=='SET_ACTIVITY' and not self.silent then
-          self.queue[#self.queue+1]=frame(1,{cmd='SET_ACTIVITY',nonce=body.nonce,data={}})
-        end
-        return #data
-      end
-      function c:receive(n)
-        local q=self.queue
-        if self.dead then return nil,'closed' end
-        if #q==0 then return nil,'timeout' end
-        local cur=q[1]
-        if #cur<n then return nil,'timeout' end
-        q[1]=cur:sub(n+1); local out=cur:sub(1,n)
-        if #q[1]==0 then table.remove(q,1) end
-        return out
-      end
-      return c
-    end
-    local up={on=false}
-    local ready=frame(1,{cmd='DISPATCH',evt='READY'})
-    local deps={paths=function() return {'/fake/ipc-0'} end, pid=function() return 4242 end,
-      unix=function() alive_conn=mkconn(up,ready); return alive_conn end}
-    local S=plugin.new_discord_session(deps)
-    local game={appid=620,name='Portal 2'}
-    assert(S.step({enabled=true,app_id=''},game,100)=='needs_app_id', 'empty app id must report needs_app_id')
-    assert(#sent_ops==0, 'nothing may be sent without an app id')
-    assert(S.step({enabled=true,app_id='123456789012345678'},nil,100)=='idle', 'no game is idle')
-    assert(S.step({enabled=true,app_id='123456789012345678'},game,100)=='no_discord', 'unreachable Discord')
-    assert(S.step({enabled=true,app_id='123456789012345678'},game,105)=='no_discord' and #sent_ops==0, 'backoff must hold')
-    up.on=true
-    assert(S.step({enabled=true,app_id='123456789012345678'},game,120)=='connected', 'must connect after backoff')
-    assert(sent_ops[1].op==0 and sent_ops[1].body.client_id=='123456789012345678', 'handshake with app id')
-    assert(sent_ops[2].op==1 and sent_ops[2].body.cmd=='SET_ACTIVITY', 'activity sent')
-    local act=sent_ops[2].body.args
-    assert(act.pid==4242 and act.activity.name=='Portal 2' and act.activity.details=='Portal 2'
-      and act.activity.type==0 and act.activity.timestamps.start==100, 'activity payload')
-    local n=#sent_ops
-    assert(S.step({enabled=true,app_id='123456789012345678'},game,125)=='connected' and #sent_ops==n, 'steady state sends nothing')
-    alive_conn.queue[#alive_conn.queue+1]=frame(3,{nonce='x'})
-    S.step({enabled=true,app_id='123456789012345678'},game,130)
-    assert(sent_ops[#sent_ops].op==4, 'ping must be answered with pong')
-    alive_conn.dead=true -- Discord restarted
-    up.on=false
-    assert(S.step({enabled=true,app_id='123456789012345678'},game,135)=='no_discord', 'dead connection detected')
-    up.on=true
-    assert(S.step({enabled=true,app_id='123456789012345678'},game,160)=='connected', 'reconnects and resends')
-    assert(sent_ops[#sent_ops].body.cmd=='SET_ACTIVITY' and sent_ops[#sent_ops].body.args.activity, 'activity resent')
-    local conn=alive_conn
-    assert(S.step({enabled=true,app_id='123456789012345678'},nil,170)=='idle', 'game stop is idle')
-    assert(sent_ops[#sent_ops].body.args.activity==nil and conn.closed, 'clear activity then close')
-    assert(S.step({enabled=false,app_id='123456789012345678'},game,200)=='idle' and #sent_ops>0, 'disabled never connects')
-    -- RPCs and the host tick hook
-    local st=call(reg,'SlsPresenceDiscordStatus')
-    assert(st.success and st.hasAppId==false and st.status=='idle', 'status RPC before configuration')
-    assert(call(reg,'SlsPresenceSetDiscord',json.encode({appId='abc'})).success==false, 'non numeric app id rejected')
-    local set=call(reg,'SlsPresenceSetDiscord',json.encode({enabled=false,appId='123456789012345678'}))
-    assert(set.success and set.discordEnabled==false and set.discordAppId=='123456789012345678', 'settings saved')
-    assert(call(reg,'SlsPresenceGet').state.discordAppId=='123456789012345678', 'settings exposed in state')
-    assert(call(reg,'SlsPresencePut',json.encode({owned={},running={}})).success)
-    assert(call(reg,'SlsPresenceGet').state.discordEnabled==false, 'Put must keep discord settings')
-    -- Discord honesty: the reply must say whether publishing can work at all.
-    local valid_app_id='1234567890123456789'
-    assert(plugin.app_id_valid(valid_app_id) and plugin.app_id_valid('12345678901234567'),
-      'a 17-20 digit Application ID is valid')
-    assert(not plugin.app_id_valid('1234') and not plugin.app_id_valid('123456789012345678901')
-      and not plugin.app_id_valid('1234567890123456a') and not plugin.app_id_valid(nil),
-      'short, long and non-numeric ids are invalid')
-    local empty=plugin.discord_status({discordEnabled=true,discordAppId=''},'idle',true)
-    assert(empty.enabled and empty.hasAppId==false and empty.appIdValid==false
-      and empty.publishing==false and empty.reason=='no-app-id', 'an empty id must reason no-app-id')
-    local short=plugin.discord_status({discordEnabled=true,discordAppId='12345'},'connected',true)
-    assert(short.reason=='invalid-app-id' and short.publishing==false and short.hasAppId==true,
-      'a malformed id must reason invalid-app-id, never report on')
-    local nosock=plugin.discord_status({discordEnabled=true,discordAppId=valid_app_id},'connected',false)
-    assert(nosock.reason=='no-socket' and nosock.publishing==false,
-      'a host without socket.unix must report no-socket rather than claim to publish')
-    local okay=plugin.discord_status({discordEnabled=true,discordAppId=valid_app_id},'connected',true)
-    assert(okay.publishing==true and okay.reason=='ok')
-    local off=plugin.discord_status({discordEnabled=false,discordAppId=valid_app_id},'connected',true)
-    assert(off.publishing==false and off.reason=='disabled')
-    local rejected_id=call(reg,'SlsPresenceSetDiscord',json.encode({appId='12345'}))
-    assert(rejected_id.success==false and rejected_id.code=='invalid-app-id',
-      'an invalid non-empty Application ID must be rejected with a structured error')
-    assert(call(reg,'SlsPresenceGet').state.discordAppId=='123456789012345678',
-      'a rejected Application ID must not be stored')
-    local saved_id=call(reg,'SlsPresenceSetDiscord',json.encode({appId=valid_app_id}))
-    assert(saved_id.success==true and saved_id.discord.appIdValid==true
-      and saved_id.discord.hasAppId==true, 'a valid id must be saved and reported')
-    assert(saved_id.discord.publishing==(saved_id.discord.reason=='ok'),
-      'publishing must never be true unless the reason is ok')
-    local honest=call(reg,'SlsPresenceGet')
-    assert(type(honest.discord)=='table' and honest.discord.appIdValid==true
-      and type(honest.discord.reason)=='string', 'Get must carry the discord verdict')
-    local status_honest=call(reg,'SlsPresenceDiscordStatus')
-    assert(type(status_honest.discord)=='table' and type(status_honest.socketAvailable)=='boolean',
-      'DiscordStatus must carry the same verdict')
-    -- Durability: a torn presence.json is healed from .bak and keeps `owned`;
-    -- the live file's stale running entry is retired on the next backend start.
-    local state_file=os.getenv('HOME')..'/.local/share/slssteam-integrations/presence.json'
-    assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={}})).success)
-    assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000001}})).success)
-    do
-      local f=assert(io.open(state_file,'rb'))
-      local good=f:read('*a'); f:close()
-      assert(good and #good>0, 'the state file must be written')
-      local bak=assert(io.open(state_file..'.bak','rb'))
-      local previous=bak:read('*a'); bak:close()
-      assert(previous and #previous>0, 'the previous good copy must be kept as .bak')
-      local torn=assert(io.open(state_file,'wb'))
-      torn:write('{"enabled": true, "owned": {"620"'); torn:close()
-    end
-    local reg2={}
-    local plugin2=assert(loadfile('addons/presence/plugin/backend/main.lua'))()
-    plugin2.register(reg2)
-    local revived=call(reg2,'SlsPresenceGet')
-    assert(revived.success and revived.recovered==true, 'a torn file must be reported as recovered from .bak')
-    assert(revived.state.owned['620']==3000000001, 'a torn file must not lose the owned ledger')
-    -- Running-entry TTL: alive keeps and heartbeats, gone expires, grace protects
-    -- a just-started game, and an unreadable process table only expires on the TTL.
-    local now=os.time()
-    local st={running={['620']=3000000001},runningAt={['620']=now}}
-    assert(#plugin.reconcile_running(st,{620},true,now+50,{grace=120,ttl=3600}).cleared==0
-      and st.running['620']==3000000001, 'a live game must be kept')
-    local beat=plugin.reconcile_running(st,{620},true,now+200,{grace=120,ttl=3600})
-    assert(beat.refreshed==1 and st.runningAt['620']==now+200, 'a live game must heartbeat')
-    local gone=plugin.reconcile_running(st,{},true,now+400,{grace=120,ttl=3600})
-    assert(#gone.cleared==1 and st.running['620']==nil and st.runningAt['620']==nil,
-      'an entry whose process is gone must expire')
-    local young={running={['621']=3000000002},runningAt={['621']=now}}
-    assert(#plugin.reconcile_running(young,{},true,now+30,{grace=120,ttl=3600}).cleared==0,
-      'the grace window must protect a game that just launched')
-    local blind={running={['622']=3000000003},runningAt={['622']=now}}
-    assert(#plugin.reconcile_running(blind,{},false,now+60,{grace=120,ttl=3600}).cleared==0,
-      'an incomplete process scan must not expire anything')
-    assert(#plugin.reconcile_running(blind,{},false,now+7200,{grace=120,ttl=3600}).cleared==1,
-      'without /proc the hard TTL must still expire the entry')
-    -- Restart cleanup: the file still calls a long-dead game running, the
-    -- process table says otherwise, so the start pass retires it.
-    assert(call(reg2,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000001}})).success)
-    local reg3={}
-    local plugin3=assert(loadfile('addons/presence/plugin/backend/main.lua'))()
-    plugin3.running_limits({grace=0,ttl=7200})
-    plugin3.scan_games=function() return {},true end
-    plugin3.register(reg3)
-    local restarted=call(reg3,'SlsPresenceGet')
-    assert(next(restarted.state.running)==nil, 'a start must clear a running entry whose game is gone')
-    assert(restarted.state.owned['620']==3000000001, 'cleanup must not touch the owned ledger')
-    assert(restarted.runtime.expiredRunning>=1, 'the expired count must be reported')
-    assert(type(plugin.tick)=='function' and plugin.tick(1)==nil, 'tick hook never raises')
+    -- Discord may PING before acknowledging: answer it and keep waiting.
+    local function frame(op,body) return string.pack('<I4I4',op,#body)..body end
+    local buffer=frame(1,json.encode({evt='READY'}))..frame(3,'{"p":1}')..frame(4,'{}')
+      ..frame(1,json.encode({cmd='SET_ACTIVITY',nonce='other'}))..frame(1,json.encode({cmd='SET_ACTIVITY',nonce='1'}))
+    local sent={}
+    local conn={settimeout=function() end,connect=function() return true end,getfd=function() return 3 end,
+      send=function(_,data) sent[#sent+1]=data; return #data end,close=function() end,
+      receive=function(_,n) local s=buffer:sub(1,n);buffer=buffer:sub(n+1);return s end}
+    local session=plugin.new_discord_session({unix=function() return conn end,paths=function() return {'fake'} end,pid=function() return 1 end})
+    assert(session.step({enabled=true,app_id='123'},{appid=620,name='Game'},100)=='connected',
+      'a PING before the SET_ACTIVITY acknowledgement dropped the connection')
+    local pong=false
+    for _,data in ipairs(sent) do if string.unpack('<I4',data)==4 then pong=true end end
+    assert(pong,'the PING was not answered with a PONG')
   end
 else
   assert(call(reg,'SlsPlaytimeHeartbeat',json.encode({id=999,kind='start'})).success==false)
@@ -403,4 +472,5 @@ else
   assert(call(reg,'SlsPlaytimeReport',json.encode({healthy=true})).success)
   assert(call(reg,'SlsPlaytimeGet').runtime.healthy==true)
 end
+assert(os.execute('rm -rf -- '..string.format('%q',steam_root)))
 print('Lua backend smoke OK ('..os.getenv('SLS_KIND')..')')

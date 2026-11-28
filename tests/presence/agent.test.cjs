@@ -18,6 +18,13 @@ function harness(hidden=true){
  const c=new PresenceController({apps,storage:storage(),overview,hideShortcut:async x=>{calls.push(['hide',x]);return hidden},delay:async()=>{},accountKey:'deadbeef'});
  c.updateInjected([620]);return {c,calls};}
 test('disabled by default, no games launched',async()=>{const {c,calls}=harness();await c.onLifetime({unAppID:620,bRunning:true});assert.equal(calls.length,0)});
+test('lookup exceptions preserve ownership and do not allocate a replacement',async()=>{
+ const {c,calls}=harness();c.state.owned[620]=3000000000;c.setEnabled(true);
+ const original=c.overview;c.overview=id=>{if(id===3000000000)throw Error('store unavailable');return original(id)};
+ await c.onLifetime({unAppID:620,bRunning:true});
+ assert.equal(c.state.owned[620],3000000000);
+ assert.equal(calls.filter(x=>x[0]==='add'||x[0]==='remove').length,0);
+});
 test('Gamescope policy blocks helper starts even when presence is enabled',async()=>{
   const {c,calls}=harness();c.setEnabled(true);
   await c.setHelperPolicy({helpersAllowed:false});
