@@ -272,6 +272,49 @@ local function read(path)
   return data
 end
 
+local function fixture_signal(signal, id, group, job)
+  id = tonumber(id)
+  assert(id and id == math.floor(id) and id > 1, 'unsafe fixture signal target')
+  local function fields(pid)
+    local stat = read('/proc/' .. pid .. '/stat')
+    local result = {}
+    if stat then
+      for field in (stat:match('%)%s*(.+)') or ''):gmatch('%S+') do result[#result + 1] = field end
+    end
+    return result
+  end
+  local self = fields('self')
+  assert(id ~= tonumber(read('/proc/self/stat'):match('^(%d+)'))
+    and (not group or id ~= tonumber(self[3])), 'fixture cannot signal its caller')
+  local target = fields(id)
+  if job then
+    assert(id == (group and job.pgid or job.pid) and job.pgid == job.pid)
+    if target[1] and target[1] ~= 'Z' then
+      assert(target[20] == job.procStart and tonumber(target[3]) == job.pgid
+        and tonumber(target[4]) == job.pgid, 'fixture leader identity changed')
+    else
+      assert(group, 'fixture leader is not alive')
+      local ps = assert(io.popen('ps -eo pid=,pgid=,sid=,stat=', 'r'))
+      local owned = false
+      for line in ps:lines() do
+        local pid, pgid, sid, state = line:match('^%s*(%d+)%s+(%d+)%s+(%d+)%s+(%S+)')
+        if tonumber(pgid) == id and tonumber(sid) == id and state:sub(1, 1) ~= 'Z' then
+          local env = read('/proc/' .. pid .. '/environ') or ''
+          if env:find('LUNA_COMPRESSOR_TOKEN=' .. job.token .. '\0', 1, true) then owned = true end
+        end
+      end
+      ps:close()
+      assert(owned, 'no verified fixture member remains')
+    end
+  else
+    assert(target[1] and tonumber(target[3]) == id and tonumber(target[4]) == id,
+      'escaped fixture is not its own session leader')
+    local env = read('/proc/' .. id .. '/environ') or ''
+    assert(env:find('LUNA_COMPRESSOR_TOKEN=', 1, true), 'not a compressor fixture')
+  end
+  return os.execute('/bin/kill -' .. signal .. ' ' .. (group and '-' or '') .. id)
+end
+
 local reg = {}
 local plugin = assert(loadfile(repo .. '/addons/compressor/plugin/backend/main.lua'))()
 assert(type(plugin) == 'table' and type(plugin.register) == 'function')
@@ -907,7 +950,7 @@ assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
 os.execute('sleep 0.3')
 local observe_old = json.decode(read(job_file))
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":true}').success)
-os.execute('/bin/kill -KILL -' .. observe_old.pgid)
+fixture_signal('KILL', observe_old.pgid, true, observe_old)
 local observe_pending = wait_for(reg, function(s)
   return s.job and not s.job.running and s.rescan ~= nil
 end, 15, OBSERVE)
@@ -1093,7 +1136,7 @@ os.execute('sleep 0.4')
 local orphan = json.decode(read(job_file))
 assert(orphan.pgid == orphan.pid and orphan.procStart and orphan.token)
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":true}').success)
-assert(os.execute('/bin/kill -KILL ' .. orphan.pid))
+assert(fixture_signal('KILL', orphan.pid, false, orphan))
 os.execute('sleep 0.2')
 local count_before_orphan = scans()
 local held = call(reg, 'SlsCompressorGet', '{"refresh":true}')
@@ -1102,7 +1145,7 @@ assert(not call(reg, 'SlsCompressorRun', '{"action":"preview"}').success)
 assert(scans() == count_before_orphan, 'a second scan started while the orphan was alive')
 mode('snapnone')
 assert(not call(reg, 'SlsCompressorCancel').success, 'cancel signalled an unverified group')
-os.execute('/bin/kill -TERM -' .. orphan.pgid) -- the isolated fixture owns this group
+fixture_signal('TERM', orphan.pgid, true, orphan)
 local orphan_done = wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
 assert(orphan_done.status.accept_snapshots_unknown == true)
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":false}').success)
@@ -1117,8 +1160,7 @@ local escaped_job = json.decode(read(job_file))
 local escaped_pid = tonumber(read(home .. '/.escaped-scan') or '')
 assert(escaped_pid, 'the escaped fixture did not start')
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":true}').success)
-assert(os.execute('/bin/kill -KILL ' .. escaped_job.pid))
-os.execute('/bin/kill -KILL -' .. escaped_job.pgid)
+fixture_signal('KILL', escaped_job.pgid, true, escaped_job)
 os.execute('sleep 0.2')
 local escaped_count = scans()
 local escaped_state = call(reg, 'SlsCompressorGet', '{"refresh":true}')
@@ -1160,7 +1202,7 @@ os.execute = execute_for_cancel
 assert(not recycled_cancel.success and signalled == 0, 'cancel signalled a recycled group')
 write_file(job_file, saved_escape_record)
 assert(not call(reg, 'SlsCompressorRun', '{"action":"preview"}').success)
-os.execute('/bin/kill -KILL -' .. escaped_pid) -- the isolated escaped fixture
+fixture_signal('KILL', escaped_pid, true)
 mode('snapnone')
 local escaped_done = wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
 assert(escaped_done.status.accept_snapshots_unknown == true)
@@ -1215,7 +1257,10 @@ assert(zombie and zombie_fields[1] == 'Z', 'the fixture did not produce an unrea
 write_file(dir .. '/job.lock', zombie .. ' ' .. zombie_fields[20] .. ' ' .. boot .. '\n')
 local reaped = call(reg, 'SlsCompressorGet', '{"refresh":true}')
 local zombie_parent = tonumber(read(zombie_parent_file) or '')
-if zombie_parent then os.execute('/bin/kill -TERM ' .. zombie_parent) end
+if zombie_parent then
+  assert(zombie_parent > 1 and tonumber(zombie_fields[2]) == zombie_parent)
+  os.execute('/bin/kill -TERM ' .. zombie_parent)
+end
 assert(reaped.success and not read(dir .. '/job.lock'), 'validated zombie owner blocked the handoff')
 
 -- Supply a fake /proc to the real reaper command. Read failures and malformed
@@ -1271,7 +1316,7 @@ assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":true}').success)
 local exhausted
 for attempt = 1, 3 do
   local record = json.decode(read(job_file))
-  os.execute('/bin/kill -KILL -' .. record.pgid)
+  fixture_signal('KILL', record.pgid, true, record)
   local next_state = wait_for(reg, function(s)
     return s.rescan and (s.rescan.failed or (s.job and s.job.running and s.job.pid ~= record.pid))
   end, 15)
@@ -1352,6 +1397,36 @@ local function fixture_finished_scan(generation, id)
   write_file(path .. '.exit', '0')
   write_file(path .. '.started', '')
   return path
+end
+
+for _, target in ipairs({'rescan.json', 'job.error'}) do
+  local gen = tonumber(read(dir .. '/generation')) + 1
+  write_file(dir .. '/generation', tostring(gen))
+  local path = fixture_finished_scan(gen, target == 'job.error' and 'feed' or 'deaf')
+  write_file(path .. '.state-error', '')
+  if target == 'rescan.json' then
+    write_file(dir .. '/rescan.json', json.encode({generation=gen, enabled=false}))
+  end
+  local rename = os.rename
+  os.rename = function(from, to)
+    if to == dir .. '/' .. target then return nil end
+    return rename(from, to)
+  end
+  local count = scans()
+  for _ = 1, 2 do
+    local result = call(reg, 'SlsCompressorGet', '{"refresh":true}')
+    assert(result.job.error and result.job.recoveryBlocked and not result.job.running)
+    assert(not read(dir .. '/job.done') and read(path .. '.state-error')
+      and read(path .. '.exit') and scans() == count, 'blocked recovery lost evidence or restarted')
+  end
+  os.rename = rename
+  local recovered = call(reg, 'SlsCompressorGet', '{"refresh":true}')
+  assert(recovered.job.error and not recovered.job.recoveryBlocked and read(dir .. '/job.done'))
+  assert(not read(path .. '.state-error'), 'committed recovery did not clean evidence')
+  if target == 'rescan.json' then
+    assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
+    wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
+  end
 end
 
 -- Even a valid, successful report is not adoptable after cancellation.

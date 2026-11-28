@@ -1663,7 +1663,9 @@ local function job_state(observe)
       if failure and not write_text(JOB_ERROR, failure) then
         failure, blocked = 'Could not save the scan failure state.', true
       end
-      if not write_text(JOB_DONE, tostring(finishedAt)) then
+      if blocked then
+        -- Keep the attempt evidence and retry the required state writes on poll.
+      elseif not write_text(JOB_DONE, tostring(finishedAt)) then
         failure, blocked = 'Could not save the final scan state. Retry the library scan.', true
         if matching then
           pending.failed = failure
