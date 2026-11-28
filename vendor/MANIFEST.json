@@ -83,7 +83,7 @@
     "presence": {
       "files": {
         "backend/main.lua": {
-          "sha256": "949c81865b4b2cb563b658dca65daf422bbacb3f3bb322f8852994c67f981b6a",
+          "sha256": "e0efe1c7987d21a4b4a6d29777878b0e2c8705bbaf1816e4c7e975fe46a7e879",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
@@ -100,7 +100,7 @@
         }
       },
       "plugin_version": "0.3.2-dev.2",
-      "source_commit": "92246e945282dfd514e6381a608d6ee74079e5f8",
+      "source_commit": "4cdd63d3feec697ecdf34042c200fe45fbc1f704",
       "source_repo": "https://github.com/pgm1207/slsteam-presence"
     },
     "sgdb": {
@@ -119,7 +119,7 @@
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-11-28T14:13:19+0100",
+  "generated": "2026-11-28T15:09:41+0100",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "aeced944f64c5dc779c24ecf912bee2570760e7d5e35f90b26f9aa1042cccb2c",

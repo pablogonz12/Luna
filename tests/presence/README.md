@@ -1,6 +1,6 @@
 # Presence regression suite
 
-The mirrored tests come from `slsteam-presence@92246e9`. Only plugin paths
+The mirrored tests come from `slsteam-presence@4cdd63d`. Only plugin paths
 change to target `addons/presence/plugin/`; the source is a committed revision.
 `luna-extra.test.cjs` and `luna-extra-backend.lua` hold Luna-only coverage.
 

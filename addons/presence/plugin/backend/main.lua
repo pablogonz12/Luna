@@ -198,7 +198,8 @@ function M.reconcile_running(data, alive, complete, now, opts)
   for original,since in pairs(data.unknownSince) do
     -- A positively observed new launch clears the sticky expiry. An entirely
     -- unreadable new launch waits for a positive match or a complete scan.
-    if games[original] or complete==true or now-since>=STICKY_LIMIT or (data.owned and not data.owned[original]) then
+    if games[original] or complete==true or (now-since>=STICKY_LIMIT and not data.running[original]) or
+       (data.owned and not data.owned[original]) then
       data.unknownSince[original]=nil
       changed=true
     end
@@ -282,7 +283,7 @@ local MAX_CMDLINE = 256 * 1024
 local function proc_stat(raw)
   if type(raw)~='string' then return nil end
   -- comm is parenthesized and can itself contain spaces or parentheses.
-  local state,rest=raw:match('^%d+ %(.+%) ([A-Za-z]) (.*)$')
+  local state,rest=raw:match('^%d+ %(.*%) ([A-Za-z]) (.*)$')
   if not state then return nil end
   local fields={}
   for field in rest:gmatch('%S+') do fields[#fields+1]=field end
@@ -768,20 +769,24 @@ function M.register(registry)
   -- file still calls running is reconciled with the processes that exist now,
   -- so an entry whose game (and agent) is long gone cannot survive a restart.
   local state,loaded=read_file()
+  local reconciliationDirty=false
+  local function saveReconciliation()
+    reconciliationDirty=not save_file(state)
+  end
   corruption_locked = read_all(LOCK) ~= nil or (loaded.reason=='invalid' and not loaded.recovered)
   if corruption_locked then
     -- Persist the lock before moving anything. A hard link atomically reserves
     -- each quarantine name without ever replacing an earlier quarantine.
     quarantine_corruption()
   end
-  if loaded.recovered then save_file(state) end
+  if loaded.recovered then saveReconciliation() end
   do
     local alive,complete=nil,false
     if next(state.running)~=nil then alive,complete=M.scan_games() end
     if alive then
       local change=M.reconcile_running(state,alive,complete,os.time())
       expired_running=expired_running+#change.cleared
-      if #change.cleared>0 or change.refreshed>0 or change.changed then save_file(state) end
+      if #change.cleared>0 or change.refreshed>0 or change.changed then saveReconciliation() end
     end
   end
   local runtime={active=0,healthy=false,error='',activeIds={},reportedAt=0,
@@ -883,12 +888,15 @@ function M.register(registry)
     -- the process table no longer shows is retired after the grace window.
     if now-last_heartbeat<HEARTBEAT_SECONDS then return end
     last_heartbeat=now
-    if next(state.running)==nil and next(state.unknownSince)==nil then return end
+    if next(state.running)==nil and next(state.unknownSince)==nil then
+      if reconciliationDirty then saveReconciliation() end
+      return
+    end
     local alive,complete=M.scan_games()
     local change=M.reconcile_running(state,alive,complete,now)
-    if #change.cleared>0 or change.refreshed>0 or change.changed then
-      save_file(state)
-      expired_running=expired_running+#change.cleared
+    expired_running=expired_running+#change.cleared
+    if #change.cleared>0 or change.refreshed>0 or change.changed or reconciliationDirty then
+      saveReconciliation()
     end
   end
   live.shutdown=function() session.shutdown() end

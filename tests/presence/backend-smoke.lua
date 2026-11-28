@@ -82,6 +82,53 @@ local get=call(reg,os.getenv('SLS_KIND')=='presence' and 'SlsPresenceGet' or 'Sl
 assert(get.success and #get.apps==1 and get.apps[1]==620, 'manifest filtering failed')
 if os.getenv('SLS_KIND')=='presence' then
   do
+    local old=1000
+    local s={owned={['620']=3000000001},running={['620']=3000000001},
+      runningAt={['620']=old},unknownSince={['620']=old}}
+    plugin.reconcile_running(s,{},false,old+7*86400+1,{grace=120,ttl=21600})
+    assert(not s.running['620'], 'a seven-day scan gap must not reset a running unknown timer')
+  end
+  do
+    local open,clock,scan=io.open,os.time,plugin.scan_games
+    local now=100000
+    os.time=function() return now end
+    plugin.scan_games=function() return {},false end
+    local function fail_next_save()
+      local attempts=0
+      io.open=function(path,mode)
+        if mode=='wb' and path:match('presence%.json%.tmp$') then
+          attempts=attempts+1
+          if attempts==1 then return nil,'injected write failure' end
+        end
+        return open(path,mode)
+      end
+      return function() return attempts end
+    end
+    local function persisted_unknown()
+      local f=assert(open(os.getenv('HOME')..'/.local/share/slssteam-integrations/presence.json','rb'))
+      local s=json.decode(f:read('*a')); f:close(); return s.unknownSince['620']
+    end
+    assert(call(reg,'SlsPresencePut',json.encode({owned={['620']=3000000001},running={['620']=3000000001}})).success)
+    plugin.register(reg)
+    -- Start with no unknown timestamp, then fail the first heartbeat write.
+    plugin.scan_games=function() return {620},true end
+    now=now+31; plugin.tick(now)
+    plugin.scan_games=function() return {},false end
+    local attempts=fail_next_save(); now=now+31; plugin.tick(now)
+    now=now+31; plugin.tick(now)
+    assert(attempts()==2 and persisted_unknown()==now-31, 'unchanged reconciliation must retry a failed heartbeat save')
+    -- The same retry is required when initial recovery fails to save.
+    plugin.scan_games=function() return {620},true end
+    now=now+31; plugin.tick(now)
+    plugin.scan_games=function() return {},false end
+    attempts=fail_next_save(); plugin.register(reg)
+    now=now+31; plugin.tick(now)
+    assert(attempts()==2 and persisted_unknown()==now-31, 'heartbeat must retry failed startup reconciliation save')
+    assert(call(reg,'SlsPresencePut',json.encode({owned={},running={}})).success)
+    io.open=open; os.time=clock; plugin.scan_games=scan
+    plugin.register(reg)
+  end
+  do
     local clock,scan=os.time,plugin.scan_games
     local now=100000
     os.time=function() return now end
@@ -187,6 +234,15 @@ if os.getenv('SLS_KIND')=='presence' then
     local one=function() return {{name='42'}} end
     local function stat(state,start)
       return '42 (game name) '..state..' '..string.rep('0 ',18)..start..' 0'
+    end
+    local empty_stat='42 () S '..string.rep('0 ',18)..'100 0'
+    local tricky_stat='42 (name ) S 9 (foo) S bar) S '..string.rep('0 ',18)..'100 0'
+    for _,value in ipairs({empty_stat,tricky_stat}) do
+      local games,_,complete=plugin.collect_running(one,function(path)
+        if path:match('/stat$') then return value end
+        return '/reaper\0AppId=620\0'
+      end)
+      assert(complete and games[1]==620, 'empty or parenthesized comm must parse using the last closing parenthesis')
     end
     local function scan(cmd, before, after)
       local reads=0
