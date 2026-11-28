@@ -247,7 +247,7 @@ end
 
 -- A hard link claims the lock and publishes its owner in the same operation.
 -- flock serializes claim, release and stale-owner cleanup, not the job itself.
-local reap_lock = 'read owner started boot nonce < ' .. shq(JOB_LOCK) .. ' || :; '
+local reap_lock = 'read owner started boot nonce 2>/dev/null < ' .. shq(JOB_LOCK) .. ' || :; '
   .. 'case "$owner" in ""|*[!0-9]*) exit 0;; esac; '
   .. 'current=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || exit 0; '
   .. 'printf "%s\\n" "$current" | '
@@ -1307,6 +1307,14 @@ local function workload_observed()
     local lockInode = line:match('FLOCK%s+%S+%s+%S+%s+%d+%s+[%x]+:[%x]+:(%d+)')
     if tonumber(lockInode) == inode then return true end
   end
+  -- In a PID namespace /proc/locks can omit an inherited flock after the
+  -- original flock(1) owner exits. An open inherited fd is conservatively
+  -- busy, even if it no longer holds the lock; observation must not flock.
+  local command = 'target=$(readlink -f ' .. shq(WORK_LOCK) .. ') || exit 1; '
+    .. 'for fd in /proc/[0-9]*/fd/6; do '
+    .. '[ "$(readlink "$fd" 2>/dev/null)" = "$target" ] && exit 0; done; exit 1'
+  local present = os.execute(command .. ' >/dev/null 2>&1')
+  if present == true or present == 0 then return true end
   return false
 end
 

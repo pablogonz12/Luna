@@ -1181,6 +1181,18 @@ assert(escaped_state.job.running and scans() == escaped_count,
 local observe_stuck = call(reg, 'SlsCompressorGet', OBSERVE)
 assert(observe_stuck.job and observe_stuck.job.stuck and observe_stuck.rescan,
   'observe did not report the visible stuck holder and reservation')
+do
+  -- PID namespaces can hide an inherited flock from /proc/locks.
+  local open = io.open
+  io.open = function(path, mode)
+    if path == '/proc/locks' then return open('/dev/null', mode) end
+    return open(path, mode)
+  end
+  local hidden = call(reg, 'SlsCompressorGet', OBSERVE)
+  io.open = open
+  assert(hidden.job and hidden.job.stuck and hidden.rescan,
+    'observe missed an inherited holder absent from /proc/locks')
+end
 assert(escaped_state.job.stuck and escaped_state.job.stuck.message:find(tostring(escaped_pid), 1, true),
   'the escaped holder is not identified with recovery guidance')
 local saw_pid = false
