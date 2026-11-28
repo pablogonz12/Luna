@@ -7717,6 +7717,10 @@
         walkMsTotal: Math.round(shelfStats.walkMsTotal * 10) / 10,
         observerCallbacks: shelfStats.observerCallbacks,
         shelfObserver: Boolean(shelfObserverRoot),
+        // A pass queued, debounced or mid-slice; with hltbLoaded this tells a
+        // caller (a test, or a human in the console) that the shelves settled.
+        shelfPending: Boolean(shelfScheduled || shelfPassRunning || shelfTimer || shelfQueue.length),
+        hltbLoaded: Boolean(hltb),
       }),
     };
 

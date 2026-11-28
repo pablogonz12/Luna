@@ -322,6 +322,18 @@ async function openUpdates(document,options){
 const button=(document,label)=>findNode(document.getElementById('sls-luna-overlay'),
   node=>node.tagName==='BUTTON'&&node.textContent===label&&typeof node.onclick==='function');
 const settle=ms=>new Promise(resolve=>setTimeout(resolve,ms||50));
+// Waits for a condition instead of a fixed time, so a loaded machine only
+// makes a test slower, never wrong. Fails with the label after `limit` ms.
+async function until(check,label,limit,detail){
+  const deadline=Date.now()+(limit||5000);
+  for(;;){
+    if(check())return;
+    if(Date.now()>deadline)throw new Error('timed out waiting for '+label+(detail?': '+detail():''));
+    await settle(5);
+  }
+}
+// The panel's shelf pass is idle and the HLTB times it sorts by are loaded.
+const shelvesSettled=w=>()=>{const s=w.__SlsLunaSelftest.state();return s.hltbLoaded&&!s.shelfPending;};
 
 function fakeWindow(document,{get,presence,compressor,hltb,fetchFailure,fetchPending,rateLimitOnce,sgdbKey,edit,setEnabled,prefs,steamClient,bootPatched,host,failFns,lumenPending,lumenTooling,lumenResult,lumen,update,gate,repair,sgdbAuto,sgdbAutoPlan,sgdbHistory,sgdbHistoryError,luatools,openLuaTools,lumenCloseOverlay,lumenOpenOverlay,channels,channelsRefusal,terminalRefusal,terminalStart,discordRefusal,sgdbHistoryTimes,sgdbApplyFailure,playtimeRev,graphicsCheckedAt,graphicsGpus,graphicsGpu}={}){
   const bridgePatched = bootPatched !== false;
@@ -2119,13 +2131,23 @@ test('library shelves re-render only when their HLTB times or direction change',
   const {w}=fakeWindow(document,{hltb:{success:true,games:{'1':{main:3600},'2':{main:120}}}});
   const intervals=[];
   w.setInterval=fn=>{intervals.push(fn);return intervals.length;};
+  // The shelf pass runs in idle slices. The test runs them itself instead of
+  // racing the fake window's 0 ms timers, which a loaded machine starves.
+  const idle=[];
+  w.requestIdleCallback=fn=>{idle.push(fn);return idle.length;};
+  w.cancelIdleCallback=()=>{};
+  const settled_=()=>{while(idle.length)idle.shift()({didTimeout:false,timeRemaining:()=>50});return shelvesSettled(w)();};
+  const detail=()=>JSON.stringify({updates:hltbShelf.updates,state:w.__SlsLunaSelftest.state()});
   mount(w);
-  await new Promise(resolve=>setTimeout(resolve,60));
+  await until(()=>settled_()&&hltbShelf.updates>0,'the first shelf draw',10000,detail);
+  await settle(20);
+  await until(settled_,'the first shelf draw to settle',10000,detail);
   assert.deepEqual(hltbShelf.order,[2,1],'shortest first');
   const settled=hltbShelf.updates;
-  // The walk runs in idle slices now, so let the queued slice finish after
-  // each interval pump before counting re-renders.
-  const pumpAll=async()=>{intervals.forEach(fn=>fn());await settle(20);};
+  // The walk runs in idle slices, so wait for the queued pass to finish after
+  // each interval pump before counting re-renders (no fixed sleep: under load
+  // a 20 ms nap counted re-renders before the pass had run).
+  const pumpAll=async()=>{intervals.forEach(fn=>fn());await settle(5);await until(settled_,'the shelf pass',10000,detail);};
   for(let i=0;i<5;i++)await pumpAll();
   assert.equal(hltbShelf.updates,settled,'unchanged times and direction must not force re-renders');
   w.localStorage.setItem('slsLunaHltbOrder','long');
