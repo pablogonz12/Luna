@@ -312,13 +312,25 @@ local function fixture_signal(signal, id, group, job)
     local env = read('/proc/' .. id .. '/environ') or ''
     assert(env:find('LUNA_COMPRESSOR_TOKEN=', 1, true), 'not a compressor fixture')
   end
-  return os.execute('/bin/kill -' .. signal .. ' ' .. (group and '-' or '') .. id)
+  -- Never `/bin/kill -SIG -ID`: procps-ng (Ubuntu) misparses it and can hit -1.
+  assert(id > 1, 'refusing to signal pid/pgid <= 1')
+  return os.execute('/bin/kill -s ' .. signal .. ' -- ' .. (group and '-' or '') .. id)
 end
 
 local reg = {}
 local plugin = assert(loadfile(repo .. '/addons/compressor/plugin/backend/main.lua'))()
 assert(type(plugin) == 'table' and type(plugin.register) == 'function')
 plugin.register(reg)
+
+-- Group signals use the one form every kill implementation reads the same way.
+do
+  assert(plugin.group_kill_command('TERM', 4242) == '/bin/kill -s TERM -- -4242')
+  for _, bad in ipairs({0, 1, -5, 'x'}) do
+    assert(not pcall(plugin.group_kill_command, 'TERM', bad), 'unsafe kill target accepted: ' .. tostring(bad))
+  end
+  local src = read(repo .. '/addons/compressor/plugin/backend/main.lua')
+  assert(not src:find("/bin/kill %-[A-Z]+ %-'"), 'a `/bin/kill -SIG -PGID` form came back')
+end
 
 -- The log tail is bounded and terminal-friendly: escape sequences and progress
 -- redraws must not reach the panel.

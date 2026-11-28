@@ -1360,11 +1360,20 @@ local function original_group_valid(job)
   return true
 end
 
+local function group_kill_command(signal, pgid)
+  pgid = math.floor(tonumber(pgid) or 0)
+  assert(pgid > 1 and signal:match('^%u+$'), 'refusing an unsafe kill target')
+  return '/bin/kill -s ' .. signal .. ' -- -' .. pgid
+end
+
 local function signal_original_group(job)
   if not original_group_valid(job) then
     return false, 'The original process group cannot be verified; no signal was sent.'
   end
-  local ok = os.execute('/bin/kill -TERM -' .. math.floor(job.pgid))
+  -- `-s TERM -- -PGID` on purpose: procps-ng kill (Ubuntu's /bin/kill) misreads
+  -- `-TERM -PGID` and can signal unrelated groups, even -1 (every process of
+  -- the user). util-linux kill and both shells' builtins accept this form.
+  local ok = os.execute(group_kill_command('TERM', job.pgid))
   if ok ~= true and ok ~= 0 then return false, 'Could not signal the original process group.' end
   return true
 end
@@ -2182,6 +2191,7 @@ function M.register(registry)
 end
 
 M.tail = tail
+M.group_kill_command = group_kill_command
 M.normalize_languages = normalize_languages
 M.binary_candidates = CANDIDATES
 return M
