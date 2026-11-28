@@ -1883,7 +1883,7 @@ class LumenUpdateTestCase(unittest.TestCase):
             for entry in self.sls.iterdir():
                 if entry.name != 'backup':
                     shutil.rmtree(entry) if entry.is_dir() and not entry.is_symlink() else entry.unlink()
-            (self.sls / 'SLSsteam.so').write_text('so v2')
+            (self.sls / 'SLSsteam.so').write_bytes(b'\x7fELF\x01')
             (self.sls / 'path').mkdir()
             (self.sls / 'path/steam').write_text('wrapper v2 LUNA-PATCH' if self.wrapper_patched_by_upstream
                                                   else 'wrapper v2')
@@ -1913,6 +1913,9 @@ class LumenUpdateTestCase(unittest.TestCase):
             return 0
 
         for name, value in (('process_running', running), ('run_base_installer', installer),
+                            ('active_steam_elf_class', lambda: 1),
+                            ('slsteam_release', lambda channels: {'tag': 'v2'}),
+                            ('slsteam_asset_class', lambda info: 1),
                             ('verify_base_installer', lambda ref, sha: 'f' * 64),
                             ('lumen_upstream_state', lambda *a, **k: {'overall': 'newer', 'components': [], 'channels': {}}),
                             ('patcher', fake_patcher), ('cmd_install', install),

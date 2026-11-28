@@ -5344,6 +5344,7 @@
     function componentText(item) {
       const installed = String(item.installed || '?');
       const available = String(item.available || '?');
+      if (item.status === 'incompatible') return item.component + ': ' + item.note;
       if (item.status === 'newer') {
         return item.component + ': ' + installed + ' → ' + available
           + (available === installed || available === 'beta' ? ' (newer build)' : '');
@@ -5415,6 +5416,10 @@
         return say('failed', 'The update failed before anything was changed.' + why);
       }
       if (checkUsable) {
+        if (upstream.overall === 'incompatible') {
+          return say('incompatible', view.components.filter(item => item.status === 'incompatible')
+            .map(componentText).join(', '));
+        }
         if (upstream.overall === 'newer') {
           return say('update-available', 'Update available: ' + (view.components
             .filter(item => item.status === 'newer').map(componentText).join(', ') || 'newer build'));
