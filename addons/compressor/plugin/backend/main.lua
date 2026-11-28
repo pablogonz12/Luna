@@ -1489,8 +1489,7 @@ local function spawn_detached(command, action, scan, generation)
   if fs.exists(JOB_DONE) and not os.remove(JOB_DONE) then return nil end
   if fs.exists(JOB_ERROR) and not os.remove(JOB_ERROR) then return nil end
   write_text(JOB_LOG, '')
-  local pidfile = DIR .. '/job.pid'
-  os.remove(pidfile)
+  local pidfile = DIR .. '/job.pid.' .. token
   local redirect = scan
     and ('> ' .. shq(report_file(generation, reportId)) .. ' 2>> ' .. shq(JOB_LOG))
     or ('> ' .. shq(JOB_LOG) .. ' 2>&1')
@@ -1702,6 +1701,28 @@ local function job_state(observe)
       end
     end
   end
+  if not observe and not running and finishedAt > 0 and job.action == 'scan' then
+    local pending = read_rescan()
+    if pending and not pending.failed and pending.generation == job.generation then
+      local path = report_file(job.generation, job.reportId)
+      local report = read_text(path)
+      local status = read_text(STATUS)
+      local trimmed = report and report:match('^%s*(.-)%s*$')
+      local valid, parsed = pcall(json.decode, report or '')
+      local expected = trimmed and trimmed:sub(1, 1) == '{'
+        and ('{"__luna_generation":' .. tostring(job.generation) .. ',' .. trimmed:sub(2))
+      if tonumber(read_text(path .. '.exit') or '') == 0 and fs.exists(path .. '.ok')
+        and not fs.exists(path .. '.cancelled') and not fs.exists(path .. '.state-error')
+        and valid and type(parsed) == 'table' and parsed.accept_snapshots_unknown == pending.enabled
+        and expected and expected == status and tonumber(read_text(STATUS_AT) or '') then
+        if not os.remove(RESCAN_FILE) then
+          blocked, failure = true, 'Could not clear the refresh reservation.'
+        end
+      elseif fs.exists(path .. '.ok') then
+        blocked, failure = true, 'Could not verify the completed refresh; recovery is blocked.'
+      end
+    end
+  end
   if not observe and not running and finishedAt > 0 and not blocked and fs.exists(JOB_DONE)
     and job.action == 'scan' then
     cleanup_report(job)
@@ -1780,7 +1801,7 @@ function M.register(registry)
     return status
   end
 
-  registry.SlsCompressorGet = function(raw)
+  registry.SlsCompressorGet = function(raw, readOnly)
     local tool = find_tool()
     -- Settings can change on disk (a hand edit, another surface), so the file
     -- is the source of truth on every read.
@@ -1790,13 +1811,13 @@ function M.register(registry)
     local light = false
     local refresh = false
     -- observe: a strictly read-only look (no auto-scan, no report adoption).
-    local observe = false
+    local observe = readOnly == true
     if type(raw) == 'string' and #raw <= 200 then
       local ok, obj = pcall(json.decode, raw)
       if ok and type(obj) == 'table' then
         light = obj.light == true
         refresh = obj.refresh == true
-        observe = obj.observe == true
+        observe = observe or obj.observe == true
       end
     end
     -- Every file the reply is built from, so the memo below cannot outlive a
@@ -1894,7 +1915,6 @@ function M.register(registry)
     if not observe and not rescan and not refresh and cacheKey and not autoStarted and not (job and job.running) then
       get_cache.text = out
       get_cache.rev = key()
-      get_cache.rekey = key
       get_cache.expires = os.time() + GET_CACHE_TTL
       local cachedLight = light
       get_cache.fast = function(request)
@@ -2179,10 +2199,12 @@ function M.register(registry)
         local cached = get_cache.fast(raw)
         if cached then return cached end
       end
-      -- With no tool, job or reservation Get cannot start or finish anything.
       if name == 'SlsCompressorGet' and not find_tool() and not read_job() and not read_rescan() then
-        return handler(raw)
+        -- The tool may appear before handler() rechecks; this path cannot
+        -- start work or advance recovery without the job lock.
+        return handler(raw, true)
       end
+      -- With no tool, job or reservation Get cannot start or finish anything.
       local locked, owner = lock_job()
       if not locked then
         return response({success = false, error = 'Compressor job state is busy; retry.'})
@@ -2190,9 +2212,6 @@ function M.register(registry)
       local ok, result = pcall(handler, raw)
       unlock_job(owner)
       if not ok then error(result) end
-      if name == 'SlsCompressorGet' and result == get_cache.text and get_cache.rekey then
-        get_cache.rev = get_cache.rekey()
-      end
       return result
     end
   end

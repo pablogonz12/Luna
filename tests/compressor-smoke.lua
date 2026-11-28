@@ -358,6 +358,20 @@ assert(looked.autoStarted == false and looked.job == nil, 'an observe-only Get s
 assert(not exists(data_dir .. '/attempt.at') and not exists(data_dir .. '/job.json'),
   'an observe-only Get wrote scan state')
 
+-- The tool can appear between the wrapper's check and the handler's check.
+do
+  local fs = require('fs')
+  local exists_original, missed = fs.exists, false
+  fs.exists = function(path)
+    if path == tool and not missed then missed = true; return false end
+    return exists_original(path)
+  end
+  local result = call(reg, 'SlsCompressorGet')
+  fs.exists = exists_original
+  assert(missed and result.tool.found and not result.autoStarted and not result.job)
+  assert(not exists(data_dir .. '/job.json'), 'unlocked no-tool Get started a scan')
+end
+
 -- First open: the tool is found and the read-only scan starts on its own.
 local first = call(reg, 'SlsCompressorGet')
 assert(first.success, 'Get failed')
@@ -375,6 +389,27 @@ assert(done.status.games[1].name == 'A' and done.tool.version == '9.9.9', 'the r
 assert(done.statusAt > 0, 'the scan time was not stamped')
 local again = call(reg, 'SlsCompressorGet')
 assert(again.autoStarted == false and again.status ~= nil, 'a later Get must not rescan')
+do
+  local run, injected = os.execute, false
+  local joblog = data_dir .. '/last.log'
+  os.execute = function(command)
+    local result = run(command)
+    if not injected and command:find('owner%-release') then
+      local file = assert(io.open(joblog, 'ab'))
+      file:write('\npost-unlock-cache-change\n')
+      file:close()
+      injected = true
+    end
+    return result
+  end
+  touch(joblog)
+  call(reg, 'SlsCompressorGet')
+  os.execute = run
+  assert(injected, 'cache test did not reach lock release')
+  local next_state = call(reg, 'SlsCompressorGet')
+  assert(next_state.job.log:find('post-unlock-cache-change', 1, true),
+    'old cached response was rekeyed after lock release')
+end
 -- The light shape (what the panel polls) drops the per-game list for speed,
 -- but the plan and the summary must stay.
 local light = call(reg, 'SlsCompressorGet', json.encode({light = true}))
@@ -1023,6 +1058,12 @@ end
 
 -- A scan that captured the old setting cannot publish after an explicit
 -- setting change. The reservation survives a backend reload and blocks runs.
+local invocations = home .. '/.scan-invocations'
+local function scans()
+  local _, count = (read(invocations) or ''):gsub('\n', '')
+  return count
+end
+local before_chain = scans()
 mode('scanhandoff')
 local old = call(reg, 'SlsCompressorRun', json.encode({action = 'scan'}))
 assert(old.success)
@@ -1033,24 +1074,18 @@ assert(queued.success and queued.rescan and not queued.rescan.failed and not que
 assert(read(accept_file) == 'true\n')
 assert(not call(reg, 'SlsCompressorRun', '{"action":"run"}').success)
 -- Leave the page closed: no backend call is made while the original scan ends.
-local invocations = home .. '/.scan-invocations'
-local function scans()
-  local _, count = (read(invocations) or ''):gsub('\n', '')
-  return count
-end
-local before_chain = scans()
 for _ = 1, 150 do
   if read(home .. '/.successor-started') then break end
   os.execute('sleep 0.1')
 end
 assert(read(home .. '/.successor-started'), 'the successor never reached its hold point')
-assert(scans() == before_chain + 1, 'the detached job did not start its successor without polling')
+assert(scans() == before_chain + 2, 'the detached job did not start its successor without polling')
 local chained_record = json.decode(read(job_file))
 assert(chained_record.generation == queued.rescan.generation and chained_record.pid == old.job.pid,
   'the successor was not owned by the original detached job')
 assert(not call(reg, 'SlsCompressorRun', '{"action":"scan"}').success,
   'an RPC started a duplicate while the chained scan was running')
-assert(scans() == before_chain + 1, 'the RPC raced the chain into starting another scan')
+assert(scans() == before_chain + 2, 'the RPC raced the chain into starting another scan')
 local restarted = {}
 assert(loadfile(repo .. '/addons/compressor/plugin/backend/main.lua'))().register(restarted)
 local fresh = wait_for(restarted, function(s) return s.rescan and s.job
@@ -1085,13 +1120,18 @@ restarted = recovered
 -- Simulate a detached spawn that never creates its pid file. A failed refresh
 -- remains durable, visible after reload, and only an explicit scan retries it.
 local execute = os.execute
+local pidfiles = {}
 os.execute = function(command)
-  if command:match('^setsid env ') then return true end
+  if command:match('^setsid env ') then
+    pidfiles[#pidfiles + 1] = command:match('job%.pid%.([%x%-]+)')
+    return true
+  end
   return execute(command)
 end
 local failed = call(restarted, 'SlsCompressorAcceptSnapshots', '{"enabled":true}')
 os.execute = execute
 assert(failed.success and failed.rescan and failed.rescan.failed)
+assert(pidfiles[1], 'a detached launch used a shared PID file')
 assert(call(restarted, 'SlsCompressorGet', OBSERVE).rescan.failed,
   'observe did not report the failed reservation')
 local reloaded = {}
@@ -1129,17 +1169,24 @@ assert(read(accept_file) == 'false\n')
 
 -- A poll and an explicit scan arriving at the old scan's exit race the
 -- detached handoff. The ownership lock permits only one successor.
-mode('scanlong')
+os.remove(home .. '/.successor-started')
+os.remove(home .. '/.successor-release')
+mode('scanhandoff')
 local race_before = scans()
 assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
 os.execute('sleep 0.3')
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":true}').success)
-os.execute('sleep 1.5')
+for _ = 1, 150 do
+  if read(home .. '/.successor-started') then break end
+  os.execute('sleep 0.1')
+end
+assert(read(home .. '/.successor-started'), 'successor did not reach its hold point')
 for _ = 1, 5 do
   call(reg, 'SlsCompressorGet', '{"refresh":true}')
   assert(not call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
   os.execute('sleep 0.1')
 end
+write_file(home .. '/.successor-release', 'release\n')
 local raced = wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
 assert(raced.status.accept_snapshots_unknown == true and scans() == race_before + 2,
   'the RPC and the chain must launch exactly one successor')
@@ -1376,7 +1423,15 @@ wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running en
 
 -- A failed final publication keeps the fresh reservation and reports retry.
 do
+os.remove(home .. '/.successor-started')
+os.remove(home .. '/.successor-release')
+mode('scanhandoff')
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":true}').success)
+for _ = 1, 150 do
+  if read(home .. '/.successor-started') then break end
+  os.execute('sleep 0.1')
+end
+assert(read(home .. '/.successor-started'), 'scan did not reach its hold point')
 local state_job = json.decode(read(job_file))
 local state_path = dir .. '/status.scan.' .. state_job.generation .. '.' .. state_job.reportId
 -- Redirect the destination to procfs, where the detached shell's actual mv
@@ -1384,7 +1439,11 @@ local state_path = dir .. '/status.scan.' .. state_job.generation .. '.' .. stat
 local saved_job = dir .. '/job.saved-test'
 assert(os.rename(job_file, saved_job))
 assert(os.execute('ln -s /proc/self ' .. string.format('%q', job_file)))
-os.execute('sleep 1')
+write_file(home .. '/.successor-release', 'release\n')
+for _ = 1, 150 do
+  if read(state_path .. '.state-error') then break end
+  os.execute('sleep 0.1')
+end
 assert(read(state_path .. '.state-error'), 'the shell did not detect its failed final rename')
 assert(os.remove(job_file))
 assert(os.rename(saved_job, job_file))
@@ -1394,6 +1453,7 @@ assert(failed_state.rescan and failed_state.rescan.failed and failed_state.job.e
 assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success)
 wait_for(reg, function(s) return not s.rescan and s.job and not s.job.running end, 15)
 
+mode('snapnone')
 assert(call(reg, 'SlsCompressorAcceptSnapshots', '{"enabled":false}').success)
 local uncommitted_job = json.decode(read(job_file))
 local uncommitted_path = dir .. '/status.scan.' .. uncommitted_job.generation .. '.' .. uncommitted_job.reportId
@@ -1433,6 +1493,23 @@ local function fixture_finished_scan(generation, id)
   write_file(path .. '.exit', '0')
   write_file(path .. '.started', '')
   return path
+end
+
+do
+  local gen = tonumber(read(dir .. '/generation')) + 1
+  write_file(dir .. '/generation', tostring(gen))
+  local path = fixture_finished_scan(gen, 'face')
+  local report = assert(read(path))
+  write_file(dir .. '/status.json', '{"__luna_generation":' .. gen .. ',' .. report:sub(2))
+  write_file(dir .. '/status.at', tostring(os.time()))
+  write_file(dir .. '/job.done', tostring(os.time()))
+  write_file(dir .. '/rescan.json', json.encode({generation=gen, enabled=false}))
+  local count = scans()
+  local recovered = call(reg, 'SlsCompressorGet', '{"refresh":true}')
+  assert(not recovered.rescan and not recovered.job.running and scans() == count,
+    'committed refresh was launched again after completion')
+  assert(not read(path), 'reconciled refresh did not clean its evidence')
+  assert(not call(reg, 'SlsCompressorGet', '{"refresh":true}').rescan and scans() == count)
 end
 
 for _, target in ipairs({'rescan.json', 'job.error'}) do
