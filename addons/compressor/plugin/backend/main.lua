@@ -1852,7 +1852,8 @@ function M.register(registry)
     -- The first open starts the read-only scan itself; a recent failed attempt
     -- is not retried in a loop, and a running job is always left alone.
     local autoStarted = false
-    if tool and not observe and not rescan and not (job and job.running) and status == nil then
+    if tool and not observe and not rescan and not (job and (job.running or job.recoveryBlocked))
+      and status == nil then
       local attempt = tonumber(read_text(ATTEMPT_AT) or '') or 0
       if os.time() - attempt > 600 then
         local pid = spawn(tool, 'scan', ACTIONS.scan.args)
@@ -1912,7 +1913,8 @@ function M.register(registry)
     -- A running pass (or a scan this call just started) rewrites its log and
     -- state while the client polls, and the next call should see that at once,
     -- so only a settled backend is memoised.
-    if not observe and not rescan and not refresh and cacheKey and not autoStarted and not (job and job.running) then
+    if not observe and not rescan and not refresh and cacheKey and not autoStarted
+      and not (job and (job.running or job.recoveryBlocked)) then
       get_cache.text = out
       get_cache.rev = key()
       get_cache.expires = os.time() + GET_CACHE_TTL
@@ -2067,6 +2069,9 @@ function M.register(registry)
     end
     if job and job.running then
       return response({success = false, error = 'A job is already running'})
+    end
+    if job and job.recoveryBlocked then
+      return response({success = false, error = job.error or 'Could not save the previous job state; retry later.'})
     end
     local tool = find_tool()
     if not tool then

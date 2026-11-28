@@ -1512,6 +1512,40 @@ do
   assert(not call(reg, 'SlsCompressorGet', '{"refresh":true}').rescan and scans() == count)
 end
 
+do
+  local gen = tonumber(read(dir .. '/generation')) + 1
+  write_file(dir .. '/generation', tostring(gen))
+  local path = fixture_finished_scan(gen, 'abed')
+  write_file(path .. '.state-error', '')
+  os.remove(dir .. '/status.json')
+  write_file(dir .. '/attempt.at', tostring(os.time() - 1000))
+  write_file(dir .. '/last.log', 'retain this evidence\n')
+  local previous_job = assert(read(job_file))
+  local rename = os.rename
+  os.rename = function(from, to)
+    if to == dir .. '/job.error' then return nil end
+    return rename(from, to)
+  end
+  local count = scans()
+  local blocked = call(reg, 'SlsCompressorGet', '{"refresh":true}')
+  assert(blocked.job and blocked.job.recoveryBlocked and not blocked.autoStarted,
+    'automatic scan started while recovery was blocked')
+  local refused = call(reg, 'SlsCompressorRun', '{"action":"scan"}')
+  assert(not refused.success and refused.error and refused.error:find('save', 1, true),
+    'explicit scan was not refused while recovery was blocked')
+  assert(read(job_file) == previous_job and read(dir .. '/last.log') == 'retain this evidence\n'
+    and read(path .. '.state-error') and read(path .. '.exit') and scans() == count,
+    'blocked launch changed the previous attempt evidence')
+  os.rename = rename
+  local resumed = call(reg, 'SlsCompressorGet', '{"refresh":true}')
+  assert(resumed.autoStarted and resumed.job and resumed.job.running,
+    'automatic scan did not resume after recovery committed')
+  wait_for(reg, function(s) return s.job and not s.job.running end, 15)
+  assert(call(reg, 'SlsCompressorRun', '{"action":"scan"}').success,
+    'explicit scan did not resume after recovery committed')
+  wait_for(reg, function(s) return s.job and not s.job.running end, 15)
+end
+
 for _, target in ipairs({'rescan.json', 'job.error'}) do
   local gen = tonumber(read(dir .. '/generation')) + 1
   write_file(dir .. '/generation', tostring(gen))
