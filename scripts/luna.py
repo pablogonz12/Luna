@@ -7007,7 +7007,7 @@ def lumen_upstream_state(channels=None, installed=None, fetch=None):
             row['status'] = 'current'
         else:
             row['status'] = 'newer'
-        if key == 'slsteam_moon' and row['status'] == 'newer' and info.get('url'):
+        if key == 'slsteam_moon' and row['status'] in ('current', 'newer') and info.get('url'):
             try:
                 client_class = active_steam_elf_class()
                 asset_class = slsteam_asset_class(info)
@@ -7337,6 +7337,18 @@ def _fail(ctx, reason, code):
     return code
 
 
+def _verify_installed_client_compatibility():
+    try:
+        client_class = active_steam_elf_class()
+        installed_class = elf_file_class(steam_tools_files()['SLSsteam.so'])
+    except (OSError, ValueError) as error:
+        raise _UpdateFailed('cannot verify installed SLSsteam.so and Steam client compatibility: %s' % error, 1)
+    if installed_class != client_class:
+        raise _UpdateFailed('installed SLSsteam.so needs the %s-bit Steam client, '
+                            'but this install uses the %s-bit client'
+                            % (32 if installed_class == 1 else 64, 32 if client_class == 1 else 64), 1)
+
+
 def _complete_update(ctx, restart_lumen=True):
     """The re-attach half; raises _UpdateFailed. Returns an exit code."""
     backup = lumen_backup_path(ctx['backup'])
@@ -7344,6 +7356,7 @@ def _complete_update(ctx, restart_lumen=True):
     problems = lumen_tooling_problems()
     if problems:
         raise _UpdateFailed('tooling incomplete after the installer: %s' % '; '.join(problems), EXIT_PATCH)
+    _verify_installed_client_compatibility()
     if steam_running():  # started again meanwhile: finish when it is closed once more
         _heal_quietly()
         applier = _queue_lumen_job('reattach', ctx, 'Steam was started during the update')
@@ -7378,6 +7391,7 @@ def _complete_update(ctx, restart_lumen=True):
     if 'lumen self-update blocked' not in after.stdout:
         warnings.append("Lumen's own updater is NOT blocked after this update")
         print('WARNING: %s' % warnings[-1], file=sys.stderr)
+    _verify_installed_client_compatibility()
     _restart_lumen(ctx, restart_lumen)
     prune_lumen_backups()
     before = ctx.get('before') or {}
