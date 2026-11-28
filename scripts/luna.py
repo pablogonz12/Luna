@@ -3223,7 +3223,11 @@ def cmd_autoupdate(options):
         pending_steam = read_steam_pending()
         if pending_steam:
             steam_job = pending_steam.get('action')
-            if steam_job == 'update':
+            if steam_job in ('update', 'cache') and steam_client_kind() == 'steamrt64':
+                ok, message = False, STEAMRT64_UNSUPPORTED
+                with contextlib.suppress(OSError):
+                    steam_pending_path().unlink()  # it would be refused on every tick
+            elif steam_job == 'update':
                 ok, message = _apply_steam_update()
             elif steam_job == 'cache':
                 build = steam_client_build()
@@ -3233,7 +3237,7 @@ def cmd_autoupdate(options):
                 try:
                     _cache_client_packages(build)
                     ok, message = True, 'cached Steam client %s' % build
-                except OSError as error:
+                except (OSError, ValueError) as error:
                     ok, message = False, 'could not cache the client: %s' % error
                 if ok:
                     try:
@@ -3454,12 +3458,29 @@ STEAM_CLIENT_MANIFESTS = {'ubuntu12': 'steam_client_ubuntu12.manifest',
 
 
 def steam_client_kind():
-    """'steamrt64' or 'ubuntu12': the client Valve's steam.sh selects, or None
-    when that cannot be told (see active_steam_elf_class)."""
-    try:
-        return 'steamrt64' if active_steam_elf_class() == 2 else 'ubuntu12'
-    except (OSError, ValueError):
-        return None
+    """'steamrt64' or 'ubuntu12': the client Valve's steam.sh selects.
+
+    Selection only, with steam.sh's rules (STEAM_FORCE_CLIENT, the disable
+    marker, an executable steamrt64/steam). Whether that client is consistent
+    with a pin, a lock or its binary's ELF class is active_steam_elf_class()'s
+    job: reporting must name the client even when that validation fails (an
+    ubuntu12 hard lock left on a 64-bit install is exactly when the SLSsteam
+    mismatch warning matters). Update operations keep failing closed on it.
+    """
+    root = steam_home()
+    force = os.environ.get('STEAM_FORCE_CLIENT', '')
+    disabled = (root / '.steam-disable-steamrt64-client').exists()
+    if force in ('ubuntu12_32', 'scout', 'ldlp'):
+        disabled = True
+    elif force in ('steamrt64', 'steamrt3c', 'steamrt'):
+        disabled = False
+    binary64 = root / 'steamrt64' / 'steam'
+    return 'steamrt64' if not disabled and os.access(binary64, os.X_OK) else 'ubuntu12'
+
+
+STEAMRT64_UNSUPPORTED = ('Steam runs the 64-bit steamrt64 client; Luna pins, caches, recovers and '
+                         'updates only the 32-bit ubuntu12 client so far. Nothing was changed. '
+                         '(`luna steam lock` still rolls back to ubuntu12.)')
 
 
 def _receipt_client(receipt):
@@ -3946,6 +3967,8 @@ def _cache_client_packages(build):
     The cached manifest must describe `build`; a stale on-disk manifest (or a
     mislabeled earlier cache) is refused instead of silently relabeled.
     """
+    if steam_client_kind() == 'steamrt64':
+        raise ValueError(STEAMRT64_UNSUPPORTED)
     source = steam_home() / 'package'
     cache = steam_cache_dir()
     try:
@@ -4958,6 +4981,9 @@ def cmd_steam(options):
         return cmd_history(options)
     if action == 'ignore-pkg':
         return cmd_ignore_pkg(options)
+    if action in ('pin', 'cache', 'recover', 'update') and steam_client_kind() == 'steamrt64':
+        print('REFUSING: ' + STEAMRT64_UNSUPPORTED, file=sys.stderr)
+        return EXIT_REFUSED
     if action == 'pin':
         build = options.build or steam_client_build()
         if not build:

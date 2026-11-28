@@ -600,6 +600,36 @@ clog:write('[x] Client version: 111\n[x] Client version: 222\n')
 clog:close()
 assert(steam_build() == '222', 'the newest nonzero runtime report still wins')
 
+-- A 64-bit install (Valve's default: no disable marker, executable
+-- steamrt64/steam) reports its own manifest, not the stale ubuntu12 one, and
+-- names the client; an SLSsteam.so of the other class is a mismatch.
+do
+  local home_dir = os.getenv('HOME')
+  local function put(path, data)
+    os.execute("mkdir -p '" .. path:match('^(.*)/[^/]*$') .. "'")
+    local f = assert(io.open(path, 'wb')); f:write(data); f:close()
+  end
+  local clog2 = io.open(fake_steam .. '/logs/console_log.txt', 'wb')
+  clog2:write('[x] Client version: 0\n'); clog2:close()
+  put(fake_steam .. '/steamrt64/steam', '\127ELF\2')
+  os.execute("chmod 755 '" .. fake_steam .. "/steamrt64/steam'")
+  put(fake_steam .. '/package/steam_client_steamrt64.manifest', '"steamrt64"\n{\n\t"version"\t\t"1794536281"\n}\n')
+  put(home_dir .. '/.local/share/SLSsteam/SLSsteam.so', '\127ELF\1')
+  local st = call('SlsLunaSteam', { raw = json.encode({ action = 'status' }) }).steam
+  assert(st.client == 'steamrt64' and st.build == '1794536281', 'a 64-bit install must report its own build: ' .. tostring(st.build))
+  assert(st.slssteamClass == 1 and tostring(st.slssteamMismatch):find('cannot load'), 'a 32-bit SLSsteam on 64-bit Steam is a mismatch')
+  put(home_dir .. '/.local/share/SLSsteam/SLSsteam.so', '\127ELF\2')
+  st = call('SlsLunaSteam', { raw = json.encode({ action = 'status' }) }).steam
+  assert(st.slssteamClass == 2 and st.slssteamMismatch == nil, 'a matching SLSsteam is not a mismatch')
+  put(fake_steam .. '/.steam-disable-steamrt64-client', '')
+  st = call('SlsLunaSteam', { raw = json.encode({ action = 'status' }) }).steam
+  assert(st.client == 'ubuntu12' and st.build == '1792618285', 'the disable marker selects ubuntu12')
+  os.remove(fake_steam .. '/.steam-disable-steamrt64-client')
+  os.remove(fake_steam .. '/steamrt64/steam')
+  os.remove(fake_steam .. '/package/steam_client_steamrt64.manifest')
+  os.remove(home_dir .. '/.local/share/SLSsteam/SLSsteam.so')
+end
+
 -- Steam client queue: status, queue, cancel round-trip in disposable HOME.
 out = call('SlsLunaSteam', { raw = json.encode({ action = 'status' }) })
 assert(out.success == true and type(out.steam) == 'table', 'the Steam status was not returned')

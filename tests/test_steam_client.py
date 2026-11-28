@@ -1089,8 +1089,12 @@ class SteamClientArchTestCase(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(luna, 'home', return_value=self.home).start()
         mock.patch.object(luna, 'process_running', return_value=False).start()
+        # LUNA_HOME / LUMEN_DIR too: luna_tools_dir() follows them, and an
+        # inherited one would point this fixture's receipt at a real install.
         mock.patch.dict(os.environ, {'HOME': str(self.home),
-                                    'XDG_DATA_HOME': str(self.home / '.local/share')}).start()
+                                    'XDG_DATA_HOME': str(self.home / '.local/share'),
+                                    'LUNA_HOME': str(self.home / '.local/share/Luna'),
+                                    'LUMEN_DIR': str(self.home / '.local/share/Lumen')}).start()
         os.environ.pop('STEAM_FORCE_CLIENT', None)
         self.sls = self.home / '.local/share/SLSsteam'
         self.sls.mkdir(parents=True)
@@ -1159,6 +1163,40 @@ class SteamClientArchTestCase(unittest.TestCase):
         text = self.status_text()
         self.assertIn('SLSsteam arch:   64-bit', text)
         self.assertNotIn('MISMATCH', text)
+
+    def test_steam_force_client_and_a_non_executable_steamrt64_select_ubuntu12(self):
+        self.this_machine()
+        with mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': 'ubuntu12_32'}):
+            self.assertEqual(luna.steam_client_kind(), 'ubuntu12')
+            self.assertEqual(luna.steam_client_build(), '1792618285')
+        (self.root / 'steamrt64/steam').chmod(0o644)
+        self.assertEqual(luna.steam_client_kind(), 'ubuntu12')
+
+    def test_a_leftover_32_bit_hard_lock_still_names_the_64_bit_client_and_its_mismatch(self):
+        self.this_machine()
+        (self.sls / 'SLSsteam.so').write_bytes(ELF32)
+        luna.write_json_file(luna.steam_pin_path(), {'clientBuild': '1792618285',
+                                                     'hardLock': {'rollback': 'ubuntu12'}})
+        with self.assertRaises(ValueError):
+            luna.active_steam_elf_class()  # update operations still fail closed
+        self.assertEqual(luna.steam_client_kind(), 'steamrt64')
+        self.assertEqual(luna.steam_client_build(), '1794536281')
+        self.assertIn('cannot load', luna.slssteam_mismatch_note(luna.steam_state()))
+
+    def test_pin_cache_recover_and_update_refuse_a_64_bit_client_and_change_nothing(self):
+        self.this_machine()
+        before = sorted((p, p.stat().st_mtime_ns) for p in self.home.rglob('*') if p.is_file())
+        for action in ('pin', 'cache', 'recover', 'update'):
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = luna.cmd_steam(argparse.Namespace(steam_action=action, build=None, now=False,
+                                                         force=False, relaunch=False, only=[]))
+            self.assertEqual(code, luna.EXIT_REFUSED, action)
+            self.assertIn('64-bit steamrt64', err.getvalue())
+        with self.assertRaises(ValueError):
+            luna._cache_client_packages('1794536281')
+        after = sorted((p, p.stat().st_mtime_ns) for p in self.home.rglob('*') if p.is_file())
+        self.assertEqual(before, after)
 
     def test_status_and_heal_write_nothing_on_an_unpinned_64_bit_install(self):
         self.this_machine()
