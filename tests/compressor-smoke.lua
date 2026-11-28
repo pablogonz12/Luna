@@ -497,7 +497,19 @@ assert(call(reg, 'SlsCompressorRun', json.encode({action = 'preview'})).success 
 -- Cancel fails closed when idle, and stops a live detached pass.
 local live = wait_for(reg, function(state) return state.job and state.job.running and state.job.action == 'assets' end)
 assert(live.job.pid >= 2, 'the live job has no pid')
-assert(call(reg, 'SlsCompressorCancel').success, 'cancel refused a live job')
+do
+  -- The signal uses `/bin/kill -s TERM -- [-]PID`: procps-ng (Ubuntu) misreads
+  -- `-TERM -PGID` and can signal -1.
+  local real_execute, sent = os.execute, {}
+  os.execute = function(command)
+    if tostring(command):match('kill') then sent[#sent + 1] = command end
+    return real_execute(command)
+  end
+  local ok, cancelled = pcall(call, reg, 'SlsCompressorCancel')
+  os.execute = real_execute
+  assert(ok and cancelled.success, 'cancel refused a live job')
+  assert(#sent == 1 and sent[1]:match('^/bin/kill %-s TERM %-%- %-?%d+$'), 'unsafe kill form: ' .. tostring(sent[1]))
+end
 local stopped = wait_for(reg, function(state) return state.job and not state.job.running end)
 assert(stopped.job.action == 'assets' and stopped.job.finishedAt > 0, 'the cancelled job was not observed as stopped')
 os.execute('sleep 0.3')

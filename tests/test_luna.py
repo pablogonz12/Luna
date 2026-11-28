@@ -1340,6 +1340,26 @@ class LunaTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertNotIn('"owned"', (self.data / 'presence.json').read_text())
 
+    def test_restore_checks_the_gzip_trailer(self):
+        # A corrupt CRC in the gzip trailer: tar never reads that far, so only a
+        # full read of the compressed stream catches it.
+        (self.data / 'presence.json').write_text('{"version":1}')
+        out = self.temp / 'backups-crc'
+        self.assertEqual(self.luna('backup', '--out', str(out)).returncode, 0)
+        archive = next(out.glob('luna-backup-*.tar.gz'))
+        mutated = bytearray(archive.read_bytes())
+        mutated[-8] ^= 0xff
+        (self.data / 'presence.json').write_text('{"version":2}')
+        # A bad CRC, and a stream cut short: both refused cleanly, nothing changed.
+        for broken in (bytes(mutated), bytes(mutated[:-12])):
+            archive.write_bytes(broken)
+            result = self.luna('restore', str(archive))
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('REFUSING', result.stdout + result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertEqual((self.data / 'presence.json').read_text(), '{"version":2}',
+                             'a corrupt archive must change nothing')
+
     def test_restore_refuses_a_tampered_archive(self):
         (self.data / 'presence.json').write_text('{"version":1}')
         out = self.temp / 'backups-tamper'
@@ -1971,6 +1991,25 @@ class LumenUpdateTestCase(unittest.TestCase):
             self.assertEqual(self.run_lumen('cancel'), 0)
         self.assertIn(('start', '--no-block', 'luna-apply.service'), self.systemctl_calls)
         self.assertIn(('stop', 'luna-apply.service'), self.systemctl_calls)
+
+    def test_stopping_the_apply_waiter_is_a_clean_cancel(self):
+        # Cancel stops luna-apply.service while it waits for Steam: that must
+        # not leave the unit 'failed'. The unit counts a raw SIGTERM as success
+        # and a SIGTERM during the wait returns 0, while other exits propagate.
+        import argparse, signal as sig
+        self.m.write_apply_unit()
+        unit = self.m.apply_unit_paths()[1].read_text()
+        self.assertIn('SuccessExitStatus=SIGTERM', unit)
+        def stopped(**_kwargs):
+            raise SystemExit(128 + sig.SIGTERM)
+        self.m.wait_for_steam_closed = stopped
+        options = argparse.Namespace(wait_steam=True, verbose=False)
+        self.assertEqual(self.m.cmd_autoupdate(options), self.m.EXIT_OK)
+        def broken(**_kwargs):
+            raise SystemExit(3)
+        self.m.wait_for_steam_closed = broken
+        with self.assertRaises(SystemExit):
+            self.m.cmd_autoupdate(options)
 
     def test_queued_update_waits_for_steam_then_runs(self):
         self.m.write_json_file(self.m.lumen_pending_path(), {'action': 'update'})
