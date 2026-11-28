@@ -4845,11 +4845,16 @@ def _refresh_steam_side():
         _steam_client_closed()
     except ValueError as error:
         return False, str(error), ''
+    # Before any write: the pin, block and cache below are ubuntu12-only.
+    if steam_client_kind() == 'steamrt64':
+        return False, STEAMRT64_UNSUPPORTED, ''
     if read_steam_pending():
         return False, 'a Steam task is already queued; run: luna steam cancel first', ''
     ok, message = _steam_force_update()
     if not ok:
         return False, message, ''
+    if steam_client_kind() == 'steamrt64':  # the updater moved Steam to the 64-bit client
+        return False, 'Steam updated, but it now runs the 64-bit client; ' + STEAMRT64_UNSUPPORTED, ''
     build = steam_client_build()
     if not build:
         return False, ('Steam updated, but the new build cannot be determined; '

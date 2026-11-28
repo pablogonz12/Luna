@@ -609,8 +609,9 @@ do
     os.execute("mkdir -p '" .. path:match('^(.*)/[^/]*$') .. "'")
     local f = assert(io.open(path, 'wb')); f:write(data); f:close()
   end
+  -- The shared log still holds the old ubuntu12 client's nonzero build.
   local clog2 = io.open(fake_steam .. '/logs/console_log.txt', 'wb')
-  clog2:write('[x] Client version: 0\n'); clog2:close()
+  clog2:write('[x] Client version: 1792618285\n'); clog2:close()
   put(fake_steam .. '/steamrt64/steam', '\127ELF\2')
   os.execute("chmod 755 '" .. fake_steam .. "/steamrt64/steam'")
   put(fake_steam .. '/package/steam_client_steamrt64.manifest', '"steamrt64"\n{\n\t"version"\t\t"1794536281"\n}\n')

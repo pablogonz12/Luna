@@ -1198,6 +1198,30 @@ class SteamClientArchTestCase(unittest.TestCase):
         after = sorted((p, p.stat().st_mtime_ns) for p in self.home.rglob('*') if p.is_file())
         self.assertEqual(before, after)
 
+    def test_refresh_refuses_a_64_bit_client_before_writing_the_pin_or_block(self):
+        self.this_machine()
+        before = sorted((p, p.stat().st_mtime_ns) for p in self.home.rglob('*') if p.is_file())
+        with mock.patch.object(luna, '_steam_force_update', side_effect=AssertionError('must not update')):
+            ok, message, build = luna._refresh_steam_side()
+        self.assertFalse(ok)
+        self.assertIn('64-bit steamrt64', message)
+        self.assertFalse(luna.steam_pin_path().exists())
+        after = sorted((p, p.stat().st_mtime_ns) for p in self.home.rglob('*') if p.is_file())
+        self.assertEqual(before, after)
+
+    def test_refresh_stops_before_pinning_when_the_updater_moves_steam_to_64_bit(self):
+        self.this_machine()
+        self.write('.steam-disable-steamrt64-client', b'', 0o644)
+
+        def update():
+            (self.root / '.steam-disable-steamrt64-client').unlink()
+            return True, 'updated'
+        with mock.patch.object(luna, '_steam_force_update', side_effect=update):
+            ok, message, _ = luna._refresh_steam_side()
+        self.assertFalse(ok)
+        self.assertIn('now runs the 64-bit client', message)
+        self.assertFalse(luna.steam_pin_path().exists())
+
     def test_status_and_heal_write_nothing_on_an_unpinned_64_bit_install(self):
         self.this_machine()
         (self.sls / 'SLSsteam.so').write_bytes(ELF64)
