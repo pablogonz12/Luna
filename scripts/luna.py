@@ -6753,7 +6753,8 @@ def _upstream_component(repo, beta_path, glob, mode, channel):
         try:
             meta = _public_json('https://api.github.com/repos/%s/contents/%s?ref=beta' % (repo, beta_path))
             if isinstance(meta, dict) and meta.get('sha') and meta.get('download_url'):
-                return {'tag': 'beta', 'id': meta['sha'], 'size': meta.get('size'), 'channel': 'beta'}, ''
+                return {'tag': 'beta', 'id': meta['sha'], 'size': meta.get('size'), 'channel': 'beta',
+                        'url': meta['download_url']}, ''
         except urllib.error.HTTPError as error:
             if error.code not in (404, 422):
                 return None, 'beta lookup failed (HTTP %s)' % error.code
@@ -6779,7 +6780,78 @@ def _upstream_component(repo, beta_path, glob, mode, channel):
     if not asset:
         return None, 'no matching release asset found'
     return {'tag': release.get('tag_name'), 'id': asset.get('id'), 'size': asset.get('size'),
-            'channel': 'stable'}, note
+            'channel': 'stable', 'url': asset.get('browser_download_url')}, note
+
+
+def active_steam_elf_class():
+    """Identify the selected client, not merely a leftover binary from another client."""
+    root = steam_home()
+    if steam_hard_lock_active():
+        if str(read_steam_pin().get('clientBuild')) != KNOWN_GOOD_UBUNTU12_BUILD:
+            raise ValueError('Steam hard lock has an unknown client build')
+        if not _elf32_file(root / 'ubuntu12_32' / 'steam'):
+            raise ValueError('locked 32-bit Steam client binary is missing or invalid')
+        return 1
+    marker = root / '.steam-enable-steamrt64-client'
+    if marker.exists():
+        binary = root / 'steamrt64' / 'steam'
+        manifest = root / 'package' / 'steam_client_steamrt64.manifest'
+        expected = 2
+    else:
+        binary = root / 'ubuntu12_32' / 'steam'
+        manifest = root / 'package' / 'steam_client_ubuntu12.manifest'
+        expected = 1
+    if not manifest.is_file() or elf_file_class(binary) != expected:
+        raise ValueError('cannot determine the active Steam client architecture from its manifest and binary')
+    return expected
+
+
+def elf_header_class(header):
+    if len(header) < 5 or header[:4] != b'\x7fELF' or header[4] not in (1, 2):
+        raise ValueError('missing or invalid ELF header')
+    return header[4]
+
+
+def elf_file_class(path):
+    with open(path, 'rb') as source:
+        return elf_header_class(source.read(5))
+
+
+def slsteam_release(channels):
+    _, repo, beta_path, pattern, mode = LUMEN_COMPONENTS[0]
+    info, note = _upstream_component(repo, beta_path, pattern, mode, channels.get('slsteam_moon', 'stable'))
+    if not info or not info.get('url'):
+        raise ValueError('cannot resolve slsteam-moon asset: %s' % (note or 'missing download URL'))
+    return info
+
+
+def slsteam_asset_class(info):
+    url = info['url']
+    if not url.startswith('https://'):
+        raise ValueError('slsteam-moon asset URL is not HTTPS')
+    data = _http_get(url)
+    try:
+        sidecar = _http_get(url + '.sha256', limit=4096)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+    else:
+        match = re.match(rb'\s*([0-9a-fA-F]{64})(?:\s|$)', sidecar)
+        if not match or hashlib.sha256(data).hexdigest().lower() != match.group(1).decode().lower():
+            raise ValueError('slsteam-moon asset SHA-256 verification failed')
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        matches = [entry for entry in archive.infolist()
+                   if PurePosixPath(entry.filename).parts[-2:] == ('bin', 'SLSsteam.so')]
+        if len(matches) != 1:
+            raise ValueError('slsteam-moon archive must contain exactly one bin/SLSsteam.so')
+        with archive.open(matches[0]) as source:
+            return elf_header_class(source.read(5))
+
+
+def slsteam_arch_message(tag, asset_class, client_class):
+    return ('slsteam-moon %s is built for the %s-bit Steam client; this install uses the %s-bit client. '
+            'Nothing was changed.' % (tag or '?', 32 if asset_class == 1 else 64,
+                                      32 if client_class == 1 else 64))
 
 
 def lumen_upstream_state(channels=None, installed=None, fetch=None):
@@ -6810,9 +6882,21 @@ def lumen_upstream_state(channels=None, installed=None, fetch=None):
             row['status'] = 'current'
         else:
             row['status'] = 'newer'
+        if key == 'slsteam_moon' and row['status'] == 'newer' and info.get('url'):
+            try:
+                client_class = active_steam_elf_class()
+                asset_class = slsteam_asset_class(info)
+                if asset_class != client_class:
+                    row['status'] = 'incompatible'
+                    row['note'] = '%s available, needs the %s-bit Steam client' % (
+                        info.get('tag') or 'update', 32 if asset_class == 1 else 64)
+            except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+                row['status'] = 'unknown'
+                row['note'] = 'cannot verify slsteam-moon compatibility: %s' % error
         rows.append(row)
     statuses = {row['status'] for row in rows}
-    overall = 'newer' if 'newer' in statuses else 'unknown' if 'unknown' in statuses else 'current'
+    overall = ('incompatible' if 'incompatible' in statuses else
+               'unknown' if 'unknown' in statuses else 'newer' if 'newer' in statuses else 'current')
     return {'overall': overall, 'components': rows, 'channels': channels}
 
 
@@ -7216,6 +7300,15 @@ def apply_base_update(restart_lumen=True, installer_latest=False, reinstall=Fals
     early = lumen_tooling_problems() + runtime_problems(full=True)  # local and cheap: refuse before any network call
     if early:
         return _refuse_update('tooling incomplete: %s' % '; '.join(early))
+    try:
+        client_class = active_steam_elf_class()
+        release = slsteam_release(lumen_channels())
+        asset_class = slsteam_asset_class(release)
+        if client_class != asset_class:
+            return _refuse_update(slsteam_arch_message(release.get('tag'), asset_class, client_class))
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+        return _refuse_update('cannot verify Steam client and slsteam-moon compatibility: %s. '
+                              'Nothing was changed.' % error)
     if not reinstall:
         verdict = lumen_upstream_state()
         compared = [{'component': row['component'], 'channel': row['channel'], 'status': row['status'],
@@ -7230,7 +7323,7 @@ def apply_base_update(restart_lumen=True, installer_latest=False, reinstall=Fals
             print('lumen     : %s' % message)
             print('\n'.join('lumen     : ' + line for line in lines))
             return EXIT_OK
-        if verdict['overall'] == 'unknown':
+        if verdict['overall'] in ('unknown', 'incompatible'):
             why = '; '.join('%s: %s' % (row['component'], row['note'] or 'unknown')
                             for row in verdict['components'] if row['status'] == 'unknown')
             message = 'could not tell whether upstream has anything newer (%s); nothing was changed. ' \
@@ -7293,6 +7386,14 @@ def apply_base_update(restart_lumen=True, installer_latest=False, reinstall=Fals
         code = run_base_installer(ref, sha, extra)
         if code != 0:
             raise _UpdateFailed('the base installer exited with %d' % code, code)
+        try:
+            installed_class = elf_file_class(steam_tools_files()['SLSsteam.so'])
+        except (OSError, ValueError) as error:
+            raise _UpdateFailed('installed SLSsteam.so is missing or unreadable: %s' % error, 1)
+        if installed_class != client_class:
+            raise _UpdateFailed('installed SLSsteam.so needs the %s-bit Steam client, '
+                                'but this install uses the %s-bit client'
+                                % (32 if installed_class == 1 else 64, 32 if client_class == 1 else 64), 1)
         if channels_bytes is not None:
             try:
                 if channels_file.read_bytes() != channels_bytes:

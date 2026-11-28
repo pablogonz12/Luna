@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -43,7 +44,7 @@ class SafetyBase(unittest.TestCase):
         self.sls = self.home / '.local/share/SLSsteam'
         (self.sls / 'path').mkdir(parents=True)
         (self.sls / 'path/steam').write_text('wrapper v1')
-        (self.sls / 'SLSsteam.so').write_text('so v1')
+        (self.sls / 'SLSsteam.so').write_bytes(b'\x7fELF\x01')
         self.cfg = self.home / '.config/SLSsteam'
         self.cfg.mkdir(parents=True)
         (self.cfg / 'config.yaml').write_text('user: settings\n')
@@ -106,6 +107,9 @@ class SafetyBase(unittest.TestCase):
         patches = {'process_running': lambda name: self.steam_up and name in ('steam', 'steamwebhelper'),
                    'run_base_installer': installer, 'patcher': fake_patcher, 'cmd_install': install,
                    'verify_base_installer': lambda ref, sha: 'f' * 64,
+                   'active_steam_elf_class': lambda: 1,
+                   'slsteam_release': lambda channels: {'tag': 'v2'},
+                   'slsteam_asset_class': lambda info: 1,
                    'lumen_upstream_state': lambda *a, **k: {'overall': 'newer', 'components': [], 'channels': {}},
                    'systemctl_user': systemctl,
                    'heal_steam_lock': lambda *a, **k: self.heals.append(1) or {'pinned': True, 'fixed': [], 'notes': []},
@@ -873,6 +877,74 @@ class StateCase(SafetyBase):
             self.assertTrue(self.m.apply_queued_lumen({}))
         self.assertEqual(seen['command'][1:], [str(self.m.luna_tools_dir() / 'luna.py'), 'lumen', 'update', '--yes'])
         self.assertEqual(seen['env'][self.m.LOCK_HELD_ENV], '1')
+
+
+class ArchitectureGuardTest(SafetyBase):
+    def archive(self, elf_class):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('slsteam-moon/bin/SLSsteam.so', b'\x7fELF' + bytes([elf_class]) + bytes(15))
+        return buf.getvalue()
+
+    def test_archive_class_and_integrity(self):
+        data = self.archive(2)
+        digest = hashlib.sha256(data).hexdigest()
+        with mock.patch.object(self.m, '_http_get', side_effect=[data, (digest + '  file.zip\n').encode()]):
+            self.assertEqual(self.m.slsteam_asset_class({'url': 'https://example.test/file.zip'}), 2)
+        with mock.patch.object(self.m, '_http_get', side_effect=[data, b'0' * 64]):
+            with self.assertRaises(ValueError):
+                self.m.slsteam_asset_class({'url': 'https://example.test/file.zip'})
+
+    def test_preflight_mismatch_drops_queued_job_without_installer(self):
+        self.m.write_json_file(self.m.lumen_pending_path(), {'action': 'update', 'at': 1})
+        before = self.snapshot()
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1, create=True), \
+             mock.patch.object(self.m, 'slsteam_release', return_value={'tag': 'v3.0'}, create=True), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=2, create=True):
+            self.assertTrue(self.m.apply_queued_lumen({}))
+        self.assertFalse(self.calls)
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertIn('64-bit', self.result()['message'])
+        self.assertFalse(self.m.read_lumen_pending())
+
+    def test_installer_mismatch_rolls_back(self):
+        before = self.snapshot()
+        def install_wrong(*args, **kwargs):
+            (self.sls / 'SLSsteam.so').write_bytes(b'\x7fELF\x02')
+            (self.lumen / 'lumen').write_text('changed')
+            return 0
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1, create=True), \
+             mock.patch.object(self.m, 'slsteam_release', return_value={'tag': 'v2'}, create=True), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=1, create=True), \
+             mock.patch.object(self.m, 'run_base_installer', side_effect=install_wrong):
+            self.assertNotEqual(self.update(), 0)
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertTrue(self.result()['rolledBack'])
+        self.assertEqual(before, self.snapshot())
+
+    def test_matching_classes_proceed(self):
+        (self.sls / 'SLSsteam.so').write_bytes(b'\x7fELF\x01')
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1, create=True), \
+             mock.patch.object(self.m, 'slsteam_release', return_value={'tag': 'v2'}, create=True), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=1, create=True):
+            self.assertEqual(self.update(), 0)
+
+    def test_incompatible_release_is_not_offered(self):
+        def fetch(repo, path, pattern, mode, channel):
+            if 'slsteam-moon' in repo:
+                return {'tag': 'v3.0', 'id': 3, 'size': 5, 'channel': 'stable',
+                        'url': 'https://example.test/file.zip'}, ''
+            return {'tag': 'v1', 'id': 1, 'size': 1, 'channel': 'stable'}, ''
+        installed = {key: {'tag': 'v1', 'id': 1, 'size': 1}
+                     for key, *_ in self.m.LUMEN_COMPONENTS}
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=2):
+            result = self.m.lumen_upstream_state(channels={}, installed=installed, fetch=fetch)
+        self.assertEqual(result['overall'], 'incompatible')
+        row = result['components'][0]
+        self.assertEqual(row['status'], 'incompatible')
+        self.assertIn('v3.0 available, needs the 64-bit Steam client', row['note'])
 
 
 if __name__ == '__main__':
