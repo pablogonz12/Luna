@@ -895,11 +895,53 @@ class ArchitectureGuardTest(SafetyBase):
         binary.parent.mkdir()
         binary.write_bytes(b'\x7fELF\x01\x01' + bytes(12) + b'\x03\x00')
         pin = {'clientBuild': self.m.KNOWN_GOOD_UBUNTU12_BUILD, 'hardLock': {'active': True}}
-        with mock.patch.object(self.m, 'read_steam_pin', return_value=pin):
+        with mock.patch.object(self.m, 'read_steam_pin', return_value=pin), \
+             mock.patch.object(self.m, 'running_steam_client_classes', return_value=set()), \
+             mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': ''}):
             self.assertEqual(self.real_active_steam_elf_class(), 1)
-            (self.steam_home / '.steam-enable-steamrt64-client').touch()
+            binary64 = self.steam_home / 'steamrt64/steam'
+            binary64.parent.mkdir()
+            binary64.write_bytes(b'\x7fELF\x02')
+            binary64.chmod(0o755)
             with self.assertRaises(ValueError):
                 self.real_active_steam_elf_class()
+
+    def test_valve_selector_and_running_client(self):
+        for subdir, cls in (('ubuntu12_32', 1), ('steamrt64', 2)):
+            binary = self.steam_home / subdir / 'steam'
+            binary.parent.mkdir()
+            binary.write_bytes(b'\x7fELF' + bytes([cls]))
+            binary.chmod(0o755)
+        package = self.steam_home / 'package'
+        package.mkdir()
+        (package / 'steam_client_ubuntu12.manifest').write_text('"version" "1792618285"')
+        (package / 'steam_client_steamrt64.manifest').write_text('"version" "1794536281"')
+        marker = self.steam_home / '.steam-disable-steamrt64-client'
+        with mock.patch.object(self.m, 'steam_hard_lock_active', return_value=False), \
+             mock.patch.object(self.m, 'running_steam_client_classes', return_value=set()) as running, \
+             mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': ''}):
+            self.assertEqual(self.real_active_steam_elf_class(), 2)
+            marker.touch()
+            self.assertEqual(self.real_active_steam_elf_class(), 1)
+            with mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': 'steamrt64'}):
+                self.assertEqual(self.real_active_steam_elf_class(), 2)
+            marker.unlink()
+            with mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': 'ubuntu12_32'}):
+                self.assertEqual(self.real_active_steam_elf_class(), 1)
+            running.return_value = {1}
+            with self.assertRaisesRegex(ValueError, 'disagrees'):
+                self.real_active_steam_elf_class()
+            running.return_value = set()
+            (self.steam_home / 'steamrt64/steam').unlink()
+            self.assertEqual(self.real_active_steam_elf_class(), 1)
+
+    def test_running_client_executable_detection(self):
+        proc_root = self.temp / 'proc'
+        proc = proc_root / '42'
+        proc.mkdir(parents=True)
+        (proc / 'comm').write_text('steam\n')
+        (proc / 'exe').symlink_to(self.steam_home / 'steamrt64/steam')
+        self.assertEqual(self.m.running_steam_client_classes(self.steam_home, proc_root), {2})
 
     def archive(self, elf_class):
         buf = io.BytesIO()

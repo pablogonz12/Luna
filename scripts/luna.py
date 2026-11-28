@@ -6785,31 +6785,56 @@ def _upstream_component(repo, beta_path, glob, mode, channel):
             'channel': 'stable', 'url': asset.get('browser_download_url')}, note
 
 
+def running_steam_client_classes(root, proc_root=Path('/proc')):
+    """Read the executable of this user's Steam processes under this Steam root."""
+    root = root.resolve()
+    clients = {(root / 'ubuntu12_32/steam').resolve(): 1,
+               (root / 'steamrt64/steam').resolve(): 2}
+    classes = set()
+    for proc in proc_root.iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if proc.stat().st_uid != os.getuid() or (proc / 'comm').read_text().strip() != 'steam':
+                continue
+            executable = Path(os.readlink(proc / 'exe'))
+            if not executable.is_relative_to(root):
+                continue
+            if executable not in clients:
+                raise ValueError('unrecognized running Steam client executable: %s' % executable)
+            classes.add(clients[executable])
+        except FileNotFoundError:
+            continue  # process exited during the scan
+    return classes
+
+
 def active_steam_elf_class():
-    """Identify the selected client, not merely a leftover binary from another client."""
+    """Mirror steam.sh's selector without changing its persistent marker."""
     root = steam_home()
+    force = os.environ.get('STEAM_FORCE_CLIENT', '')
+    disabled = (root / '.steam-disable-steamrt64-client').exists()
+    if force in ('ubuntu12_32', 'scout', 'ldlp'):
+        disabled = True
+    elif force in ('steamrt64', 'steamrt3c', 'steamrt'):
+        disabled = False
+    binary64 = root / 'steamrt64' / 'steam'
+    expected = 2 if not disabled and os.access(binary64, os.X_OK) else 1
+    binary = binary64 if expected == 2 else root / 'ubuntu12_32' / 'steam'
+    if elf_file_class(binary) != expected:
+        raise ValueError('selected Steam client binary has the wrong ELF class')
     if steam_hard_lock_active():
-        if (root / '.steam-enable-steamrt64-client').exists():
+        if expected != 1:
             raise ValueError('Steam client selector conflicts with the 32-bit hard lock')
         if str(read_steam_pin().get('clientBuild')) != KNOWN_GOOD_UBUNTU12_BUILD:
             raise ValueError('Steam hard lock has an unknown client build')
         manifest = root / 'package' / 'steam_client_ubuntu12.manifest'
         if _manifest_version(manifest.read_bytes()) != KNOWN_GOOD_UBUNTU12_BUILD:
             raise ValueError('locked Steam client manifest does not match the pin')
-        if not _elf32_file(root / 'ubuntu12_32' / 'steam'):
+        if not _elf32_file(binary):
             raise ValueError('locked 32-bit Steam client binary is missing or invalid')
-        return 1
-    marker = root / '.steam-enable-steamrt64-client'
-    if marker.exists():
-        binary = root / 'steamrt64' / 'steam'
-        manifest = root / 'package' / 'steam_client_steamrt64.manifest'
-        expected = 2
-    else:
-        binary = root / 'ubuntu12_32' / 'steam'
-        manifest = root / 'package' / 'steam_client_ubuntu12.manifest'
-        expected = 1
-    if not manifest.is_file() or elf_file_class(binary) != expected:
-        raise ValueError('cannot determine the active Steam client architecture from its manifest and binary')
+    running = running_steam_client_classes(root)
+    if running and running != {expected}:
+        raise ValueError('running Steam client architecture disagrees with the selected client')
     return expected
 
 
