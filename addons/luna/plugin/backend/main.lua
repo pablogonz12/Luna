@@ -1746,7 +1746,21 @@ local function steam_client_state()  -- What `luna steam status` reports on the 
     end
   end
   if state.build == '' then
-    local manifest = read_file(steam_root .. '/package/steam_client_ubuntu12.manifest')
+    -- The manifest of the client steam.sh selects: steamrt64 unless
+    -- .steam-disable-steamrt64-client exists or there is no steamrt64/steam.
+    -- A 64-bit install keeps a stale ubuntu12 manifest that is not its build.
+    local function exists(path)
+      local handle = io.open(path, 'rb')
+      if handle then handle:close() return true end
+      return false
+    end
+    local client = 'ubuntu12'
+    if not exists(steam_root .. '/.steam-disable-steamrt64-client')
+        and exists(steam_root .. '/steamrt64/steam') then
+      client = 'steamrt64'
+    end
+    state.client = client
+    local manifest = read_file(steam_root .. '/package/steam_client_' .. client .. '.manifest')
     if manifest then
       for version in manifest:gmatch('"version"%s+"(%d+)"') do
         if version ~= '0' then state.build = version end
@@ -2013,6 +2027,7 @@ function M.register(registry)
       steam, steam .. '/steam.sh', steam .. '/steam.cfg', steam .. '/userdata',
       steam .. '/logs', steam .. '/logs/console_log.txt',
       steam .. '/package', steam .. '/package/steam_client_ubuntu12.manifest',
+      steam .. '/package/steam_client_steamrt64.manifest', steam .. '/.steam-disable-steamrt64-client',
       update_dir, update_dir .. '/update-check.json', update_dir .. '/autoupdate.json',
       update_dir .. '/steam-pin.json', update_dir .. '/steam-job.json',
       update_dir .. '/steam-client-cache', update_dir .. '/steam-client-cache/build.txt',

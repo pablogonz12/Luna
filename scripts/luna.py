@@ -3449,17 +3449,39 @@ def steam_tools_files():
             'library-inject.so': base / 'library-inject.so'}
 
 
+STEAM_CLIENT_MANIFESTS = {'ubuntu12': 'steam_client_ubuntu12.manifest',
+                          'steamrt64': 'steam_client_steamrt64.manifest'}
+
+
+def steam_client_kind():
+    """'steamrt64' or 'ubuntu12': the client Valve's steam.sh selects, or None
+    when that cannot be told (see active_steam_elf_class)."""
+    try:
+        return 'steamrt64' if active_steam_elf_class() == 2 else 'ubuntu12'
+    except (OSError, ValueError):
+        return None
+
+
+def _receipt_client(receipt):
+    # Receipts written before steamrt64 support describe the ubuntu12 client.
+    return str(receipt.get('client') or 'ubuntu12')
+
+
 def steam_client_build():
     """Verified installed binaries, then the on-disk manifest, then runtime logs.
 
+    Every source is read for the client steam.sh selects: a 64-bit install keeps
+    a stale ubuntu12 manifest and receipt around (both still "match" because
+    those files are untouched), and they must not be reported as its build.
     A package manifest alone does NOT prove that its client was extracted.
     The install receipt is preferred only while the core executable hashes match.
     Newer clients log "Client version: 0" at startup, so a zero report is
     treated as "no information" rather than a build number.
     """
+    kind = steam_client_kind() or 'ubuntu12'
     receipt = read_json_file(luna_tools_dir() / 'steam-client-installed.json') or {}
     core = receipt.get('core') or {}
-    if core:
+    if core and _receipt_client(receipt) == kind:
         try:
             if all(sha256(steam_home() / _steam_payload_path(name)) == digest
                    for name, digest in core.items()):
@@ -3467,7 +3489,7 @@ def steam_client_build():
         except (OSError, ValueError):
             pass
     try:
-        manifest = (steam_home() / 'package' / 'steam_client_ubuntu12.manifest').read_text(
+        manifest = (steam_home() / 'package' / STEAM_CLIENT_MANIFESTS[kind]).read_text(
             encoding='utf-8', errors='replace')
         found = re.findall(r'"version"\s+"(\d+)"', manifest)
         manifest_build = next((build for build in reversed(found) if build != '0'), '')
@@ -3747,8 +3769,9 @@ def steam_state():
     cache_ready = bool(cached) and (steam_cache_dir() / 'package').is_dir()
     packages_match = packages_match_cache() if cache_ready else None
     receipt = read_json_file(luna_tools_dir() / 'steam-client-installed.json') or {}
+    kind = steam_client_kind()
     binaries_match = None
-    if receipt.get('core'):
+    if receipt.get('core') and _receipt_client(receipt) == (kind or 'ubuntu12'):
         try:
             binaries_match = all(sha256(steam_home() / _steam_payload_path(name)) == digest
                                  for name, digest in receipt['core'].items())
@@ -3778,7 +3801,38 @@ def steam_state():
         'pacmanIgnored': pacman_ignored,
         'hardLock': bool(pin.get('hardLock')),
         'packageReadOnly': _package_read_only(),
+        'client': kind or '',
+        'slssteamClass': slssteam_elf_class(),
     }
+
+
+def slssteam_elf_class():
+    """1 (32-bit) or 2 (64-bit) for the installed SLSsteam.so, 0 when unreadable."""
+    path = steam_tools_files().get('SLSsteam.so')
+    try:
+        return elf_file_class(path) if path else 0
+    except (OSError, ValueError):
+        return 0
+
+
+def steam_client_label(state):
+    """'1794536281 (steamrt64, 64-bit)'-style text for status output."""
+    build = state['build'] or 'unknown (Steam never logged a version here)'
+    kind = state.get('client') or ''
+    if not kind:
+        return build + ' (client architecture unknown)'
+    return '%s (%s, %s)' % (build, kind, '64-bit' if kind == 'steamrt64' else '32-bit')
+
+
+def slssteam_mismatch_note(state):
+    """A warning when the installed SLSsteam.so cannot load into the selected client."""
+    want = {'steamrt64': 2, 'ubuntu12': 1}.get(state.get('client') or '')
+    have = state.get('slssteamClass') or 0
+    if not want or not have or want == have:
+        return ''
+    return ('SLSsteam.so is %d-bit but Steam runs the %d-bit %s client: it cannot load '
+            '(games run unlicensed). Install the matching slsteam-moon build.'
+            % (32 if have == 1 else 64, 32 if want == 1 else 64, state['client']))
 
 
 def cached_client_build():
@@ -4843,8 +4897,11 @@ def cmd_steam(options):
     action = getattr(options, 'steam_action', '') or 'status'
     if action == 'status':
         state = steam_state()
-        print('client : %s' % (state['build'] or 'unknown (Steam never logged a version here)'))
-        print('pinned : %s' % (state['pinned'] or 'none (run: luna steam pin)'))
+        print('client : %s' % steam_client_label(state))
+        if state.get('client') == 'steamrt64' and not state['pinned']:
+            print('pinned : none (64-bit pinning arrives in a later Luna release)')
+        else:
+            print('pinned : %s' % (state['pinned'] or 'none (run: luna steam pin)'))
         print('packages: %s' % ('match the pin' if state['match']
                                  else 'DIFFER from the pin - run: luna steam recover (Steam closed)'
                                  if state['pinned'] and state['cacheReady']
@@ -4860,6 +4917,11 @@ def cmd_steam(options):
                      else ' and NOT ignored - add "IgnorePkg = steam" to /etc/pacman.conf (needs sudo)'))
         for name, digest in sorted(state['slssteam'].items()):
             print('%-16s %s' % (name + ':', digest[:12] if digest else '(missing)'))
+        if state.get('slssteamClass'):
+            print('SLSsteam arch:   %d-bit' % (32 if state['slssteamClass'] == 1 else 64))
+        mismatch = slssteam_mismatch_note(state)
+        if mismatch:
+            print('WARN   : MISMATCH: %s' % mismatch)
         if state['slssteamDrift']:
             print('WARN   : SLSsteam changed since the pin: %s' % ', '.join(state['slssteamDrift']))
         for line in heal_steam_lock(apply=False)['notes']:  # read-only: status never repairs
@@ -4869,7 +4931,9 @@ def cmd_steam(options):
         if warning:
             print('WARN   : %s' % warning)
         print(libcrypto_status()[1])
-        print('cache  : %s' % ('build ' + state['cachedBuild'] if state['cacheReady']
+        # The cache tooling is ubuntu12-only for now: say so on a 64-bit client.
+        stale_kind = ' (ubuntu12 client, not the one Steam runs)' if state.get('client') == 'steamrt64' else ''
+        print('cache  : %s' % ('build ' + state['cachedBuild'] + stale_kind if state['cacheReady']
                                 else 'empty (run: luna steam cache with Steam closed)'))
         pending = read_steam_pending()
         if pending:
@@ -5042,6 +5106,9 @@ def cmd_steam(options):
 def steam_drift_note():
     """One-line summary for preflight/Health, or '' when nothing is wrong."""
     state = steam_state()
+    mismatch = slssteam_mismatch_note(state)
+    if mismatch:
+        return mismatch
     if state.get('binariesMatch') is False:
         return 'Steam client executables changed; close Steam and run: luna steam recover'
     if state['pinned'] and state['cacheReady'] and state['packagesMatch'] is False:
