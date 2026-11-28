@@ -650,12 +650,56 @@ marker:write('{"id":"1","pid":0,"startedAt":' .. tostring(os.time() - 500)
 marker:close()
 out = call('SlsLunaRepair', { raw = json.encode({ action = 'status' }) })
 assert(out.success == true and out.job.state == 'timeout', 'a stale job must report a timeout')
-assert(tostring(out.job.message):find('process group was stopped'),
-  'a timeout must say the process group was stopped')
+assert(tostring(out.job.message):find('identity is stale'),
+  'a legacy timeout must report stale identity')
 assert(io.open(repair_dir .. '/repair-job.json', 'rb') == nil, 'the stale marker is removed')
 out = call('SlsLunaRepair', { raw = json.encode({ action = 'status' }) })
 assert(out.success == true and out.job.state == 'timeout',
   'and the last outcome stays a timeout, not a false success')
+
+-- Fake proc reads and intercept signals: no real process is ever signalled.
+do
+  local real_open, real_execute = io.open, os.execute
+  local stat, boot, signals, change_after_term
+  local function fake_stat(start, state)
+    return '12345 (name with ) parentheses) ' .. (state or 'S')
+      .. string.rep(' 0', 18) .. ' ' .. start .. ' 0\n'
+  end
+  io.open = function(path, mode)
+    local data = path == '/proc/12345/stat' and stat
+      or path == '/proc/sys/kernel/random/boot_id' and boot
+    if data then
+      return { read = function() return data end, close = function() end }
+    end
+    return real_open(path, mode)
+  end
+  os.execute = function(command)
+    if command:match('^kill %-') then
+      signals[#signals + 1] = command
+      if change_after_term then stat = fake_stat('999') end
+      return true
+    end
+    if command == 'sleep 0.3' then return true end
+    return real_execute(command)
+  end
+  local function check(identity, expected, message, replacement, state, change)
+    stat, boot, signals, change_after_term = fake_stat(replacement or '123', state), 'boot-id\n', {}, change
+    local job = { id = 'test', pid = 12345, startedAt = os.time() - 500 }
+    if identity then job.starttime, job.bootId = identity[1], identity[2] end
+    local file = assert(real_open(repair_dir .. '/repair-job.json', 'wb'))
+    file:write(json.encode(job)); file:close()
+    local answer = call('SlsLunaRepair', { raw = json.encode({ action = 'status' }) })
+    assert(#signals == expected, 'unexpected signal count: ' .. #signals)
+    assert(answer.job.message:find(message), answer.job.message)
+  end
+  check({ '123', 'boot-id' }, 2, 'process group was signalled')
+  check({ '123', 'boot-id' }, 0, 'identity was unreadable or changed', '124')
+  check({ '123', 'other-boot' }, 0, 'identity was unreadable or changed')
+  check(nil, 0, 'identity is stale')
+  check({ '123', 'boot-id' }, 0, 'identity was unreadable or changed', nil, 'Z')
+  check({ '123', 'boot-id' }, 1, 'before KILL', nil, nil, true)
+  io.open, os.execute = real_open, real_execute
+end
 
 -- Non-blocking fetch: with http.start/http.poll available, SlsHltbFetch never
 -- waits on the network. The fake answers each request after two empty polls,

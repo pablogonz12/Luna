@@ -1309,12 +1309,31 @@ end
 
 -- The job runs in its own session, so its pid is the process-group id: a
 -- negative signal reaches the installer and everything it started.
-local function stop_group(pid)
+local function stop_group(pid, job)
   pid = math.floor(tonumber(pid) or 0)
-  if pid <= 0 then return false end
-  os.execute('kill -TERM -' .. tostring(pid) .. ' 2>/dev/null; sleep 0.3; '
-    .. 'kill -KILL -' .. tostring(pid) .. ' 2>/dev/null')
-  return true
+  if not job.starttime or job.starttime == '' or not job.bootId or job.bootId == '' then
+    return false, 'its identity is stale; no signals were sent'
+  end
+  local function matches()
+    if pid <= 0 then return false end
+    local stat = read_file('/proc/' .. tostring(pid) .. '/stat')
+    local boot = read_file('/proc/sys/kernel/random/boot_id')
+    if not stat or not boot then return false end
+    local rest = stat:match('^.*%)(.*)$')
+    if not rest then return false end
+    local fields = {}
+    for field in rest:gmatch('%S+') do fields[#fields + 1] = field end
+    return fields[1] ~= 'Z' and fields[1] ~= 'X'
+      and fields[20] ~= nil and fields[20]:match('^%d+$') ~= nil
+      and fields[20] == tostring(job.starttime)
+      and boot:match('^%s*(.-)%s*$') == job.bootId
+  end
+  if not matches() then return false, 'its identity was unreadable or changed; no signals were sent' end
+  os.execute('kill -TERM -' .. tostring(pid) .. ' 2>/dev/null')
+  os.execute('sleep 0.3')
+  if not matches() then return false, 'TERM was sent, but its identity changed or became unreadable before KILL' end
+  os.execute('kill -KILL -' .. tostring(pid) .. ' 2>/dev/null')
+  return true, 'its process group was signalled'
 end
 
 local function job_message(name, result)
@@ -1349,10 +1368,10 @@ local function job_state(name)
     pid = math.floor(tonumber(job.pid) or 0)
     age = math.max(0, os.time() - started)
     if age > limit then
-      if process_alive(pid) then stop_group(pid) end
+      local _, stop_message = stop_group(pid, job)
       state = 'timeout'
       result = { state = 'timeout', at = os.time(),
-        message = 'did not finish in ' .. tostring(limit) .. ' s; its process group was stopped'
+        message = 'did not finish in ' .. tostring(limit) .. ' s; ' .. stop_message
           .. (last_line(file_tail(log_path)) ~= '' and (' - ' .. last_line(file_tail(log_path))) or '') }
       write_json(result_path, result)
       os.remove(state_path)
@@ -1417,8 +1436,13 @@ local function start_job(name, args)
   -- timeout signals), runs the bounded command, records the outcome, and
   -- removes the marker. Everything is constants plus shq(); no request text.
   local command = tostring(args or spec.args)
-  local inner = "printf '{\"id\":\"%s\",\"pid\":%s,\"startedAt\":%s,\"phase\":\"running\","
-    .. "\"state\":\"running\",\"limit\":%s}\\n' " .. shq(id) .. " \"$$\" \"$(date +%s)\" "
+  local inner = 'stat=$(cat /proc/$$/stat 2>/dev/null); stat=${stat##*)}; '
+    .. 'set -- $stat; n=0; while [ "$n" -lt 19 ] && [ "$#" -gt 0 ]; do shift; n=$((n+1)); done; '
+    .. 'starttime=$1; boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); '
+    .. 'case "$starttime" in *[!0-9]*|"") starttime="" ;; esac; '
+    .. 'case "$boot" in *[!0-9a-fA-F-]*|"") boot="" ;; esac; '
+    .. "printf '{\"id\":\"%s\",\"pid\":%s,\"startedAt\":%s,\"starttime\":\"%s\",\"bootId\":\"%s\",\"phase\":\"running\","
+    .. "\"state\":\"running\",\"limit\":%s}\\n' " .. shq(id) .. " \"$$\" \"$(date +%s)\" \"$starttime\" \"$boot\" "
     .. "'" .. tostring(spec.seconds) .. "' > " .. shq(state_path .. '.tmp')
     .. ' && mv -f ' .. shq(state_path .. '.tmp') .. ' ' .. shq(state_path)
     .. '; ' .. bounded(spec.seconds) .. shq(python_bin()) .. ' ' .. shq(updater_path())
