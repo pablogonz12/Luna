@@ -12,6 +12,9 @@ mkdir -p "$tmp/home"
 mkdir -p "$tmp/presence"
 (cd "$root" && SLS_TEST_HOME="$tmp/presence" HOME="$tmp/presence" SLS_KIND=presence \
   "$lua" tests/presence/backend-smoke.lua)
+mkdir -p "$tmp/presence-extra"
+(cd "$root" && SLS_TEST_HOME="$tmp/presence-extra" HOME="$tmp/presence-extra" SLS_KIND=presence \
+  "$lua" tests/presence/luna-extra-backend.lua)
 LUNA_TEST_HOME="$tmp/home" HOME="$tmp/home" LUNA_REPO="$root" "$lua" "$root/tests/bridge-smoke.lua"
 # Discovery must survive a HOME that a shell would mis-quote (item 14).
 awkward="$tmp/home with 'quote'"
