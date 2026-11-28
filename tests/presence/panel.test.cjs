@@ -64,3 +64,34 @@ test('with SLS Luna present, the panel creates nothing',()=>{
   assert.equal(document.getElementById('sls-presence-panel'),null);
   assert.equal(w.__SlsPresencePanel,undefined,'the standalone guard must stay untouched');
 });
+
+test('corruption notice uses text, lists paths, and acknowledges with a JSON string',async()=>{
+  const {w,document}=fakeWindow();
+  const calls=[];
+  const unsafe='/tmp/<img src=x onerror=alert(1)>';
+  let locked=true;
+  w.Millennium.callServerMethod=async (_host,method,args)=>{
+    calls.push({method,args});
+    if(method==='SlsPresenceAcknowledgeCorruption') {
+      assert.equal(args.raw,JSON.stringify({acknowledge:true}));
+      locked=false;
+      return JSON.stringify({success:true});
+    }
+    return JSON.stringify({success:true,state:{enabled:false,owned:{}},runtime:{},apps:[],
+      corruptionRequiresAcknowledgement:locked,quarantineDirectory:unsafe,quarantinePaths:[unsafe+'/presence.json.quarantine.1.1']});
+  };
+  loadPanel(w);
+  document.getElementById('sls-presence-panel-button').onclick();
+  await new Promise(resolve=>setImmediate(resolve));
+  const notice=document.getElementById('sls-presence-corruption');
+  const button=document.getElementById('sls-presence-start-fresh');
+  assert.equal(notice.hidden,false);
+  assert.match(notice.textContent,/state and its backup could not be read/);
+  assert.match(notice.textContent,/ownership changes are paused/);
+  assert.ok(notice.textContent.includes(unsafe));
+  assert.equal(notice.innerHTML,undefined,'backend text must not be inserted as HTML');
+  assert.equal(button.textContent,'Start fresh');
+  await button.onclick();
+  assert.equal(calls.filter(x=>x.method==='SlsPresenceAcknowledgeCorruption').length,1);
+  assert.equal(notice.hidden,true);
+});

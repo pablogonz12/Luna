@@ -1,13 +1,9 @@
 # Presence regression suite
 
-Mirrored from `slsteam-presence/tests/` alongside the 0.3.2-dev.2 payload. Only
-plugin paths change to target `addons/presence/plugin/`; assertions remain the
-same. `bash scripts/test-all.sh` runs these Node suites and the isolated Lua
-backend smoke test, without depending on a sibling checkout or live Steam.
+The mirrored tests come from `slsteam-presence@92246e9`. Only plugin paths
+change to target `addons/presence/plugin/`; the source is a committed revision.
+`luna-extra.test.cjs` and `luna-extra-backend.lua` hold Luna-only coverage.
 
-This development payload comes from the uncommitted
-`fix/presence-session-cleanup` worktree based on
-`0490b34c9430436764602698237b6f8492971f0b`, not that committed revision itself.
-`vendor/MANIFEST.json` records `uncommitted-worktree` and the exact payload
-hashes. Do not mistake passing mocks for desktop/Gaming Mode live validation,
-or publish this snapshot as a released source revision.
+`bash scripts/test-all.sh` runs the Node suites and both isolated Lua backend
+tests without a sibling checkout or live Steam. Passing mocks does not replace
+desktop or Gaming Mode validation.
