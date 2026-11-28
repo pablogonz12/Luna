@@ -37,7 +37,7 @@
     "luna": {
       "files": {
         "backend/main.lua": {
-          "sha256": "c14af72db0c1612d733d26ef711a42446ab803d39385e57e2b9f7ef2654984a5",
+          "sha256": "2ee7af44526555437c249a25aa1366a2262cd7241393ea2e6c963ebdddad5732",
           "source_path": "plugin/backend/main.lua"
         },
         "plugin.json": {
@@ -54,7 +54,7 @@
         }
       },
       "plugin_version": "0.14.19",
-      "source_commit": "017fbec8b544f00052b1f6ccbff26349bed5bbbf",
+      "source_commit": "d202a24374da58061d62fc743953224ad0179ebe",
       "source_repo": "https://github.com/pgm1207/Luna"
     },
     "playtime": {
@@ -119,7 +119,7 @@
       "source_repo": "https://github.com/pgm1207/Luna"
     }
   },
-  "generated": "2026-11-28T00:22:12+0100",
+  "generated": "2026-11-28T02:47:34+0100",
   "shared": {
     "bridge/bridge.lua": {
       "sha256": "aeced944f64c5dc779c24ecf912bee2570760e7d5e35f90b26f9aa1042cccb2c",
