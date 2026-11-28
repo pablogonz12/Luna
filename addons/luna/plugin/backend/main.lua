@@ -1314,26 +1314,43 @@ local function stop_group(pid, job)
   if not job.starttime or job.starttime == '' or not job.bootId or job.bootId == '' then
     return false, 'its identity is stale; no signals were sent'
   end
-  local function matches()
-    if pid <= 0 then return false end
-    local stat = read_file('/proc/' .. tostring(pid) .. '/stat')
+  -- 'same': the recorded leader, alive. 'zombie': the recorded leader, exited
+  -- but unreaped. 'gone': no such pid. 'other': unreadable, another boot, or a
+  -- different process now holds the pid.
+  local function leader()
+    if pid <= 0 then return 'other' end
     local boot = read_file('/proc/sys/kernel/random/boot_id')
-    if not stat or not boot then return false end
+    if not boot or boot:match('^%s*(.-)%s*$') ~= job.bootId then return 'other' end
+    local stat = read_file('/proc/' .. tostring(pid) .. '/stat')
+    if not stat then return path_exists('/proc/' .. tostring(pid)) and 'other' or 'gone' end
     local rest = stat:match('^.*%)(.*)$')
-    if not rest then return false end
+    if not rest then return 'other' end
     local fields = {}
     for field in rest:gmatch('%S+') do fields[#fields + 1] = field end
-    return fields[1] ~= 'Z' and fields[1] ~= 'X'
-      and fields[20] ~= nil and fields[20]:match('^%d+$') ~= nil
-      and fields[20] == tostring(job.starttime)
-      and boot:match('^%s*(.-)%s*$') == job.bootId
+    if not (fields[20] and fields[20]:match('^%d+$') and fields[20] == tostring(job.starttime)) then
+      return 'other'
+    end
+    if fields[1] == 'Z' or fields[1] == 'X' then return 'zombie' end
+    return 'same'
   end
-  if not matches() then return false, 'its identity was unreadable or changed; no signals were sent' end
+  -- A pgid is never handed out again while any process still belongs to that
+  -- group, so once the leader was verified, surviving members are ours.
+  local function group_alive()
+    local ok = os.execute('pgrep -g ' .. tostring(pid) .. ' >/dev/null 2>&1')
+    return ok == true or ok == 0
+  end
+  if leader() ~= 'same' then return false, 'its identity was unreadable or changed; no signals were sent' end
   os.execute('kill -TERM -' .. tostring(pid) .. ' 2>/dev/null')
   os.execute('sleep 0.3')
-  if not matches() then return false, 'TERM was sent, but its identity changed or became unreadable before KILL' end
-  os.execute('kill -KILL -' .. tostring(pid) .. ' 2>/dev/null')
-  return true, 'its process group was signalled'
+  local after = leader()
+  if after == 'same' or ((after == 'gone' or after == 'zombie') and group_alive()) then
+    os.execute('kill -KILL -' .. tostring(pid) .. ' 2>/dev/null')
+    return true, 'its process group was signalled'
+  end
+  if after == 'other' then
+    return false, 'TERM was sent, but its identity changed or became unreadable before KILL'
+  end
+  return true, 'its process group stopped after TERM'
 end
 
 local function job_message(name, result)

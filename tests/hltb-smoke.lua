@@ -660,7 +660,7 @@ assert(out.success == true and out.job.state == 'timeout',
 -- Fake proc reads and intercept signals: no real process is ever signalled.
 do
   local real_open, real_execute = io.open, os.execute
-  local stat, boot, signals, change_after_term
+  local stat, boot, signals, change_after_term, leader_exits, survivors
   local function fake_stat(start, state)
     return '12345 (name with ) parentheses) ' .. (state or 'S')
       .. string.rep(' 0', 18) .. ' ' .. start .. ' 0\n'
@@ -668,6 +668,10 @@ do
   io.open = function(path, mode)
     local data = path == '/proc/12345/stat' and stat
       or path == '/proc/sys/kernel/random/boot_id' and boot
+    if path == '/proc/12345/stat' and stat == false then return nil end
+    if path == '/proc/12345' then
+      return stat and { read = function() return nil end, close = function() end } or nil
+    end
     if data then
       return { read = function() return data end, close = function() end }
     end
@@ -677,13 +681,18 @@ do
     if command:match('^kill %-') then
       signals[#signals + 1] = command
       if change_after_term then stat = fake_stat('999') end
+      if leader_exits and command:match('^kill %-TERM') then
+        stat = leader_exits == 'zombie' and fake_stat('123', 'Z') or false
+      end
       return true
     end
+    if command:match('^pgrep %-g 12345') then return survivors and true or nil end
     if command == 'sleep 0.3' then return true end
     return real_execute(command)
   end
-  local function check(identity, expected, message, replacement, state, change)
+  local function check(identity, expected, message, replacement, state, change, exits, alive)
     stat, boot, signals, change_after_term = fake_stat(replacement or '123', state), 'boot-id\n', {}, change
+    leader_exits, survivors = exits, alive
     local job = { id = 'test', pid = 12345, startedAt = os.time() - 500 }
     if identity then job.starttime, job.bootId = identity[1], identity[2] end
     local file = assert(real_open(repair_dir .. '/repair-job.json', 'wb'))
@@ -698,6 +707,12 @@ do
   check(nil, 0, 'identity is stale')
   check({ '123', 'boot-id' }, 0, 'identity was unreadable or changed', nil, 'Z')
   check({ '123', 'boot-id' }, 1, 'before KILL', nil, nil, true)
+  -- TERM ends the leader but a child ignores it: the group is still ours, so
+  -- KILL follows (for an exited and for an unreaped leader).
+  check({ '123', 'boot-id' }, 2, 'process group was signalled', nil, nil, nil, 'gone', true)
+  check({ '123', 'boot-id' }, 2, 'process group was signalled', nil, nil, nil, 'zombie', true)
+  -- The whole group stopped on TERM: no KILL is needed.
+  check({ '123', 'boot-id' }, 1, 'stopped after TERM', nil, nil, nil, 'gone', false)
   io.open, os.execute = real_open, real_execute
 end
 
