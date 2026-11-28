@@ -5344,6 +5344,7 @@
     function componentText(item) {
       const installed = String(item.installed || '?');
       const available = String(item.available || '?');
+      if (item.status === 'incompatible') return item.component + ': ' + item.note;
       if (item.status === 'newer') {
         return item.component + ': ' + installed + ' → ' + available
           + (available === installed || available === 'beta' ? ' (newer build)' : '');
@@ -5415,6 +5416,10 @@
         return say('failed', 'The update failed before anything was changed.' + why);
       }
       if (checkUsable) {
+        if (upstream.overall === 'incompatible') {
+          return say('incompatible', view.components.filter(item => item.status === 'incompatible')
+            .map(componentText).join(', '));
+        }
         if (upstream.overall === 'newer') {
           return say('update-available', 'Update available: ' + (view.components
             .filter(item => item.status === 'newer').map(componentText).join(', ') || 'newer build'));
@@ -6023,10 +6028,19 @@
       }
 
       section('Steam client');
+      const steam64 = steam.client === 'steamrt64';
       line('Build ' + (steam.build || '?')
+        + (steam.client ? ' (' + (steam64 ? '64-bit steamrt64' : '32-bit ubuntu12') + ')' : '')
         + (steam.pinned ? ' · known-good ' + steam.pinned + (steam.match ? ' ✓' : ' — drifted') : ' · no known-good build pinned')
         + ' · updates ' + (steam.updatesBlocked ? 'blocked (steam.cfg lock)' : 'allowed'));
+      if (steam.slssteamMismatch) text('sls-luna-error', steam.slssteamMismatch);
       if (steam.pending) line('Queued Steam task: ' + steam.pending);
+      if (steam64) {
+        // Pin, cache, recover and update handle only the 32-bit client so far.
+        line('Steam runs the 64-bit client. Luna cannot pin or update it yet, so Steam updates itself; '
+          + 'a later Luna release adds a verified 64-bit pin.');
+        row(button('Cancel Steam task', () => runSteamAction({ action: 'cancel' }), true, !steam.pending));
+      } else {
       line('Stay on the known-good build — Recommended. This is the default; nothing moves Steam unless you choose below.');
       row(button('Pin this build as known-good', () => runSteamAction({ action: 'pin' }), true,
           Boolean(steam.pinned && steam.match)),
@@ -6042,6 +6056,7 @@
             runSteamAction({ action: 'queue-update' });
           }, false, Boolean(steam.pending)),
           button('Keep the known-good build', () => { steamLatestArmed = false; repaintIfOpen(); }, true));
+      }
       }
       return body;
     }

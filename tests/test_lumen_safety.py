@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -43,7 +44,7 @@ class SafetyBase(unittest.TestCase):
         self.sls = self.home / '.local/share/SLSsteam'
         (self.sls / 'path').mkdir(parents=True)
         (self.sls / 'path/steam').write_text('wrapper v1')
-        (self.sls / 'SLSsteam.so').write_text('so v1')
+        (self.sls / 'SLSsteam.so').write_bytes(b'\x7fELF\x01')
         self.cfg = self.home / '.config/SLSsteam'
         self.cfg.mkdir(parents=True)
         (self.cfg / 'config.yaml').write_text('user: settings\n')
@@ -59,6 +60,9 @@ class SafetyBase(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('luna_safety_mod', str(LUNA))
         self.m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.m)
+        self.real_slsteam_asset_class = self.m.slsteam_asset_class
+        self.real_lumen_upstream_state = self.m.lumen_upstream_state
+        self.real_active_steam_elf_class = self.m.active_steam_elf_class
         self.steam_up = False
         self.installer_action = 'ok'
         self.patchable = True
@@ -106,6 +110,9 @@ class SafetyBase(unittest.TestCase):
         patches = {'process_running': lambda name: self.steam_up and name in ('steam', 'steamwebhelper'),
                    'run_base_installer': installer, 'patcher': fake_patcher, 'cmd_install': install,
                    'verify_base_installer': lambda ref, sha: 'f' * 64,
+                   'active_steam_elf_class': lambda: 1,
+                   'slsteam_release': lambda channels: {'tag': 'v2'},
+                   'slsteam_asset_class': lambda info: 1,
                    'lumen_upstream_state': lambda *a, **k: {'overall': 'newer', 'components': [], 'channels': {}},
                    'systemctl_user': systemctl,
                    'heal_steam_lock': lambda *a, **k: self.heals.append(1) or {'pinned': True, 'fixed': [], 'notes': []},
@@ -467,7 +474,8 @@ class FakeApi:
 
 def release(tag, asset_id, size, name):
     return {'tag_name': tag, 'draft': False, 'prerelease': False,
-            'assets': [{'name': name, 'id': asset_id, 'size': size}]}
+            'assets': [{'name': name, 'id': asset_id, 'size': size,
+                        'browser_download_url': 'https://example.test/' + name}]}
 
 
 STABLE = {
@@ -486,6 +494,8 @@ class CurrentnessCase(SafetyBase):
         real = self.fresh()
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(self.m, 'lumen_upstream_state', real.lumen_upstream_state).start()
+        mock.patch.object(real, 'active_steam_elf_class', return_value=1).start()
+        mock.patch.object(real, 'slsteam_asset_class', return_value=1).start()
         self.api_module = real
         (self.lumen / 'versions.json').write_text(json.dumps(INSTALLED_STABLE))
 
@@ -873,6 +883,208 @@ class StateCase(SafetyBase):
             self.assertTrue(self.m.apply_queued_lumen({}))
         self.assertEqual(seen['command'][1:], [str(self.m.luna_tools_dir() / 'luna.py'), 'lumen', 'update', '--yes'])
         self.assertEqual(seen['env'][self.m.LOCK_HELD_ENV], '1')
+
+
+class ArchitectureGuardTest(SafetyBase):
+    def test_historical_build_with_retained_hard_lock(self):
+        package = self.steam_home / 'package'
+        package.mkdir()
+        manifest = package / 'steam_client_ubuntu12.manifest'
+        manifest.write_text('"version" "%s"' % self.m.STEAM_COMPAT_BUILD)
+        binary = self.steam_home / 'ubuntu12_32/steam'
+        binary.parent.mkdir()
+        binary.write_bytes(b'\x7fELF\x01\x01' + bytes(12) + b'\x03\x00')
+        pin = {'clientBuild': self.m.STEAM_COMPAT_BUILD, 'hardLock': {'active': True}}
+        with mock.patch.object(self.m, 'read_steam_pin', return_value=pin), \
+             mock.patch.object(self.m, 'running_steam_client_classes', return_value=set()), \
+             mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': ''}):
+            self.assertEqual(self.real_active_steam_elf_class(), 1)
+            manifest.write_text('"version" "%s"' % self.m.KNOWN_GOOD_UBUNTU12_BUILD)
+            with self.assertRaisesRegex(ValueError, 'manifest'):
+                self.real_active_steam_elf_class()
+            manifest.write_text('"version" "%s"' % self.m.STEAM_COMPAT_BUILD)
+            pin['clientBuild'] = '123456'
+            with self.assertRaisesRegex(ValueError, 'unknown client build'):
+                self.real_active_steam_elf_class()
+            pin['clientBuild'] = self.m.STEAM_COMPAT_BUILD
+            binary.write_bytes(b'\x7fELF\x01' + bytes(15))
+            with self.assertRaisesRegex(ValueError, 'invalid'):
+                self.real_active_steam_elf_class()
+
+    def test_active_client_requires_consistent_lock_manifest_and_binary(self):
+        package = self.steam_home / 'package'
+        package.mkdir()
+        (package / 'steam_client_ubuntu12.manifest').write_text(
+            '"version" "%s"' % self.m.KNOWN_GOOD_UBUNTU12_BUILD)
+        binary = self.steam_home / 'ubuntu12_32/steam'
+        binary.parent.mkdir()
+        binary.write_bytes(b'\x7fELF\x01\x01' + bytes(12) + b'\x03\x00')
+        pin = {'clientBuild': self.m.KNOWN_GOOD_UBUNTU12_BUILD, 'hardLock': {'active': True}}
+        with mock.patch.object(self.m, 'read_steam_pin', return_value=pin), \
+             mock.patch.object(self.m, 'running_steam_client_classes', return_value=set()), \
+             mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': ''}):
+            self.assertEqual(self.real_active_steam_elf_class(), 1)
+            binary64 = self.steam_home / 'steamrt64/steam'
+            binary64.parent.mkdir()
+            binary64.write_bytes(b'\x7fELF\x02')
+            binary64.chmod(0o755)
+            with self.assertRaises(ValueError):
+                self.real_active_steam_elf_class()
+
+    def test_valve_selector_and_running_client(self):
+        for subdir, cls in (('ubuntu12_32', 1), ('steamrt64', 2)):
+            binary = self.steam_home / subdir / 'steam'
+            binary.parent.mkdir()
+            binary.write_bytes(b'\x7fELF' + bytes([cls]))
+            binary.chmod(0o755)
+        package = self.steam_home / 'package'
+        package.mkdir()
+        (package / 'steam_client_ubuntu12.manifest').write_text('"version" "1792618285"')
+        (package / 'steam_client_steamrt64.manifest').write_text('"version" "1794536281"')
+        marker = self.steam_home / '.steam-disable-steamrt64-client'
+        with mock.patch.object(self.m, 'steam_hard_lock_active', return_value=False), \
+             mock.patch.object(self.m, 'running_steam_client_classes', return_value=set()) as running, \
+             mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': ''}):
+            self.assertEqual(self.real_active_steam_elf_class(), 2)
+            marker.touch()
+            self.assertEqual(self.real_active_steam_elf_class(), 1)
+            with mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': 'steamrt64'}):
+                self.assertEqual(self.real_active_steam_elf_class(), 2)
+            marker.unlink()
+            with mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': 'ubuntu12_32'}):
+                self.assertEqual(self.real_active_steam_elf_class(), 1)
+            running.return_value = {1}
+            with self.assertRaisesRegex(ValueError, 'disagrees'):
+                self.real_active_steam_elf_class()
+            running.return_value = set()
+            (self.steam_home / 'steamrt64/steam').unlink()
+            self.assertEqual(self.real_active_steam_elf_class(), 1)
+
+    def test_running_client_executable_detection(self):
+        proc_root = self.temp / 'proc'
+        proc = proc_root / '42'
+        proc.mkdir(parents=True)
+        (proc / 'comm').write_text('steam\n')
+        (proc / 'exe').symlink_to(self.steam_home / 'steamrt64/steam')
+        self.assertEqual(self.m.running_steam_client_classes(self.steam_home, proc_root), {2})
+
+    def archive(self, elf_class):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('slsteam-moon/bin/SLSsteam.so', b'\x7fELF' + bytes([elf_class]) + bytes(15))
+        return buf.getvalue()
+
+    def test_archive_class_and_integrity(self):
+        data = self.archive(2)
+        digest = hashlib.sha256(data).hexdigest()
+        with mock.patch.object(self.m, '_http_get', side_effect=[data, (digest + '  file.zip\n').encode()]):
+            self.assertEqual(self.real_slsteam_asset_class({'url': 'https://example.test/file.zip'}), 2)
+        with mock.patch.object(self.m, '_http_get', side_effect=[data, b'0' * 64]):
+            with self.assertRaises(ValueError):
+                self.real_slsteam_asset_class({'url': 'https://example.test/file.zip'})
+
+    def test_preflight_mismatch_drops_queued_job_without_installer(self):
+        self.m.write_json_file(self.m.lumen_pending_path(), {'action': 'update', 'at': 1})
+        before = self.snapshot()
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1, create=True), \
+             mock.patch.object(self.m, 'slsteam_release', return_value={'tag': 'v3.0'}, create=True), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=2, create=True):
+            self.assertTrue(self.m.apply_queued_lumen({}))
+        self.assertFalse(self.calls)
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertIn('64-bit', self.result()['message'])
+        self.assertFalse(self.m.read_lumen_pending())
+
+    def test_installer_mismatch_rolls_back(self):
+        before = self.snapshot()
+        def install_wrong(*args, **kwargs):
+            (self.sls / 'SLSsteam.so').write_bytes(b'\x7fELF\x02')
+            (self.lumen / 'lumen').write_text('changed')
+            return 0
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1, create=True), \
+             mock.patch.object(self.m, 'slsteam_release', return_value={'tag': 'v2'}, create=True), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=1, create=True), \
+             mock.patch.object(self.m, 'run_base_installer', side_effect=install_wrong):
+            self.assertNotEqual(self.update(), 0)
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertTrue(self.result()['rolledBack'])
+        self.assertEqual(before, self.snapshot())
+
+    def test_matching_classes_proceed(self):
+        (self.sls / 'SLSsteam.so').write_bytes(b'\x7fELF\x01')
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1, create=True), \
+             mock.patch.object(self.m, 'slsteam_release', return_value={'tag': 'v2'}, create=True), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=1, create=True):
+            self.assertEqual(self.update(), 0)
+
+    def test_incompatible_release_is_not_offered(self):
+        def fetch(repo, path, pattern, mode, channel):
+            if 'slsteam-moon' in repo:
+                return {'tag': 'v3.0', 'id': 3, 'size': 5, 'channel': 'stable',
+                        'url': 'https://example.test/file.zip'}, ''
+            return {'tag': 'v1', 'id': 1, 'size': 1, 'channel': 'stable'}, ''
+        installed = {key: {'tag': 'v1', 'id': 1, 'size': 1}
+                     for key, *_ in self.m.LUMEN_COMPONENTS}
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=2):
+            result = self.real_lumen_upstream_state(channels={}, installed=installed, fetch=fetch)
+        self.assertEqual(result['overall'], 'incompatible')
+        row = result['components'][0]
+        self.assertEqual(row['status'], 'incompatible')
+        self.assertIn('v3.0 available, needs the 64-bit Steam client', row['note'])
+
+    def test_current_moon_incompatible_blocks_newer_plugin(self):
+        def fetch(repo, path, pattern, mode, channel):
+            if 'slsteam-moon' in repo:
+                return {'tag': 'v2', 'id': 1, 'size': 1, 'channel': 'stable',
+                        'url': 'https://example.test/moon.zip'}, ''
+            if 'luatools-moon' in repo:
+                return {'tag': 'v2', 'id': 2, 'size': 2, 'channel': 'stable'}, ''
+            return {'tag': 'v1', 'id': 1, 'size': 1, 'channel': 'stable'}, ''
+        installed = {key: {'tag': 'v1', 'id': 1, 'size': 1}
+                     for key, *_ in self.m.LUMEN_COMPONENTS}
+        installed['slsteam_moon']['tag'] = 'v2'
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=2), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=1):
+            result = self.real_lumen_upstream_state(channels={}, installed=installed, fetch=fetch)
+        self.assertEqual(result['overall'], 'incompatible')
+        self.assertEqual(result['components'][0]['status'], 'incompatible')
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=1):
+            result = self.real_lumen_upstream_state(channels={}, installed=installed, fetch=fetch)
+        self.assertEqual(result['overall'], 'newer')
+        self.assertEqual(result['components'][0]['status'], 'current')
+
+    def test_selector_change_after_installer_rolls_back(self):
+        before = self.snapshot()
+        with mock.patch.object(self.m, 'active_steam_elf_class', side_effect=[1, 2]):
+            self.assertNotEqual(self.update(), 0)
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertTrue(self.result()['rolledBack'])
+        self.assertEqual(before, self.snapshot())
+
+    def test_queued_reattach_rechecks_selector_and_rolls_back(self):
+        backup = self.m.backup_lumen_tree()
+        (self.lumen / 'lumen').write_text('changed')
+        ctx = {'backup': backup.name, 'installerStarted': True}
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=2), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            result = self.m.run_lumen_recovery_job({'action': 'reattach', 'ctx': ctx})
+        self.assertNotEqual(result, 0)
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertTrue(self.result()['rolledBack'])
+        self.assertEqual((self.lumen / 'lumen').read_text(), 'binary v1')
+
+    def test_queued_reattach_unreadable_client_rolls_back(self):
+        backup = self.m.backup_lumen_tree()
+        ctx = {'backup': backup.name, 'installerStarted': True}
+        with mock.patch.object(self.m, 'active_steam_elf_class', side_effect=OSError('unreadable')), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            result = self.m.run_lumen_recovery_job({'action': 'reattach', 'ctx': ctx})
+        self.assertNotEqual(result, 0)
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertTrue(self.result()['rolledBack'])
 
 
 if __name__ == '__main__':

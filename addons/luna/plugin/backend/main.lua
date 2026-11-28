@@ -1732,26 +1732,85 @@ local function steam_client_state()  -- What `luna steam status` reports on the 
   local state = { build = '', pinned = '', hardLock = false, match = false, updatesBlocked = false,
     cachedBuild = '', cacheReady = false }
   local steam_root = home .. '/.local/share/Steam'
-  local log_path = steam_root .. '/logs/console_log.txt'
-  local handle = io.open(log_path, 'rb')
-  if handle then
-    local size = handle:seek('end') or 0
-    handle:seek('set', math.max(0, size - 65536))
-    local tail = handle:read('*a') or ''
-    handle:close()
-    -- Newer clients log "Client version: 0" at startup; a zero report carries
-    -- no information and must never override a real version or a pin.
-    for build in tail:gmatch('Client version:%s*(%d+)') do
-      if build ~= '0' then state.build = build end
+  local function exists(path)
+    local file = io.open(path, 'rb')
+    if file then file:close() return true end
+    return false
+  end
+  -- The client steam.sh selects, with the CLI's rules (steam_client_kind):
+  -- STEAM_FORCE_CLIENT, then .steam-disable-steamrt64-client, then an
+  -- executable steamrt64/steam. A 64-bit install keeps a stale ubuntu12
+  -- manifest that is not its build.
+  local force = os.getenv('STEAM_FORCE_CLIENT') or ''
+  local disabled = exists(steam_root .. '/.steam-disable-steamrt64-client')
+  if force == 'ubuntu12_32' or force == 'scout' or force == 'ldlp' then
+    disabled = true
+  elseif force == 'steamrt64' or force == 'steamrt3c' or force == 'steamrt' then
+    disabled = false
+  end
+  local binary64 = steam_root .. '/steamrt64/steam'
+  local executable = false
+  if exists(binary64) then
+    local quoted = "'" .. binary64:gsub("'", "'\\''") .. "'"
+    local ran = os.execute('test -x ' .. quoted)
+    executable = ran == true or ran == 0  -- Lua 5.1 returns 0, 5.2+ true
+  end
+  state.client = (not disabled and executable) and 'steamrt64' or 'ubuntu12'
+  -- SLSsteam.so's ELF class (byte 4: 1 = 32-bit, 2 = 64-bit) and whether it
+  -- can load into that client: the same note as `luna steam status`.
+  state.slssteamClass = 0
+  local so = io.open(home .. '/.local/share/SLSsteam/SLSsteam.so', 'rb')
+  if so then
+    local header = so:read(5) or ''
+    so:close()
+    if header:sub(1, 4) == '\127ELF' then
+      local class = header:byte(5)
+      if class == 1 or class == 2 then state.slssteamClass = class end
     end
   end
-  if state.build == '' then
-    local manifest = read_file(steam_root .. '/package/steam_client_ubuntu12.manifest')
+  local want = state.client == 'steamrt64' and 2 or 1
+  if state.slssteamClass ~= 0 and state.slssteamClass ~= want then
+    state.slssteamMismatch = string.format('SLSsteam.so is %d-bit but Steam runs the %d-bit %s client: '
+      .. 'it cannot load (games run unlicensed). Install the matching slsteam-moon build.',
+      state.slssteamClass == 1 and 32 or 64, want == 1 and 32 or 64, state.client)
+  end
+  -- The selected client's manifest (a 64-bit install keeps a stale ubuntu12
+  -- one that is not its build).
+  local function manifest_build()
+    local found = ''
+    local manifest = read_file(steam_root .. '/package/steam_client_' .. state.client .. '.manifest')
     if manifest then
       for version in manifest:gmatch('"version"%s+"(%d+)"') do
-        if version ~= '0' then state.build = version end
+        if version ~= '0' then found = version end
       end
     end
+    return found
+  end
+  -- The shared console log. Newer clients log "Client version: 0" at startup;
+  -- a zero report carries no information and must never override a real
+  -- version or a pin.
+  local function log_build()
+    local found = ''
+    local handle = io.open(steam_root .. '/logs/console_log.txt', 'rb')
+    if handle then
+      local size = handle:seek('end') or 0
+      handle:seek('set', math.max(0, size - 65536))
+      local tail = handle:read('*a') or ''
+      handle:close()
+      for build in tail:gmatch('Client version:%s*(%d+)') do
+        if build ~= '0' then found = build end
+      end
+    end
+    return found
+  end
+  if state.client == 'steamrt64' then
+    -- The log is shared with the old ubuntu12 client and can still hold its
+    -- nonzero build; the steamrt64 manifest is the evidence for this client.
+    state.build = manifest_build()
+    if state.build == '' then state.build = log_build() end
+  else
+    state.build = log_build()
+    if state.build == '' then state.build = manifest_build() end
   end
   local tools = update_dir
   local pin_raw = read_file(tools .. '/steam-pin.json')
@@ -2013,6 +2072,8 @@ function M.register(registry)
       steam, steam .. '/steam.sh', steam .. '/steam.cfg', steam .. '/userdata',
       steam .. '/logs', steam .. '/logs/console_log.txt',
       steam .. '/package', steam .. '/package/steam_client_ubuntu12.manifest',
+      steam .. '/package/steam_client_steamrt64.manifest', steam .. '/.steam-disable-steamrt64-client',
+      steam .. '/steamrt64/steam', home .. '/.local/share/SLSsteam/SLSsteam.so',
       update_dir, update_dir .. '/update-check.json', update_dir .. '/autoupdate.json',
       update_dir .. '/steam-pin.json', update_dir .. '/steam-job.json',
       update_dir .. '/steam-client-cache', update_dir .. '/steam-client-cache/build.txt',

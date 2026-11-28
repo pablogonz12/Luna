@@ -3223,7 +3223,11 @@ def cmd_autoupdate(options):
         pending_steam = read_steam_pending()
         if pending_steam:
             steam_job = pending_steam.get('action')
-            if steam_job == 'update':
+            if steam_job in ('update', 'cache') and steam_client_kind() == 'steamrt64':
+                ok, message = False, STEAMRT64_UNSUPPORTED
+                with contextlib.suppress(OSError):
+                    steam_pending_path().unlink()  # it would be refused on every tick
+            elif steam_job == 'update':
                 ok, message = _apply_steam_update()
             elif steam_job == 'cache':
                 build = steam_client_build()
@@ -3233,7 +3237,7 @@ def cmd_autoupdate(options):
                 try:
                     _cache_client_packages(build)
                     ok, message = True, 'cached Steam client %s' % build
-                except OSError as error:
+                except (OSError, ValueError) as error:
                     ok, message = False, 'could not cache the client: %s' % error
                 if ok:
                     try:
@@ -3449,17 +3453,56 @@ def steam_tools_files():
             'library-inject.so': base / 'library-inject.so'}
 
 
+STEAM_CLIENT_MANIFESTS = {'ubuntu12': 'steam_client_ubuntu12.manifest',
+                          'steamrt64': 'steam_client_steamrt64.manifest'}
+
+
+def steam_client_kind():
+    """'steamrt64' or 'ubuntu12': the client Valve's steam.sh selects.
+
+    Selection only, with steam.sh's rules (STEAM_FORCE_CLIENT, the disable
+    marker, an executable steamrt64/steam). Whether that client is consistent
+    with a pin, a lock or its binary's ELF class is active_steam_elf_class()'s
+    job: reporting must name the client even when that validation fails (an
+    ubuntu12 hard lock left on a 64-bit install is exactly when the SLSsteam
+    mismatch warning matters). Update operations keep failing closed on it.
+    """
+    root = steam_home()
+    force = os.environ.get('STEAM_FORCE_CLIENT', '')
+    disabled = (root / '.steam-disable-steamrt64-client').exists()
+    if force in ('ubuntu12_32', 'scout', 'ldlp'):
+        disabled = True
+    elif force in ('steamrt64', 'steamrt3c', 'steamrt'):
+        disabled = False
+    binary64 = root / 'steamrt64' / 'steam'
+    return 'steamrt64' if not disabled and os.access(binary64, os.X_OK) else 'ubuntu12'
+
+
+STEAMRT64_UNSUPPORTED = ('Steam runs the 64-bit steamrt64 client; Luna pins, caches, recovers and '
+                         'updates only the 32-bit ubuntu12 client so far. Nothing was changed. '
+                         '(`luna steam lock` still rolls back to ubuntu12.)')
+
+
+def _receipt_client(receipt):
+    # Receipts written before steamrt64 support describe the ubuntu12 client.
+    return str(receipt.get('client') or 'ubuntu12')
+
+
 def steam_client_build():
     """Verified installed binaries, then the on-disk manifest, then runtime logs.
 
+    Every source is read for the client steam.sh selects: a 64-bit install keeps
+    a stale ubuntu12 manifest and receipt around (both still "match" because
+    those files are untouched), and they must not be reported as its build.
     A package manifest alone does NOT prove that its client was extracted.
     The install receipt is preferred only while the core executable hashes match.
     Newer clients log "Client version: 0" at startup, so a zero report is
     treated as "no information" rather than a build number.
     """
+    kind = steam_client_kind() or 'ubuntu12'
     receipt = read_json_file(luna_tools_dir() / 'steam-client-installed.json') or {}
     core = receipt.get('core') or {}
-    if core:
+    if core and _receipt_client(receipt) == kind:
         try:
             if all(sha256(steam_home() / _steam_payload_path(name)) == digest
                    for name, digest in core.items()):
@@ -3467,7 +3510,7 @@ def steam_client_build():
         except (OSError, ValueError):
             pass
     try:
-        manifest = (steam_home() / 'package' / 'steam_client_ubuntu12.manifest').read_text(
+        manifest = (steam_home() / 'package' / STEAM_CLIENT_MANIFESTS[kind]).read_text(
             encoding='utf-8', errors='replace')
         found = re.findall(r'"version"\s+"(\d+)"', manifest)
         manifest_build = next((build for build in reversed(found) if build != '0'), '')
@@ -3747,8 +3790,9 @@ def steam_state():
     cache_ready = bool(cached) and (steam_cache_dir() / 'package').is_dir()
     packages_match = packages_match_cache() if cache_ready else None
     receipt = read_json_file(luna_tools_dir() / 'steam-client-installed.json') or {}
+    kind = steam_client_kind()
     binaries_match = None
-    if receipt.get('core'):
+    if receipt.get('core') and _receipt_client(receipt) == (kind or 'ubuntu12'):
         try:
             binaries_match = all(sha256(steam_home() / _steam_payload_path(name)) == digest
                                  for name, digest in receipt['core'].items())
@@ -3778,7 +3822,38 @@ def steam_state():
         'pacmanIgnored': pacman_ignored,
         'hardLock': bool(pin.get('hardLock')),
         'packageReadOnly': _package_read_only(),
+        'client': kind or '',
+        'slssteamClass': slssteam_elf_class(),
     }
+
+
+def slssteam_elf_class():
+    """1 (32-bit) or 2 (64-bit) for the installed SLSsteam.so, 0 when unreadable."""
+    path = steam_tools_files().get('SLSsteam.so')
+    try:
+        return elf_file_class(path) if path else 0
+    except (OSError, ValueError):
+        return 0
+
+
+def steam_client_label(state):
+    """'1794536281 (steamrt64, 64-bit)'-style text for status output."""
+    build = state['build'] or 'unknown (Steam never logged a version here)'
+    kind = state.get('client') or ''
+    if not kind:
+        return build + ' (client architecture unknown)'
+    return '%s (%s, %s)' % (build, kind, '64-bit' if kind == 'steamrt64' else '32-bit')
+
+
+def slssteam_mismatch_note(state):
+    """A warning when the installed SLSsteam.so cannot load into the selected client."""
+    want = {'steamrt64': 2, 'ubuntu12': 1}.get(state.get('client') or '')
+    have = state.get('slssteamClass') or 0
+    if not want or not have or want == have:
+        return ''
+    return ('SLSsteam.so is %d-bit but Steam runs the %d-bit %s client: it cannot load '
+            '(games run unlicensed). Install the matching slsteam-moon build.'
+            % (32 if have == 1 else 64, 32 if want == 1 else 64, state['client']))
 
 
 def cached_client_build():
@@ -3892,6 +3967,8 @@ def _cache_client_packages(build):
     The cached manifest must describe `build`; a stale on-disk manifest (or a
     mislabeled earlier cache) is refused instead of silently relabeled.
     """
+    if steam_client_kind() == 'steamrt64':
+        raise ValueError(STEAMRT64_UNSUPPORTED)
     source = steam_home() / 'package'
     cache = steam_cache_dir()
     try:
@@ -4768,11 +4845,16 @@ def _refresh_steam_side():
         _steam_client_closed()
     except ValueError as error:
         return False, str(error), ''
+    # Before any write: the pin, block and cache below are ubuntu12-only.
+    if steam_client_kind() == 'steamrt64':
+        return False, STEAMRT64_UNSUPPORTED, ''
     if read_steam_pending():
         return False, 'a Steam task is already queued; run: luna steam cancel first', ''
     ok, message = _steam_force_update()
     if not ok:
         return False, message, ''
+    if steam_client_kind() == 'steamrt64':  # the updater moved Steam to the 64-bit client
+        return False, 'Steam updated, but it now runs the 64-bit client; ' + STEAMRT64_UNSUPPORTED, ''
     build = steam_client_build()
     if not build:
         return False, ('Steam updated, but the new build cannot be determined; '
@@ -4843,8 +4925,11 @@ def cmd_steam(options):
     action = getattr(options, 'steam_action', '') or 'status'
     if action == 'status':
         state = steam_state()
-        print('client : %s' % (state['build'] or 'unknown (Steam never logged a version here)'))
-        print('pinned : %s' % (state['pinned'] or 'none (run: luna steam pin)'))
+        print('client : %s' % steam_client_label(state))
+        if state.get('client') == 'steamrt64' and not state['pinned']:
+            print('pinned : none (64-bit pinning arrives in a later Luna release)')
+        else:
+            print('pinned : %s' % (state['pinned'] or 'none (run: luna steam pin)'))
         print('packages: %s' % ('match the pin' if state['match']
                                  else 'DIFFER from the pin - run: luna steam recover (Steam closed)'
                                  if state['pinned'] and state['cacheReady']
@@ -4860,6 +4945,11 @@ def cmd_steam(options):
                      else ' and NOT ignored - add "IgnorePkg = steam" to /etc/pacman.conf (needs sudo)'))
         for name, digest in sorted(state['slssteam'].items()):
             print('%-16s %s' % (name + ':', digest[:12] if digest else '(missing)'))
+        if state.get('slssteamClass'):
+            print('SLSsteam arch:   %d-bit' % (32 if state['slssteamClass'] == 1 else 64))
+        mismatch = slssteam_mismatch_note(state)
+        if mismatch:
+            print('WARN   : MISMATCH: %s' % mismatch)
         if state['slssteamDrift']:
             print('WARN   : SLSsteam changed since the pin: %s' % ', '.join(state['slssteamDrift']))
         for line in heal_steam_lock(apply=False)['notes']:  # read-only: status never repairs
@@ -4869,7 +4959,9 @@ def cmd_steam(options):
         if warning:
             print('WARN   : %s' % warning)
         print(libcrypto_status()[1])
-        print('cache  : %s' % ('build ' + state['cachedBuild'] if state['cacheReady']
+        # The cache tooling is ubuntu12-only for now: say so on a 64-bit client.
+        stale_kind = ' (ubuntu12 client, not the one Steam runs)' if state.get('client') == 'steamrt64' else ''
+        print('cache  : %s' % ('build ' + state['cachedBuild'] + stale_kind if state['cacheReady']
                                 else 'empty (run: luna steam cache with Steam closed)'))
         pending = read_steam_pending()
         if pending:
@@ -4894,6 +4986,9 @@ def cmd_steam(options):
         return cmd_history(options)
     if action == 'ignore-pkg':
         return cmd_ignore_pkg(options)
+    if action in ('pin', 'cache', 'recover', 'update') and steam_client_kind() == 'steamrt64':
+        print('REFUSING: ' + STEAMRT64_UNSUPPORTED, file=sys.stderr)
+        return EXIT_REFUSED
     if action == 'pin':
         build = options.build or steam_client_build()
         if not build:
@@ -5042,6 +5137,9 @@ def cmd_steam(options):
 def steam_drift_note():
     """One-line summary for preflight/Health, or '' when nothing is wrong."""
     state = steam_state()
+    mismatch = slssteam_mismatch_note(state)
+    if mismatch:
+        return mismatch
     if state.get('binariesMatch') is False:
         return 'Steam client executables changed; close Steam and run: luna steam recover'
     if state['pinned'] and state['cacheReady'] and state['packagesMatch'] is False:
@@ -6753,7 +6851,8 @@ def _upstream_component(repo, beta_path, glob, mode, channel):
         try:
             meta = _public_json('https://api.github.com/repos/%s/contents/%s?ref=beta' % (repo, beta_path))
             if isinstance(meta, dict) and meta.get('sha') and meta.get('download_url'):
-                return {'tag': 'beta', 'id': meta['sha'], 'size': meta.get('size'), 'channel': 'beta'}, ''
+                return {'tag': 'beta', 'id': meta['sha'], 'size': meta.get('size'), 'channel': 'beta',
+                        'url': meta['download_url']}, ''
         except urllib.error.HTTPError as error:
             if error.code not in (404, 422):
                 return None, 'beta lookup failed (HTTP %s)' % error.code
@@ -6778,8 +6877,112 @@ def _upstream_component(repo, beta_path, glob, mode, channel):
         return None, 'release lookup failed (%s)' % error
     if not asset:
         return None, 'no matching release asset found'
+    if repo == 'swwayps/slsteam-moon' and not asset.get('browser_download_url'):
+        return None, 'slsteam-moon asset has no download URL'
     return {'tag': release.get('tag_name'), 'id': asset.get('id'), 'size': asset.get('size'),
-            'channel': 'stable'}, note
+            'channel': 'stable', 'url': asset.get('browser_download_url')}, note
+
+
+def running_steam_client_classes(root, proc_root=Path('/proc')):
+    """Read the executable of this user's Steam processes under this Steam root."""
+    root = root.resolve()
+    clients = {(root / 'ubuntu12_32/steam').resolve(): 1,
+               (root / 'steamrt64/steam').resolve(): 2}
+    classes = set()
+    for proc in proc_root.iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if proc.stat().st_uid != os.getuid() or (proc / 'comm').read_text().strip() != 'steam':
+                continue
+            executable = Path(os.readlink(proc / 'exe'))
+            if not executable.is_relative_to(root):
+                continue
+            if executable not in clients:
+                raise ValueError('unrecognized running Steam client executable: %s' % executable)
+            classes.add(clients[executable])
+        except FileNotFoundError:
+            continue  # process exited during the scan
+    return classes
+
+
+def active_steam_elf_class():
+    """Mirror steam.sh's selector without changing its persistent marker."""
+    root = steam_home()
+    force = os.environ.get('STEAM_FORCE_CLIENT', '')
+    disabled = (root / '.steam-disable-steamrt64-client').exists()
+    if force in ('ubuntu12_32', 'scout', 'ldlp'):
+        disabled = True
+    elif force in ('steamrt64', 'steamrt3c', 'steamrt'):
+        disabled = False
+    binary64 = root / 'steamrt64' / 'steam'
+    expected = 2 if not disabled and os.access(binary64, os.X_OK) else 1
+    binary = binary64 if expected == 2 else root / 'ubuntu12_32' / 'steam'
+    if elf_file_class(binary) != expected:
+        raise ValueError('selected Steam client binary has the wrong ELF class')
+    if steam_hard_lock_active():
+        if expected != 1:
+            raise ValueError('Steam client selector conflicts with the 32-bit hard lock')
+        pinned_build = str(read_steam_pin().get('clientBuild') or '')
+        if pinned_build not in (KNOWN_GOOD_UBUNTU12_BUILD, STEAM_COMPAT_BUILD):
+            raise ValueError('Steam hard lock has an unknown client build')
+        manifest = root / 'package' / 'steam_client_ubuntu12.manifest'
+        if _manifest_version(manifest.read_bytes()) != pinned_build:
+            raise ValueError('locked Steam client manifest does not match the pin')
+        if not _elf32_file(binary):
+            raise ValueError('locked 32-bit Steam client binary is missing or invalid')
+    running = running_steam_client_classes(root)
+    if running and running != {expected}:
+        raise ValueError('running Steam client architecture disagrees with the selected client')
+    return expected
+
+
+def elf_header_class(header):
+    if len(header) < 5 or header[:4] != b'\x7fELF' or header[4] not in (1, 2):
+        raise ValueError('missing or invalid ELF header')
+    return header[4]
+
+
+def elf_file_class(path):
+    with open(path, 'rb') as source:
+        return elf_header_class(source.read(5))
+
+
+def slsteam_release(channels):
+    _, repo, beta_path, pattern, mode = LUMEN_COMPONENTS[0]
+    info, note = _upstream_component(repo, beta_path, pattern, mode, channels.get('slsteam_moon', 'stable'))
+    if not info or not info.get('url'):
+        raise ValueError('cannot resolve slsteam-moon asset: %s' % (note or 'missing download URL'))
+    return info
+
+
+def slsteam_asset_class(info):
+    url = info['url']
+    if not url.startswith('https://'):
+        raise ValueError('slsteam-moon asset URL is not HTTPS')
+    data = _http_get(url)
+    try:
+        sidecar = _http_get(url + '.sha256', limit=4096)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+    else:
+        match = re.match(rb'\s*([0-9a-fA-F]{64})(?:\s|$)', sidecar)
+        if not match or hashlib.sha256(data).hexdigest().lower() != match.group(1).decode().lower():
+            raise ValueError('slsteam-moon asset SHA-256 verification failed')
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        matches = [entry for entry in archive.infolist()
+                   if PurePosixPath(entry.filename).parts[-2:] == ('bin', 'SLSsteam.so')]
+        if len(matches) != 1:
+            raise ValueError('slsteam-moon archive must contain exactly one bin/SLSsteam.so')
+        with archive.open(matches[0]) as source:
+            return elf_header_class(source.read(5))
+
+
+def slsteam_arch_message(tag, asset_class, client_class):
+    return ('slsteam-moon %s is built for the %s-bit Steam client; this install uses the %s-bit client. '
+            'Nothing was changed.' % (tag or '?', 32 if asset_class == 1 else 64,
+                                      32 if client_class == 1 else 64))
 
 
 def lumen_upstream_state(channels=None, installed=None, fetch=None):
@@ -6810,9 +7013,21 @@ def lumen_upstream_state(channels=None, installed=None, fetch=None):
             row['status'] = 'current'
         else:
             row['status'] = 'newer'
+        if key == 'slsteam_moon' and row['status'] in ('current', 'newer') and info.get('url'):
+            try:
+                client_class = active_steam_elf_class()
+                asset_class = slsteam_asset_class(info)
+                if asset_class != client_class:
+                    row['status'] = 'incompatible'
+                    row['note'] = '%s available, needs the %s-bit Steam client' % (
+                        info.get('tag') or 'update', 32 if asset_class == 1 else 64)
+            except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+                row['status'] = 'unknown'
+                row['note'] = 'cannot verify slsteam-moon compatibility: %s' % error
         rows.append(row)
     statuses = {row['status'] for row in rows}
-    overall = 'newer' if 'newer' in statuses else 'unknown' if 'unknown' in statuses else 'current'
+    overall = ('incompatible' if 'incompatible' in statuses else
+               'unknown' if 'unknown' in statuses else 'newer' if 'newer' in statuses else 'current')
     return {'overall': overall, 'components': rows, 'channels': channels}
 
 
@@ -7128,6 +7343,18 @@ def _fail(ctx, reason, code):
     return code
 
 
+def _verify_installed_client_compatibility():
+    try:
+        client_class = active_steam_elf_class()
+        installed_class = elf_file_class(steam_tools_files()['SLSsteam.so'])
+    except (OSError, ValueError) as error:
+        raise _UpdateFailed('cannot verify installed SLSsteam.so and Steam client compatibility: %s' % error, 1)
+    if installed_class != client_class:
+        raise _UpdateFailed('installed SLSsteam.so needs the %s-bit Steam client, '
+                            'but this install uses the %s-bit client'
+                            % (32 if installed_class == 1 else 64, 32 if client_class == 1 else 64), 1)
+
+
 def _complete_update(ctx, restart_lumen=True):
     """The re-attach half; raises _UpdateFailed. Returns an exit code."""
     backup = lumen_backup_path(ctx['backup'])
@@ -7135,6 +7362,7 @@ def _complete_update(ctx, restart_lumen=True):
     problems = lumen_tooling_problems()
     if problems:
         raise _UpdateFailed('tooling incomplete after the installer: %s' % '; '.join(problems), EXIT_PATCH)
+    _verify_installed_client_compatibility()
     if steam_running():  # started again meanwhile: finish when it is closed once more
         _heal_quietly()
         applier = _queue_lumen_job('reattach', ctx, 'Steam was started during the update')
@@ -7169,6 +7397,7 @@ def _complete_update(ctx, restart_lumen=True):
     if 'lumen self-update blocked' not in after.stdout:
         warnings.append("Lumen's own updater is NOT blocked after this update")
         print('WARNING: %s' % warnings[-1], file=sys.stderr)
+    _verify_installed_client_compatibility()
     _restart_lumen(ctx, restart_lumen)
     prune_lumen_backups()
     before = ctx.get('before') or {}
@@ -7216,6 +7445,15 @@ def apply_base_update(restart_lumen=True, installer_latest=False, reinstall=Fals
     early = lumen_tooling_problems() + runtime_problems(full=True)  # local and cheap: refuse before any network call
     if early:
         return _refuse_update('tooling incomplete: %s' % '; '.join(early))
+    try:
+        client_class = active_steam_elf_class()
+        release = slsteam_release(lumen_channels())
+        asset_class = slsteam_asset_class(release)
+        if client_class != asset_class:
+            return _refuse_update(slsteam_arch_message(release.get('tag'), asset_class, client_class))
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+        return _refuse_update('cannot verify Steam client and slsteam-moon compatibility: %s. '
+                              'Nothing was changed.' % error)
     if not reinstall:
         verdict = lumen_upstream_state()
         compared = [{'component': row['component'], 'channel': row['channel'], 'status': row['status'],
@@ -7230,7 +7468,7 @@ def apply_base_update(restart_lumen=True, installer_latest=False, reinstall=Fals
             print('lumen     : %s' % message)
             print('\n'.join('lumen     : ' + line for line in lines))
             return EXIT_OK
-        if verdict['overall'] == 'unknown':
+        if verdict['overall'] in ('unknown', 'incompatible'):
             why = '; '.join('%s: %s' % (row['component'], row['note'] or 'unknown')
                             for row in verdict['components'] if row['status'] == 'unknown')
             message = 'could not tell whether upstream has anything newer (%s); nothing was changed. ' \
@@ -7293,6 +7531,14 @@ def apply_base_update(restart_lumen=True, installer_latest=False, reinstall=Fals
         code = run_base_installer(ref, sha, extra)
         if code != 0:
             raise _UpdateFailed('the base installer exited with %d' % code, code)
+        try:
+            installed_class = elf_file_class(steam_tools_files()['SLSsteam.so'])
+        except (OSError, ValueError) as error:
+            raise _UpdateFailed('installed SLSsteam.so is missing or unreadable: %s' % error, 1)
+        if installed_class != client_class:
+            raise _UpdateFailed('installed SLSsteam.so needs the %s-bit Steam client, '
+                                'but this install uses the %s-bit client'
+                                % (32 if installed_class == 1 else 64, 32 if client_class == 1 else 64), 1)
         if channels_bytes is not None:
             try:
                 if channels_file.read_bytes() != channels_bytes:
