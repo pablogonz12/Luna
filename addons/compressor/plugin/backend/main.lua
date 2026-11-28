@@ -1651,10 +1651,17 @@ function M.register(registry)
     end
     local group = process_group(pid)
     local command
+    -- `-s TERM -- [-]PID`: procps-ng kill (Ubuntu's /bin/kill) misreads
+    -- `-TERM -PGID` and was seen signalling unrelated groups and even -1
+    -- (every process of the user); util-linux kill and the shell builtins read
+    -- this form the same way.
+    if pid <= 1 then
+      return response({success = false, code = 'signal', error = 'Refusing to signal pid ' .. pid})
+    end
     if group and group == pid then
-      command = '/bin/kill -TERM -' .. pid
+      command = '/bin/kill -s TERM -- -' .. pid
     else
-      command = '/bin/kill -TERM ' .. pid
+      command = '/bin/kill -s TERM -- ' .. pid
     end
     local ok = os.execute(command)
     -- os.execute returns true/0 on success depending on the Lua version;
