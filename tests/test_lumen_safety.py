@@ -886,6 +886,31 @@ class StateCase(SafetyBase):
 
 
 class ArchitectureGuardTest(SafetyBase):
+    def test_historical_build_with_retained_hard_lock(self):
+        package = self.steam_home / 'package'
+        package.mkdir()
+        manifest = package / 'steam_client_ubuntu12.manifest'
+        manifest.write_text('"version" "%s"' % self.m.STEAM_COMPAT_BUILD)
+        binary = self.steam_home / 'ubuntu12_32/steam'
+        binary.parent.mkdir()
+        binary.write_bytes(b'\x7fELF\x01\x01' + bytes(12) + b'\x03\x00')
+        pin = {'clientBuild': self.m.STEAM_COMPAT_BUILD, 'hardLock': {'active': True}}
+        with mock.patch.object(self.m, 'read_steam_pin', return_value=pin), \
+             mock.patch.object(self.m, 'running_steam_client_classes', return_value=set()), \
+             mock.patch.dict(os.environ, {'STEAM_FORCE_CLIENT': ''}):
+            self.assertEqual(self.real_active_steam_elf_class(), 1)
+            manifest.write_text('"version" "%s"' % self.m.KNOWN_GOOD_UBUNTU12_BUILD)
+            with self.assertRaisesRegex(ValueError, 'manifest'):
+                self.real_active_steam_elf_class()
+            manifest.write_text('"version" "%s"' % self.m.STEAM_COMPAT_BUILD)
+            pin['clientBuild'] = '123456'
+            with self.assertRaisesRegex(ValueError, 'unknown client build'):
+                self.real_active_steam_elf_class()
+            pin['clientBuild'] = self.m.STEAM_COMPAT_BUILD
+            binary.write_bytes(b'\x7fELF\x01' + bytes(15))
+            with self.assertRaisesRegex(ValueError, 'invalid'):
+                self.real_active_steam_elf_class()
+
     def test_active_client_requires_consistent_lock_manifest_and_binary(self):
         package = self.steam_home / 'package'
         package.mkdir()

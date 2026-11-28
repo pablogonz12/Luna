@@ -6825,10 +6825,11 @@ def active_steam_elf_class():
     if steam_hard_lock_active():
         if expected != 1:
             raise ValueError('Steam client selector conflicts with the 32-bit hard lock')
-        if str(read_steam_pin().get('clientBuild')) != KNOWN_GOOD_UBUNTU12_BUILD:
+        pinned_build = str(read_steam_pin().get('clientBuild') or '')
+        if pinned_build not in (KNOWN_GOOD_UBUNTU12_BUILD, STEAM_COMPAT_BUILD):
             raise ValueError('Steam hard lock has an unknown client build')
         manifest = root / 'package' / 'steam_client_ubuntu12.manifest'
-        if _manifest_version(manifest.read_bytes()) != KNOWN_GOOD_UBUNTU12_BUILD:
+        if _manifest_version(manifest.read_bytes()) != pinned_build:
             raise ValueError('locked Steam client manifest does not match the pin')
         if not _elf32_file(binary):
             raise ValueError('locked 32-bit Steam client binary is missing or invalid')
