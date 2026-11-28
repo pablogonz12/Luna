@@ -29,7 +29,7 @@ lua_step() {
   elif command -v luac >/dev/null 2>&1; then luac=luac
   else echo 'luac unavailable; install lua5.4 (it ships luac5.4)' >&2; return 1
   fi
-  "$luac" -p tests/bridge-smoke.lua tests/presence/backend-smoke.lua tests/compressor-smoke.lua \
+  "$luac" -p tests/bridge-smoke.lua tests/presence/backend-smoke.lua tests/presence/luna-extra-backend.lua tests/compressor-smoke.lua \
     tests/hltb-smoke.lua tests/sgdb-smoke.lua tests/graphics-smoke.lua bridge/bridge.lua \
     addons/*/plugin/backend/main.lua || return 1
   bash scripts/test-backend.sh

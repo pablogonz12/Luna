@@ -19,7 +19,7 @@ end
 -- the backend saw the game's process alive (or the agent reported it started).
 -- It lives beside the numeric running map so the wire shape the agent reads is
 -- unchanged; without it an entry could outlive its game forever.
-local function blank() return {enabled=false, sessionTime=true, discordEnabled=true, discordAppId='', owned={}, running={}, runningAt={}, cleanup=0, account=nil, accountSource=nil} end
+local function blank() return {enabled=false, sessionTime=true, discordEnabled=true, discordAppId='', owned={}, running={}, runningAt={}, unknownSince={}, cleanup=0, account=nil, accountSource=nil} end
 -- Only the 8-hex FNV digest of an account identity is ever persisted; the raw
 -- SteamID or account name must never reach this file or a log line.
 local function valid_account(v)
@@ -73,6 +73,10 @@ local function parse_state(s)
     if data.running[key] ~= nil and tonumber(at) and tonumber(at) > 0 then
       data.runningAt[key] = math.floor(tonumber(at))
     end
+  end
+  for original,at in pairs(type(value.unknownSince)=='table' and value.unknownSince or {}) do
+    local key=tostring(original)
+    if data.owned[key] and tonumber(at) and tonumber(at)>0 then data.unknownSince[key]=math.floor(tonumber(at)) end
   end
   return data
 end
@@ -157,8 +161,19 @@ end
 -- A `running` entry must not outlive its game. The agent records the entry when
 -- it launches a placeholder and the backend heartbeats it while the game's
 -- process is alive; an entry the process table no longer shows is retired after
--- a short grace window, and one with no process evidence at all after a hard TTL.
+-- a short grace window. A continuously incomplete scan has a hard ceiling:
+-- unreadable unrelated processes would otherwise retain every record forever.
 local RUNNING_LIMITS = {grace=120, ttl=6*3600}
+local STICKY_LIMIT = 7*24*3600
+local function expired_ids(data,now)
+  local result={}
+  for original,at in pairs(data.unknownSince or {}) do
+    if data.owned[original] and RUNNING_LIMITS.ttl>0 and now-at>=RUNNING_LIMITS.ttl and now-at<STICKY_LIMIT then
+      result[#result+1]=tonumber(original)
+    end
+  end
+  return result
+end
 function M.running_limits(opts)
   if type(opts)=='table' then
     for _,key in ipairs({'grace','ttl'}) do
@@ -178,10 +193,24 @@ function M.reconcile_running(data, alive, complete, now, opts)
     if valid_id(id) then games[tostring(math.floor(tonumber(id)))]=true end
   end
   data.running = data.running or {}
-  local cleared, refreshed = {}, 0
+  data.unknownSince = data.unknownSince or {}
+  local cleared, refreshed, changed = {}, 0, false
+  for original,since in pairs(data.unknownSince) do
+    -- A positively observed new launch clears the sticky expiry. An entirely
+    -- unreadable new launch waits for a positive match or a complete scan.
+    if games[original] or complete==true or (now-since>=STICKY_LIMIT and not data.running[original]) or
+       (data.owned and not data.owned[original]) then
+      data.unknownSince[original]=nil
+      changed=true
+    end
+  end
   for original in pairs(data.running) do
     local at = tonumber((data.runningAt or {})[original]) or 0
-    local alive_now = complete==true and games[tostring(math.floor(tonumber(original) or 0))]==true
+    local alive_now = games[tostring(math.floor(tonumber(original) or 0))]==true
+    if (alive_now or complete==true) and data.unknownSince[original] then
+      data.unknownSince[original]=nil
+      changed=true
+    end
     if alive_now then
       data.runningAt = data.runningAt or {}
       -- Heartbeat, but only when it moves: a steady game must not rewrite the
@@ -191,15 +220,19 @@ function M.reconcile_running(data, alive, complete, now, opts)
       data.running[original]=nil
       if data.runningAt then data.runningAt[original]=nil end
       cleared[#cleared+1]=original
-    elseif at>0 and ttl>0 and now-at>ttl then
-      -- No trustworthy process table (missing /proc, unreadable) but the entry
-      -- is far older than any session: the TTL is the only guard left.
-      data.running[original]=nil
-      if data.runningAt then data.runningAt[original]=nil end
-      cleared[#cleared+1]=original
+    elseif complete~=true and not alive_now then
+      local since=data.unknownSince[original]
+      if not since or now<since then
+        data.unknownSince[original]=now
+        changed=true
+      elseif ttl>0 and now-since>=ttl then
+        data.running[original]=nil
+        data.runningAt[original]=nil
+        cleared[#cleared+1]=original
+      end
     end
   end
-  return {cleared=cleared, refreshed=refreshed}
+  return {cleared=cleared, refreshed=refreshed, changed=changed}
 end
 -- Discord honesty: an enabled toggle with a missing or malformed Application ID
 -- (or a host with no unix socket) cannot publish anything, so every reply says
@@ -246,12 +279,37 @@ end
 -- which manifest games are still running, and which of our helper shortcuts are
 -- still alive. Pure input functions are injected so tests never read /proc.
 local MAX_PIDS = 8192
-local MAX_CMDLINE = 4096
-local function collect_running(list_dir, read_file)
+local MAX_CMDLINE = 256 * 1024
+local function proc_stat(raw)
+  if type(raw)~='string' then return nil end
+  -- comm is parenthesized and can itself contain spaces or parentheses.
+  local state,rest=raw:match('^%d+ %(.*%) ([A-Za-z]) (.*)$')
+  if not state then return nil end
+  local fields={}
+  for field in rest:gmatch('%S+') do fields[#fields+1]=field end
+  local start=fields[19] -- field 22, after pid, comm and state
+  if not start or not start:match('^%d+$') then return nil end
+  return state,start
+end
+local function read_proc(path)
+  local f,err,code=io.open(path,'rb')
+  if not f then return nil,err,code end
+  -- One extra byte detects truncation, including for the proc pseudo-files.
+  local data,read_error,read_code=f:read(MAX_CMDLINE+1)
+  f:close()
+  if data==nil and read_error==nil then return '' end
+  return data,read_error,read_code
+end
+local function vanished(err,code)
+  return code==2 or code==3 or (type(err)=='string' and
+    (err:find('No such file or directory',1,true) ~= nil or err:find('No such process',1,true) ~= nil))
+end
+local function collect_running(list_dir, read_file, previous)
   local games, helpers = {}, {}
+  local identities = {}
   local seen_games, seen_helpers, seen_pids = {}, {}, {}
   local ok, entries = pcall(list_dir, '/proc')
-  if not ok or type(entries) ~= 'table' then return games, helpers, false end
+  if not ok or type(entries) ~= 'table' then return games, helpers, false, nil, true end
   local scanned, complete = 0, true
   for _, entry in ipairs(entries) do
     local name = type(entry)=='table' and entry.name or (type(entry)=='string' and entry or nil)
@@ -259,29 +317,57 @@ local function collect_running(list_dir, read_file)
       if scanned >= MAX_PIDS then return games, helpers, false end
       seen_pids[name] = true
       scanned = scanned + 1
-      local ok_read, raw = pcall(read_file, '/proc/' .. name .. '/cmdline')
-      if not ok_read then complete = false end
-      if ok_read and type(raw) == 'string' and #raw > 0 and #raw <= MAX_CMDLINE then
-        -- Match a complete argv token, not FakeAppId= or AppId=123suffix.
-        -- Avoid copying every cmdline just to replace its NUL separators.
-        local id = raw:match('^AppId=(%d+)%z') or raw:match('%zAppId=(%d+)%z')
-        if id then
-          local value = tonumber(id)
-          if value and value >= 1 and value <= MAX then
-            if not seen_games[value] then
-              games[#games + 1] = value
-              seen_games[value] = true
-            end
-            if raw:find('\0/usr/bin/sleep\00086400\0', 1, true) and not seen_helpers[value] then
-              helpers[#helpers + 1] = value
-              seen_helpers[value] = true
+      local base='/proc/'..name..'/'
+      local ok_stat, stat, stat_error, stat_code = pcall(read_file, base..'stat')
+      local state,start = proc_stat(ok_stat and stat)
+      if start then identities[name]=start end
+      if not state then
+        if not (ok_stat and stat==nil and vanished(stat_error,stat_code)) then complete=false end
+      elseif previous and previous[name] and previous[name]~=start then
+        -- A formerly observed PID now names another process. Do not attribute
+        -- its cmdline to the old process; the next scan can classify the new one.
+        complete=false
+      elseif state~='Z' and state~='X' then
+        local ok_read, raw, read_error, read_code = pcall(read_file, base..'cmdline')
+        local ok_after, after, after_error, after_code = pcall(read_file, base..'stat')
+        local state_after,start_after=proc_stat(ok_after and after)
+        if state_after and start~=start_after then
+          complete=false
+        elseif (ok_read and raw==nil and vanished(read_error,read_code)) or
+           (ok_after and after==nil and vanished(after_error,after_code)) then
+          identities[name]=nil
+        elseif not ok_read or type(raw)~='string' or not state_after or start~=start_after then
+          complete=false
+        elseif state_after~='Z' and state_after~='X' then
+          if #raw>MAX_CMDLINE then
+            raw=raw:sub(1,MAX_CMDLINE)
+            -- A later token could contain an AppId or the helper command.
+            complete=false
+          end
+          -- Match a complete argv token, not FakeAppId= or AppId=123suffix.
+          local id = raw:match('^AppId=(%d+)%z') or raw:match('%zAppId=(%d+)%z')
+          if id then
+            local value = tonumber(id)
+            if value and value >= 1 and value <= MAX then
+              if not seen_games[value] then
+                games[#games + 1] = value
+                seen_games[value] = true
+              end
+              if raw:find('\0/usr/bin/sleep\00086400\0', 1, true) and not seen_helpers[value] then
+                helpers[#helpers + 1] = value
+                seen_helpers[value] = true
+              end
             end
           end
         end
       end
     end
   end
-  return games, helpers, complete
+  return games, helpers, complete, identities
+end
+local function process_snapshot(list_dir, reader)
+  local games,helpers,complete,_,failed=collect_running(list_dir,reader)
+  return {success=not failed,complete=complete,games=games,helpers=helpers,scannedAt=os.time()}
 end
 -- FNV-1a/32, byte-identical to the JS implementation in plugin/public/agent.js
 -- (verified by tests/probe-roundtrip assertions). Used to reduce a SteamID64 to
@@ -667,13 +753,11 @@ local function manifests()
 end
 local live = {}
 local expired_running = 0
+local scan_identities = {}
 -- The games the process table currently shows, minus our own helper shortcuts.
 function M.scan_games()
-  local games, helpers, complete = collect_running(fs.list, function(path)
-    local f = io.open(path,'rb')
-    if not f then return nil end
-    local data = f:read('*a'); f:close(); return data
-  end)
+  local games, helpers, complete, identities = collect_running(fs.list, read_proc, scan_identities)
+  if identities then scan_identities=identities end
   local skip = {}
   for _, id in ipairs(helpers) do skip[id] = true end
   local out = {}
@@ -685,20 +769,24 @@ function M.register(registry)
   -- file still calls running is reconciled with the processes that exist now,
   -- so an entry whose game (and agent) is long gone cannot survive a restart.
   local state,loaded=read_file()
+  local reconciliationDirty=false
+  local function saveReconciliation()
+    reconciliationDirty=not save_file(state)
+  end
   corruption_locked = read_all(LOCK) ~= nil or (loaded.reason=='invalid' and not loaded.recovered)
   if corruption_locked then
     -- Persist the lock before moving anything. A hard link atomically reserves
     -- each quarantine name without ever replacing an earlier quarantine.
     quarantine_corruption()
   end
-  if loaded.recovered then save_file(state) end
+  if loaded.recovered then saveReconciliation() end
   do
     local alive,complete=nil,false
     if next(state.running)~=nil then alive,complete=M.scan_games() end
     if alive then
       local change=M.reconcile_running(state,alive,complete,os.time())
       expired_running=expired_running+#change.cleared
-      if #change.cleared>0 or change.refreshed>0 then save_file(state) end
+      if #change.cleared>0 or change.refreshed>0 or change.changed then saveReconciliation() end
     end
   end
   local runtime={active=0,healthy=false,error='',activeIds={},reportedAt=0,
@@ -711,7 +799,7 @@ function M.register(registry)
     local apps=manifests()
     runtime.expiredRunning=expired_running
     return response({success=true, state=state, apps=apps, libraryError=manifest_cache.error,
-      runtime=runtime, recovered=loaded.recovered==true,
+      runtime=runtime, recovered=loaded.recovered==true, expired=expired_ids(state,os.time()),
       recoveredReason=loaded.reason or '',
       corrupt=corruption_locked, corruptionRequiresAcknowledgement=corruption_locked,
       quarantineDirectory=DIR, quarantinePaths=quarantine_paths(),
@@ -751,12 +839,7 @@ function M.register(registry)
   -- recreated SharedJSContext lost: which manifest games are actually running and
   -- which of our helpers are still alive.
   registry.SlsPresenceProbeProcesses=function()
-    local games, helpers, complete = collect_running(fs.list, function(path)
-      local f = io.open(path, 'rb')
-      if not f then return nil end
-      local data = f:read('*a'); f:close(); return data
-    end)
-    return response({success=complete, complete=complete, games=games, helpers=helpers, scannedAt=os.time()})
+    return response(process_snapshot(fs.list, read_proc))
   end
   -- Read-only plan for a Discord activity: resolved name and socket candidates.
   -- Reports needsClientId because no Discord application ID is configured.
@@ -782,7 +865,7 @@ function M.register(registry)
     local data=f:read('*a'); f:close(); return data
   end
   local function current_game()
-    local games,helpers=collect_running(fs.list,read_text)
+    local games,helpers=collect_running(fs.list,read_proc)
     local skip={}
     for _,id in ipairs(helpers) do skip[id]=true end
     local appid
@@ -805,12 +888,15 @@ function M.register(registry)
     -- the process table no longer shows is retired after the grace window.
     if now-last_heartbeat<HEARTBEAT_SECONDS then return end
     last_heartbeat=now
-    if next(state.running)==nil then return end
+    if next(state.running)==nil and next(state.unknownSince)==nil then
+      if reconciliationDirty then saveReconciliation() end
+      return
+    end
     local alive,complete=M.scan_games()
     local change=M.reconcile_running(state,alive,complete,now)
-    if #change.cleared>0 or change.refreshed>0 then
-      save_file(state)
-      expired_running=expired_running+#change.cleared
+    expired_running=expired_running+#change.cleared
+    if #change.cleared>0 or change.refreshed>0 or change.changed or reconciliationDirty then
+      saveReconciliation()
     end
   end
   live.shutdown=function() session.shutdown() end
@@ -876,17 +962,26 @@ function M.register(registry)
       usedShortcuts[sid]=true
       next_state.owned[tostring(original)]=tonumber(shortcut)
     end
+    local now=os.time()
+    for original,since in pairs(state.unknownSince) do
+      if next_state.owned[original] and now-since<STICKY_LIMIT then next_state.unknownSince[original]=since end
+    end
+    local expired=expired_ids(next_state,now)
+    local blocked={}
+    for _,original in ipairs(expired) do blocked[tostring(original)]=true end
     for original,shortcut in pairs(obj.running) do
       if tonumber(shortcut)~=next_state.owned[tostring(original)] then
         return response({success=false,error='Invalid active shortcut'})
       end
-      next_state.running[tostring(original)]=tonumber(shortcut)
-      -- The agent has just seen this game running: that is the heartbeat.
-      next_state.runningAt[tostring(original)]=os.time()
+      if not blocked[tostring(original)] then
+        next_state.running[tostring(original)]=tonumber(shortcut)
+        -- The agent has just seen this game running: that is the heartbeat.
+        next_state.runningAt[tostring(original)]=now
+      end
     end
     local saved,err=save_file(next_state)
     if saved then state=next_state end
-    return response({success=saved,error=err})
+    return response({success=saved,error=err,expired=expired})
   end
   registry.SlsPresenceSetEnabled=function(value)
     if type(value)~='boolean' then return response({success=false,error='Expected boolean'}) end
@@ -965,6 +1060,8 @@ function M.tick(now) if live.tick then pcall(live.tick, now or os.time()) end en
 function M.on_unload() if live.shutdown then pcall(live.shutdown) end end
 M.new_discord_session = new_discord_session
 M.collect_running = collect_running
+M.read_proc = read_proc
+M.process_snapshot = process_snapshot
 M.login_users = login_users
 M.fnv1a = fnv1a
 M.acf_name = acf_name
