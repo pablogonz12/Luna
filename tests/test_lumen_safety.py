@@ -1009,6 +1009,58 @@ class ArchitectureGuardTest(SafetyBase):
         self.assertEqual(row['status'], 'incompatible')
         self.assertIn('v3.0 available, needs the 64-bit Steam client', row['note'])
 
+    def test_current_moon_incompatible_blocks_newer_plugin(self):
+        def fetch(repo, path, pattern, mode, channel):
+            if 'slsteam-moon' in repo:
+                return {'tag': 'v2', 'id': 1, 'size': 1, 'channel': 'stable',
+                        'url': 'https://example.test/moon.zip'}, ''
+            if 'luatools-moon' in repo:
+                return {'tag': 'v2', 'id': 2, 'size': 2, 'channel': 'stable'}, ''
+            return {'tag': 'v1', 'id': 1, 'size': 1, 'channel': 'stable'}, ''
+        installed = {key: {'tag': 'v1', 'id': 1, 'size': 1}
+                     for key, *_ in self.m.LUMEN_COMPONENTS}
+        installed['slsteam_moon']['tag'] = 'v2'
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=2), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=1):
+            result = self.real_lumen_upstream_state(channels={}, installed=installed, fetch=fetch)
+        self.assertEqual(result['overall'], 'incompatible')
+        self.assertEqual(result['components'][0]['status'], 'incompatible')
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1), \
+             mock.patch.object(self.m, 'slsteam_asset_class', return_value=1):
+            result = self.real_lumen_upstream_state(channels={}, installed=installed, fetch=fetch)
+        self.assertEqual(result['overall'], 'newer')
+        self.assertEqual(result['components'][0]['status'], 'current')
+
+    def test_selector_change_after_installer_rolls_back(self):
+        before = self.snapshot()
+        with mock.patch.object(self.m, 'active_steam_elf_class', side_effect=[1, 2]):
+            self.assertNotEqual(self.update(), 0)
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertTrue(self.result()['rolledBack'])
+        self.assertEqual(before, self.snapshot())
+
+    def test_queued_reattach_rechecks_selector_and_rolls_back(self):
+        backup = self.m.backup_lumen_tree()
+        (self.lumen / 'lumen').write_text('changed')
+        ctx = {'backup': backup.name, 'installerStarted': True}
+        with mock.patch.object(self.m, 'active_steam_elf_class', return_value=2), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            result = self.m.run_lumen_recovery_job({'action': 'reattach', 'ctx': ctx})
+        self.assertNotEqual(result, 0)
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertTrue(self.result()['rolledBack'])
+        self.assertEqual((self.lumen / 'lumen').read_text(), 'binary v1')
+
+    def test_queued_reattach_unreadable_client_rolls_back(self):
+        backup = self.m.backup_lumen_tree()
+        ctx = {'backup': backup.name, 'installerStarted': True}
+        with mock.patch.object(self.m, 'active_steam_elf_class', side_effect=OSError('unreadable')), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            result = self.m.run_lumen_recovery_job({'action': 'reattach', 'ctx': ctx})
+        self.assertNotEqual(result, 0)
+        self.assertEqual(self.result()['state'], 'failed')
+        self.assertTrue(self.result()['rolledBack'])
+
 
 if __name__ == '__main__':
     unittest.main()
