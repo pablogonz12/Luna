@@ -60,6 +60,9 @@ class SafetyBase(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('luna_safety_mod', str(LUNA))
         self.m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.m)
+        self.real_slsteam_asset_class = self.m.slsteam_asset_class
+        self.real_lumen_upstream_state = self.m.lumen_upstream_state
+        self.real_active_steam_elf_class = self.m.active_steam_elf_class
         self.steam_up = False
         self.installer_action = 'ok'
         self.patchable = True
@@ -471,7 +474,8 @@ class FakeApi:
 
 def release(tag, asset_id, size, name):
     return {'tag_name': tag, 'draft': False, 'prerelease': False,
-            'assets': [{'name': name, 'id': asset_id, 'size': size}]}
+            'assets': [{'name': name, 'id': asset_id, 'size': size,
+                        'browser_download_url': 'https://example.test/' + name}]}
 
 
 STABLE = {
@@ -490,6 +494,8 @@ class CurrentnessCase(SafetyBase):
         real = self.fresh()
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(self.m, 'lumen_upstream_state', real.lumen_upstream_state).start()
+        mock.patch.object(real, 'active_steam_elf_class', return_value=1).start()
+        mock.patch.object(real, 'slsteam_asset_class', return_value=1).start()
         self.api_module = real
         (self.lumen / 'versions.json').write_text(json.dumps(INSTALLED_STABLE))
 
@@ -880,6 +886,21 @@ class StateCase(SafetyBase):
 
 
 class ArchitectureGuardTest(SafetyBase):
+    def test_active_client_requires_consistent_lock_manifest_and_binary(self):
+        package = self.steam_home / 'package'
+        package.mkdir()
+        (package / 'steam_client_ubuntu12.manifest').write_text(
+            '"version" "%s"' % self.m.KNOWN_GOOD_UBUNTU12_BUILD)
+        binary = self.steam_home / 'ubuntu12_32/steam'
+        binary.parent.mkdir()
+        binary.write_bytes(b'\x7fELF\x01\x01' + bytes(12) + b'\x03\x00')
+        pin = {'clientBuild': self.m.KNOWN_GOOD_UBUNTU12_BUILD, 'hardLock': {'active': True}}
+        with mock.patch.object(self.m, 'read_steam_pin', return_value=pin):
+            self.assertEqual(self.real_active_steam_elf_class(), 1)
+            (self.steam_home / '.steam-enable-steamrt64-client').touch()
+            with self.assertRaises(ValueError):
+                self.real_active_steam_elf_class()
+
     def archive(self, elf_class):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w') as z:
@@ -890,10 +911,10 @@ class ArchitectureGuardTest(SafetyBase):
         data = self.archive(2)
         digest = hashlib.sha256(data).hexdigest()
         with mock.patch.object(self.m, '_http_get', side_effect=[data, (digest + '  file.zip\n').encode()]):
-            self.assertEqual(self.m.slsteam_asset_class({'url': 'https://example.test/file.zip'}), 2)
+            self.assertEqual(self.real_slsteam_asset_class({'url': 'https://example.test/file.zip'}), 2)
         with mock.patch.object(self.m, '_http_get', side_effect=[data, b'0' * 64]):
             with self.assertRaises(ValueError):
-                self.m.slsteam_asset_class({'url': 'https://example.test/file.zip'})
+                self.real_slsteam_asset_class({'url': 'https://example.test/file.zip'})
 
     def test_preflight_mismatch_drops_queued_job_without_installer(self):
         self.m.write_json_file(self.m.lumen_pending_path(), {'action': 'update', 'at': 1})
@@ -940,7 +961,7 @@ class ArchitectureGuardTest(SafetyBase):
                      for key, *_ in self.m.LUMEN_COMPONENTS}
         with mock.patch.object(self.m, 'active_steam_elf_class', return_value=1), \
              mock.patch.object(self.m, 'slsteam_asset_class', return_value=2):
-            result = self.m.lumen_upstream_state(channels={}, installed=installed, fetch=fetch)
+            result = self.real_lumen_upstream_state(channels={}, installed=installed, fetch=fetch)
         self.assertEqual(result['overall'], 'incompatible')
         row = result['components'][0]
         self.assertEqual(row['status'], 'incompatible')

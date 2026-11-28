@@ -6779,6 +6779,8 @@ def _upstream_component(repo, beta_path, glob, mode, channel):
         return None, 'release lookup failed (%s)' % error
     if not asset:
         return None, 'no matching release asset found'
+    if repo == 'swwayps/slsteam-moon' and not asset.get('browser_download_url'):
+        return None, 'slsteam-moon asset has no download URL'
     return {'tag': release.get('tag_name'), 'id': asset.get('id'), 'size': asset.get('size'),
             'channel': 'stable', 'url': asset.get('browser_download_url')}, note
 
@@ -6787,8 +6789,13 @@ def active_steam_elf_class():
     """Identify the selected client, not merely a leftover binary from another client."""
     root = steam_home()
     if steam_hard_lock_active():
+        if (root / '.steam-enable-steamrt64-client').exists():
+            raise ValueError('Steam client selector conflicts with the 32-bit hard lock')
         if str(read_steam_pin().get('clientBuild')) != KNOWN_GOOD_UBUNTU12_BUILD:
             raise ValueError('Steam hard lock has an unknown client build')
+        manifest = root / 'package' / 'steam_client_ubuntu12.manifest'
+        if _manifest_version(manifest.read_bytes()) != KNOWN_GOOD_UBUNTU12_BUILD:
+            raise ValueError('locked Steam client manifest does not match the pin')
         if not _elf32_file(root / 'ubuntu12_32' / 'steam'):
             raise ValueError('locked 32-bit Steam client binary is missing or invalid')
         return 1
